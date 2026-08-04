@@ -40,6 +40,24 @@ class UpgradeContinuityTest {
                     .putString(KEY_ANONYMOUS_DIGEST, sha256(anonymousId))
                     .commit(),
             )
+            allowAsyncIdentityPersistence()
+        }
+    }
+
+    @Test
+    fun verifyPublishedAnonymousRehydration() {
+        val anonymousDigest = evidence.getString(KEY_ANONYMOUS_DIGEST, null)
+        assertNotNull("anonymous identity evidence was unavailable for published rehydration", anonymousDigest)
+        assertTrue("anonymous identity digest is malformed", anonymousDigest!!.matches(SHA256_PATTERN))
+
+        ConfigServer().use { server ->
+            Elu.setup(context, SITE_KEY, EluOptions(configHost = server.baseUrl))
+            assertEquals(
+                "published SDK did not rehydrate the anonymous identity",
+                anonymousDigest,
+                sha256(awaitDistinctId { sha256(it) == anonymousDigest }),
+            )
+            assertTrue("config request was not observed", server.awaitRequest())
         }
     }
 
@@ -81,6 +99,26 @@ class UpgradeContinuityTest {
                 "identified continuity value could not be persisted",
                 evidence.edit().putString(KEY_IDENTIFIED_ID, IDENTIFIED_ID).commit(),
             )
+            allowAsyncIdentityPersistence()
+        }
+    }
+
+    @Test
+    fun verifyPublishedIdentifiedRehydration() {
+        assertEquals(
+            "identified identity evidence was unavailable for published rehydration",
+            IDENTIFIED_ID,
+            evidence.getString(KEY_IDENTIFIED_ID, null),
+        )
+
+        ConfigServer().use { server ->
+            Elu.setup(context, SITE_KEY, EluOptions(configHost = server.baseUrl))
+            assertEquals(
+                "published SDK did not rehydrate the identified identity",
+                IDENTIFIED_ID,
+                awaitDistinctId { it == IDENTIFIED_ID },
+            )
+            assertTrue("config request was not observed", server.awaitRequest())
         }
     }
 
@@ -119,6 +157,13 @@ class UpgradeContinuityTest {
         MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
             .joinToString("") { byte -> "%02x".format(byte) }
+
+    private fun allowAsyncIdentityPersistence() {
+        // The public facade has no persistence acknowledgement. This delay is
+        // not treated as evidence: the next fresh application start must rehydrate
+        // and assert the identity before candidate replacement is allowed.
+        Thread.sleep(ASYNC_PERSISTENCE_SETTLE_MS)
+    }
 
     private class ConfigServer : Closeable {
         private val socket = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
@@ -166,6 +211,7 @@ class UpgradeContinuityTest {
         const val EVIDENCE_PREFERENCES = "dev.elu.analytics.upgrade-evidence"
         const val KEY_ANONYMOUS_DIGEST = "anonymousIdentitySha256"
         const val KEY_IDENTIFIED_ID = "identifiedIdentity"
+        const val ASYNC_PERSISTENCE_SETTLE_MS = 1_000L
         val SHA256_PATTERN = Regex("^[0-9a-f]{64}$")
         val CONFIG_BODY =
             """

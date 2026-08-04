@@ -14,8 +14,10 @@ TEST_CLASS = "dev.elu.analytics.upgradeevidence.UpgradeContinuityTest"
 BASELINE_AAR_SHA256 = "aeab6cede8da582626505b019a5dc1574d06241b1f1905583ac8e3922d215b8d"
 INSTRUMENTATION_FILES = {
     "anonymous-published-state.instrumentation.txt": "establishPublishedAnonymousState",
+    "anonymous-published-rehydration.instrumentation.txt": "verifyPublishedAnonymousRehydration",
     "anonymous-continuity.instrumentation.txt": "verifyAnonymousReplacementContinuity",
     "identified-published-state.instrumentation.txt": "establishPublishedIdentifiedState",
+    "identified-published-rehydration.instrumentation.txt": "verifyPublishedIdentifiedRehydration",
     "identified-continuity.instrumentation.txt": "verifyIdentifiedReplacementContinuity",
 }
 INSTALL_FILES = {
@@ -169,12 +171,34 @@ class NormalizeAndroidUpgradeEvidenceTest(unittest.TestCase):
     def test_rejects_failure_abort_and_crash_markers_even_with_ok_footer(self) -> None:
         path = self.raw / "identified-continuity.instrumentation.txt"
         transcript = successful_instrumentation("verifyIdentifiedReplacementContinuity")
-        for marker in ("FAILURES!!!", "INSTRUMENTATION_ABORTED", "Instrumentation crashed."):
+        cases = (
+            ("FAILURES!!!", "TEST_FAILURE_UNCLASSIFIED"),
+            ("INSTRUMENTATION_ABORTED", "RUNNER_ABORTED"),
+            ("Instrumentation crashed.", "RUNNER_CRASHED"),
+        )
+        for marker, failure_code in cases:
             with self.subTest(marker=marker):
                 path.write_text(transcript + marker + "\n", encoding="utf-8")
                 result = self.run_normalizer()
                 self.assertNotEqual(0, result.returncode)
-                self.assertIn("failure marker", result.stdout + result.stderr)
+                self.assertIn(f"failureCode={failure_code}", result.stdout + result.stderr)
+
+    def test_classifies_known_assertion_without_exposing_values(self) -> None:
+        path = self.raw / "identified-continuity.instrumentation.txt"
+        transcript = successful_instrumentation("verifyIdentifiedReplacementContinuity")
+        path.write_text(
+            transcript
+            + "candidate SDK did not continue the identified identity\n"
+            + "expected:<private-value-sentinel> but was:<different-value-sentinel>\n"
+            + "FAILURES!!!\n",
+            encoding="utf-8",
+        )
+        result = self.run_normalizer()
+        combined = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("failureCode=CANDIDATE_IDENTIFIED_CONTINUITY_FAILED", combined)
+        self.assertNotIn("private-value-sentinel", combined)
+        self.assertNotIn("different-value-sentinel", combined)
 
     def test_rejects_wrong_instrumentation_method(self) -> None:
         (self.raw / "anonymous-continuity.instrumentation.txt").write_text(
@@ -183,7 +207,7 @@ class NormalizeAndroidUpgradeEvidenceTest(unittest.TestCase):
         )
         result = self.run_normalizer()
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("method did not match exactly once", result.stdout + result.stderr)
+        self.assertIn("failureCode=TRANSCRIPT_METHOD_MISMATCH", result.stdout + result.stderr)
 
     def test_rejects_wrong_instrumentation_class(self) -> None:
         path = self.raw / "anonymous-continuity.instrumentation.txt"
@@ -191,7 +215,7 @@ class NormalizeAndroidUpgradeEvidenceTest(unittest.TestCase):
         path.write_text(transcript.replace(TEST_CLASS, "example.WrongTest"), encoding="utf-8")
         result = self.run_normalizer()
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("class did not match exactly once", result.stdout + result.stderr)
+        self.assertIn("failureCode=TRANSCRIPT_CLASS_MISMATCH", result.stdout + result.stderr)
 
     def test_rejects_duplicate_instrumentation_transcript(self) -> None:
         path = self.raw / "anonymous-continuity.instrumentation.txt"
@@ -199,7 +223,7 @@ class NormalizeAndroidUpgradeEvidenceTest(unittest.TestCase):
         path.write_text(transcript + transcript, encoding="utf-8")
         result = self.run_normalizer()
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("class did not match exactly once", result.stdout + result.stderr)
+        self.assertIn("failureCode=TRANSCRIPT_CLASS_MISMATCH", result.stdout + result.stderr)
 
     def test_rejects_unexpected_instrumentation_transcript(self) -> None:
         (self.raw / "unexpected.instrumentation.txt").write_text(

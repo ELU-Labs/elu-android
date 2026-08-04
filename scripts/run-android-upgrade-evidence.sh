@@ -60,6 +60,11 @@ adb shell am instrument -w -r \
   "$TEST_COMPONENT" >"$raw_dir/anonymous-published-state.instrumentation.txt" 2>&1
 
 adb shell am force-stop "$APP_ID"
+adb shell am instrument -w -r \
+  -e class "${TEST_CLASS}#verifyPublishedAnonymousRehydration" \
+  "$TEST_COMPONENT" >"$raw_dir/anonymous-published-rehydration.instrumentation.txt" 2>&1
+
+adb shell am force-stop "$APP_ID"
 adb install -r -t "$apk_dir/candidate.apk" >"$raw_dir/anonymous-candidate-app-replace.txt" 2>&1
 adb install -r -t "$apk_dir/candidate-androidTest.apk" >"$raw_dir/anonymous-candidate-test-replace.txt" 2>&1
 adb shell am instrument -w -r \
@@ -74,6 +79,11 @@ adb install -t "$apk_dir/published-androidTest.apk" >"$raw_dir/identified-publis
 adb shell am instrument -w -r \
   -e class "${TEST_CLASS}#establishPublishedIdentifiedState" \
   "$TEST_COMPONENT" >"$raw_dir/identified-published-state.instrumentation.txt" 2>&1
+
+adb shell am force-stop "$APP_ID"
+adb shell am instrument -w -r \
+  -e class "${TEST_CLASS}#verifyPublishedIdentifiedRehydration" \
+  "$TEST_COMPONENT" >"$raw_dir/identified-published-rehydration.instrumentation.txt" 2>&1
 
 adb shell am force-stop "$APP_ID"
 adb install -r -t "$apk_dir/candidate.apk" >"$raw_dir/identified-candidate-app-replace.txt" 2>&1

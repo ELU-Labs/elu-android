@@ -12,8 +12,10 @@ import re
 EXPECTED_TEST_CLASS = "dev.elu.analytics.upgradeevidence.UpgradeContinuityTest"
 EXPECTED_INSTRUMENTATION = {
     "anonymous-published-state.instrumentation.txt": "establishPublishedAnonymousState",
+    "anonymous-published-rehydration.instrumentation.txt": "verifyPublishedAnonymousRehydration",
     "anonymous-continuity.instrumentation.txt": "verifyAnonymousReplacementContinuity",
     "identified-published-state.instrumentation.txt": "establishPublishedIdentifiedState",
+    "identified-published-rehydration.instrumentation.txt": "verifyPublishedIdentifiedRehydration",
     "identified-continuity.instrumentation.txt": "verifyIdentifiedReplacementContinuity",
 }
 EXPECTED_INSTALL_FILES = {
@@ -29,16 +31,20 @@ EXPECTED_INSTALL_FILES = {
 EXPECTED_RAW_FILES = EXPECTED_INSTALL_FILES | set(EXPECTED_INSTRUMENTATION)
 EXPECTED_OPERATIONS = [
     "establish-anonymous-identity",
+    "verify-published-anonymous-rehydration",
     "replace-anonymous-install-with-candidate",
     "verify-anonymous-identity-continuity",
     "establish-identified-identity",
+    "verify-published-identified-rehydration",
     "replace-identified-install-with-candidate",
     "verify-identified-identity-continuity",
 ]
 EXPECTED_CONTINUITY = {
     "anonymousIdentityEstablished": True,
+    "publishedAnonymousIdentityRehydrated": True,
     "anonymousIdentityPreserved": True,
     "identifiedIdentityEstablished": True,
+    "publishedIdentifiedIdentityRehydrated": True,
     "identifiedIdentityPreserved": True,
     "applicationDataPreserved": True,
 }
@@ -61,6 +67,32 @@ FAILURE_MARKER = re.compile(
     r"\b(?:failure|failed|abort|aborted|crash|crashed)\b",
     flags=re.IGNORECASE,
 )
+ASSERTION_FAILURE_CODES = {
+    "upgrade evidence requires a fresh install": "FRESH_INSTALL_PRECONDITION_FAILED",
+    "published SDK must establish anonymous identity before identification": "PUBLISHED_IDENTIFIED_PRECONDITION_FAILED",
+    "published SDK must establish anonymous identity": "PUBLISHED_ANONYMOUS_ESTABLISHMENT_FAILED",
+    "anonymous continuity digest could not be persisted": "EVIDENCE_LEDGER_WRITE_FAILED",
+    "anonymous identity evidence was unavailable for published rehydration": "PUBLISHED_ANONYMOUS_EVIDENCE_MISSING",
+    "anonymous identity digest is malformed": "ANONYMOUS_EVIDENCE_INVALID",
+    "published SDK did not rehydrate the anonymous identity": "PUBLISHED_ANONYMOUS_REHYDRATION_FAILED",
+    "anonymous identity evidence did not survive replacement install": "CANDIDATE_ANONYMOUS_EVIDENCE_MISSING",
+    "candidate SDK did not continue the anonymous identity": "CANDIDATE_ANONYMOUS_CONTINUITY_FAILED",
+    "published SDK must establish identified identity": "PUBLISHED_IDENTIFIED_ESTABLISHMENT_FAILED",
+    "identified continuity value could not be persisted": "EVIDENCE_LEDGER_WRITE_FAILED",
+    "identified identity evidence was unavailable for published rehydration": "PUBLISHED_IDENTIFIED_EVIDENCE_MISSING",
+    "published SDK did not rehydrate the identified identity": "PUBLISHED_IDENTIFIED_REHYDRATION_FAILED",
+    "identified identity evidence did not survive replacement install": "CANDIDATE_IDENTIFIED_EVIDENCE_MISSING",
+    "candidate SDK did not continue the identified identity": "CANDIDATE_IDENTIFIED_CONTINUITY_FAILED",
+    "config request was not observed": "CONFIG_REQUEST_NOT_OBSERVED",
+}
+IDENTITY_TIMEOUT_CODES = {
+    "establishPublishedAnonymousState": "PUBLISHED_ANONYMOUS_ESTABLISHMENT_TIMEOUT",
+    "verifyPublishedAnonymousRehydration": "PUBLISHED_ANONYMOUS_REHYDRATION_TIMEOUT",
+    "verifyAnonymousReplacementContinuity": "CANDIDATE_ANONYMOUS_CONTINUITY_TIMEOUT",
+    "establishPublishedIdentifiedState": "PUBLISHED_IDENTIFIED_ESTABLISHMENT_TIMEOUT",
+    "verifyPublishedIdentifiedRehydration": "PUBLISHED_IDENTIFIED_REHYDRATION_TIMEOUT",
+    "verifyIdentifiedReplacementContinuity": "CANDIDATE_IDENTIFIED_CONTINUITY_TIMEOUT",
+}
 
 
 def sha256_file(path: pathlib.Path) -> str:
@@ -78,9 +110,27 @@ def digest_raw_files(raw_dir: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def classify_instrumentation_failure(text: str, expected_method: str) -> str:
+    for assertion_message, failure_code in ASSERTION_FAILURE_CODES.items():
+        if assertion_message in text:
+            return failure_code
+    if "SDK did not expose identity before timeout" in text:
+        return IDENTITY_TIMEOUT_CODES[expected_method]
+    if re.search(r"INSTRUMENTATION_ABORTED|\babort(?:ed)?\b", text, flags=re.IGNORECASE):
+        return "RUNNER_ABORTED"
+    if re.search(
+        r"FATAL EXCEPTION|INSTRUMENTATION_RESULT: shortMsg=|\bcrash(?:ed)?\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "RUNNER_CRASHED"
+    return "TEST_FAILURE_UNCLASSIFIED"
+
+
 def validate_instrumentation(name: str, text: str, expected_method: str) -> None:
     if FAILURE_MARKER.search(text):
-        raise SystemExit(f"instrumentation transcript contains a failure marker: {name}")
+        failure_code = classify_instrumentation_failure(text, expected_method)
+        raise SystemExit(f"instrumentation failureCode={failure_code}: {name}")
 
     classes = re.findall(r"^INSTRUMENTATION_STATUS: class=(.+)$", text, flags=re.MULTILINE)
     methods = re.findall(r"^INSTRUMENTATION_STATUS: test=(.+)$", text, flags=re.MULTILINE)
@@ -89,13 +139,13 @@ def validate_instrumentation(name: str, text: str, expected_method: str) -> None
     ok_footers = re.findall(r"^OK \(1 test\)$", text, flags=re.MULTILINE)
 
     if classes != [EXPECTED_TEST_CLASS, EXPECTED_TEST_CLASS]:
-        raise SystemExit(f"instrumentation class did not match exactly once: {name}")
+        raise SystemExit(f"instrumentation failureCode=TRANSCRIPT_CLASS_MISMATCH: {name}")
     if methods != [expected_method, expected_method]:
-        raise SystemExit(f"instrumentation method did not match exactly once: {name}")
+        raise SystemExit(f"instrumentation failureCode=TRANSCRIPT_METHOD_MISMATCH: {name}")
     if status_codes != ["1", "0"]:
-        raise SystemExit(f"instrumentation status sequence was not start/pass: {name}")
+        raise SystemExit(f"instrumentation failureCode=TRANSCRIPT_STATUS_MISMATCH: {name}")
     if terminal_codes != ["-1"] or len(ok_footers) != 1:
-        raise SystemExit(f"instrumentation did not have one successful terminal result: {name}")
+        raise SystemExit(f"instrumentation failureCode=TRANSCRIPT_TERMINAL_MISMATCH: {name}")
 
 
 def validate_raw_files(raw_dir: pathlib.Path) -> None:

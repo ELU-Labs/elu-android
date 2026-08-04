@@ -5,9 +5,10 @@ contract for replacement-install verification. The same fixture sources build
 against the published `0.1.0` SDK and the candidate project by setting
 `eluUpgradeDependency` to `published` or `candidate`.
 
-CI runs separate clean-device checks for anonymous and identified identity,
-replaces each published app with the candidate using the same application ID
-and signing key, and executes the continuity assertions on an emulator.
+CI runs separate clean-device checks for anonymous and identified identity.
+Each check first restarts the published app and proves that its own persisted
+identity rehydrates, then replaces it with the candidate using the same
+application ID and signing key and executes the continuity assertion.
 
 The normalized result and its SHA-256 digest are written under
 `build/reports/upgrade-evidence/0.1.0/` and uploaded. Raw `adb` and
