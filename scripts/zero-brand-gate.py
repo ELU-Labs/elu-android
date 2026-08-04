@@ -384,7 +384,7 @@ def emit_baseline(findings: list[Finding]) -> None:
         json.dumps(
             {
                 "schemaVersion": 1,
-                "historicalReference": "0.1.0",
+                "compatibilityReference": "0.1.0",
                 "allowances": {finding.finding_id: finding.count for finding in findings},
             },
             indent=2,

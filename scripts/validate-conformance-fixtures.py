@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the dependency-free subset of the provisional fixture schema."""
+"""Validate the dependency-free subset of the observational fixture schema."""
 
 from __future__ import annotations
 
@@ -25,11 +25,11 @@ def main() -> None:
         fail("no fixtures found")
     for path in paths:
         data = json.loads(path.read_text(encoding="utf-8"))
-        expected_baseline = {"platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "provisional-pending-javascript-v1"}
+        expected_baseline = {"platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "observational"}
         if data.get("schemaVersion") != 1 or data.get("baseline") != expected_baseline:
-            fail(f"{path.name}: baseline must remain pinned and provisional")
+            fail(f"{path.name}: baseline must remain pinned and observational")
         if data.get("normative") is not False:
-            fail(f"{path.name}: mobile fixtures cannot become normative before JavaScript v1")
+            fail(f"{path.name}: compatibility fixtures must remain non-normative")
         domain = data.get("domain")
         if domain not in EXPECTED_DOMAINS:
             fail(f"{path.name}: unknown domain {domain!r}")
@@ -47,7 +47,7 @@ def main() -> None:
                     fail(f"{path.name}/{observation_id}: {key} must be non-empty")
     if domains != EXPECTED_DOMAINS:
         fail(f"domain coverage mismatch: {sorted(domains)}")
-    print(f"validated {len(paths)} provisional fixtures ({len(ids)} observations)")
+    print(f"validated {len(paths)} observational fixtures ({len(ids)} observations)")
 
 
 if __name__ == "__main__":

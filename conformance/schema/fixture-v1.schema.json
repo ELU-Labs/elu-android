@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://elu.dev/sdk/conformance/fixture-v1.schema.json",
-  "title": "ELU SDK provisional behavior fixture",
+  "title": "ELU SDK observational behavior fixture",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "baseline", "domain", "normative", "observations", "gaps"],
@@ -16,7 +16,7 @@
         "version": { "const": "0.1.0" },
         "tag": { "const": "0.1.0" },
         "commit": { "const": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4" },
-        "contractStatus": { "const": "provisional-pending-javascript-v1" }
+        "contractStatus": { "const": "observational" }
       }
     },
     "domain": { "enum": ["identity-reset", "groups-flags", "events-lifecycle", "replay-privacy", "persistence-network"] },

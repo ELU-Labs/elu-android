@@ -44,21 +44,19 @@ static fixture can satisfy the runtime-evidence step.
 
 Modes:
 
-- `strict` blocks on every non-legal occurrence and is the ownership-release
-  target.
+- `strict` blocks on every non-legal occurrence and is required for release.
 - `ratchet` permits only the hashed occurrence/count inventory frozen from the
-  historical wrapper and rejects new debt without reproducing the identifier
-  in the baseline.
-- `report` inventories transitional artifacts without claiming compliance.
+  `0.1.0` compatibility reference and rejects new debt without reproducing the
+  identifier in the baseline.
+- `report` inventories current artifacts without claiming compliance.
 
-The published `0.1.0` tag and Maven files are immutable historical evidence.
-They are not rewritten. The first owned runtime release must pass `strict`
+The published `0.1.0` tag and Maven files are immutable compatibility records.
+They are not rewritten. Every release candidate must pass `strict`
 across the clean source checkout, resolved graph, AAR, sources/docs archives,
 POM/module metadata, DEX/symbols, SBOM, and generated runtime network capture.
 The release workflow always materializes and strictly scans
 `releaseRuntimeClasspath`; it also discovers and scans SBOM/BOM outputs when a
-build plugin produces them. There is no SBOM producer configured in this Phase
-0/1 repository yet.
+build plugin produces them. The current build does not generate an SBOM.
 
 Run the scanner tests with:
 

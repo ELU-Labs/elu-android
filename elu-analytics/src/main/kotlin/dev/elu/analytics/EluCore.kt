@@ -24,8 +24,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * All state transitions happen on a single background executor; the facade
  * only reads the volatile [state] and either delegates, buffers, or no-ops.
  *
- * PostHog is embedded as the process-wide singleton ([PostHogAndroid.setup] +
- * the [PostHog] companion), matching the one-instance-per-app web model.
+ * The analytics runtime is embedded as a process-wide singleton, matching the
+ * one-instance-per-app web model.
  */
 internal class EluCore(
     private val appContext: Context,
@@ -50,11 +50,11 @@ internal class EluCore(
 
     @Volatile private var activeConfig: EluRemoteConfig? = null
 
-    @Volatile private var posthogInited = false
+    @Volatile private var runtimeInitialized = false
 
     @Volatile private var replayEnabledAtInit = false
 
-    // The privacy config actually APPLIED to PostHog at init (plus live
+    // The privacy config actually applied at runtime initialization (plus live
     // reductions) — mid-session tighten checks compare against this, not the
     // last fetch, so an ignored loosening can't make a benign restore read as
     // a tighten.
@@ -142,7 +142,7 @@ internal class EluCore(
         if (cached != null) {
             activeConfig = cached
             if (cached.enabled && !(deviceInEu && cached.privacy.blockEu)) {
-                initPostHog(cached)
+                initializeRuntime(cached)
             } else {
                 // Keep fetching on the normal cadence so re-activation recovers.
                 state = EluStatePolicy.State.DISABLED
@@ -150,7 +150,7 @@ internal class EluCore(
             }
         }
         // No cache (first launch ever): stay PENDING and buffer. While the EU
-        // decision is unresolved nothing leaves the device — PostHog is not
+        // decision is unresolved nothing leaves the device — the runtime is not
         // initialized until a config (or cached default) says so.
 
         runFetch()
@@ -176,18 +176,18 @@ internal class EluCore(
     private fun applyFreshConfig(fresh: EluRemoteConfig) {
         activeConfig = fresh
         val euBlocked = deviceInEu && fresh.privacy.blockEu
-        when (EluStatePolicy.actionFor(state, fresh.enabled, euBlocked, posthogInited)) {
+        when (EluStatePolicy.actionFor(state, fresh.enabled, euBlocked, runtimeInitialized)) {
             EluStatePolicy.Action.INITIALIZE -> {
                 if (state == EluStatePolicy.State.DISABLED) {
-                    // Re-activation before PostHog ever initialized — treat as
-                    // config-arrival in pending. If PostHog WAS inited (kill
-                    // switch opted us out) the loosening applies next launch,
-                    // where initPostHog clears the persisted opt-out.
+                    // Re-activation before the runtime initialized — treat as
+                    // config-arrival in pending. If the runtime was initialized
+                    // (kill switch opted us out), loosening applies next launch,
+                    // where initializeRuntime clears the persisted opt-out.
                     // Belt-and-braces: nothing buffered during DISABLED may
                     // ride the re-activation drain.
                     buffer.clear()
                 }
-                initPostHog(fresh)
+                initializeRuntime(fresh)
             }
             EluStatePolicy.Action.DISABLE -> {
                 state = EluStatePolicy.State.DISABLED
@@ -252,7 +252,7 @@ internal class EluCore(
         }
     }
 
-    private fun initPostHog(cfg: EluRemoteConfig) {
+    private fun initializeRuntime(cfg: EluRemoteConfig) {
         val token = cfg.publicToken ?: return
         val host = cfg.host ?: return
         val privacy = cfg.privacy
@@ -260,9 +260,9 @@ internal class EluCore(
         // "New" is device-scoped and decided by THIS setup call's marker probe.
         val replayAllowed = !(privacy.replayNewUsersOnly && !isNewUser)
 
-        val phConfig =
+        val runtimeConfig =
             PostHogAndroidConfig(apiKey = token, host = host).apply {
-                // The wrapper — not the customer — owns this object (CONTRACT.md §4).
+                // The SDK — not the customer — owns this object (CONTRACT.md §4).
                 captureApplicationLifecycleEvents = true
                 captureScreenViews = true
                 captureDeepLinks = true
@@ -280,20 +280,20 @@ internal class EluCore(
                 // text views, not just inputs — see CONTRACT.md.
                 sessionReplayConfig.maskAllTextInputs = privacy.maskTextInputs || privacy.maskAllText
                 sessionReplayConfig.maskAllImages = privacy.maskImages
-                // Upstream defaults captureLogcat to TRUE and logcat routinely
+                // Runtime defaults captureLogcat to true, and logcat routinely
                 // echoes the same user text maskAllText exists to hide — mirror
                 // the web loader's enable_recording_console_log gate.
                 sessionReplayConfig.captureLogcat = !privacy.maskAllText
                 onFeatureFlags = PostHogOnFeatureFlags { onFlagsLoaded() }
             }
 
-        PostHogAndroid.setup(appContext, phConfig)
-        posthogInited = true
+        PostHogAndroid.setup(appContext, runtimeConfig)
+        runtimeInitialized = true
         replayEnabledAtInit = replayAllowed
         appliedPrivacy = privacy
 
         // A prior ELU kill-switch run (enabled false / EU tighten) called
-        // optOut(), which upstream PERSISTS and hydrates on every later launch
+        // optOut(), which persists and hydrates on every later launch
         // — without this, re-activation would leave the device dark forever.
         // This is the ELU kill-switch path CONTRACT.md §4 carves out.
         try {
@@ -323,7 +323,7 @@ internal class EluCore(
     }
 
     /**
-     * PostHog `reset()` clears registered super properties along with
+     * Runtime `reset()` clears registered super properties along with
      * identity, so both init and every reset path must (re-)register these —
      * the backend depends on `elu_facade_version` for the fleet version
      * histogram (CONTRACT.md §5).
@@ -340,7 +340,7 @@ internal class EluCore(
                 flagsLoadedOnce = true
                 flagListeners.toList()
             }
-        // PostHog invokes this on its flag-loading network thread; customer
+        // The runtime invokes this on its flag-loading network thread; customer
         // callbacks commonly touch views, so deliver on main (iOS parity).
         mainHandler.post { listeners.forEach { runSafe(it) } }
     }

@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Phase 0/1 gates (Android)
+    name: Android SDK checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-phase-0-1-reports
+          name: android-sdk-reports
           path: |
             elu-analytics/build/reports/tests/
             elu-analytics/build/publications/maven/

@@ -1,6 +1,6 @@
 package dev.elu.analytics
 
-/** Pure replay-budget decisions; runtime and persistence effects stay in the platform wrapper. */
+/** Pure replay-budget decisions; runtime and persistence effects stay in the platform adapter. */
 internal object EluReplayBudgetPolicy {
     sealed interface Decision {
         data object Disabled : Decision

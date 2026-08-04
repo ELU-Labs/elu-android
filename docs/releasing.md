@@ -1,7 +1,6 @@
-# Android release foundation
+# Releasing the Android SDK
 
-The `0.1.0` publication is immutable historical evidence. No workflow in this
-repository modifies or republishes it.
+Version `0.1.0` is already published and must never be modified or republished.
 
 Future publication is manual and requires all of the following:
 
@@ -24,10 +23,9 @@ Future publication is manual and requires all of the following:
    release gate.
 7. The workflow materializes `releaseRuntimeClasspath` and includes the report
    in the strict publication scan, together with the AAR, publication metadata,
-   source/docs archives, and any generated SBOM/BOM outputs. The current
-   transitional dependency graph is expected to fail that gate; publication
-   remains intentionally impossible until runtime ownership removes the
-   historical dependency and all generated occurrences.
+   source/docs archives, and any generated SBOM/BOM outputs. Publication
+   proceeds only when the complete input set passes the strict scan; the CI
+   ratchet is not a release substitute.
 
 The protected `maven-central-reviewed` environment must define both signing
 trust inputs before publication:
@@ -47,13 +45,13 @@ or add a short key ID.
 Create a future candidate tag only after review:
 
 ```bash
-git tag -s 1.0.0-rc.1 -m $'Android ownership candidate\n\nReviewed-by: SDK Owner <owner@elu.dev>'
+git tag -s 1.0.0-rc.1 -m $'Android release candidate\n\nReviewed-by: SDK Owner <owner@elu.dev>'
 git verify-tag --raw 1.0.0-rc.1
 git push origin 1.0.0-rc.1
 ```
 
 Then manually dispatch the release workflow with that exact tag. Never reuse,
-move, or overwrite an adopted Maven version or tag. A failed candidate gets a
+move, or overwrite a released Maven version or tag. A failed candidate gets a
 new semantic version.
 
 The workflow must not be enabled for production until repository settings

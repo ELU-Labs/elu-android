@@ -8,8 +8,7 @@ import java.util.Date
 
 /**
  * The ELU Analytics facade — the mobile analog of the web `window.elu`
- * allowlist. Customer code never touches `posthog.*`; a future upstream swap
- * changes nothing here.
+ * allowlist. Customer code interacts only with this stable public surface.
  *
  * Every method is safe in every state: before [setup] (idle) and while
  * disabled they no-op; while pending (no usable config yet) event-class calls
@@ -102,7 +101,7 @@ public object Elu {
         val c = core ?: return
         c.dispatch {
             PostHog.reset()
-            // Upstream reset() wipes registered super properties along with
+            // Runtime reset() wipes registered super properties along with
             // identity (prefs clear; ELU keys are not on its except-list) —
             // re-register so post-logout events keep elu_facade_version.
             c.registerEluSuperProperties()
@@ -175,7 +174,9 @@ public object Elu {
     @JvmOverloads
     public fun reloadFeatureFlags(completion: (() -> Unit)? = null) {
         core?.dispatchRunningOnly {
-            PostHog.reloadFeatureFlags(completion?.let { cb -> PostHogOnFeatureFlags { cb() } })
+            PostHog.reloadFeatureFlags(
+                completion?.let { cb -> PostHogOnFeatureFlags { cb() } },
+            )
         }
     }
 

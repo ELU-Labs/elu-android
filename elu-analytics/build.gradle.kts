@@ -18,7 +18,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        // posthog-android 3.58.0 declares minSdk 23.
+        // The resolved analytics runtime requires minSdk 23.
         minSdk = 23
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -46,8 +46,7 @@ kotlin {
 }
 
 dependencies {
-    // Exact pin — every native symbol in this wrapper was verified against
-    // the android-v3.58.0 source; do not bump casually.
+    // Exact pin: update only with an API/behavior compatibility review.
     implementation("com.posthog:posthog-android") {
         version { strictly("3.58.0") }
     }

@@ -1,9 +1,10 @@
-# Resolved from tag 0.1.0 with:
+# Normalized summary resolved from tag 0.1.0 with:
 # ./gradlew :elu-analytics:dependencies --configuration releaseRuntimeClasspath
+# Exact legacy-family coordinates are recorded in legal/THIRD_PARTY_NOTICES.md.
 
 org.jetbrains.kotlin:kotlin-stdlib:2.1.20
 org.jetbrains:annotations:13.0
-historical-runtime:3.58.0 (see legal/THIRD_PARTY_NOTICES.md)
+legal-inventory:android-runtime:3.58.0 (see legal/THIRD_PARTY_NOTICES.md)
 org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.1.10
 org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.10
 androidx.lifecycle:lifecycle-process:2.6.2
@@ -24,7 +25,7 @@ org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4
 org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.6.4
 com.google.guava:listenablefuture:1.0
 com.squareup.curtains:curtains:1.2.5
-historical-kotlin-runtime:6.29.0 (see legal/THIRD_PARTY_NOTICES.md)
+legal-inventory:kotlin-runtime:6.29.0 (see legal/THIRD_PARTY_NOTICES.md)
 com.google.code.gson:gson:2.10.1
 com.squareup.okhttp3:okhttp:4.12.0
 com.squareup.okio:okio-jvm:3.6.0

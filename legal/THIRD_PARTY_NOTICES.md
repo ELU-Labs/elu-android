@@ -1,33 +1,34 @@
 # Third-party notices
 
-This file records dependencies used by historical and transitional ELU Android
-SDK releases. It is a legal/provenance artifact and is the only non-ELU naming
-allowlist consumed by the release scanner.
+This file provides attribution and license notices for third-party software
+used by the ELU Android SDK.
 
-## Historical `0.1.0` runtime
+## Runtime dependencies
 
-ELU Android `0.1.0` depends on PostHog Android `3.58.0` and its transitive
-PostHog Kotlin runtime `6.29.0`. The source tag is
+ELU Android `0.1.0` uses these exact Maven coordinates:
+
+- `com.posthog:posthog-android:3.58.0`
+- `com.posthog:posthog:6.29.0` (transitive runtime)
+
+The source release is tag
 `android-v3.58.0`, whose annotated tag object is
 `fdfb71de8f89e5a57cfc647b6182adfe36fadddd` and whose peeled source commit is
 `279bd1c946ab810d770380472608cc4a01d01025`.
 
 The dependency is distributed under the MIT License. Copyright and permission
-notices from any retained source closure must be preserved here or in another
-`LICENSE*` / `THIRD_PARTY_NOTICES*` legal artifact when source preparation
-begins. No source has been imported by the Phase 0/1 baseline work.
+notices for redistributed source or binaries must be preserved here or in
+another `LICENSE*` / `THIRD_PARTY_NOTICES*` legal file.
 
 Source: <https://github.com/PostHog/posthog-android/tree/android-v3.58.0>
 
 The published ELU `0.1.0` AAR does not bundle dependency classes. Maven resolves
-the historical runtime and its Kotlin, AndroidX, coroutines, Gson, OkHttp,
-Okio, Curtains, annotations, and listenable-future dependencies as separate
-artifacts. Their resolved versions are frozen in
-`baselines/0.1.0/dependencies/release-runtime-classpath.txt`. A fresh license
-closure audit is mandatory before any source from those artifacts is retained
-or bundled by an ELU-owned runtime.
+the runtime and its Kotlin, AndroidX, coroutines, Gson, OkHttp, Okio, Curtains,
+annotations, and listenable-future dependencies as separate artifacts. The
+compatibility baseline contains a normalized closure summary that points back
+to the exact coordinates above. A fresh license closure audit is required
+before source from those artifacts is redistributed or bundled.
 
-## Verbatim license at the pinned source commit
+## License text
 
 The text below is copied verbatim from `LICENSE.md` at peeled commit
 `279bd1c946ab810d770380472608cc4a01d01025`.

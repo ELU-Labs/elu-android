@@ -5,10 +5,11 @@ configuration — behavior (privacy controls, kill switches, session replay)
 is managed from your ELU dashboard and delivered as remote config. See
 [`CONTRACT.md`](./CONTRACT.md) for the behavioral contract.
 
-- **You only need a site key.** No PostHog account, no API keys in the app.
+- **You only need a site key.** No separate analytics-provider account or API
+  key is required in the app.
 - Privacy controls (EU blocking, text/image masking, replay limits) are
   applied **client-side at capture time** and managed from the ELU dashboard.
-- `minSdk 23`, session replay self-gates on API 26+ via the underlying SDK.
+- `minSdk 23`; session replay activates on API 26+.
 
 ## Install
 
@@ -31,13 +32,12 @@ includeBuild("path/to/elu-android") {
 }
 ```
 
-> **Do not use posthog-android directly alongside this SDK.** It owns the
-> process-wide PostHog singleton: a second `setup` (yours or ours) no-ops,
-> which can leave one of the two dark — or route your events into the wrong
-> project. The dependency is pinned `strictly("3.58.0")`, so a different
-> posthog-android version in your app will fail Gradle resolution rather
-> than silently override. If you're migrating from a direct PostHog
-> integration, remove it first.
+> **Do not initialize a second copy of the resolved analytics runtime alongside
+> this SDK.** The runtime owns a process-wide singleton, so a second `setup`
+> can no-op, disable one integration, or route events to the wrong project.
+> Its dependency version is strictly pinned; incompatible versions fail
+> Gradle resolution instead of silently overriding it. Remove any direct
+> integration with the same runtime before installing ELU Analytics.
 
 ## Setup
 
@@ -57,8 +57,9 @@ class MyApp : Application() {
 `Elu.setup` is idempotent and never throws. Every `Elu.*` method is safe in
 every state: before config arrives, event calls are buffered in memory
 (FIFO, cap 100) and replayed once the device is cleared to send; if the
-device is blocked (EU) or the site key is disabled, everything is a no-op
-and nothing ever leaves the device.
+device is blocked (EU) or the site key is disabled, event calls are no-ops and
+no analytics events or replay leave the device. ELU config fetches continue so
+a re-enabled site can recover.
 
 Dev override for the config endpoint:
 
@@ -109,8 +110,7 @@ Behavioral details: [`CONTRACT.md`](./CONTRACT.md).
 
 ## Build notes
 
-Library module: `elu-analytics` (namespace `dev.elu.analytics`), AGP 8.9.x,
+Library module: `elu-analytics` (namespace `dev.elu.analytics`), AGP 8.13.x,
 Kotlin 2.1.x, compileSdk 36, Java 11 bytecode (JDK 17 toolchain). The build
-files were written without a local Android toolchain and are untested until
-CI runs them. R8/ProGuard: consumer rules ship in the AAR; the wrapper uses
-no reflection.
+uses strict Kotlin compiler settings and is verified in CI. R8/ProGuard:
+consumer rules ship in the AAR; the SDK facade uses no reflection.

@@ -7,9 +7,9 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 /**
- * Per-PostHog-session visual-replay wall-clock budget (`replayMaxMinutes`).
+ * Per-runtime-session visual-replay wall-clock budget (`replayMaxMinutes`).
  * Start stamps live in SharedPreferences keyed by session id (pruned to the
- * most recent 5) so a relaunch inside the same PostHog session resumes the
+ * most recent 5) so a relaunch inside the same runtime session resumes the
  * remaining budget instead of restarting it. Events keep flowing after the
  * budget stops replay — only the visual stream is cut.
  *

@@ -8,7 +8,7 @@ plugins {
 
 tasks.register<Exec>("checkConformanceFixtures") {
     group = "verification"
-    description = "Validates provisional Android 0.1.0 behavior fixtures."
+    description = "Validates observational Android 0.1.0 behavior fixtures."
     commandLine("python3", "scripts/validate-conformance-fixtures.py")
 }
 
@@ -20,7 +20,7 @@ tasks.register<Exec>("checkZeroBrandScanner") {
 
 tasks.register<Exec>("checkZeroBrandRatchet") {
     group = "verification"
-    description = "Rejects forbidden-identifier debt beyond the 0.1.0 wrapper baseline."
+    description = "Rejects forbidden-identifier debt beyond the 0.1.0 compatibility baseline."
     commandLine(
         "python3",
         "scripts/zero-brand-gate.py",
