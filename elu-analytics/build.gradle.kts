@@ -1,5 +1,12 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+val sdkVersion =
+    Regex("const val NAME: String = \"([^\"]+)\"")
+        .find(file("src/main/kotlin/dev/elu/analytics/EluVersion.kt").readText())
+        ?.groupValues
+        ?.get(1)
+        ?: error("EluVersion.NAME is the required SDK version source of truth")
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
@@ -14,6 +21,7 @@ android {
         // posthog-android 3.58.0 declares minSdk 23.
         minSdk = 23
         consumerProguardFiles("consumer-rules.pro")
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -29,7 +37,9 @@ android {
 }
 
 kotlin {
-    jvmToolchain(17)
+    // Release/CI stays on 17. The override exists for local verification on
+    // machines that have only a newer JDK; emitted bytecode remains JVM 11.
+    jvmToolchain(providers.gradleProperty("eluJavaToolchainVersion").map(String::toInt).getOrElse(17))
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_11)
     }
@@ -41,6 +51,12 @@ dependencies {
     implementation("com.posthog:posthog-android") {
         version { strictly("3.58.0") }
     }
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
 
 mavenPublishing {
@@ -54,7 +70,7 @@ mavenPublishing {
 
     // Version in lockstep with EluVersion.NAME (and the install snippet in
     // the ELU dashboard).
-    coordinates("dev.elu", "elu-analytics", "0.1.0")
+    coordinates("dev.elu", "elu-analytics", sdkVersion)
 
     pom {
         name.set("ELU Analytics")
@@ -80,4 +96,8 @@ mavenPublishing {
             developerConnection.set("scm:git:ssh://git@github.com/ELU-Labs/elu-android.git")
         }
     }
+}
+
+tasks.register("printSdkVersion") {
+    doLast { println(sdkVersion) }
 }

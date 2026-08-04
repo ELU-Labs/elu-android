@@ -34,3 +34,18 @@ The Gradle module metadata is represented by its published checksum and the
 resolved dependency inventory. The exact immutable file remains available at
 the Maven coordinate; it is not copied here because it contains transitional
 dependency naming that the ownership tree must eventually remove.
+
+## Consumer reproduction
+
+Compile the maintained sample against the immutable published baseline and
+verify its AAR checksum:
+
+```bash
+./gradlew :sample:assembleDebug :sample:verifyBaselineArtifact -PeluBaselineVersion=0.1.0
+```
+
+Compile the same source against the current project with:
+
+```bash
+./gradlew :sample:assembleDebug
+```

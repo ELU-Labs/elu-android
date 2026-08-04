@@ -32,7 +32,9 @@ internal object EluEuGuard {
             } catch (t: Throwable) {
                 null
             }
-        if (id.isNullOrBlank()) return true
-        return id.startsWith("Europe/") || id in EXTRA_EU_ZONES
+        return isEuTimezone(id)
     }
+
+    internal fun isEuTimezone(id: String?): Boolean =
+        id.isNullOrBlank() || id.startsWith("Europe/") || id in EXTRA_EU_ZONES
 }

@@ -29,6 +29,7 @@ internal data class EluPrivacyConfig(
 }
 
 internal data class EluRemoteConfig(
+    val schemaVersion: Int,
     val enabled: Boolean,
     val publicToken: String? = null,
     val host: String? = null,
@@ -49,20 +50,30 @@ internal data class EluRemoteConfig(
                 } catch (t: Throwable) {
                     return null
                 }
+            val rawVersion = root.opt("v") as? Number ?: return null
+            if (rawVersion.toDouble() != SUPPORTED_SCHEMA_VERSION.toDouble()) return null
             val enabled = root.opt("enabled") as? Boolean ?: return null
-            if (!enabled) return EluRemoteConfig(enabled = false)
+            if (!enabled) {
+                return EluRemoteConfig(
+                    schemaVersion = SUPPORTED_SCHEMA_VERSION,
+                    enabled = false,
+                )
+            }
 
             val token = (root.opt("publicToken") as? String)?.trim()
             val host = (root.opt("host") as? String)?.trim()
             if (token.isNullOrEmpty() || host.isNullOrEmpty()) return null
 
             return EluRemoteConfig(
+                schemaVersion = SUPPORTED_SCHEMA_VERSION,
                 enabled = true,
                 publicToken = token,
                 host = host,
                 privacy = parsePrivacy(root.opt("privacy")),
             )
         }
+
+        private const val SUPPORTED_SCHEMA_VERSION = 1
 
         private fun parsePrivacy(node: Any?): EluPrivacyConfig {
             val obj = node as? JSONObject ?: return EluPrivacyConfig.DEFAULTS
