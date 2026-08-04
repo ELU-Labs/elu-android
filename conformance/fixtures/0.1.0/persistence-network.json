@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "provisional-pending-javascript-v1" },
+  "domain": "persistence-network",
+  "normative": false,
+  "observations": [
+    {
+      "id": "elu-owned-wrapper-state",
+      "given": ["setup has run"],
+      "operations": ["write first-launch marker", "write replay budget", "cache config"],
+      "expected": ["preferences file is dev.elu.analytics", "keys are elu.firstLaunchAt and elu.recBudget.<session>", "config cache is filesDir/elu/config-<filesystem-safe-site-key>.json"],
+      "evidence": ["source-inspection"]
+    },
+    {
+      "id": "config-fetch-baseline",
+      "given": ["configHost is the ELU default"],
+      "operations": ["GET /v1/<siteKey>/config"],
+      "expected": ["connect and read timeouts are 10 seconds", "only HTTP 200 and a usable body are cached", "failures retry at 0, 2, and 8 seconds"],
+      "evidence": ["source-inspection"]
+    },
+    {
+      "id": "historical-capture-egress",
+      "given": ["an enabled 0.1.0 config returns its historical runtime destination"],
+      "operations": ["initialize", "capture"],
+      "expected": ["capture egress is delegated to the historical runtime identified in legal provenance", "the ownership release must replace this with ELU-owned destinations"],
+      "evidence": ["source-inspection", "published-artifact"]
+    }
+  ],
+  "gaps": ["A physical-device network trace is still required.", "Persistence keys and endpoint schemas are observations only until JavaScript v1 freezes the shared contract."]
+}

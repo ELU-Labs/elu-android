@@ -2,7 +2,6 @@ package dev.elu.analytics
 
 import java.io.File
 import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * Fetches `GET <configHost>/v1/<siteKey>/config` and persists the last
@@ -30,7 +29,7 @@ internal class EluConfigClient(
     fun fetch(): EluRemoteConfig? {
         var conn: HttpURLConnection? = null
         return try {
-            val url = URL("${configHost.trimEnd('/')}/v1/$siteKey/config")
+            val url = EluConfigUrl.build(configHost, siteKey)
             conn = url.openConnection() as HttpURLConnection
             conn.connectTimeout = TIMEOUT_MS
             conn.readTimeout = TIMEOUT_MS

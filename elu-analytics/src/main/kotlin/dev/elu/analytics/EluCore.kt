@@ -32,8 +32,6 @@ internal class EluCore(
     private val siteKey: String,
     options: EluOptions,
 ) {
-    internal enum class State { PENDING, RUNNING, DISABLED }
-
     private val executor: ScheduledExecutorService =
         Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "elu-analytics").apply { isDaemon = true }
@@ -48,7 +46,7 @@ internal class EluCore(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val fetchAttempts = AtomicInteger(0)
 
-    @Volatile private var state: State = State.PENDING
+    @Volatile private var state: EluStatePolicy.State = EluStatePolicy.State.PENDING
 
     @Volatile private var activeConfig: EluRemoteConfig? = null
 
@@ -84,31 +82,31 @@ internal class EluCore(
     /** Buffer-class ops: delegate when running, buffer when pending, drop when disabled. */
     fun dispatch(op: () -> Unit) {
         when (state) {
-            State.RUNNING -> runSafe(op)
-            State.PENDING -> {
+            EluStatePolicy.State.RUNNING -> runSafe(op)
+            EluStatePolicy.State.PENDING -> {
                 buffer.add(op)
                 // Heal the pending→running race: an op enqueued after the drain
                 // would otherwise sit forever.
-                if (state == State.RUNNING) executor.execute { flushBuffer() }
+                if (state == EluStatePolicy.State.RUNNING) executor.execute { flushBuffer() }
                 // Heal the pending→disabled race the same way: an op landing
                 // after the disable-time clear() must not survive to be sent
                 // by a later re-activation (EU-block guarantee).
-                if (state == State.DISABLED) buffer.clear()
+                if (state == EluStatePolicy.State.DISABLED) buffer.clear()
             }
-            State.DISABLED -> Unit
+            EluStatePolicy.State.DISABLED -> Unit
         }
     }
 
     /** Command ops that make no sense to replay later (flush, reloadFeatureFlags). */
     fun dispatchRunningOnly(op: () -> Unit) {
-        if (state == State.RUNNING) runSafe(op)
+        if (state == EluStatePolicy.State.RUNNING) runSafe(op)
     }
 
     fun <T> read(
         default: T,
         op: () -> T,
     ): T {
-        if (state != State.RUNNING) return default
+        if (state != EluStatePolicy.State.RUNNING) return default
         return try {
             op()
         } catch (t: Throwable) {
@@ -147,7 +145,7 @@ internal class EluCore(
                 initPostHog(cached)
             } else {
                 // Keep fetching on the normal cadence so re-activation recovers.
-                state = State.DISABLED
+                state = EluStatePolicy.State.DISABLED
                 buffer.clear()
             }
         }
@@ -178,17 +176,9 @@ internal class EluCore(
     private fun applyFreshConfig(fresh: EluRemoteConfig) {
         activeConfig = fresh
         val euBlocked = deviceInEu && fresh.privacy.blockEu
-        when (state) {
-            State.PENDING -> {
-                if (fresh.enabled && !euBlocked) {
-                    initPostHog(fresh)
-                } else {
-                    state = State.DISABLED
-                    buffer.clear()
-                }
-            }
-            State.DISABLED -> {
-                if (fresh.enabled && !euBlocked && !posthogInited) {
+        when (EluStatePolicy.actionFor(state, fresh.enabled, euBlocked, posthogInited)) {
+            EluStatePolicy.Action.INITIALIZE -> {
+                if (state == EluStatePolicy.State.DISABLED) {
                     // Re-activation before PostHog ever initialized — treat as
                     // config-arrival in pending. If PostHog WAS inited (kill
                     // switch opted us out) the loosening applies next launch,
@@ -196,10 +186,15 @@ internal class EluCore(
                     // Belt-and-braces: nothing buffered during DISABLED may
                     // ride the re-activation drain.
                     buffer.clear()
-                    initPostHog(fresh)
                 }
+                initPostHog(fresh)
             }
-            State.RUNNING -> applyMidSession(fresh, euBlocked)
+            EluStatePolicy.Action.DISABLE -> {
+                state = EluStatePolicy.State.DISABLED
+                buffer.clear()
+            }
+            EluStatePolicy.Action.APPLY_RUNNING -> applyMidSession(fresh, euBlocked)
+            EluStatePolicy.Action.NO_OP -> Unit
         }
     }
 
@@ -215,7 +210,7 @@ internal class EluCore(
             } catch (t: Throwable) {
                 Log.w(TAG, "elu optOut failed: $t")
             }
-            state = State.DISABLED
+            state = EluStatePolicy.State.DISABLED
             buffer.clear()
             return
         }
@@ -316,7 +311,7 @@ internal class EluCore(
         // flip can still precede the executor tail — accepted, ~single-op
         // window, and buffered captures carry their call-time timestamps.
         flushBuffer()
-        state = State.RUNNING
+        state = EluStatePolicy.State.RUNNING
         executor.execute { flushBuffer() }
 
         budget.maxMinutes = privacy.replayMaxMinutes
@@ -402,7 +397,7 @@ internal class EluCore(
             runFetch()
         }
         // Session may have rotated (or resumed) while backgrounded.
-        if (state == State.RUNNING && replayEnabledAtInit) budget.check()
+        if (state == EluStatePolicy.State.RUNNING && replayEnabledAtInit) budget.check()
     }
 
     private fun runSafe(op: () -> Unit) {

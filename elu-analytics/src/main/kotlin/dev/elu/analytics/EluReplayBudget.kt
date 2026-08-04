@@ -35,9 +35,7 @@ internal class EluReplayBudget(
     fun check() {
         pending?.cancel(false)
         pending = null
-        if (vetoed) return
-        val budgetMs = maxMinutes * 60_000L
-        if (budgetMs <= 0L) return
+        if (vetoed || maxMinutes <= 0) return
 
         val sessionId =
             try {
@@ -51,29 +49,35 @@ internal class EluReplayBudget(
             } catch (t: Throwable) {
                 false
             }
-        if (sessionId == null || !replayActive) {
-            // Replay may still be waiting on remote opt-in/sampling — re-check.
-            pending = executor.schedule(::check, RETRY_SECONDS, TimeUnit.SECONDS)
-            return
-        }
-
-        val key = KEY_PREFIX + sessionId
         val now = System.currentTimeMillis()
-        var start = prefs.getLong(key, 0L)
-        if (start <= 0L) {
-            start = now
-            stamp(key, now)
-        }
-        val remainingMs = budgetMs - (now - start)
-        if (remainingMs <= 0L) {
-            try {
-                PostHog.stopSessionReplay()
-            } catch (t: Throwable) {
-                // never propagate into the host app
+        val key = sessionId?.let { KEY_PREFIX + it }
+        val persistedStart = key?.let { prefs.getLong(it, 0L) } ?: 0L
+        when (
+            val decision =
+                EluReplayBudgetPolicy.decide(
+                    maxMinutes = maxMinutes,
+                    vetoed = vetoed,
+                    sessionId = sessionId,
+                    replayActive = replayActive,
+                    nowMs = now,
+                    persistedStartMs = persistedStart,
+                )
+        ) {
+            EluReplayBudgetPolicy.Decision.Disabled -> Unit
+            EluReplayBudgetPolicy.Decision.Stop -> {
+                try {
+                    PostHog.stopSessionReplay()
+                } catch (t: Throwable) {
+                    // never propagate into the host app
+                }
             }
-            // Stopped for this run; next launch re-arms with a fresh session.
-        } else {
-            pending = executor.schedule(::check, remainingMs + 250L, TimeUnit.MILLISECONDS)
+            is EluReplayBudgetPolicy.Decision.Retry -> {
+                pending = executor.schedule(::check, decision.delayMs, TimeUnit.MILLISECONDS)
+            }
+            is EluReplayBudgetPolicy.Decision.Schedule -> {
+                if (decision.startAtMs != null && key != null) stamp(key, decision.startAtMs)
+                pending = executor.schedule(::check, decision.delayMs, TimeUnit.MILLISECONDS)
+            }
         }
     }
 
@@ -97,6 +101,5 @@ internal class EluReplayBudget(
     private companion object {
         const val KEY_PREFIX = "elu.recBudget."
         const val MAX_STAMPS = 5
-        const val RETRY_SECONDS = 60L
     }
 }

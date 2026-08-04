@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "elu-android"
 include(":elu-analytics")
+include(":sample")
