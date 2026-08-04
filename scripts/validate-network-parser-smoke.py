@@ -7,7 +7,12 @@ import argparse
 import json
 import pathlib
 
-EXPECTED_SCENARIOS = {"config", "capture", "replay", "flags"}
+EXPECTED_METHODS = {
+    "config": "GET",
+    "capture": "POST",
+    "replay": "POST",
+    "flags": "POST",
+}
 
 
 def main() -> None:
@@ -41,18 +46,21 @@ def main() -> None:
         scenario = request.get("scenario")
         method = request.get("method")
         url = request.get("url")
-        if scenario not in EXPECTED_SCENARIOS:
+        if scenario not in EXPECTED_METHODS:
             raise SystemExit(f"request {index} has unsupported scenario: {scenario!r}")
-        if method not in {"GET", "POST"}:
-            raise SystemExit(f"request {index} has unsupported method: {method!r}")
+        if method != EXPECTED_METHODS[scenario]:
+            raise SystemExit(
+                f"request {index} scenario {scenario!r} requires method "
+                f"{EXPECTED_METHODS[scenario]}"
+            )
         if not isinstance(url, str) or not url:
             raise SystemExit(f"request {index} must contain a URL")
         scenarios.append(scenario)
 
     if len(set(scenarios)) != len(scenarios):
         raise SystemExit("parser smoke scenarios must be unique")
-    if set(scenarios) != EXPECTED_SCENARIOS:
-        missing = sorted(EXPECTED_SCENARIOS.difference(scenarios))
+    if set(scenarios) != set(EXPECTED_METHODS):
+        missing = sorted(set(EXPECTED_METHODS).difference(scenarios))
         raise SystemExit(f"parser smoke is missing scenarios: {', '.join(missing)}")
     print(f"network parser smoke valid: {len(requests)} requests across {len(scenarios)} scenarios")
 

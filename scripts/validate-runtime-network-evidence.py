@@ -7,6 +7,13 @@ import argparse
 import json
 import pathlib
 
+EXPECTED_METHODS = {
+    "config": "GET",
+    "capture": "POST",
+    "replay": "POST",
+    "flags": "POST",
+}
+
 
 def parse_expectation(value: str) -> tuple[str, int]:
     if "=" not in value:
@@ -40,6 +47,9 @@ def main() -> None:
     expectations = dict(args.expect)
     if len(expectations) != len(args.expect):
         raise SystemExit("runtime network expectations must not repeat a scenario")
+    unsupported = sorted(set(expectations).difference(EXPECTED_METHODS))
+    if unsupported:
+        raise SystemExit(f"unsupported runtime network scenarios: {', '.join(unsupported)}")
     requests = data.get("requests")
     if not isinstance(requests, list) or not requests:
         raise SystemExit("runtime network evidence must contain requests")
@@ -51,6 +61,12 @@ def main() -> None:
         scenario = request.get("scenario")
         if scenario not in expectations:
             raise SystemExit(f"runtime request {index} has unexpected scenario: {scenario!r}")
+        method = request.get("method")
+        if method != EXPECTED_METHODS[scenario]:
+            raise SystemExit(
+                f"runtime request {index} scenario {scenario!r} requires method "
+                f"{EXPECTED_METHODS[scenario]}"
+            )
         url = request.get("url")
         if not isinstance(url, str) or not url:
             raise SystemExit(f"runtime request {index} must contain a URL")

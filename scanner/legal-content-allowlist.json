@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "repositoryFiles": [
+    "LICENSE",
+    "legal/THIRD_PARTY_NOTICES.md"
+  ],
+  "artifactMemberBasenames": [
+    "LICENSE",
+    "LICENSE.md",
+    "LICENSE.txt",
+    "THIRD_PARTY_NOTICES",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_NOTICES.txt"
+  ]
+}

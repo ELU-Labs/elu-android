@@ -22,10 +22,12 @@ Future publication is manual and requires all of the following:
    replay, and flags scenarios with their expected request counts. The checked
    in parser smoke is explicitly not runtime evidence, and cannot satisfy this
    release gate.
-7. The legal-only scanner runs in strict mode for publication. The current
-   transitional wrapper is expected to fail that gate; publication remains
-   intentionally impossible until runtime ownership removes the historical
-   dependency and all generated occurrences.
+7. The workflow materializes `releaseRuntimeClasspath` and includes the report
+   in the strict publication scan, together with the AAR, publication metadata,
+   source/docs archives, and any generated SBOM/BOM outputs. The current
+   transitional dependency graph is expected to fail that gate; publication
+   remains intentionally impossible until runtime ownership removes the
+   historical dependency and all generated occurrences.
 
 The protected `maven-central-reviewed` environment must define both signing
 trust inputs before publication:

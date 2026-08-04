@@ -61,6 +61,11 @@ jobs:
           checkZeroBrandScanner
           checkZeroBrandRatchet
           --stacktrace
+      - name: Generate resolved release dependency evidence
+        run: |
+          mkdir -p build/reports
+          ./gradlew :elu-analytics:dependencies --configuration releaseRuntimeClasspath \
+            > build/reports/release-runtime-classpath.txt
       - name: Validate static network-parser smoke
         run: |
           python3 scripts/validate-network-parser-smoke.py scanner/fixtures/network-parser-smoke.json
@@ -77,10 +82,22 @@ jobs:
       - name: Verify public API and legal-only artifact gate
         run: |
           python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
-          python3 scripts/zero-brand-gate.py --mode strict \
-            --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar \
-            --input publication=elu-analytics/build/publications/maven \
-            --input archives=elu-analytics/build/libs \
+          scanner_inputs=(
+            --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar
+            --input publication=elu-analytics/build/publications/maven
+            --input archives=elu-analytics/build/libs
+            --input dependencies=build/reports/release-runtime-classpath.txt
+          )
+          sbom_index=0
+          while IFS= read -r -d '' sbom; do
+            scanner_inputs+=(--input "sbom-${sbom_index}=${sbom}")
+            ((sbom_index += 1))
+          done < <(
+            find build elu-analytics/build -type f \
+              \( -iname '*sbom*' -o -iname 'bom.json' -o -iname 'bom.xml' \) \
+              -print0
+          )
+          python3 scripts/zero-brand-gate.py --mode strict "${scanner_inputs[@]}" \
             --network runtime=build/reports/android-runtime-network-evidence.json
       - name: Publish and release
         run: ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache --stacktrace

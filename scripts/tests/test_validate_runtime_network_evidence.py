@@ -28,10 +28,26 @@ class ValidateRuntimeNetworkEvidenceTest(unittest.TestCase):
                     "evidenceKind": "android-runtime-network-capture",
                     "runtimeEvidence": runtime_evidence,
                     "requests": [
-                        {"scenario": "config", "url": "https://elu.dev/v1/config"},
-                        {"scenario": "capture", "url": "https://ingest.elu.dev/v1/events"},
-                        {"scenario": "replay", "url": "https://ingest.elu.dev/v1/replay"},
-                        {"scenario": "flags", "url": "https://ingest.elu.dev/v1/flags"},
+                        {
+                            "scenario": "config",
+                            "method": "GET",
+                            "url": "https://elu.dev/v1/config",
+                        },
+                        {
+                            "scenario": "capture",
+                            "method": "POST",
+                            "url": "https://ingest.elu.dev/v1/events",
+                        },
+                        {
+                            "scenario": "replay",
+                            "method": "POST",
+                            "url": "https://ingest.elu.dev/v1/replay",
+                        },
+                        {
+                            "scenario": "flags",
+                            "method": "POST",
+                            "url": "https://ingest.elu.dev/v1/flags",
+                        },
                     ],
                 }
             ),
