@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
-  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "provisional-pending-javascript-v1" },
+  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "observational" },
   "domain": "groups-flags",
   "normative": false,
   "observations": [
     {
       "id": "group-and-flag-context-buffer-with-events",
-      "given": ["the wrapper is pending"],
+      "given": ["the SDK is pending"],
       "operations": ["group org acme", "setPersonPropertiesForFlags", "setGroupPropertiesForFlags"],
-      "expected": ["operations share the facade FIFO", "operations are dropped if the wrapper becomes disabled"],
+      "expected": ["operations share the facade FIFO", "operations are dropped if the SDK becomes disabled"],
       "evidence": ["source-inspection", "public-api"]
     },
     {
       "id": "flag-getters-have-safe-defaults",
-      "given": ["the wrapper is not running"],
+      "given": ["the SDK is not running"],
       "operations": ["getFeatureFlag", "getFeatureFlagPayload", "isFeatureEnabled"],
       "expected": ["flag and payload return null", "enabled returns false"],
       "evidence": ["source-inspection"]
@@ -26,5 +26,5 @@
       "evidence": ["source-inspection"]
     }
   ],
-  "gaps": ["Flag wire format, cache keys, and invalidation semantics await the JavaScript-owned v1 contract."]
+  "gaps": ["Flag wire format, cache keys, and invalidation semantics are outside this observational fixture."]
 }

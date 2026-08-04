@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "provisional-pending-javascript-v1" },
+  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "observational" },
   "domain": "identity-reset",
   "normative": false,
   "observations": [
@@ -20,11 +20,11 @@
     },
     {
       "id": "identity-getter-defaults-closed",
-      "given": ["the wrapper is pending or disabled"],
+      "given": ["the SDK is pending or disabled"],
       "operations": ["distinctId"],
       "expected": ["returns null", "does not initialize storage or network"],
       "evidence": ["source-inspection"]
     }
   ],
-  "gaps": ["Delegated anonymous identity and session stores require real 0.1.0 device archives before migration design.", "Reset semantics remain observational until JavaScript freezes shared v1 identity behavior."]
+  "gaps": ["This observational fixture does not cover anonymous identity or session-store continuity across SDK upgrades.", "Reset semantics remain observational in this compatibility fixture."]
 }

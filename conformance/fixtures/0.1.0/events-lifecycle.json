@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "provisional-pending-javascript-v1" },
+  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "observational" },
   "domain": "events-lifecycle",
   "normative": false,
   "observations": [
     {
       "id": "pending-buffer-is-bounded-fifo",
-      "given": ["the wrapper is pending", "the queue already contains 100 operations"],
+      "given": ["the SDK is pending", "the queue already contains 100 operations"],
       "operations": ["capture one more event"],
       "expected": ["the oldest operation is dropped", "the new operation becomes the FIFO tail", "the queue is memory-only"],
       "evidence": ["source-inspection"]

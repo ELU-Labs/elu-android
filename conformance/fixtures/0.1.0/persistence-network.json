@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "provisional-pending-javascript-v1" },
+  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "observational" },
   "domain": "persistence-network",
   "normative": false,
   "observations": [
     {
-      "id": "elu-owned-wrapper-state",
+      "id": "elu-owned-sdk-state",
       "given": ["setup has run"],
       "operations": ["write first-launch marker", "write replay budget", "cache config"],
       "expected": ["preferences file is dev.elu.analytics", "keys are elu.firstLaunchAt and elu.recBudget.<session>", "config cache is filesDir/elu/config-<filesystem-safe-site-key>.json"],
@@ -19,12 +19,12 @@
       "evidence": ["source-inspection"]
     },
     {
-      "id": "historical-capture-egress",
-      "given": ["an enabled 0.1.0 config returns its historical runtime destination"],
+      "id": "configured-capture-egress",
+      "given": ["an enabled 0.1.0 config returns a runtime destination"],
       "operations": ["initialize", "capture"],
-      "expected": ["capture egress is delegated to the historical runtime identified in legal provenance", "the ownership release must replace this with ELU-owned destinations"],
+      "expected": ["capture egress is delegated to the configured runtime destination", "the runtime dependency is documented in THIRD_PARTY_NOTICES.md"],
       "evidence": ["source-inspection", "published-artifact"]
     }
   ],
-  "gaps": ["A physical-device network trace is still required.", "Persistence keys and endpoint schemas are observations only until JavaScript v1 freezes the shared contract."]
+  "gaps": ["A physical-device network trace is still required.", "Persistence keys and endpoint schemas are observational in this compatibility fixture."]
 }

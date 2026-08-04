@@ -13,5 +13,5 @@
     { "name": "maven-metadata.xml", "size": 327, "sha256": "e4fd2bf103a6dffcdddf9fbd67444a38f8dd69c722948aab3ef67e11bef3b034" }
   ],
   "aarEntries": ["R.txt", "AndroidManifest.xml", "classes.jar", "proguard.txt", "META-INF/com/android/build/gradle/aar-metadata.properties"],
-  "historicalRuntimeProvenance": "legal/THIRD_PARTY_NOTICES.md#historical-010-runtime"
+  "thirdPartyNotices": "legal/THIRD_PARTY_NOTICES.md#runtime-dependencies"
 }

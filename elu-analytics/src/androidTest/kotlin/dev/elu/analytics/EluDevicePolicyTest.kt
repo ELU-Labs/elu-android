@@ -13,7 +13,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
-class EluDeviceFoundationTest {
+class EluDevicePolicyTest {
     @Test
     fun eluOwnedPreferenceNamespaceSurvivesReopen() {
         val context = ApplicationProvider.getApplicationContext<Context>()

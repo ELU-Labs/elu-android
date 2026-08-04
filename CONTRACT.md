@@ -1,16 +1,17 @@
 # ELU Mobile SDK — behavioral contract
 
-The ELU mobile SDKs (iOS and Android) are thin wrappers over the PostHog
-mobile SDKs, driven entirely by ELU remote config. The design rules:
+The ELU mobile SDKs (iOS and Android) are driven entirely by ELU remote
+configuration. The design rules:
 
 1. The SDK is initialized with ONLY a site key — `Elu.setup` is the mobile
    analog of ELU's one-line web script tag.
 2. It fetches per-site-key remote config from
    `GET https://elu.dev/v1/<siteKey>/config` and caches it on disk.
 3. It ships **fail-closed compiled defaults** (EU-block ON, masking ON,
-   replay off-until-config); remote config may only LOOSEN behavior
-   mid-session, never pretend to retro-tighten (captured frames cannot be
-   re-masked).
+   replay off-until-config) until the first usable config arrives. That
+   initial config may loosen the defaults. Once the runtime is running, fresh
+   config tightens immediately while loosening waits for the next launch;
+   captured frames cannot be retroactively re-masked.
 4. Customer code only ever touches the `Elu.*` facade — never the underlying
    provider SDK.
 
@@ -31,8 +32,8 @@ Enabled:
 {
   "v": 1,
   "enabled": true,
-  "publicToken": "phc_…",
-  "host": "https://us.i.posthog.com",
+  "publicToken": "example-token",
+  "host": "<analytics-host-from-elu-config>",
   "privacy": {
     "blockEu": true,
     "maskTextInputs": true,
@@ -43,6 +44,9 @@ Enabled:
   }
 }
 ```
+
+The host is supplied by ELU remote configuration; this example does not
+prescribe a production hostname.
 
 Defaults when a privacy field is missing or unparseable: `blockEu` and
 `maskTextInputs` true, everything else off, `replayMaxMinutes` 0 = unlimited
@@ -57,7 +61,7 @@ cached config valid indefinitely.
 ## 2. Lifecycle state machine
 
 States: `idle` → `pending` (setup called, no usable config yet) → `running`
-(PostHog initialized) / `disabled` (config said `enabled:false`, or
+(runtime initialized) / `disabled` (config said `enabled:false`, or
 EU-blocked).
 
 - `setup(siteKey)` is idempotent (second call warns and no-ops). It records
@@ -69,8 +73,9 @@ EU-blocked).
 - Device-in-EU AND `blockEu` (from cached config, or the compiled default
   TRUE when no config exists yet) ⇒ blocked. Buffered ops held while the
   decision is pending flush if the fetched config says `blockEu:false` and
-  are dropped if it says `blockEu:true`. Nothing leaves the device until the
-  decision is made.
+  are dropped if it says `blockEu:true`. Until the decision is made, the
+  analytics runtime stays uninitialized and emits no events or replay; the
+  ELU config request itself still occurs.
 - Facade methods are safe in EVERY state: `pending` buffers event-class
   calls (getters return defaults), `disabled` no-ops, `running` delegates.
   Never throws, never blocks the caller.
@@ -81,7 +86,7 @@ immediately, loosening waits for the next launch:
 | Change | Action now |
 |---|---|
 | `enabled` true→false | opt out + stop replay; state → `disabled` |
-| `enabled` false→true (PostHog never initialized) | initialize now |
+| `enabled` false→true (runtime never initialized) | initialize now |
 | `blockEu` false→true and device is EU | opt out + stop replay; `disabled` |
 | any masking tightened | stop replay for the rest of the run |
 | `replayNewUsersOnly` turned on, device is returning | stop replay |
@@ -90,16 +95,18 @@ immediately, loosening waits for the next launch:
 
 ## 3. Privacy semantics
 
-All controls act CLIENT-SIDE at capture time — masked or blocked content
-never leaves the device.
+All capture controls act CLIENT-SIDE — masked or blocked analytics content
+never leaves the device. ELU config requests still occur while capture is
+blocked so a re-enabled site can recover.
 
 - **`blockEu`** (compiled default ON, fail-closed): IANA-timezone heuristic —
   blocked when the zone is empty/unreadable, starts with `Europe/`, or is one
   of: `Asia/Nicosia, Asia/Famagusta, Atlantic/Canary, Atlantic/Madeira,
   Atlantic/Azores, Atlantic/Reykjavik, Atlantic/Faroe, Africa/Ceuta,
   America/Cayenne, America/Guadeloupe, America/Martinique, Indian/Reunion,
-  Indian/Mayotte`. Blocked = the provider SDK never initializes: no network,
-  no stored IDs, no events, no replay.
+  Indian/Mayotte`. Blocked = the analytics runtime never initializes: no
+  runtime identity storage, analytics events, or replay. ELU config fetches
+  continue so re-activation can recover.
 - **`maskTextInputs`** (default ON): mask typed input in replay. Platform
   note: the underlying mobile SDKs have a single text-masking knob that
   masks ALL rendered text (labels included), not just inputs — tighter than
@@ -118,12 +125,12 @@ never leaves the device.
 
 ## 4. Compiled defaults
 
-The wrapper — not the customer — owns the underlying SDK's config object:
-token + host come from ELU config only; screen tracking and application
+The SDK owns its runtime configuration: token + host come from ELU config
+only; screen tracking and application
 lifecycle events ON; session replay ON in screenshot mode; element-
-interaction autocapture, surveys, and other provider-branded extras OFF.
+interaction autocapture, surveys, and optional extras OFF.
 Replay on/off, sampling, and minimum duration remain governed server-side by
-the ELU-managed project. The wrapper never calls opt-in/opt-out except on
+the ELU-managed project. The SDK never calls opt-in/opt-out except on
 the ELU kill-switch path (and clears a persisted opt-out at init so a
 re-enabled workspace recovers).
 
@@ -134,7 +141,7 @@ Registered at init AND re-registered after every `reset()` (the underlying
 
 ```
 elu_sdk: "ios" | "android"
-elu_sdk_version: "<wrapper semver>"
+elu_sdk_version: "<sdk semver>"
 elu_facade_version: 1
 ```
 
@@ -148,9 +155,9 @@ elu_facade_version: 1
 
 Identity is customer-supplied ONLY (`identify` from your auth flow, `reset`
 on logout) — the SDK never auto-identifies. The facade deliberately omits
-provider config access, session-recording start/stop, surveys, and
-opt-in/out: exposing those would lock the public ELU API to
-provider-specific semantics.
+runtime configuration access, session-recording start/stop, surveys, and
+opt-in/out: exposing those would couple the public ELU API to implementation
+details.
 
 Buffered-op ordering: the pre-config buffer replays strictly FIFO once
 running — including `reset`, so a pre-config logout delivers pre-reset
