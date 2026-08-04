@@ -45,6 +45,7 @@ jobs:
         run: |
           mkdir -p build/reports
           ./gradlew :elu-analytics:dependencies --configuration releaseRuntimeClasspath > build/reports/release-runtime-classpath.txt
+          python3 scripts/validate-network-parser-smoke.py scanner/fixtures/network-parser-smoke.json
           python3 scripts/zero-brand-gate.py --mode report --skip-tree \
             --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar \
             --input publication=elu-analytics/build/publications/maven \
@@ -52,7 +53,7 @@ jobs:
             --input dependencies=build/reports/release-runtime-classpath.txt \
             | tee build/reports/zero-brand-artifacts.txt
           python3 scripts/zero-brand-gate.py --mode strict --skip-tree \
-            --network smoke=scanner/fixtures/allowed-network-trace.json
+            --network parser-smoke=scanner/fixtures/network-parser-smoke.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

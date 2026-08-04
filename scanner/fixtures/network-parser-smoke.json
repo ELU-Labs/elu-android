@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "fixtureKind": "network-parser-smoke",
+  "runtimeEvidence": false,
+  "expectedRequestCount": 4,
+  "requests": [
+    {
+      "scenario": "config",
+      "method": "GET",
+      "url": "https://elu.dev/v1/redacted-site-key/config"
+    },
+    {
+      "scenario": "capture",
+      "method": "POST",
+      "url": "https://ingest.elu.dev/v1/events"
+    },
+    {
+      "scenario": "replay",
+      "method": "POST",
+      "url": "https://ingest.elu.dev/v1/replay"
+    },
+    {
+      "scenario": "flags",
+      "method": "POST",
+      "url": "https://ingest.elu.dev/v1/flags"
+    }
+  ]
+}

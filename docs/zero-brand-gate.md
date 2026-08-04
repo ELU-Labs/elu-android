@@ -14,8 +14,22 @@ compare independently generated artifacts.
 Inputs passed with `--network label=path` are also parsed for URLs. Each URL
 must use HTTPS and its host must equal an entry in
 `scanner/network-allowlist.json` or be a true label-boundary subdomain when the
-entry permits subdomains. Lookalike suffixes and insecure schemes fail; an
-empty trace is valid evidence for a blocked/offline scenario.
+entry permits subdomains. Lookalike suffixes, insecure schemes, empty inputs,
+empty directories, and inputs containing no URL all fail.
+
+`scanner/fixtures/network-parser-smoke.json` is a static parser smoke only. It
+sets `runtimeEvidence: false`; its scenario set and declared request count are
+checked independently by `scripts/validate-network-parser-smoke.py`. It proves
+that the allowlist parser accepts representative ELU-owned URLs and nothing
+about what the Android runtime actually contacted.
+
+Publication instead requires the device/instrumentation harness to generate
+`build/reports/android-runtime-network-evidence.json` with
+`evidenceKind: android-runtime-network-capture`, `runtimeEvidence: true`, and
+the exact config/capture/replay/flags scenario counts enforced by
+`scripts/validate-runtime-network-evidence.py`. That generated file then goes
+through the same HTTPS and ELU label-boundary host validator. No checked-in
+static fixture can satisfy the runtime-evidence step.
 
 Modes:
 
@@ -29,7 +43,7 @@ Modes:
 The published `0.1.0` tag and Maven files are immutable historical evidence.
 They are not rewritten. The first owned runtime release must pass `strict`
 across the clean source checkout, resolved graph, AAR, sources/docs archives,
-POM/module metadata, DEX/symbols, SBOM, and scripted network trace.
+POM/module metadata, DEX/symbols, SBOM, and generated runtime network capture.
 
 Run the scanner tests with:
 

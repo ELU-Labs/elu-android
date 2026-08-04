@@ -75,6 +75,24 @@ class ZeroBrandGateTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("LICENSE-evidence.jar!/classes.txt", result.stdout)
 
+    def test_legal_filename_does_not_allowlist_forbidden_parent_path(self) -> None:
+        disguised_legal = self.root / TOKEN / "LICENSE.txt"
+        disguised_legal.parent.mkdir()
+        disguised_legal.write_text("otherwise valid legal text", encoding="utf-8")
+
+        result = self.run_gate()
+        self.assertEqual(1, result.returncode)
+        self.assertIn(f"path: {TOKEN}/LICENSE.txt", result.stdout)
+
+    def test_nested_legal_filename_does_not_allowlist_forbidden_parent_path(self) -> None:
+        archive = self.root / "artifact.aar"
+        with zipfile.ZipFile(archive, "w") as outer:
+            outer.writestr(f"{TOKEN}/LICENSE.txt", "otherwise valid legal text")
+
+        result = self.run_gate("--skip-tree", "--input", f"aar={archive}")
+        self.assertEqual(1, result.returncode)
+        self.assertIn(f"path: aar!/{TOKEN}/LICENSE.txt", result.stdout)
+
     def test_network_trace_requires_https_and_label_boundary_domain(self) -> None:
         trace = self.root / "network.json"
         allowlist = self.root / "network-allowlist.json"
@@ -105,6 +123,33 @@ class ZeroBrandGateTest(unittest.TestCase):
                 f"trace={trace}",
             )
             self.assertEqual(1, rejected.returncode, rejected_url)
+
+    def test_network_trace_rejects_empty_or_no_url_evidence(self) -> None:
+        trace = self.root / "network.json"
+        allowlist = self.root / "network-allowlist.json"
+        for contents in ("", json.dumps({"requests": []}), json.dumps({"status": "blocked"})):
+            trace.write_text(contents, encoding="utf-8")
+            result = self.run_gate(
+                "--skip-tree",
+                "--network-allowlist",
+                str(allowlist),
+                "--network",
+                f"trace={trace}",
+            )
+            self.assertEqual(1, result.returncode)
+            self.assertIn("trace contains no URLs", result.stdout)
+
+        empty_directory = self.root / "empty-network"
+        empty_directory.mkdir()
+        result = self.run_gate(
+            "--skip-tree",
+            "--network-allowlist",
+            str(allowlist),
+            "--network",
+            f"trace={empty_directory}",
+        )
+        self.assertEqual(1, result.returncode)
+        self.assertIn("trace contains no files", result.stdout)
 
     def test_ratchet_accepts_known_debt_and_rejects_new_debt(self) -> None:
         (self.root / "legacy.txt").write_text(TOKEN, encoding="utf-8")

@@ -70,7 +70,7 @@ def scan_blob(data: bytes, logical_path: str, token: bytes, findings: list[Findi
                     continue
                 nested_path = f"{logical_path}!/{name}"
                 path_count = name.casefold().encode("utf-8").count(token)
-                if path_count and not is_legal_path(nested_path):
+                if path_count:
                     findings.append(make_finding(nested_path, "path", path_count))
                 try:
                     scan_blob(archive.read(name), nested_path, token, findings)
@@ -92,10 +92,9 @@ def tracked_files(root: pathlib.Path) -> list[pathlib.Path]:
 
 def scan_file(path: pathlib.Path, logical_path: str, token: bytes, findings: list[Finding]) -> None:
     normalized = logical_path.replace("\\", "/")
-    if not is_legal_path(normalized):
-        path_count = normalized.casefold().encode("utf-8").count(token)
-        if path_count:
-            findings.append(make_finding(normalized, "path", path_count))
+    path_count = normalized.casefold().encode("utf-8").count(token)
+    if path_count:
+        findings.append(make_finding(normalized, "path", path_count))
     try:
         scan_blob(path.read_bytes(), normalized, token, findings)
     except (OSError, PermissionError):
@@ -157,15 +156,23 @@ def validate_network_input(
     domains: list[tuple[str, bool]],
 ) -> list[str]:
     violations: list[str] = []
-    for trace in network_files(path):
+    traces = network_files(path)
+    discovered_urls = 0
+    for trace in traces:
         logical = label if path.is_file() else f"{label}/{trace.relative_to(path).as_posix()}"
-        for url in sorted(network_urls(trace)):
+        urls = network_urls(trace)
+        discovered_urls += len(urls)
+        for url in sorted(urls):
             parsed = urllib.parse.urlsplit(url)
             if parsed.scheme.casefold() != "https":
                 violations.append(f"network: {logical}: non-HTTPS URL {url}")
                 continue
             if parsed.hostname is None or not host_is_allowed(parsed.hostname, domains):
                 violations.append(f"network: {logical}: non-ELU host {parsed.hostname or '<missing>'}")
+    if not traces:
+        violations.append(f"network: {label}: trace contains no files")
+    elif discovered_urls == 0:
+        violations.append(f"network: {label}: trace contains no URLs")
     return violations
 
 
