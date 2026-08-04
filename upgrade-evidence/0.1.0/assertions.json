@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "sourceVersion": "0.1.0",
+  "operations": [
+    "establish-anonymous-identity",
+    "replace-anonymous-install-with-candidate",
+    "verify-anonymous-identity-continuity",
+    "establish-identified-identity",
+    "replace-identified-install-with-candidate",
+    "verify-identified-identity-continuity"
+  ],
+  "expectedContinuity": {
+    "anonymousIdentityEstablished": true,
+    "anonymousIdentityPreserved": true,
+    "identifiedIdentityEstablished": true,
+    "identifiedIdentityPreserved": true,
+    "applicationDataPreserved": true
+  },
+  "rawEvidence": {
+    "custody": "ephemeral-ci-workspace",
+    "status": "digested-not-retained"
+  }
+}
