@@ -25,6 +25,16 @@ class ZeroBrandGateTest(unittest.TestCase):
             "<!-- zero-brand-token-end -->\n",
             encoding="utf-8",
         )
+        allowlist = self.root / "network-allowlist.json"
+        allowlist.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "domains": [{"host": "elu.dev", "includeSubdomains": True}],
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -55,6 +65,46 @@ class ZeroBrandGateTest(unittest.TestCase):
         result = self.run_gate("--skip-tree", "--input", f"aar={archive}")
         self.assertEqual(1, result.returncode)
         self.assertIn("aar!/classes.txt", result.stdout)
+
+    def test_legal_named_archive_does_not_hide_nested_content(self) -> None:
+        archive = self.root / "LICENSE-evidence.jar"
+        with zipfile.ZipFile(archive, "w") as outer:
+            outer.writestr("classes.txt", f"symbol:{TOKEN}")
+
+        result = self.run_gate("--skip-tree", "--input", f"LICENSE-evidence.jar={archive}")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("LICENSE-evidence.jar!/classes.txt", result.stdout)
+
+    def test_network_trace_requires_https_and_label_boundary_domain(self) -> None:
+        trace = self.root / "network.json"
+        allowlist = self.root / "network-allowlist.json"
+        trace.write_text(
+            json.dumps({"urls": ["https://ingest.elu.dev/v1/events", "https://elu.dev/v1/config"]}),
+            encoding="utf-8",
+        )
+        allowed = self.run_gate(
+            "--skip-tree",
+            "--network-allowlist",
+            str(allowlist),
+            "--network",
+            f"trace={trace}",
+        )
+        self.assertEqual(0, allowed.returncode, allowed.stdout + allowed.stderr)
+
+        for rejected_url in (
+            "http://ingest.elu.dev/v1/events",
+            "https://elu.dev.evil.example/v1/events",
+            "https://notelu.dev/v1/events",
+        ):
+            trace.write_text(json.dumps({"url": rejected_url}), encoding="utf-8")
+            rejected = self.run_gate(
+                "--skip-tree",
+                "--network-allowlist",
+                str(allowlist),
+                "--network",
+                f"trace={trace}",
+            )
+            self.assertEqual(1, rejected.returncode, rejected_url)
 
     def test_ratchet_accepts_known_debt_and_rejects_new_debt(self) -> None:
         (self.root / "legacy.txt").write_text(TOKEN, encoding="utf-8")

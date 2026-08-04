@@ -1,22 +1,62 @@
 name: Publish to Maven Central
 
-# Manual trigger — publishes the version in elu-analytics/build.gradle.kts
-# to the Central Portal and auto-releases it. Requires repo secrets:
+# Manual trigger — checks out and verifies an exact annotated release tag,
+# then publishes the version sourced from EluVersion.NAME. Requires repo secrets:
 # MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD (portal user token) and
 # SIGNING_KEY / SIGNING_KEY_PASSWORD (armored PGP secret key + passphrase).
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact annotated semantic-version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: maven-central-reviewed
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Verify matching reviewed tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python3 scripts/verify-release-tag.py "$RELEASE_TAG"
+      - name: Run release gates
+        run: >-
+          ./gradlew
+          :elu-analytics:testDebugUnitTest
+          :elu-analytics:assembleRelease
+          :elu-analytics:assembleDebugAndroidTest
+          :elu-analytics:generatePomFileForMavenPublication
+          :elu-analytics:generateMetadataFileForMavenPublication
+          :elu-analytics:releaseSourcesJar
+          :elu-analytics:javaDocReleaseJar
+          :sample:assembleDebug
+          checkConformanceFixtures
+          checkZeroBrandScanner
+          checkZeroBrandRatchet
+          --stacktrace
+      - name: Verify public API and legal-only artifact gate
+        run: |
+          python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
+          python3 scripts/zero-brand-gate.py --mode strict \
+            --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar \
+            --input publication=elu-analytics/build/publications/maven \
+            --input archives=elu-analytics/build/libs \
+            --network smoke=scanner/fixtures/allowed-network-trace.json
       - name: Publish and release
         run: ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache --stacktrace
         env:

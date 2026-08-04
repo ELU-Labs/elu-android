@@ -11,6 +11,12 @@ metadata, resolved dependency reports, SBOMs, source/docs archives, and supplied
 network traces. Every external input receives a stable logical label so CI can
 compare independently generated artifacts.
 
+Inputs passed with `--network label=path` are also parsed for URLs. Each URL
+must use HTTPS and its host must equal an entry in
+`scanner/network-allowlist.json` or be a true label-boundary subdomain when the
+entry permits subdomains. Lookalike suffixes and insecure schemes fail; an
+empty trace is valid evidence for a blocked/offline scenario.
+
 Modes:
 
 - `strict` blocks on every non-legal occurrence and is the ownership-release

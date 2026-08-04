@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "domains": [
+    {
+      "host": "elu.dev",
+      "includeSubdomains": true
+    }
+  ]
+}

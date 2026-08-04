@@ -1,0 +1,8 @@
+{
+  "requests": [
+    { "url": "https://elu.dev/v1/redacted-site-key/config" },
+    { "url": "https://ingest.elu.dev/v1/events" },
+    { "url": "https://ingest.elu.dev/v1/replay" },
+    { "url": "https://ingest.elu.dev/v1/flags" }
+  ]
+}

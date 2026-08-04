@@ -9,16 +9,20 @@ import hashlib
 import io
 import json
 import pathlib
+import re
 import subprocess
 import sys
+import urllib.parse
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_TOKEN_FILE = ROOT / "legal" / "THIRD_PARTY_NOTICES.md"
+DEFAULT_NETWORK_ALLOWLIST = ROOT / "scanner" / "network-allowlist.json"
 TOKEN_START = "<!-- zero-brand-token-start -->"
 TOKEN_END = "<!-- zero-brand-token-end -->"
 LEGAL_PREFIXES = ("license", "third_party_notices")
 ARCHIVE_SUFFIXES = {".aar", ".apk", ".jar", ".zip"}
+URL_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"'<>]+")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,11 +55,10 @@ def make_finding(logical_path: str, kind: str, count: int) -> Finding:
 
 
 def scan_blob(data: bytes, logical_path: str, token: bytes, findings: list[Finding]) -> None:
-    if is_legal_path(logical_path):
-        return
-    count = data.lower().count(token)
-    if count:
-        findings.append(make_finding(logical_path, "content", count))
+    if not is_legal_path(logical_path):
+        count = data.lower().count(token)
+        if count:
+            findings.append(make_finding(logical_path, "content", count))
 
     suffix = pathlib.PurePosixPath(logical_path).suffix.casefold()
     if suffix not in ARCHIVE_SUFFIXES and not data.startswith(b"PK\x03\x04"):
@@ -89,11 +92,10 @@ def tracked_files(root: pathlib.Path) -> list[pathlib.Path]:
 
 def scan_file(path: pathlib.Path, logical_path: str, token: bytes, findings: list[Finding]) -> None:
     normalized = logical_path.replace("\\", "/")
-    if is_legal_path(normalized):
-        return
-    path_count = normalized.casefold().encode("utf-8").count(token)
-    if path_count:
-        findings.append(make_finding(normalized, "path", path_count))
+    if not is_legal_path(normalized):
+        path_count = normalized.casefold().encode("utf-8").count(token)
+        if path_count:
+            findings.append(make_finding(normalized, "path", path_count))
     try:
         scan_blob(path.read_bytes(), normalized, token, findings)
     except (OSError, PermissionError):
@@ -114,6 +116,57 @@ def scan_input(label: str, path: pathlib.Path, token: bytes, findings: list[Find
         scan_file(path, label, token, findings)
     else:
         raise SystemExit(f"scan input does not exist: {path}")
+
+
+def network_files(path: pathlib.Path) -> list[pathlib.Path]:
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(item for item in path.rglob("*") if item.is_file())
+    raise SystemExit(f"network trace does not exist: {path}")
+
+
+def network_urls(path: pathlib.Path) -> set[str]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {match.group(0).rstrip(".,);]") for match in URL_PATTERN.finditer(text)}
+
+
+def load_network_allowlist(path: pathlib.Path) -> list[tuple[str, bool]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schemaVersion") != 1:
+        raise SystemExit(f"unsupported network allowlist: {path}")
+    domains: list[tuple[str, bool]] = []
+    for entry in data.get("domains", []):
+        host = str(entry.get("host", "")).strip().casefold().rstrip(".")
+        if not host or "://" in host or "/" in host:
+            raise SystemExit(f"invalid allowlisted host: {host!r}")
+        domains.append((host, entry.get("includeSubdomains") is True))
+    if not domains:
+        raise SystemExit("network allowlist must contain at least one domain")
+    return domains
+
+
+def host_is_allowed(host: str, domains: list[tuple[str, bool]]) -> bool:
+    normalized = host.casefold().rstrip(".")
+    return any(normalized == domain or (include_subdomains and normalized.endswith(f".{domain}")) for domain, include_subdomains in domains)
+
+
+def validate_network_input(
+    label: str,
+    path: pathlib.Path,
+    domains: list[tuple[str, bool]],
+) -> list[str]:
+    violations: list[str] = []
+    for trace in network_files(path):
+        logical = label if path.is_file() else f"{label}/{trace.relative_to(path).as_posix()}"
+        for url in sorted(network_urls(trace)):
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme.casefold() != "https":
+                violations.append(f"network: {logical}: non-HTTPS URL {url}")
+                continue
+            if parsed.hostname is None or not host_is_allowed(parsed.hostname, domains):
+                violations.append(f"network: {logical}: non-ELU host {parsed.hostname or '<missing>'}")
+    return violations
 
 
 def collapse(findings: list[Finding]) -> list[Finding]:
@@ -160,6 +213,8 @@ def main() -> None:
     parser.add_argument("--root", type=pathlib.Path, default=ROOT)
     parser.add_argument("--token-file", type=pathlib.Path, default=DEFAULT_TOKEN_FILE)
     parser.add_argument("--input", action="append", type=parse_input, default=[])
+    parser.add_argument("--network", action="append", type=parse_input, default=[])
+    parser.add_argument("--network-allowlist", type=pathlib.Path, default=DEFAULT_NETWORK_ALLOWLIST)
     parser.add_argument("--skip-tree", action="store_true")
     parser.add_argument("--mode", choices=("strict", "report", "ratchet"), default="strict")
     parser.add_argument("--baseline", type=pathlib.Path)
@@ -172,6 +227,12 @@ def main() -> None:
         scan_tree(args.root.resolve(), token, findings)
     for label, path in args.input:
         scan_input(label, path, token, findings)
+    network_violations: list[str] = []
+    if args.network:
+        domains = load_network_allowlist(args.network_allowlist)
+        for label, path in args.network:
+            scan_input(f"network/{label}", path, token, findings)
+            network_violations.extend(validate_network_input(label, path, domains))
     findings = collapse(findings)
 
     if args.emit_baseline:
@@ -186,8 +247,11 @@ def main() -> None:
 
     for finding in findings:
         print(f"{finding.kind}: {finding.logical_path} ({finding.count})")
-    print(f"zero-brand scan: {len(findings)} finding(s), {len(failures)} release-blocking")
-    if args.mode != "report" and failures:
+    for violation in network_violations:
+        print(violation)
+    release_blocking = len(failures) + (0 if args.mode == "report" else len(network_violations))
+    print(f"zero-brand scan: {len(findings)} finding(s), {len(network_violations)} network violation(s), {release_blocking} release-blocking")
+    if args.mode != "report" and (failures or network_violations):
         raise SystemExit(1)
 
 
