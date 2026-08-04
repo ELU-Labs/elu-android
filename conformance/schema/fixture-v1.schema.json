@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://elu.dev/sdk/conformance/fixture-v1.schema.json",
+  "title": "ELU SDK provisional behavior fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "baseline", "domain", "normative", "observations", "gaps"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "version", "tag", "commit", "contractStatus"],
+      "properties": {
+        "platform": { "const": "android" },
+        "version": { "const": "0.1.0" },
+        "tag": { "const": "0.1.0" },
+        "commit": { "const": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4" },
+        "contractStatus": { "const": "provisional-pending-javascript-v1" }
+      }
+    },
+    "domain": { "enum": ["identity-reset", "groups-flags", "events-lifecycle", "replay-privacy", "persistence-network"] },
+    "normative": { "const": false },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "given", "operations", "expected", "evidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+          "given": { "type": "array", "items": { "type": "string" } },
+          "operations": { "type": "array", "items": { "type": "string" } },
+          "expected": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "evidence": { "type": "array", "minItems": 1, "items": { "enum": ["source-inspection", "public-api", "published-artifact", "device-capture"] } }
+        }
+      }
+    },
+    "gaps": { "type": "array", "items": { "type": "string" } }
+  }
+}

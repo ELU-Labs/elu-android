@@ -1,0 +1,48 @@
+# Source: published dev.elu:elu-analytics:0.1.0 AAR
+# Command: javap -classpath classes.jar -public dev.elu.analytics.Elu dev.elu.analytics.EluOptions
+
+Compiled from "Elu.kt"
+public final class dev.elu.analytics.Elu {
+  public static final dev.elu.analytics.Elu INSTANCE;
+  public static final void setup(android.content.Context, java.lang.String, dev.elu.analytics.EluOptions);
+  public static void setup$default(android.content.Context, java.lang.String, dev.elu.analytics.EluOptions, int, java.lang.Object);
+  public static final void capture(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void capture$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final void identify(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void identify$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final void screen(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void screen$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final void alias(java.lang.String);
+  public static final void reset();
+  public static final void captureException(java.lang.Throwable, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void captureException$default(java.lang.Throwable, java.util.Map, int, java.lang.Object);
+  public static final void register(java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void unregister(java.lang.String);
+  public static final void setPersonProperties(java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void group(java.lang.String, java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void group$default(java.lang.String, java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final java.lang.String distinctId();
+  public static final java.lang.Object getFeatureFlag(java.lang.String);
+  public static final java.lang.Object getFeatureFlagPayload(java.lang.String);
+  public static final boolean isFeatureEnabled(java.lang.String);
+  public static final void reloadFeatureFlags(kotlin.jvm.functions.Function0<kotlin.Unit>);
+  public static void reloadFeatureFlags$default(kotlin.jvm.functions.Function0, int, java.lang.Object);
+  public static final void onFeatureFlagsLoaded(kotlin.jvm.functions.Function0<kotlin.Unit>);
+  public static final void setPersonPropertiesForFlags(java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void setGroupPropertiesForFlags(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void flush();
+  public static final void setup(android.content.Context, java.lang.String);
+  public static final void capture(java.lang.String);
+  public static final void identify(java.lang.String);
+  public static final void screen(java.lang.String);
+  public static final void captureException(java.lang.Throwable);
+  public static final void group(java.lang.String, java.lang.String);
+  public static final void reloadFeatureFlags();
+}
+Compiled from "EluOptions.kt"
+public final class dev.elu.analytics.EluOptions {
+  public dev.elu.analytics.EluOptions(java.lang.String);
+  public dev.elu.analytics.EluOptions(java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final java.lang.String getConfigHost();
+  public dev.elu.analytics.EluOptions();
+}

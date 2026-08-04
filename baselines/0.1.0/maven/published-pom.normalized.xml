@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The runtime dependency is represented by legalRef to avoid copying
+     transitional naming outside the legal provenance artifact. -->
+<publishedPomSnapshot>
+  <groupId>dev.elu</groupId>
+  <artifactId>elu-analytics</artifactId>
+  <version>0.1.0</version>
+  <packaging>aar</packaging>
+  <name>ELU Analytics</name>
+  <description>ELU Analytics SDK for Android — analytics and session replay, configured remotely by your ELU dashboard.</description>
+  <dependencies>
+    <dependency group="org.jetbrains.kotlin" artifact="kotlin-stdlib" version="2.1.20" scope="compile" />
+    <dependency legalRef="legal/THIRD_PARTY_NOTICES.md#historical-010-runtime" version="3.58.0" scope="runtime" />
+  </dependencies>
+  <publishedSha256>b0ea1acb06a701ccac064745f85f0928aa07be0149338f4fcdad27e4175549d0</publishedSha256>
+</publishedPomSnapshot>
