@@ -1,0 +1,30 @@
+{
+    "schemaVersion": 1,
+    "policyRevision": "privacy-1",
+    "contextRevision": 5,
+    "effectivePolicyHash": "sha256:852aa75195a8a72e48ded6f286ea8634d83e64c55277207756632f7a60883ed3",
+    "onDeviceDecision": {
+        "decision": "allow",
+        "source": "device-region",
+        "evaluatedAt": "2026-08-04T00:00:00.000Z"
+    },
+    "captureAllowed": true,
+    "replayAllowed": true,
+    "replaySampled": true,
+    "identityOptedOut": false,
+    "maskingValidated": true,
+    "replaySessionEligible": true,
+    "replayBudgetRemainingSeconds": 3599,
+    "replayTransport": {
+        "codec": "elu-browser-dom-v1",
+        "compression": "gzip",
+        "advertised": true
+    },
+    "effectiveMasking": {
+        "text": "sensitive",
+        "inputs": "all",
+        "images": "block",
+        "secureInputsMasked": true,
+        "platformFallbackApplied": false
+    }
+}

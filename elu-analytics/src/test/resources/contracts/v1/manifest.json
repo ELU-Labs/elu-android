@@ -1,0 +1,72 @@
+{
+    "contract": "elu-sdk",
+    "contractVersion": "1.0.0",
+    "schemaVersion": 1,
+    "status": "frozen",
+    "statusScope": "semantic-contract",
+    "semanticContract": {
+        "contractVersion": "1.0.0",
+        "status": "frozen"
+    },
+    "transport": {
+        "profile": "elu-http-v1",
+        "status": "specified-not-wired",
+        "runtimeBehavior": "unchanged",
+        "repositoryConformance": "schemas-and-fixtures",
+        "liveReadbackVerification": "pending-external-verification",
+        "configurationEndpoint": {
+            "method": "GET",
+            "pathTemplate": "/sdk/v1/{siteKey}/config"
+        },
+        "policy": "fixtures/transport-policy.json"
+    },
+    "compatibility": {
+        "currentBrowserWireAndStorageUnchanged": true,
+        "breakingChangeRequiresContractMajor": true
+    },
+    "schemas": {
+        "config": "schemas/config.schema.json",
+        "identity": "schemas/identity.schema.json",
+        "mutation": "schemas/mutation.schema.json",
+        "event": "schemas/event.schema.json",
+        "replay": "schemas/replay.schema.json",
+        "flagsRequest": "schemas/flags-request.schema.json",
+        "flagsResponse": "schemas/flags-response.schema.json",
+        "privacyPolicy": "schemas/privacy-policy.schema.json",
+        "privacyState": "schemas/privacy.schema.json",
+        "version": "schemas/version.schema.json",
+        "batchRequest": "schemas/batch-request.schema.json",
+        "batchAck": "schemas/batch-ack.schema.json",
+        "replayRequest": "schemas/replay-request.schema.json",
+        "replayAck": "schemas/replay-ack.schema.json",
+        "transportError": "schemas/transport-error.schema.json",
+        "transportPolicy": "schemas/transport-policy.schema.json"
+    },
+    "fixtures": [
+        "fixtures/config-enabled.json",
+        "fixtures/config-disabled.json",
+        "fixtures/identity.json",
+        "fixtures/mutations.json",
+        "fixtures/event.json",
+        "fixtures/replay.json",
+        "fixtures/flags-request.json",
+        "fixtures/flags-response.json",
+        "fixtures/privacy-allowed.json",
+        "fixtures/privacy-blocked.json",
+        "fixtures/version.json",
+        "fixtures/batch-request.json",
+        "fixtures/batch-ack.json",
+        "fixtures/batch-ack-retryable-head.json",
+        "fixtures/replay-request.json",
+        "fixtures/replay-ack.json",
+        "fixtures/transport-error-unauthorized.json",
+        "fixtures/transport-error-forbidden.json",
+        "fixtures/transport-error-payload-too-large.json",
+        "fixtures/transport-error-rate-limited.json",
+        "fixtures/transport-error-service-unavailable.json",
+        "fixtures/transport-policy.json"
+    ],
+    "gates": {
+        "liveEngineReadback": "readback-expectations.json"
+    }
+}

@@ -1,0 +1,74 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/privacy-policy.schema.json",
+    "title": "ELU SDK server privacy policy v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["schemaVersion", "revision", "capture", "replay", "masking", "regionPolicy"],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "revision": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "capture": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["enabled"],
+            "properties": {
+                "enabled": { "type": "boolean" },
+                "reason": { "type": "string", "maxLength": 256 }
+            }
+        },
+        "replay": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["enabled", "sampleRate", "minimumDurationSeconds", "maximumDurationSeconds"],
+            "properties": {
+                "enabled": { "type": "boolean" },
+                "reason": { "type": "string", "maxLength": 256 },
+                "sampleRate": { "type": "number", "minimum": 0, "maximum": 1 },
+                "minimumDurationSeconds": { "type": "integer", "minimum": 0, "maximum": 3600 },
+                "maximumDurationSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 }
+            }
+        },
+        "masking": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "inputs", "images", "secureInputsMasked"],
+            "properties": {
+                "text": { "enum": ["all", "sensitive"] },
+                "inputs": { "enum": ["all", "sensitive"] },
+                "images": { "enum": ["block", "allow"] },
+                "secureInputsMasked": { "const": true },
+                "platformRules": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["platform", "action", "targetDialect", "target"],
+                        "properties": {
+                            "platform": { "enum": ["browser", "android", "ios"] },
+                            "action": { "enum": ["mask", "block"] },
+                            "targetDialect": { "type": "string", "pattern": "^elu-[a-z0-9][a-z0-9.-]{0,63}$" },
+                            "target": { "type": "string", "minLength": 1, "maxLength": 512 }
+                        }
+                    }
+                }
+            }
+        },
+        "regionPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode"],
+            "properties": {
+                "mode": { "enum": ["allow", "block", "block-eu-on-device"] },
+                "evaluator": { "const": "elu-eu-timezone-v1" }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "mode": { "const": "block-eu-on-device" } } },
+                    "then": { "required": ["evaluator"] }
+                }
+            ]
+        }
+    }
+}

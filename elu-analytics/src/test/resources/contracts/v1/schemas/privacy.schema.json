@@ -1,0 +1,69 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/privacy.schema.json",
+    "title": "ELU SDK effective on-device privacy state v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schemaVersion",
+        "policyRevision",
+        "contextRevision",
+        "onDeviceDecision",
+        "captureAllowed",
+        "replayAllowed",
+        "replaySampled",
+        "identityOptedOut",
+        "maskingValidated",
+        "replaySessionEligible",
+        "replayBudgetRemainingSeconds",
+        "replayTransport",
+        "effectiveMasking",
+        "effectivePolicyHash"
+    ],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "policyRevision": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "contextRevision": { "type": "integer", "minimum": 0 },
+        "effectivePolicyHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "onDeviceDecision": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["decision", "source"],
+            "properties": {
+                "decision": { "enum": ["allow", "block", "unknown"] },
+                "source": { "enum": ["not-evaluated", "device-region", "local-consent", "remote-kill-switch"] },
+                "reason": { "type": "string", "maxLength": 256 },
+                "evaluatedAt": { "type": "string", "format": "date-time" }
+            }
+        },
+        "captureAllowed": { "type": "boolean" },
+        "replayAllowed": { "type": "boolean" },
+        "replaySampled": { "type": "boolean" },
+        "identityOptedOut": { "type": "boolean" },
+        "maskingValidated": { "type": "boolean" },
+        "replaySessionEligible": { "type": "boolean" },
+        "replayBudgetRemainingSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
+        "replayTransport": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["codec", "compression", "advertised"],
+            "properties": {
+                "codec": { "type": "string", "pattern": "^elu-[a-z0-9][a-z0-9.-]{0,63}$" },
+                "compression": { "enum": ["none", "gzip"] },
+                "advertised": { "const": true }
+            }
+        },
+        "effectiveMasking": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "inputs", "images", "secureInputsMasked", "platformFallbackApplied"],
+            "properties": {
+                "text": { "enum": ["all", "sensitive"] },
+                "inputs": { "enum": ["all", "sensitive"] },
+                "images": { "enum": ["block", "allow"] },
+                "secureInputsMasked": { "const": true },
+                "platformFallbackApplied": { "type": "boolean" }
+            }
+        }
+    }
+}
