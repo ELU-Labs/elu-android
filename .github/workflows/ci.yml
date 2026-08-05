@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Android SDK checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test, build, and compile consumer fixtures
+        run: >-
+          ./gradlew
+          :elu-analytics:testDebugUnitTest
+          :elu-analytics:assembleRelease
+          :elu-analytics:assembleDebugAndroidTest
+          :elu-analytics:generatePomFileForMavenPublication
+          :elu-analytics:generateMetadataFileForMavenPublication
+          :elu-analytics:releaseSourcesJar
+          :elu-analytics:javaDocReleaseJar
+          :sample:assembleDebug
+          checkConformanceFixtures
+          checkZeroBrandScanner
+          checkZeroBrandRatchet
+          --stacktrace
+      - name: Verify public API and ABI snapshot
+        run: python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
+      - name: Reproduce published 0.1.0 consumer
+        run: >-
+          ./gradlew
+          :sample:assembleDebug
+          :sample:verifyBaselineArtifact
+          -PeluBaselineVersion=0.1.0
+          --stacktrace
+      - name: Inventory dependency and artifact debt
+        shell: bash
+        run: |
+          mkdir -p build/reports
+          ./gradlew :elu-analytics:dependencies --configuration releaseRuntimeClasspath > build/reports/release-runtime-classpath.txt
+          python3 scripts/validate-network-parser-smoke.py scanner/fixtures/network-parser-smoke.json
+          python3 scripts/zero-brand-gate.py --mode report --skip-tree \
+            --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar \
+            --input publication=elu-analytics/build/publications/maven \
+            --input archives=elu-analytics/build/libs \
+            --input dependencies=build/reports/release-runtime-classpath.txt \
+            | tee build/reports/zero-brand-artifacts.txt
+          python3 scripts/zero-brand-gate.py --mode strict --skip-tree \
+            --network parser-smoke=scanner/fixtures/network-parser-smoke.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-sdk-reports
+          path: |
+            elu-analytics/build/reports/tests/
+            elu-analytics/build/publications/maven/
+            build/reports/

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "observational" },
+  "domain": "identity-reset",
+  "normative": false,
+  "observations": [
+    {
+      "id": "pending-identity-operations-are-fifo",
+      "given": ["setup has entered pending", "no usable config has arrived"],
+      "operations": ["identify user-a", "capture before-reset", "reset", "capture after-reset"],
+      "expected": ["all four operations enter the same bounded FIFO", "a running transition drains in call order"],
+      "evidence": ["source-inspection"]
+    },
+    {
+      "id": "reset-restores-elu-version-properties",
+      "given": ["the runtime is running"],
+      "operations": ["reset"],
+      "expected": ["runtime reset happens first", "elu_sdk, elu_sdk_version, and elu_facade_version are registered again"],
+      "evidence": ["source-inspection", "public-api"]
+    },
+    {
+      "id": "identity-getter-defaults-closed",
+      "given": ["the SDK is pending or disabled"],
+      "operations": ["distinctId"],
+      "expected": ["returns null", "does not initialize storage or network"],
+      "evidence": ["source-inspection"]
+    }
+  ],
+  "gaps": ["This observational fixture does not cover anonymous identity or session-store continuity across SDK upgrades.", "Reset semantics remain observational in this compatibility fixture."]
+}

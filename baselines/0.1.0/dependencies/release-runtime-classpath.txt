@@ -1,0 +1,31 @@
+# Normalized summary resolved from tag 0.1.0 with:
+# ./gradlew :elu-analytics:dependencies --configuration releaseRuntimeClasspath
+# Exact legacy-family coordinates are recorded in legal/THIRD_PARTY_NOTICES.md.
+
+org.jetbrains.kotlin:kotlin-stdlib:2.1.20
+org.jetbrains:annotations:13.0
+legal-inventory:android-runtime:3.58.0 (see legal/THIRD_PARTY_NOTICES.md)
+org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.1.10
+org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.10
+androidx.lifecycle:lifecycle-process:2.6.2
+androidx.lifecycle:lifecycle-runtime:2.6.2
+androidx.lifecycle:lifecycle-common:2.6.2
+androidx.lifecycle:lifecycle-common-java8:2.6.2
+androidx.arch.core:core-common:2.2.0
+androidx.arch.core:core-runtime:2.2.0
+androidx.profileinstaller:profileinstaller:1.3.0
+androidx.concurrent:concurrent-futures:1.1.0
+androidx.startup:startup-runtime:1.1.1
+androidx.tracing:tracing:1.0.0
+androidx.annotation:annotation:1.2.0
+androidx.core:core:1.5.0
+androidx.versionedparcelable:versionedparcelable:1.1.1
+androidx.collection:collection:1.0.0
+org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4
+org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.6.4
+com.google.guava:listenablefuture:1.0
+com.squareup.curtains:curtains:1.2.5
+legal-inventory:kotlin-runtime:6.29.0 (see legal/THIRD_PARTY_NOTICES.md)
+com.google.code.gson:gson:2.10.1
+com.squareup.okhttp3:okhttp:4.12.0
+com.squareup.okio:okio-jvm:3.6.0

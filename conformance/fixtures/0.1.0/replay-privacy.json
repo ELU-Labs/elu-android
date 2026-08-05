@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "baseline": { "platform": "android", "version": "0.1.0", "tag": "0.1.0", "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4", "contractStatus": "observational" },
+  "domain": "replay-privacy",
+  "normative": false,
+  "observations": [
+    {
+      "id": "privacy-defaults-fail-closed",
+      "given": ["no usable config exists"],
+      "operations": ["setup"],
+      "expected": ["EU blocking defaults true", "input text masking defaults true", "replay stays uninitialized while policy is pending"],
+      "evidence": ["source-inspection"]
+    },
+    {
+      "id": "eu-guard-blocks-before-runtime-init",
+      "given": ["timezone is empty, unreadable, Europe-prefixed, or in the extra-zone set", "blockEu is true"],
+      "operations": ["setup", "capture"],
+      "expected": ["the SDK becomes or remains disabled", "buffered operations are cleared", "no capture runtime is initialized"],
+      "evidence": ["source-inspection"]
+    },
+    {
+      "id": "replay-budget-persists-per-session",
+      "given": ["replay is active", "replayMaxMinutes is between 1 and 60"],
+      "operations": ["budget check", "process relaunch in the same session", "budget check"],
+      "expected": ["the first start stamp is reused", "replay stops after elapsed wall-clock budget", "event capture remains running"],
+      "evidence": ["source-inspection"]
+    }
+  ],
+  "gaps": ["No real-device masked frame or replay chunk has been archived yet.", "Replay envelope and renderer compatibility are outside this observational fixture."]
+}

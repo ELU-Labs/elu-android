@@ -1,0 +1,10 @@
+{
+  "allowances": {
+    "83cd35db49c75233323e793bd508e38da6ff0a4bbff55cc67ed86fe9f1dba4e3": 23,
+    "bfe530d9dc43ed1645ee87d5e02bf35631c3c45384030982a4a630c75407266b": 18,
+    "f0db9ac648ef3bbef64340c78f04dde01bd0ac4c8f2ea72037b444cafea75be0": 5,
+    "f94c346985119d5a20e12afba74865b4a9347b15cac48fdb069eb3ff26c010a9": 2
+  },
+  "compatibilityReference": "0.1.0",
+  "schemaVersion": 1
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "coordinate": "dev.elu:elu-analytics:0.1.0",
+  "tag": "0.1.0",
+  "commit": "c5bd7ff7b172748c62d099bdab02b911aee0b0d4",
+  "capturedAt": "2026-08-03",
+  "artifacts": [
+    { "name": "elu-analytics-0.1.0.aar", "size": 42258, "sha256": "aeab6cede8da582626505b019a5dc1574d06241b1f1905583ac8e3922d215b8d" },
+    { "name": "elu-analytics-0.1.0-sources.jar", "size": 13982, "sha256": "fe0c70fd7194a860ce819989d62202912ba07df51a2db84d273a097cf36a73e8" },
+    { "name": "elu-analytics-0.1.0-javadoc.jar", "size": 281974, "sha256": "a9d2af4e22c19fdd1fc31c9b9a1c042d931e0e01648d0066172ddc6933c2c76e" },
+    { "name": "elu-analytics-0.1.0.pom", "size": 1981, "sha256": "b0ea1acb06a701ccac064745f85f0928aa07be0149338f4fcdad27e4175549d0" },
+    { "name": "elu-analytics-0.1.0.module", "size": 4101, "sha256": "fbc38a4961a6cc34614493b65031d534415cc22252ce6fd35b514cadcc68df94" },
+    { "name": "maven-metadata.xml", "size": 327, "sha256": "e4fd2bf103a6dffcdddf9fbd67444a38f8dd69c722948aab3ef67e11bef3b034" }
+  ],
+  "aarEntries": ["R.txt", "AndroidManifest.xml", "classes.jar", "proguard.txt", "META-INF/com/android/build/gradle/aar-metadata.properties"],
+  "thirdPartyNotices": "legal/THIRD_PARTY_NOTICES.md#runtime-dependencies"
+}
