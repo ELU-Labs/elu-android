@@ -281,11 +281,20 @@ class RuntimeQueueOwnerTest {
 
     @Test
     fun `serialized concurrent submissions create one contiguous mixed stream`() {
-        val owner = open(FakeRuntimeQueueBacking(), limits = RuntimeQueueLimits(100, 2_000_000))
+        val owner =
+            open(
+                FakeRuntimeQueueBacking(),
+                limits = RuntimeQueueLimits(100, 2_000_000),
+                legacyStateLoader = {
+                    freshState().copy(
+                        identity = freshState().identity.copy(session = session()),
+                    )
+                },
+            )
         val futures =
             (0 until 50).map { index ->
                 if (index % 2 == 0) {
-                    owner.appendEvents(RuntimeEventSessionUpdate.Replace(session()), listOf(event("event-$index")))
+                    owner.appendEvents(RuntimeEventSessionUpdate.Preserve, listOf(event("event-$index")))
                 } else {
                     owner.appendMutations(
                         listOf(mutation(RuntimeMutationChange.LinkAlias("alias-$index", "anon_test"))),
@@ -306,7 +315,7 @@ class RuntimeQueueOwnerTest {
 
         assertThrows(IllegalArgumentException::class.java) {
             owner.appendEvents(
-                RuntimeEventSessionUpdate.Replace(session()),
+                RuntimeEventSessionUpdate.Replace(null, session()),
                 List(MAX_RUNTIME_APPEND_RECORDS + 1) { index -> event("event-$index") },
             )
         }
@@ -380,7 +389,7 @@ class RuntimeQueueOwnerTest {
         }
         assertFutureCause(IllegalArgumentException::class.java) {
             owner.appendEvents(
-                RuntimeEventSessionUpdate.Replace(session().copy(id = "session_other")),
+                RuntimeEventSessionUpdate.Replace(null, session().copy(id = "session_other")),
                 listOf(event("mismatch")),
             ).await()
         }
@@ -443,19 +452,168 @@ class RuntimeQueueOwnerTest {
     }
 
     @Test
+    fun `session replacement CAS rejects null and stale rotation expectations`() {
+        val owner = open(FakeRuntimeQueueBacking())
+        val base = session(id = "session_base")
+        owner.appendEvents(
+            RuntimeEventSessionUpdate.Replace(null, base),
+            listOf(event("base").copy(expectedSessionId = base.id)),
+        ).await()
+        val afterBase = owner.snapshot().await()
+
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.appendEvents(
+                RuntimeEventSessionUpdate.Replace(
+                    null,
+                    base.copy(lastActivityAt = LATER),
+                ),
+                listOf(eventAt("unexpected-null-match", LATER).copy(expectedSessionId = base.id)),
+            ).await()
+        }
+        assertEquals(afterBase, owner.snapshot().await())
+
+        val firstRotation = session(id = "session_rotation_a", startedAt = LATER, lastActivityAt = LATER)
+        owner.appendEvents(
+            RuntimeEventSessionUpdate.Replace(base.id, firstRotation),
+            listOf(eventAt("rotation-a", LATER).copy(expectedSessionId = firstRotation.id)),
+        ).await()
+        val committed = owner.snapshot().await()
+
+        val staleRotation = session(id = "session_rotation_b", startedAt = EVEN_LATER, lastActivityAt = EVEN_LATER)
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.appendEvents(
+                RuntimeEventSessionUpdate.Replace(base.id, staleRotation),
+                listOf(eventAt("rotation-b", EVEN_LATER).copy(expectedSessionId = staleRotation.id)),
+            ).await()
+        }
+
+        assertEquals(committed, owner.snapshot().await())
+        assertEquals(firstRotation, committed.state.identity.session)
+        assertEquals(2, owner.peek(10, MAX_RUNTIME_DELIVERY_BYTES).await().size)
+    }
+
+    @Test
+    fun `same session replacement cannot revive a sixty second timeout with eighteen hundred`() {
+        val owner = open(FakeRuntimeQueueBacking())
+        val current = session(id = "session_timeout", timeoutSeconds = 60)
+        owner.appendEvents(
+            RuntimeEventSessionUpdate.Replace(null, current),
+            listOf(event("current").copy(expectedSessionId = current.id)),
+        ).await()
+        val committed = owner.snapshot().await()
+        val proposed =
+            current.copy(
+                lastActivityAt = AT_TIMEOUT_BOUNDARY,
+                timeoutSeconds = 1_800,
+            )
+
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.appendEvents(
+                RuntimeEventSessionUpdate.Replace(current.id, proposed),
+                listOf(eventAt("revived", AT_TIMEOUT_BOUNDARY).copy(expectedSessionId = proposed.id)),
+            ).await()
+        }
+
+        assertEquals(committed, owner.snapshot().await())
+        assertEquals(1, owner.peek(10, MAX_RUNTIME_DELIVERY_BYTES).await().size)
+    }
+
+    @Test
+    fun `same session replacement rotates at the exact maximum duration boundary`() {
+        val owner = open(FakeRuntimeQueueBacking())
+        val current = session(lastActivityAt = BEFORE_MAXIMUM_DURATION, id = "session_maximum")
+        owner.appendEvents(
+            RuntimeEventSessionUpdate.Replace(null, current),
+            listOf(eventAt("before-maximum", BEFORE_MAXIMUM_DURATION).copy(expectedSessionId = current.id)),
+        ).await()
+        val committed = owner.snapshot().await()
+        val proposed = current.copy(lastActivityAt = AT_MAXIMUM_DURATION)
+
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.appendEvents(
+                RuntimeEventSessionUpdate.Replace(current.id, proposed),
+                listOf(eventAt("at-maximum", AT_MAXIMUM_DURATION).copy(expectedSessionId = proposed.id)),
+            ).await()
+        }
+
+        assertEquals(committed, owner.snapshot().await())
+        assertEquals(1, owner.peek(10, MAX_RUNTIME_DELIVERY_BYTES).await().size)
+    }
+
+    @Test
+    fun `background session events require a foregrounding replacement`() {
+        val backgroundSession =
+            session(
+                id = "session_background",
+                startedAt = EARLIER,
+                lifecycle = SessionLifecycle.BACKGROUND,
+                backgroundedAt = LATER,
+            )
+        val imported =
+            freshState().copy(
+                identity =
+                    freshState().identity.copy(
+                        session = backgroundSession,
+                        updatedAt = LATER,
+                    ),
+            )
+        val owner = open(FakeRuntimeQueueBacking(), legacyStateLoader = { imported })
+
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.appendEvents(
+                RuntimeEventSessionUpdate.Preserve,
+                listOf(eventAt("background-preserve", EVEN_LATER).copy(expectedSessionId = backgroundSession.id)),
+            ).await()
+        }
+        val overlappingRotation =
+            session(
+                id = "session_overlapping",
+                startedAt = NOW,
+                lastActivityAt = EVEN_LATER,
+            )
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.appendEvents(
+                RuntimeEventSessionUpdate.Replace(backgroundSession.id, overlappingRotation),
+                listOf(eventAt("overlapping", EVEN_LATER).copy(expectedSessionId = overlappingRotation.id)),
+            ).await()
+        }
+
+        val foregrounded =
+            backgroundSession.copy(
+                lastActivityAt = EVEN_LATER,
+                lifecycle = SessionLifecycle.ACTIVE,
+                backgroundedAt = null,
+            )
+        val accepted =
+            owner.appendEvents(
+                RuntimeEventSessionUpdate.Replace(backgroundSession.id, foregrounded),
+                listOf(eventAt("foregrounded", EVEN_LATER).copy(expectedSessionId = foregrounded.id)),
+            ).await() as RuntimeAppendResult.Accepted
+
+        assertEquals(SessionLifecycle.ACTIVE, accepted.snapshot.state.identity.session?.lifecycle)
+        assertEquals(null, accepted.snapshot.state.identity.session?.backgroundedAt)
+        assertEquals(foregrounded, accepted.snapshot.state.identity.session)
+        assertEquals(1, accepted.snapshot.queuedCount)
+    }
+
+    @Test
     fun `session mutation and local timestamps may not move persisted time backward`() {
         val owner = open(FakeRuntimeQueueBacking())
         appendEvents(owner, event("initial"))
 
         assertFutureCause(IllegalArgumentException::class.java) {
             owner.appendEvents(
-                RuntimeEventSessionUpdate.Replace(session().copy(startedAt = LATER, lastActivityAt = LATER)),
+                RuntimeEventSessionUpdate.Replace(
+                    "session_test",
+                    session().copy(startedAt = LATER, lastActivityAt = LATER),
+                ),
                 listOf(event("changed-start")),
             ).await()
         }
         assertFutureCause(IllegalArgumentException::class.java) {
             owner.appendEvents(
                 RuntimeEventSessionUpdate.Replace(
+                    "session_test",
                     session().copy(id = "session_replacement", startedAt = EARLIER, lastActivityAt = LATER),
                 ),
                 listOf(event("stale-replacement").copy(expectedSessionId = "session_replacement")),
@@ -480,20 +638,20 @@ class RuntimeQueueOwnerTest {
 
         assertFutureCause(IllegalArgumentException::class.java) {
             owner.appendEvents(
-                RuntimeEventSessionUpdate.Replace(session()),
+                RuntimeEventSessionUpdate.Replace(null, session()),
                 listOf(eventAt("after-session", LATER)),
             ).await()
         }
         val accepted =
             owner.appendEvents(
-                RuntimeEventSessionUpdate.Replace(session(lastActivityAt = LATER)),
+                RuntimeEventSessionUpdate.Replace(null, session(lastActivityAt = LATER)),
                 listOf(eventAt("first", NOW), eventAt("second", LATER)),
             ).await() as RuntimeAppendResult.Accepted
         assertEquals(listOf(NOW, LATER), accepted.records.map { (it as RuntimeQueuedRecord.Event).record.occurredAt })
 
         assertFutureCause(IllegalArgumentException::class.java) {
             owner.appendEvents(
-                RuntimeEventSessionUpdate.Replace(session(lastActivityAt = LATER)),
+                RuntimeEventSessionUpdate.Replace("session_test", session(lastActivityAt = LATER)),
                 listOf(eventAt("later-first", LATER), eventAt("backward", NOW)),
             ).await()
         }
@@ -511,7 +669,7 @@ class RuntimeQueueOwnerTest {
         val owner = open(FakeRuntimeQueueBacking())
         val committed =
             owner.appendEvents(
-                RuntimeEventSessionUpdate.Replace(session(lastActivityAt = LATER)),
+                RuntimeEventSessionUpdate.Replace(null, session(lastActivityAt = LATER)),
                 listOf(eventAt("later", LATER)),
             ).await() as RuntimeAppendResult.Accepted
         val before = committed.snapshot
@@ -594,8 +752,13 @@ class RuntimeQueueOwnerTest {
     private fun appendEvents(
         owner: RuntimeQueueOwner,
         vararg events: RuntimeRecordDraft.Event,
-    ): RuntimeAppendResult =
-        owner.appendEvents(RuntimeEventSessionUpdate.Replace(session()), events.toList()).await()
+    ): RuntimeAppendResult {
+        val expectedCurrentSessionId = owner.snapshot().await().state.identity.session?.id
+        return owner.appendEvents(
+            RuntimeEventSessionUpdate.Replace(expectedCurrentSessionId, session()),
+            events.toList(),
+        ).await()
+    }
 
     private fun acknowledgement(references: List<RuntimeRecordReference>): RuntimeAcknowledgement =
         RuntimeAcknowledgement(STREAM_ID, references)
@@ -624,14 +787,21 @@ class RuntimeQueueOwnerTest {
         change: RuntimeMutationChange,
     ): RuntimeRecordDraft.Mutation = RuntimeRecordDraft.Mutation(occurredAt, change, versions())
 
-    private fun session(lastActivityAt: String = NOW): SessionState =
+    private fun session(
+        lastActivityAt: String = NOW,
+        id: String = "session_test",
+        startedAt: String = NOW,
+        timeoutSeconds: Int = 1_800,
+        lifecycle: SessionLifecycle = SessionLifecycle.ACTIVE,
+        backgroundedAt: String? = null,
+    ): SessionState =
         SessionState(
-            id = "session_test",
-            startedAt = NOW,
+            id = id,
+            startedAt = startedAt,
             lastActivityAt = lastActivityAt,
-            timeoutSeconds = 1_800,
-            lifecycle = SessionLifecycle.ACTIVE,
-            backgroundedAt = null,
+            timeoutSeconds = timeoutSeconds,
+            lifecycle = lifecycle,
+            backgroundedAt = backgroundedAt,
         )
 
     private fun versions(): RuntimeVersions =
@@ -690,6 +860,9 @@ class RuntimeQueueOwnerTest {
         const val NOW = "2026-08-05T00:00:00.000Z"
         const val LATER = "2026-08-05T00:00:01.000Z"
         const val EVEN_LATER = "2026-08-05T00:00:02.000Z"
+        const val AT_TIMEOUT_BOUNDARY = "2026-08-05T00:01:00.000Z"
+        const val BEFORE_MAXIMUM_DURATION = "2026-08-05T23:59:59.000Z"
+        const val AT_MAXIMUM_DURATION = "2026-08-06T00:00:00.000Z"
         const val STREAM_ID = "stream_test"
     }
 }

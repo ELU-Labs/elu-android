@@ -176,7 +176,14 @@ internal sealed interface RuntimeRecordDraft {
 internal sealed interface RuntimeEventSessionUpdate {
     data object Preserve : RuntimeEventSessionUpdate
 
-    data class Replace(val session: SessionState) : RuntimeEventSessionUpdate
+    /**
+     * Replaces the session only when the persisted current session still has
+     * [expectedCurrentSessionId]. A null expectation matches only no session.
+     */
+    data class Replace(
+        val expectedCurrentSessionId: String?,
+        val session: SessionState,
+    ) : RuntimeEventSessionUpdate
 }
 
 internal sealed interface RuntimeLocalStateChange {

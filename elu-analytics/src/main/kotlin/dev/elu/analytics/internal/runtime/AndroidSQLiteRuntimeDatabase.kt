@@ -3,16 +3,25 @@ package dev.elu.analytics.internal.runtime
 import android.content.ContentValues
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import android.os.Build
 import java.io.File
 import java.io.IOException
 
 internal interface AndroidRuntimeDatabaseFaults {
+    fun connectionConfigured(settings: AndroidRuntimeConnectionSettings) = Unit
+
     fun beforeCommit() = Unit
 
     fun afterCommit() = Unit
 
     data object None : AndroidRuntimeDatabaseFaults
 }
+
+internal data class AndroidRuntimeConnectionSettings(
+    val journalMode: String,
+    val synchronous: Long,
+    val busyTimeoutMillis: Long,
+)
 
 /** System-SQLite implementation. One runtime worker owns an instance for its full lifetime. */
 internal class AndroidSQLiteRuntimeDatabase private constructor(
@@ -270,17 +279,68 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     SQLiteDatabase.OPEN_READWRITE or
                         SQLiteDatabase.CREATE_IF_NECESSARY or
                         SQLiteDatabase.NO_LOCALIZED_COLLATORS,
-                )
+            )
             try {
-                sqlite.enableWriteAheadLogging()
-                sqlite.execSQL("PRAGMA synchronous = FULL")
-                sqlite.execSQL("PRAGMA busy_timeout = 5000")
+                // Android 15 can safely execute row-returning PRAGMAs on every pooled connection.
+                // Older releases stay single-connection so these durability settings cannot
+                // accidentally land on a read connection while writes use another.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                    sqlite.enableWriteAheadLogging()
+                } else {
+                    // Clear both explicit and framework compatibility WAL flags.
+                    sqlite.disableWriteAheadLogging()
+                }
+                configureConnection(sqlite, faults)
                 validateIntegrity(sqlite)
                 initializeOrValidateSchema(sqlite)
                 return AndroidSQLiteRuntimeDatabase(sqlite, Thread.currentThread(), faults)
             } catch (error: Throwable) {
                 sqlite.close()
                 throw error
+            }
+        }
+
+        private fun configureConnection(
+            sqlite: SQLiteDatabase,
+            faults: AndroidRuntimeDatabaseFaults,
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                sqlite.execPerConnectionSQL("PRAGMA synchronous = FULL", emptyArray())
+                sqlite.execPerConnectionSQL(
+                    "PRAGMA busy_timeout = $SQLITE_BUSY_TIMEOUT_MILLIS",
+                    emptyArray(),
+                )
+            }
+            executePragma(sqlite, "PRAGMA synchronous = FULL")
+            executePragma(sqlite, "PRAGMA busy_timeout = $SQLITE_BUSY_TIMEOUT_MILLIS")
+            val settings =
+                AndroidRuntimeConnectionSettings(
+                    journalMode = pragmaString(sqlite, "PRAGMA journal_mode").lowercase(),
+                    synchronous = pragmaLong(sqlite, "PRAGMA synchronous"),
+                    busyTimeoutMillis = pragmaLong(sqlite, "PRAGMA busy_timeout"),
+                )
+            val shouldUseWal = Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM
+            if ((settings.journalMode == SQLITE_JOURNAL_MODE_WAL) != shouldUseWal) {
+                corrupt("Runtime database did not apply its required SQLite journal mode")
+            }
+            if (settings.synchronous != SQLITE_SYNCHRONOUS_FULL) {
+                corrupt("Runtime database did not apply SQLite synchronous=FULL")
+            }
+            if (settings.busyTimeoutMillis != SQLITE_BUSY_TIMEOUT_MILLIS) {
+                corrupt("Runtime database did not apply the SQLite busy timeout")
+            }
+            faults.connectionConfigured(settings)
+        }
+
+        /** PRAGMA assignments may return rows, so API 35 requires the query path. */
+        private fun executePragma(
+            sqlite: SQLiteDatabase,
+            statement: String,
+        ) {
+            sqlite.rawQuery(statement, null).use { cursor ->
+                while (cursor.moveToNext()) {
+                    // Consume every row so the assignment executes on the acquired connection.
+                }
             }
         }
 
@@ -305,7 +365,13 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     try {
                         sqlite.execSQL(CREATE_CORE)
                         sqlite.execSQL(CREATE_QUEUE)
-                        sqlite.execSQL("PRAGMA user_version = $RUNTIME_STORAGE_SCHEMA_VERSION")
+                        executePragma(
+                            sqlite,
+                            "PRAGMA user_version = $RUNTIME_STORAGE_SCHEMA_VERSION",
+                        )
+                        if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_STORAGE_SCHEMA_VERSION.toLong()) {
+                            corrupt("Runtime database could not persist its schema version")
+                        }
                         sqlite.setTransactionSuccessful()
                         markedSuccessful = true
                     } finally {
@@ -332,6 +398,10 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             validateTableSql(sqlite, CORE_TABLE, CREATE_CORE)
             validateTableSql(sqlite, QUEUE_TABLE, CREATE_QUEUE)
         }
+
+        private const val SQLITE_SYNCHRONOUS_FULL = 2L
+        private const val SQLITE_BUSY_TIMEOUT_MILLIS = 5_000L
+        private const val SQLITE_JOURNAL_MODE_WAL = "wal"
 
         private fun applicationSchemaObjects(sqlite: SQLiteDatabase): Set<String> {
             sqlite.rawQuery(
@@ -374,6 +444,15 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             sqlite.rawQuery(pragma, null).use { cursor ->
                 if (!cursor.moveToFirst()) corrupt("$pragma returned no value")
                 cursor.getLong(0)
+            }
+
+        private fun pragmaString(
+            sqlite: SQLiteDatabase,
+            pragma: String,
+        ): String =
+            sqlite.rawQuery(pragma, null).use { cursor ->
+                if (!cursor.moveToFirst()) corrupt("$pragma returned no value")
+                cursor.getString(0)
             }
 
         private fun Cursor.requiredBlob(

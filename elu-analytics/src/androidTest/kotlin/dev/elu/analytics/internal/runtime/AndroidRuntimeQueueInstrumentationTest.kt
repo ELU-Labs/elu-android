@@ -91,6 +91,39 @@ class AndroidRuntimeQueueInstrumentationTest {
     }
 
     @Test
+    fun freshDatabaseOpenConfiguresAndVerifiesSQLiteConnectionAndSchema() {
+        val file = databaseFile()
+        val faults = RecordingFaults()
+        val owner = open(file, CountingIdentifiers(), faults, ::freshState)
+
+        assertEquals(
+            listOf(
+                AndroidRuntimeConnectionSettings(
+                    journalMode = "wal",
+                    synchronous = 2L,
+                    busyTimeoutMillis = 5_000L,
+                ),
+            ),
+            faults.connectionSettings,
+        )
+        assertEquals(0, owner.snapshot().await().queuedCount)
+        owner.closeAsync().await()
+        owners.remove(owner)
+
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            assertEquals(1, sqlite.version)
+            sqlite.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                null,
+            ).use { cursor ->
+                val tables = mutableListOf<String>()
+                while (cursor.moveToNext()) tables += cursor.getString(0)
+                assertEquals(listOf("core_state", "queue_records"), tables)
+            }
+        }
+    }
+
+    @Test
     fun sqliteMultiRecordAppendAndExactAcknowledgementAreAtomic() {
         val file = databaseFile()
         val faults = RecordingFaults()
@@ -141,7 +174,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         SQLiteDatabase.openOrCreateDatabase(unsupportedFile, null).use { sqlite ->
             sqlite.execSQL("CREATE TABLE preserved_marker (value TEXT NOT NULL)")
             sqlite.execSQL("INSERT INTO preserved_marker(value) VALUES ('keep')")
-            sqlite.execSQL("PRAGMA user_version = 2")
+            executePragma(sqlite, "PRAGMA user_version = 2")
         }
 
         assertFutureCause(UnsupportedRuntimeStorageSchemaException::class.java) {
@@ -163,7 +196,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         SQLiteDatabase.openOrCreateDatabase(malformedFile, null).use { sqlite ->
             sqlite.execSQL("CREATE TABLE core_state (singleton_id INTEGER PRIMARY KEY)")
             sqlite.execSQL("CREATE TABLE queue_records (sequence INTEGER PRIMARY KEY)")
-            sqlite.execSQL("PRAGMA user_version = 1")
+            executePragma(sqlite, "PRAGMA user_version = 1")
         }
         assertFutureCause(RuntimeQueueCorruptionException::class.java) {
             AndroidRuntimeQueue.openForTesting(
@@ -258,8 +291,13 @@ class AndroidRuntimeQueueInstrumentationTest {
     private fun appendEvents(
         owner: RuntimeQueueOwner,
         vararg events: RuntimeRecordDraft.Event,
-    ): RuntimeAppendResult =
-        owner.appendEvents(RuntimeEventSessionUpdate.Replace(session()), events.toList()).await()
+    ): RuntimeAppendResult {
+        val expectedCurrentSessionId = owner.snapshot().await().state.identity.session?.id
+        return owner.appendEvents(
+            RuntimeEventSessionUpdate.Replace(expectedCurrentSessionId, session()),
+            events.toList(),
+        ).await()
+    }
 
     private fun acknowledgement(references: List<RuntimeRecordReference>): RuntimeAcknowledgement =
         RuntimeAcknowledgement(STREAM_ID, references)
@@ -322,6 +360,17 @@ class AndroidRuntimeQueueInstrumentationTest {
         pragma: String,
     ): Long = sqlite.rawQuery(pragma, null).use { cursor -> cursor.moveToFirst(); cursor.getLong(0) }
 
+    private fun executePragma(
+        sqlite: SQLiteDatabase,
+        statement: String,
+    ) {
+        sqlite.rawQuery(statement, null).use { cursor ->
+            while (cursor.moveToNext()) {
+                // Fully consume row-returning PRAGMA assignments on Android 15.
+            }
+        }
+    }
+
     private fun <T> Future<T>.await(): T = get(20, TimeUnit.SECONDS)
 
     private fun assertFutureCause(
@@ -348,6 +397,12 @@ class AndroidRuntimeQueueInstrumentationTest {
         val failBeforeCommit = AtomicBoolean()
         val failAfterCommit = AtomicBoolean()
         val callbackThreads = mutableListOf<Thread>()
+        val connectionSettings = mutableListOf<AndroidRuntimeConnectionSettings>()
+
+        override fun connectionConfigured(settings: AndroidRuntimeConnectionSettings) {
+            callbackThreads += Thread.currentThread()
+            connectionSettings += settings
+        }
 
         override fun beforeCommit() {
             if (failBeforeCommit.compareAndSet(true, false)) {

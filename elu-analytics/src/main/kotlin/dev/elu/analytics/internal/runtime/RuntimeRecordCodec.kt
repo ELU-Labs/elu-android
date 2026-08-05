@@ -195,6 +195,24 @@ internal object RuntimeRecordCodec {
         return if (seconds != 0) seconds else leftTimestamp.fraction.compareTo(rightTimestamp.fraction)
     }
 
+    /** Compares `later - earlier` with an integral duration without losing fractional precision. */
+    fun compareElapsedSeconds(
+        later: String,
+        earlier: String,
+        seconds: Int,
+    ): Int {
+        require(seconds >= 0) { "seconds must be non-negative" }
+        val laterTimestamp = parseRfc3339(later, "later timestamp")
+        val earlierTimestamp = parseRfc3339(earlier, "earlier timestamp")
+        val wholeSeconds = laterTimestamp.epochSecond - earlierTimestamp.epochSecond
+        val wholeComparison = wholeSeconds.compareTo(seconds.toLong())
+        return if (wholeComparison != 0) {
+            wholeComparison
+        } else {
+            laterTimestamp.fraction.compareTo(earlierTimestamp.fraction)
+        }
+    }
+
     private fun encodeEventIdentity(identity: RuntimeEventIdentity): JSONObject =
         JSONObject()
             .put("anonymousId", checkedString(identity.anonymousId, 1, 256, "event.identity.anonymousId"))

@@ -5,6 +5,7 @@ import dev.elu.analytics.internal.core.CoreStateCodec
 import dev.elu.analytics.internal.core.FlagContextState
 import dev.elu.analytics.internal.core.PersistedCoreState
 import dev.elu.analytics.internal.core.SessionLifecycle
+import dev.elu.analytics.internal.core.SessionState
 import dev.elu.analytics.internal.core.UuidCoreIdentifierGenerator
 import java.util.Collections
 import java.util.concurrent.Callable
@@ -749,7 +750,12 @@ internal class RuntimeQueueOwner private constructor(
         update: RuntimeEventSessionUpdate,
     ): PersistedCoreState =
         when (update) {
-            RuntimeEventSessionUpdate.Preserve -> state
+            RuntimeEventSessionUpdate.Preserve -> {
+                val session = state.identity.session
+                    ?: throw IllegalArgumentException("Events require a persisted session")
+                validateEventSession(session, state.identity.updatedAt)
+                state
+            }
             is RuntimeEventSessionUpdate.Replace -> {
                 validateSessionTransition(state, update)
                 state.copy(
@@ -918,16 +924,15 @@ internal class RuntimeQueueOwner private constructor(
         state: PersistedCoreState,
         update: RuntimeEventSessionUpdate.Replace,
     ) {
+        val current = state.identity.session
+        require(current?.id == update.expectedCurrentSessionId) {
+            "Persisted current session no longer matches the replacement expectation"
+        }
         val session = update.session
-        require(session.lifecycle == SessionLifecycle.ACTIVE) {
-            "Event session replacement must be active"
-        }
-        require(session.backgroundedAt == null) {
-            "An active event session may not retain a background timestamp"
-        }
-        requireTimestampNotBefore(session.lastActivityAt, session.startedAt, "Session lastActivityAt")
+        validateEventSession(session, session.lastActivityAt)
         requireTimestampNotBefore(session.lastActivityAt, state.identity.updatedAt, "Session lastActivityAt")
-        state.identity.session?.let { current ->
+        current?.let {
+            validateStoredSession(current, state.identity.updatedAt)
             if (current.id == session.id) {
                 require(session.startedAt == current.startedAt) {
                     "An existing session may not change its start timestamp"
@@ -937,8 +942,59 @@ internal class RuntimeQueueOwner private constructor(
                     current.lastActivityAt,
                     "Session lastActivityAt",
                 )
+                val effectiveTimeoutSeconds = minOf(current.timeoutSeconds, session.timeoutSeconds)
+                require(
+                    RuntimeRecordCodec.compareElapsedSeconds(
+                        session.lastActivityAt,
+                        current.lastActivityAt,
+                        effectiveTimeoutSeconds,
+                    ) < 0,
+                ) { "An expired session may not be revived by replacement" }
             } else {
-                requireTimestampNotBefore(session.startedAt, current.lastActivityAt, "Replacement session startedAt")
+                val currentBoundary = current.backgroundedAt ?: current.lastActivityAt
+                requireTimestampNotBefore(session.startedAt, currentBoundary, "Replacement session startedAt")
+            }
+        }
+    }
+
+    private fun validateEventSession(
+        session: SessionState,
+        identityUpdatedAt: String,
+    ) {
+        validateStoredSession(session, identityUpdatedAt)
+        require(session.lifecycle == SessionLifecycle.ACTIVE) {
+            "Event session replacement must be active"
+        }
+        require(session.backgroundedAt == null) {
+            "An active event session may not retain a background timestamp"
+        }
+    }
+
+    private fun validateStoredSession(
+        session: SessionState,
+        identityUpdatedAt: String,
+    ) {
+        requireTimestampNotBefore(session.lastActivityAt, session.startedAt, "Session lastActivityAt")
+        requireTimestampNotBefore(identityUpdatedAt, session.lastActivityAt, "Identity updatedAt")
+        require(
+            RuntimeRecordCodec.compareElapsedSeconds(
+                session.lastActivityAt,
+                session.startedAt,
+                session.maximumDurationSeconds,
+            ) < 0,
+        ) { "Session exceeds its maximum duration" }
+        when (session.lifecycle) {
+            SessionLifecycle.ACTIVE ->
+                require(session.backgroundedAt == null) {
+                    "An active session may not retain a background timestamp"
+                }
+            SessionLifecycle.BACKGROUND -> {
+                val backgroundedAt =
+                    requireNotNull(session.backgroundedAt) {
+                        "A background session requires a background timestamp"
+                    }
+                requireTimestampNotBefore(backgroundedAt, session.lastActivityAt, "Session backgroundedAt")
+                requireTimestampNotBefore(identityUpdatedAt, backgroundedAt, "Identity updatedAt")
             }
         }
     }
