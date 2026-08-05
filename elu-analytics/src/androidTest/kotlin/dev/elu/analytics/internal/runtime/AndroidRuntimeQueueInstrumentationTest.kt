@@ -279,7 +279,11 @@ class AndroidRuntimeQueueInstrumentationTest {
 
         val current = byteArrayOf(0, 1, 2, 3, 127, -1)
         val future = "{\"declaredBodyBytes\":4194305,\"future\":true}".toByteArray(Charsets.UTF_8)
-        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { sqlite ->
+        SQLiteDatabase.openDatabase(
+            file.path,
+            null,
+            SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+        ).use { sqlite ->
             sqlite.execSQL(
                 "INSERT INTO flag_cache(record_key, storage_schema_version, payload) VALUES (?, ?, ?)",
                 arrayOf<Any>("cache-body:preserved:0000", 1L, current),
