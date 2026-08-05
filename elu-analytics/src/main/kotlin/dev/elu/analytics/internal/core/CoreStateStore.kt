@@ -107,11 +107,15 @@ internal class AndroidCoreStateStore private constructor(
     override fun read(): ByteArray? {
         recoverInterruptedCommit()
         if (!file.exists()) return null
-        val declaredLength = file.length()
+        return readBoundedBytes(file)
+    }
+
+    private fun readBoundedBytes(candidate: File): ByteArray {
+        val declaredLength = candidate.length()
         if (declaredLength < 0 || declaredLength > MAX_PERSISTED_CORE_STATE_BYTES) {
             throw CoreStateCorruptionException("Core state exceeds the maximum persisted size")
         }
-        return FileInputStream(file).use { input ->
+        return FileInputStream(candidate).use { input ->
             val output = ByteArrayOutputStream(declaredLength.toInt().coerceAtLeast(32))
             val chunk = ByteArray(8_192)
             var total = 0
@@ -147,8 +151,11 @@ internal class AndroidCoreStateStore private constructor(
 
         val hadPrevious = file.exists()
         if (hadPrevious) {
-            if (backupFile.exists() && !fileOperations.delete(backupFile)) {
-                throw IOException("Could not clear stale core state backup")
+            if (backupFile.exists()) {
+                guardBackupBeforeMutation()
+                if (!fileOperations.delete(backupFile)) {
+                    throw IOException("Could not clear stale core state backup")
+                }
             }
             if (!fileOperations.rename(file, backupFile)) {
                 throw IOException("Could not preserve the previous core state")
@@ -192,6 +199,9 @@ internal class AndroidCoreStateStore private constructor(
 
     private fun recoverInterruptedCommit() {
         val parent = file.parentFile ?: throw IOException("Core state file must have a parent directory")
+        if (backupFile.exists()) {
+            guardBackupBeforeMutation()
+        }
         if (file.exists()) {
             // Both files means staging was already renamed into place. That
             // rename is the commit point, so never replace the newer primary
@@ -216,6 +226,28 @@ internal class AndroidCoreStateStore private constructor(
             // not prevent reading the committed primary and a later write will
             // truncate it before use.
             fileOperations.delete(stagingFile)
+        }
+    }
+
+    /**
+     * A backup is never loaded while a primary exists, but a downgraded SDK
+     * must also never destroy bytes written by a newer schema. Corrupt and
+     * ordinary v1 backups remain disposable after a complete bounded read.
+     * Forward-schema signals and unreadable/oversized backups are propagated
+     * before any destructive cleanup can occur.
+     */
+    private fun guardBackupBeforeMutation() {
+        // If the backup cannot be read within this SDK's bound, preserve it:
+        // a newer schema may legitimately use a larger cap. Only corruption
+        // discovered after a complete bounded read is safe to ignore here.
+        val bytes = readBoundedBytes(backupFile)
+        try {
+            CoreStateCodec.decode(bytes)
+        } catch (_: CoreStateCorruptionException) {
+            // A damaged envelope can still contain an independently parseable
+            // future child. Recovery intentionally rethrows only the forward
+            // schema exceptions and ignores ordinary corruption.
+            CoreStateCodec.recoverableRecords(bytes)
         }
     }
 

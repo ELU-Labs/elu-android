@@ -4,6 +4,7 @@ import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.time.Instant
+import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -104,6 +105,70 @@ class CoreStateStoreTest {
     }
 
     @Test
+    fun `unsupported major backup is preserved across construction mutation and write`() {
+        assertForwardBackupPreserved("unsupported-major", UnsupportedCoreSchemaException::class.java) { root ->
+            root.put("schemaVersion", 2).put("futureRootField", true)
+        }
+    }
+
+    @Test
+    fun `same major extension backup is preserved across construction mutation and write`() {
+        assertForwardBackupPreserved(
+            "same-major-extension",
+            UnsupportedCoreSchemaExtensionException::class.java,
+        ) { root ->
+            root.put("futureRootField", true)
+        }
+    }
+
+    @Test
+    fun `damaged backup envelope still preserves unsupported child records`() {
+        assertForwardBackupPreserved(
+            "damaged-envelope-future-child",
+            UnsupportedCoreSchemaException::class.java,
+        ) { root ->
+            root.remove("schemaVersion")
+            root.getJSONObject("stream")
+                .put("schemaVersion", 2)
+                .put("futureStreamField", true)
+        }
+        assertForwardBackupPreserved(
+            "damaged-envelope-extended-child",
+            UnsupportedCoreSchemaExtensionException::class.java,
+        ) { root ->
+            root.put("schemaVersion", "one")
+            root.getJSONObject("flagContext").put("futureFlagField", true)
+        }
+    }
+
+    @Test
+    fun `oversized backup is preserved across construction mutation and write`() {
+        val file = File(temporaryFolder.newFolder("oversized-backup"), "core-v1.json")
+        val store = AndroidCoreStateStore.forTesting(file)
+        val core = newCore(store)
+        val stateBefore = core.snapshot()
+        val primaryBytes = file.readBytes()
+        val backup = File(file.parentFile, "${file.name}.bak")
+        val backupBytes = ByteArray(MAX_PERSISTED_CORE_STATE_BYTES + 1) { index ->
+            if (index == 0) '{'.code.toByte() else 0x5a
+        }
+        backup.writeBytes(backupBytes)
+
+        assertThrows(CoreStateCorruptionException::class.java) { newCore(store) }
+        assertArrayEquals(primaryBytes, file.readBytes())
+        assertArrayEquals(backupBytes, backup.readBytes())
+
+        assertThrows(CoreStateCorruptionException::class.java) { core.identify("must-not-commit") }
+        assertEquals(stateBefore, core.snapshot())
+        assertArrayEquals(primaryBytes, file.readBytes())
+        assertArrayEquals(backupBytes, backup.readBytes())
+
+        assertThrows(CoreStateCorruptionException::class.java) { store.write(primaryBytes) }
+        assertArrayEquals(primaryBytes, file.readBytes())
+        assertArrayEquals(backupBytes, backup.readBytes())
+    }
+
+    @Test
     fun `directory fsync failure never rolls an opted out commit back`() {
         val file = File(temporaryFolder.newFolder("fsync-failure"), "core-v1.json")
         val directorySync = FailingOnceDirectorySync()
@@ -149,6 +214,51 @@ class CoreStateStoreTest {
             CoreIdentifierGenerator { prefix -> "${prefix}stable" },
             CoreEpochClock { FIXED_NOW_MILLIS },
         )
+
+    private fun <T : Throwable> assertForwardBackupPreserved(
+        label: String,
+        expected: Class<T>,
+        editBackup: (JSONObject) -> Unit,
+    ) {
+        val constructionFile = File(temporaryFolder.newFolder("$label-construction"), "core-v1.json")
+        val constructionStore = AndroidCoreStateStore.forTesting(constructionFile)
+        newCore(constructionStore)
+        val constructionPrimary = constructionFile.readBytes()
+        val constructionBackup = File(constructionFile.parentFile, "${constructionFile.name}.bak")
+        val constructionBackupBytes = futureBackupBytes(constructionPrimary, editBackup)
+        constructionBackup.writeBytes(constructionBackupBytes)
+
+        assertThrows(expected) { newCore(constructionStore) }
+        assertArrayEquals(constructionPrimary, constructionFile.readBytes())
+        assertArrayEquals(constructionBackupBytes, constructionBackup.readBytes())
+
+        val mutationFile = File(temporaryFolder.newFolder("$label-mutation"), "core-v1.json")
+        val mutationStore = AndroidCoreStateStore.forTesting(mutationFile)
+        val core = newCore(mutationStore)
+        val stateBefore = core.snapshot()
+        val mutationPrimary = mutationFile.readBytes()
+        val mutationBackup = File(mutationFile.parentFile, "${mutationFile.name}.bak")
+        val mutationBackupBytes = futureBackupBytes(mutationPrimary, editBackup)
+        mutationBackup.writeBytes(mutationBackupBytes)
+
+        assertThrows(expected) { core.identify("must-not-commit") }
+        assertEquals(stateBefore, core.snapshot())
+        assertArrayEquals(mutationPrimary, mutationFile.readBytes())
+        assertArrayEquals(mutationBackupBytes, mutationBackup.readBytes())
+
+        assertThrows(expected) { mutationStore.write(mutationPrimary) }
+        assertArrayEquals(mutationPrimary, mutationFile.readBytes())
+        assertArrayEquals(mutationBackupBytes, mutationBackup.readBytes())
+    }
+
+    private fun futureBackupBytes(
+        primaryBytes: ByteArray,
+        editBackup: (JSONObject) -> Unit,
+    ): ByteArray =
+        JSONObject(String(primaryBytes, Charsets.UTF_8))
+            .apply(editBackup)
+            .toString()
+            .toByteArray()
 
     private class FailingBackupDeleteOperations : CoreFileOperations {
         var failBackupDeletes: Boolean = false
