@@ -68,10 +68,15 @@ class AndroidRuntimeQueueInstrumentationTest {
         val identifiers = CountingIdentifiers()
         val loaderThreads = mutableListOf<Thread>()
         val owner =
-            open(file, identifiers, faults) {
-                loaderThreads += Thread.currentThread()
-                freshState()
-            }
+            open(
+                file = file,
+                identifiers = identifiers,
+                faults = faults,
+                stateLoader = {
+                    loaderThreads += Thread.currentThread()
+                    freshState()
+                },
+            )
 
         faults.failBeforeCommit.set(true)
         assertFutureCause(IOException::class.java) {
@@ -101,9 +106,14 @@ class AndroidRuntimeQueueInstrumentationTest {
         owners.remove(owner)
 
         val reopened =
-            open(file, identifiers, faults) {
-                error("Legacy JSON must not be read after SQLite became authoritative")
-            }
+            open(
+                file = file,
+                identifiers = identifiers,
+                faults = faults,
+                stateLoader = {
+                    error("Legacy JSON must not be read after SQLite became authoritative")
+                },
+            )
         assertEquals(ids, reopened.peek(10, Long.MAX_VALUE).await().map { it.recordId })
         assertEquals(2L, reopened.snapshot().await().state.stream.nextSequence)
     }
@@ -291,10 +301,16 @@ class AndroidRuntimeQueueInstrumentationTest {
     fun duplicateOwnerIsRejectedUntilTheLeaseClosesAndOpenRunsOffMain() {
         val file = databaseFile()
         var loaderThread: Thread? = null
-        val first = open(file, CountingIdentifiers(), RecordingFaults()) {
-            loaderThread = Thread.currentThread()
-            freshState()
-        }
+        val first =
+            open(
+                file = file,
+                identifiers = CountingIdentifiers(),
+                faults = RecordingFaults(),
+                stateLoader = {
+                    loaderThread = Thread.currentThread()
+                    freshState()
+                },
+            )
         assertNotEquals(Looper.getMainLooper().thread, loaderThread)
 
         assertFutureCause(RuntimeQueueOwnershipException::class.java) {
@@ -331,7 +347,13 @@ class AndroidRuntimeQueueInstrumentationTest {
 
         owner.closeAsync().await()
         owners.remove(owner)
-        val reopened = open(file, CountingIdentifiers(), RecordingFaults()) { error("legacy must not be read") }
+        val reopened =
+            open(
+                file = file,
+                identifiers = CountingIdentifiers(),
+                faults = RecordingFaults(),
+                stateLoader = { error("legacy must not be read") },
+            )
         val event = (reopened.peek(1, MAX_RUNTIME_DELIVERY_BYTES).await().single() as RuntimeQueuedRecord.Event).record
         assertEquals(safePayload.length, (event.properties.getValue("payload") as String).length)
     }
