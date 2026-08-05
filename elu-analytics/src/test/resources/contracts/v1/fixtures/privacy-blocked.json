@@ -1,0 +1,27 @@
+{
+    "schemaVersion": 1,
+    "policyRevision": "privacy-eu-blocked-1",
+    "contextRevision": 7,
+    "effectivePolicyHash": "sha256:e0c5e50f3127f85b1530be39fced4cc7abeae535d3d50ca48acb30cfcca685f6",
+    "onDeviceDecision": {
+        "decision": "block",
+        "source": "device-region",
+        "reason": "regional-policy",
+        "evaluatedAt": "2026-08-04T00:00:00.000Z"
+    },
+    "captureAllowed": false,
+    "replayAllowed": false,
+    "replaySampled": false,
+    "identityOptedOut": false,
+    "maskingValidated": true,
+    "replaySessionEligible": false,
+    "replayBudgetRemainingSeconds": 0,
+    "replayTransport": null,
+    "effectiveMasking": {
+        "text": "all",
+        "inputs": "all",
+        "images": "block",
+        "secureInputsMasked": true,
+        "platformFallbackApplied": true
+    }
+}
