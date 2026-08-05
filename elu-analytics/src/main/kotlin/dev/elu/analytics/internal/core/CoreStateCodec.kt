@@ -1,7 +1,6 @@
 package dev.elu.analytics.internal.core
 
 import java.math.BigDecimal
-import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -40,6 +39,58 @@ internal data class RecoverableCoreRecords(
     val stream: StreamState? = null,
     val flagContext: FlagContextState? = null,
 )
+
+/**
+ * Normalizes customer numbers to the concrete types supported by Android's org.json runtime.
+ *
+ * Byte, Short, and Float are convenient Kotlin inputs, but Android JSONTokener materializes only
+ * Int, Long, and Double. Integral values are canonicalized to the Int/Long type Android will read
+ * back. Arbitrary Number implementations and the one finite Double that Android serializes to a
+ * different integer are rejected before JSONObject can silently change their value.
+ */
+private fun normalizeAndroidJsonNumber(
+    value: Number,
+    path: String,
+    fail: (String) -> Nothing,
+): Number =
+    when (value) {
+        is Byte -> normalizeAndroidJsonInteger(value.toLong())
+        is Short -> normalizeAndroidJsonInteger(value.toLong())
+        is Int -> value
+        is Long -> normalizeAndroidJsonInteger(value)
+        is Float -> normalizeAndroidJsonDouble(value.toDouble(), path, fail)
+        is Double -> normalizeAndroidJsonDouble(value, path, fail)
+        else ->
+            fail(
+                "$path contains unsupported JSON number type ${value::class.java.name}; " +
+                    "use Int, Long, or finite Double",
+            )
+    }
+
+private fun normalizeAndroidJsonInteger(value: Long): Number =
+    if (value in Int.MIN_VALUE..Int.MAX_VALUE) value.toInt() else value
+
+private fun normalizeAndroidJsonDouble(
+    value: Double,
+    path: String,
+    fail: (String) -> Nothing,
+): Number {
+    if (!value.isFinite()) fail("$path must be a finite JSON number")
+
+    // Android's numberToString() compares a Double to number.longValue(). Long.MAX_VALUE rounds
+    // to 2^63 as a Double, so 2^63 satisfies that comparison and is incorrectly written as
+    // 9223372036854775807. Reject this single alias instead of corrupting it across a restart.
+    if (value == Long.MAX_VALUE.toDouble()) {
+        fail("$path cannot be represented by Android JSON without changing its value")
+    }
+
+    val integerValue = value.toLong()
+    return if (value == integerValue.toDouble()) {
+        normalizeAndroidJsonInteger(integerValue)
+    } else {
+        value
+    }
+}
 
 /** Strict codec for the durable provider-neutral state aggregate. */
 internal object CoreStateCodec {
@@ -222,14 +273,17 @@ internal object CoreStateCodec {
             null -> budget.addNull()
             is String -> budget.addString(value)
             is Boolean -> budget.addBoolean(value)
-            is Byte -> budget.addInteger(value.toLong())
-            is Short -> budget.addInteger(value.toLong())
-            is Int -> budget.addInteger(value.toLong())
-            is Long -> budget.addInteger(value)
-            is BigInteger -> budget.addBigInteger(value)
-            is BigDecimal -> budget.addBigDecimal(value)
-            is Float -> budget.addFloatingPoint(value.toDouble())
-            is Double -> budget.addFloatingPoint(value)
+            is Number -> {
+                when (
+                    val normalized =
+                        normalizeAndroidJsonNumber(value, "Core state") { message -> corrupt(message) }
+                ) {
+                    is Int -> budget.addInteger(normalized.toLong())
+                    is Long -> budget.addInteger(normalized)
+                    is Double -> budget.addFloatingPoint(normalized)
+                    else -> corrupt("Core state contains an unsupported normalized JSON number")
+                }
+            }
             is Map<*, *> -> budgetJsonObject(value, budget, depth)
             is List<*> -> {
                 budget.addArrayNode()
@@ -744,9 +798,8 @@ internal object CoreStateCodec {
         if (depth > MAX_JSON_DEPTH) corrupt("$path exceeds the maximum JSON nesting depth")
         return when (value) {
             null -> JSONObject.NULL
-            is String, is Boolean, is Byte, is Short, is Int, is Long, is BigInteger, is BigDecimal -> value
-            is Float -> if (value.isFinite()) value else corrupt("$path must be a finite JSON number")
-            is Double -> if (value.isFinite()) value else corrupt("$path must be a finite JSON number")
+            is String, is Boolean -> value
+            is Number -> normalizeAndroidJsonNumber(value, path) { message -> corrupt(message) }
             is Map<*, *> -> {
                 val out = JSONObject()
                 value.forEach { (key, child) ->
@@ -785,9 +838,12 @@ internal object CoreStateCodec {
         if (depth > MAX_JSON_DEPTH) corrupt("$path exceeds the maximum JSON nesting depth")
         return when (value) {
             JSONObject.NULL -> null
-            is String, is Boolean, is Byte, is Short, is Int, is Long, is BigInteger, is BigDecimal -> value
-            is Float -> if (value.isFinite()) value else corrupt("$path must be a finite JSON number")
-            is Double -> if (value.isFinite()) value else corrupt("$path must be a finite JSON number")
+            is String, is Boolean -> value
+            // json-java uses BigDecimal for decimal tokens in host unit tests, while Android's
+            // JSONTokener returns Double. Normalize only values that survive that conversion
+            // exactly, so JVM tests model Android without masking arbitrary-precision loss.
+            is BigDecimal -> decodeHostDecimal(value, path)
+            is Number -> normalizeAndroidJsonNumber(value, path) { message -> corrupt(message) }
             is JSONObject -> decodeJsonObject(value, path, depth)
             is JSONArray -> {
                 val out = ArrayList<Any?>(value.length())
@@ -796,6 +852,17 @@ internal object CoreStateCodec {
             }
             else -> corrupt("$path contains a non-JSON value of type ${value::class.java.name}")
         }
+    }
+
+    private fun decodeHostDecimal(
+        value: BigDecimal,
+        path: String,
+    ): Number {
+        val doubleValue = value.toDouble()
+        if (!doubleValue.isFinite() || BigDecimal.valueOf(doubleValue).compareTo(value) != 0) {
+            corrupt("$path cannot be represented exactly as a finite Android JSON number")
+        }
+        return normalizeAndroidJsonDouble(doubleValue, path) { message -> corrupt(message) }
     }
 
     private fun corrupt(
@@ -855,31 +922,6 @@ internal object CoreStateCodec {
             addBytes(length)
         }
 
-        fun addBigInteger(value: BigInteger) {
-            addNode()
-            addBytes(estimatedBigIntegerBytes(value))
-        }
-
-        fun addBigDecimal(value: BigDecimal) {
-            addNode()
-            val precision = value.precision().toLong()
-            val scale = value.scale().toLong()
-            val adjustedExponent = -scale + precision - 1
-            val signBytes = if (value.signum() < 0) 1L else 0L
-            val canonicalBytes =
-                if (scale >= 0 && adjustedExponent >= -6) {
-                    when {
-                        scale == 0L -> precision
-                        scale < precision -> precision + 1 // Embedded decimal point.
-                        else -> scale + 2 // Leading "0." and zero padding.
-                    }
-                } else {
-                    val coefficientBytes = if (precision == 1L) 1L else precision + 1
-                    coefficientBytes + 2 + unsignedDecimalDigits(adjustedExponent)
-                }
-            addBytes(signBytes + canonicalBytes)
-        }
-
         fun addFloatingPoint(value: Double) {
             if (!value.isFinite()) corruptBudget("Core state contains a non-finite JSON number")
             addNode()
@@ -922,23 +964,6 @@ internal object CoreStateCodec {
             estimatedBytes += amount
         }
 
-        private fun estimatedBigIntegerBytes(value: BigInteger): Long {
-            if (value.signum() == 0) return 1
-            val bits = value.bitLength().coerceAtLeast(1).toLong()
-            val magnitudeDigits = (bits * 30_103L + 99_999L) / 100_000L
-            return magnitudeDigits + if (value.signum() < 0) 1 else 0
-        }
-
-        private fun unsignedDecimalDigits(value: Long): Long {
-            var remaining = value
-            var digits = 0L
-            do {
-                digits += 1
-                remaining /= 10
-            } while (remaining != 0L)
-            return digits
-        }
-
         private fun corruptBudget(message: String): Nothing =
             throw CoreStateCorruptionException(message)
     }
@@ -979,15 +1004,11 @@ internal object JsonValues {
         require(depth <= 64) { "$path exceeds the maximum JSON nesting depth" }
         return when (value) {
             null -> null
-            is String, is Boolean, is Byte, is Short, is Int, is Long, is BigInteger, is BigDecimal -> value
-            is Float -> {
-                require(value.isFinite()) { "$path must be a finite JSON number" }
-                value
-            }
-            is Double -> {
-                require(value.isFinite()) { "$path must be a finite JSON number" }
-                value
-            }
+            is String, is Boolean -> value
+            is Number ->
+                normalizeAndroidJsonNumber(value, path) { message ->
+                    throw IllegalArgumentException(message)
+                }
             is Map<*, *> -> {
                 val out = linkedMapOf<String, Any?>()
                 value.forEach { (key, child) ->

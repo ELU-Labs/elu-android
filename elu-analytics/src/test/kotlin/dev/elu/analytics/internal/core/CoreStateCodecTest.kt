@@ -279,36 +279,176 @@ class CoreStateCodecTest {
     }
 
     @Test
-    fun `pre-encode numeric estimate preserves compact extreme-scale decimals`() {
+    fun `supported numbers are canonical before use and stable across Android persistence`() {
         val state = CoreStateCodec.decode(validAggregateBytes())
-        val compactScientific = BigDecimal(BigInteger.ONE, Int.MAX_VALUE)
-        val withCompactNumber =
+        val twoTo53 = Math.scalb(1.0, 53)
+        val positiveLongLimit = Long.MAX_VALUE.toDouble()
+        val inputNumbers: Map<String, Any?> =
+            mapOf(
+                "byte" to 7.toByte(),
+                "short" to 300.toShort(),
+                "int" to Int.MIN_VALUE,
+                "smallLong" to 7L,
+                "long" to Long.MAX_VALUE,
+                "float" to 1.25f,
+                "negativeZero" to -0.0,
+                "zero" to 0.0,
+                "one" to 1.0,
+                "belowTwoTo53" to Math.nextDown(twoTo53),
+                "twoTo53" to twoTo53,
+                "aboveTwoTo53" to Math.nextUp(twoTo53),
+                "belowPositiveLongLimit" to Math.nextDown(positiveLongLimit),
+                "abovePositiveLongLimit" to Math.nextUp(positiveLongLimit),
+                "negativeLongLimit" to Long.MIN_VALUE.toDouble(),
+                "doubleMin" to Double.MIN_VALUE,
+                "doubleMax" to Double.MAX_VALUE,
+            )
+        val expected: Map<String, Any?> =
+            mapOf(
+                "byte" to 7,
+                "short" to 300,
+                "int" to Int.MIN_VALUE,
+                "smallLong" to 7,
+                "long" to Long.MAX_VALUE,
+                "float" to 1.25,
+                "negativeZero" to 0,
+                "zero" to 0,
+                "one" to 1,
+                "belowTwoTo53" to Math.nextDown(twoTo53).toLong(),
+                "twoTo53" to twoTo53.toLong(),
+                "aboveTwoTo53" to Math.nextUp(twoTo53).toLong(),
+                "belowPositiveLongLimit" to Math.nextDown(positiveLongLimit).toLong(),
+                "abovePositiveLongLimit" to Math.nextUp(positiveLongLimit),
+                "negativeLongLimit" to Long.MIN_VALUE,
+                "doubleMin" to Double.MIN_VALUE,
+                "doubleMax" to Double.MAX_VALUE,
+            )
+        val normalized = JsonValues.objectValue(inputNumbers, "properties")
+        val withNumbers =
             state.copy(
                 identity =
                     state.identity.copy(
-                        superProperties = mapOf("compact" to compactScientific),
+                        superProperties = normalized,
                     ),
             )
 
-        val encoded = CoreStateCodec.encode(withCompactNumber)
+        val decoded =
+            CoreStateCodec
+                .decode(CoreStateCodec.encode(withNumbers))
+                .identity
+                .superProperties
 
-        assertTrue(encoded.size < MAX_PERSISTED_CORE_STATE_BYTES)
-        assertEquals(
-            compactScientific,
-            CoreStateCodec.decode(encoded).identity.superProperties["compact"],
-        )
+        assertEquals(expected, normalized)
+        assertEquals(expected, decoded)
     }
 
     @Test
-    fun `customer JSON rejects non-finite and non-native values`() {
-        assertThrows(IllegalArgumentException::class.java) {
-            JsonValues.objectValue(mapOf("bad" to Double.NaN), "properties")
+    fun `host decimal decoding applies Android canonicalization and boundary rejection`() {
+        val canonicalIdentity =
+            JSONObject(IDENTITY_FIXTURE).apply {
+                getJSONObject("superProperties").put("one", BigDecimal("1.0"))
+            }
+
+        val one = CoreStateCodec.decodeIdentity(canonicalIdentity).superProperties["one"]
+
+        assertEquals(1, one)
+        assertTrue(one is Int)
+
+        val lossyIdentity =
+            JSONObject(IDENTITY_FIXTURE).apply {
+                getJSONObject("superProperties")
+                    .put("lossy", BigDecimal.valueOf(Long.MAX_VALUE.toDouble()))
+            }
+
+        val error =
+            assertThrows(CoreStateCorruptionException::class.java) {
+                CoreStateCodec.decodeIdentity(lossyIdentity)
+            }
+        assertTrue(error.message.orEmpty().contains("without changing its value"))
+    }
+
+    @Test
+    fun `arbitrary precision numbers are rejected before Android JSON coercion`() {
+        val state = CoreStateCodec.decode(validAggregateBytes())
+        val unsupportedNumbers =
+            listOf(
+                BigDecimal(BigInteger.ONE, Int.MAX_VALUE),
+                BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.ONE),
+            )
+
+        unsupportedNumbers.forEach { number ->
+            val validationError =
+                assertThrows(IllegalArgumentException::class.java) {
+                    JsonValues.objectValue(mapOf("bad" to number), "properties")
+                }
+            assertTrue(validationError.message.orEmpty().contains("unsupported JSON number type"))
+
+            val codecError =
+                assertThrows(CoreStateCorruptionException::class.java) {
+                    CoreStateCodec.encode(
+                        state.copy(
+                            identity = state.identity.copy(superProperties = mapOf("bad" to number)),
+                        ),
+                    )
+                }
+            assertTrue(codecError.message.orEmpty().contains("unsupported JSON number type"))
         }
+    }
+
+    @Test
+    fun `finite Double at the lossy Android Long boundary is rejected before persistence`() {
+        val state = CoreStateCodec.decode(validAggregateBytes())
+        val lossyBoundary = Long.MAX_VALUE.toDouble()
+        assertEquals(Math.scalb(1.0, 63), lossyBoundary, 0.0)
+
+        val validationError =
+            assertThrows(IllegalArgumentException::class.java) {
+                JsonValues.objectValue(mapOf("bad" to lossyBoundary), "properties")
+            }
+        assertTrue(validationError.message.orEmpty().contains("without changing its value"))
+
+        val codecError =
+            assertThrows(CoreStateCorruptionException::class.java) {
+                CoreStateCodec.encode(
+                    state.copy(
+                        identity = state.identity.copy(superProperties = mapOf("bad" to lossyBoundary)),
+                    ),
+                )
+            }
+        assertTrue(codecError.message.orEmpty().contains("without changing its value"))
+    }
+
+    @Test
+    fun `customer JSON and codec reject every non-finite number`() {
+        val state = CoreStateCodec.decode(validAggregateBytes())
+        val nonFiniteNumbers =
+            listOf<Number>(
+                Double.NaN,
+                Double.POSITIVE_INFINITY,
+                Double.NEGATIVE_INFINITY,
+                Float.NaN,
+                Float.POSITIVE_INFINITY,
+                Float.NEGATIVE_INFINITY,
+            )
+
+        nonFiniteNumbers.forEach { number ->
+            assertThrows(IllegalArgumentException::class.java) {
+                JsonValues.objectValue(mapOf("nested" to listOf(number)), "properties")
+            }
+            assertThrows(CoreStateCorruptionException::class.java) {
+                CoreStateCodec.encode(
+                    state.copy(
+                        flagContext = state.flagContext.copy(personProperties = mapOf("bad" to number)),
+                    ),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `customer JSON rejects non-native values`() {
         assertThrows(IllegalArgumentException::class.java) {
             JsonValues.objectValue(mapOf("bad" to Any()), "properties")
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            JsonValues.objectValue(mapOf("nested" to listOf(Float.POSITIVE_INFINITY)), "properties")
         }
     }
 
