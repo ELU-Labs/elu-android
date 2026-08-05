@@ -1,0 +1,105 @@
+{
+    "schemaVersion": 1,
+    "streamId": "stream_018fcb7cff80721387a19b859e7c53a6",
+    "versions": {
+        "schemaVersion": 1,
+        "contractVersion": "1.0.0",
+        "platform": "browser",
+        "runtime": {
+            "name": "elu-js",
+            "version": "1.409.5-elu.1"
+        },
+        "facade": {
+            "name": "window.elu",
+            "version": "1.0.0"
+        },
+        "build": "4670b69e98ed590c31cf42fc840a25bdadf45ae7"
+    },
+    "mutations": [
+        {
+            "mutationId": "mutation_000001",
+            "sequence": 1,
+            "contextRevision": 1,
+            "occurredAt": "2026-08-04T00:00:01.000Z",
+            "subject": {
+                "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+                "userId": "user_123",
+                "identityRevision": 1
+            },
+            "change": {
+                "type": "identify",
+                "userId": "user_123",
+                "set": { "plan": "growth" },
+                "setOnce": { "createdFrom": "sdk" }
+            }
+        },
+        {
+            "mutationId": "mutation_000002",
+            "sequence": 2,
+            "contextRevision": 2,
+            "occurredAt": "2026-08-04T00:00:02.000Z",
+            "subject": {
+                "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+                "userId": "user_123",
+                "identityRevision": 1
+            },
+            "change": {
+                "type": "linkAlias",
+                "aliasId": "legacy_user_123",
+                "canonicalId": "user_123"
+            }
+        },
+        {
+            "mutationId": "mutation_000003",
+            "sequence": 3,
+            "contextRevision": 3,
+            "occurredAt": "2026-08-04T00:00:03.000Z",
+            "subject": {
+                "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+                "userId": "user_123",
+                "identityRevision": 1
+            },
+            "change": {
+                "type": "setPersonProperties",
+                "set": { "role": "owner" },
+                "setOnce": {},
+                "unset": []
+            }
+        },
+        {
+            "mutationId": "mutation_000004",
+            "sequence": 4,
+            "contextRevision": 4,
+            "occurredAt": "2026-08-04T00:00:04.000Z",
+            "subject": {
+                "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+                "userId": "user_123",
+                "identityRevision": 1
+            },
+            "change": {
+                "type": "associateGroup",
+                "groupType": "organization",
+                "groupKey": "org_456"
+            }
+        },
+        {
+            "mutationId": "mutation_000005",
+            "sequence": 5,
+            "contextRevision": 5,
+            "occurredAt": "2026-08-04T00:00:05.000Z",
+            "subject": {
+                "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+                "userId": "user_123",
+                "identityRevision": 1
+            },
+            "change": {
+                "type": "setGroupProperties",
+                "groupType": "organization",
+                "groupKey": "org_456",
+                "set": { "tier": "design-partner" },
+                "setOnce": {},
+                "unset": []
+            }
+        }
+    ]
+}

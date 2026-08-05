@@ -1,0 +1,50 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/event.schema.json",
+    "title": "ELU SDK logical event envelope v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schemaVersion",
+        "eventId",
+        "streamId",
+        "sequence",
+        "contextRevision",
+        "kind",
+        "name",
+        "occurredAt",
+        "identity",
+        "sessionId",
+        "properties",
+        "groups",
+        "versions"
+    ],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "eventId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "streamId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "contextRevision": { "type": "integer", "minimum": 0 },
+        "kind": { "enum": ["capture", "screen", "exception", "diagnostic"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["anonymousId", "userId", "revision"],
+            "properties": {
+                "anonymousId": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "userId": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+                "revision": { "type": "integer", "minimum": 0 }
+            }
+        },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "properties": { "type": "object" },
+        "groups": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "versions": { "$ref": "version.schema.json" }
+    }
+}

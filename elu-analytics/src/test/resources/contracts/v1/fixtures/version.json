@@ -1,0 +1,14 @@
+{
+    "schemaVersion": 1,
+    "contractVersion": "1.0.0",
+    "platform": "browser",
+    "runtime": {
+        "name": "elu-js",
+        "version": "1.409.5-elu.1"
+    },
+    "facade": {
+        "name": "window.elu",
+        "version": "1.0.0"
+    },
+    "build": "4670b69e98ed590c31cf42fc840a25bdadf45ae7"
+}
