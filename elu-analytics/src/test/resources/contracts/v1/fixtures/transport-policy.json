@@ -1,0 +1,197 @@
+{
+    "schemaVersion": 1,
+    "profile": "elu-http-v1",
+    "semanticContractVersion": "1.0.0",
+    "transportStatus": "specified-not-wired",
+    "configuration": {
+        "method": "GET",
+        "pathTemplate": "/sdk/v1/{siteKey}/config",
+        "credentialPlacement": "site-key-path-parameter",
+        "enabledStatus": 200,
+        "disabledStatus": 200,
+        "transientFailure": {
+            "statusSelectors": [429, "5xx", "network-error"],
+            "lastValidatedConfig": "usable-until-expires-at-only",
+            "withoutValidConfig": "fail-closed",
+            "pendingQueue": "bounded-memory-only",
+            "afterExpiry": "discard-pending-and-disable-network",
+            "retry": "backoff-honoring-retry-after",
+            "isConfigDocument": false
+        }
+    },
+    "authorization": {
+        "credentialKind": "public-routing-site-key",
+        "isSecret": false,
+        "configPlacement": {
+            "kind": "path-parameter",
+            "name": "siteKey",
+            "secondCredentialRequired": false
+        },
+        "normalPostPlacement": {
+            "kind": "header",
+            "name": "Authorization",
+            "scheme": "Bearer"
+        },
+        "beaconPostPlacement": {
+            "kind": "query-parameter",
+            "name": "site_key",
+            "scope": "discovered-post-endpoints-only"
+        },
+        "credentialResolution": {
+            "precedence": "authorization-header",
+            "bothEqual": "accept-once",
+            "mismatch": "reject-401-without-processing"
+        },
+        "cors": {
+            "normalPostRequest": {
+                "requestMode": "cors",
+                "method": "POST",
+                "credentials": "omit",
+                "contentType": "application/json",
+                "preflight": "required"
+            },
+            "beaconPostRequest": {
+                "requestMode": "no-cors",
+                "method": "POST",
+                "contentType": "text/plain;charset=UTF-8",
+                "bodyEncoding": "utf-8-json",
+                "contentEncoding": "identity",
+                "customHeaders": false,
+                "preflight": "forbidden",
+                "corsSimpleRequest": true,
+                "cookieAuthorization": "ignored"
+            },
+            "configGetResponse": {
+                "headers": {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Expose-Headers": "Retry-After"
+                }
+            },
+            "postResponse": {
+                "headers": {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Expose-Headers": "Retry-After"
+                }
+            },
+            "preflightResponse": {
+                "headers": {
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Authorization, Content-Type"
+                },
+                "requiresSiteKey": false
+            }
+        },
+        "tenantBinding": "server-derived-from-site-key",
+        "grants": ["config-read", "telemetry-write", "flag-evaluation"],
+        "neverGrants": ["admin", "stored-data-read", "cross-site-access"],
+        "rules": [
+            {
+                "condition": "missing-malformed-unknown-or-revoked-site-key",
+                "status": 401
+            },
+            {
+                "condition": "valid-site-key-disallowed-for-context-or-scope",
+                "status": 403
+            },
+            {
+                "condition": "known-disabled-site-config",
+                "status": 200
+            }
+        ]
+    },
+    "batching": {
+        "requestSchema": "schemas/batch-request.schema.json",
+        "ackSchema": "schemas/batch-ack.schema.json",
+        "ordering": "shared-stream-sequence",
+        "limits": {
+            "countConfigPath": "limits.eventBatchCount",
+            "bytesConfigPath": "limits.eventBatchBytes",
+            "byteBasis": "utf-8-complete-json-request-before-content-encoding",
+            "packing": "largest-contiguous-prefix-within-count-and-byte-limits",
+            "on413Split": "ordered-halves-first-size-ceiling-record-count-divided-by-two",
+            "splitDeliveryOrder": "first-half-before-second-half",
+            "singleRecord413": "terminally-reject"
+        },
+        "ackRule": "resolved-contiguous-prefix",
+        "semanticValidation": "required-before-queue-deletion",
+        "scalarFieldsTrustedBeforeValidation": false,
+        "terminallyRejectedRecordsRemovable": true,
+        "retryableHeadBlocksAdvancement": true,
+        "unchangedRetryReusesRequestAndRecordIdentity": true,
+        "reshapedRetryUsesNewRequestId": true,
+        "reshapedRetryPreservesRecordIdentity": true,
+        "duplicateAck": "same-effective-ack"
+    },
+    "replay": {
+        "requestSchema": "schemas/replay-request.schema.json",
+        "ackSchema": "schemas/replay-ack.schema.json",
+        "limits": {
+            "bytesConfigPath": "limits.replayChunkBytes",
+            "byteBasis": "utf-8-complete-json-request-before-content-encoding",
+            "singleChunk413": "terminally-reject"
+        },
+        "retryReusesRequestAndChunkIdentity": true,
+        "duplicateAck": "same-effective-ack"
+    },
+    "errors": {
+        "schema": "schemas/transport-error.schema.json",
+        "httpStatusAuthority": "authoritative",
+        "bodyStatus": "required-and-must-match-http-status",
+        "retryAfterSyntax": "delta-seconds-or-http-date",
+        "otherwiseUnspecifiedHttpFailure": "permanent-fail-closed-with-protocol-issue",
+        "rules": [
+            {
+                "status": 401,
+                "disposition": "permanent",
+                "retryAfter": "forbidden",
+                "action": "do-not-retry-with-same-key",
+                "fixture": "fixtures/transport-error-unauthorized.json"
+            },
+            {
+                "status": 403,
+                "disposition": "permanent",
+                "retryAfter": "forbidden",
+                "action": "do-not-retry-same-request",
+                "fixture": "fixtures/transport-error-forbidden.json"
+            },
+            {
+                "status": 413,
+                "disposition": "retry-after-reduction",
+                "retryAfter": "forbidden",
+                "action": "retry-reduced-request-with-new-request-id-preserving-record-identities",
+                "singleRecordAction": "terminally-reject",
+                "fixture": "fixtures/transport-error-payload-too-large.json"
+            },
+            {
+                "status": 429,
+                "disposition": "retryable",
+                "retryAfter": "required",
+                "retryAfterExample": "30",
+                "action": "retry-same-request-preserving-identities",
+                "fixture": "fixtures/transport-error-rate-limited.json"
+            },
+            {
+                "status": "5xx",
+                "disposition": "retryable",
+                "retryAfter": "optional",
+                "retryAfterExample": "Tue, 04 Aug 2026 00:02:00 GMT",
+                "action": "retry-same-request-preserving-identities",
+                "fixture": "fixtures/transport-error-service-unavailable.json"
+            }
+        ]
+    },
+    "idempotency": {
+        "batchScope": ["site", "streamId", "kind", "recordId"],
+        "batchRecordIdFields": {
+            "mutation": "mutationId",
+            "event": "eventId"
+        },
+        "replayScope": ["site", "replayId", "chunkId"],
+        "idempotencyRetentionSeconds": 691200,
+        "maxRecordAgeSeconds": 604800,
+        "retentionStartsAt": "first-resolution",
+        "clientRetryBoundary": "not-after-max-record-age",
+        "duplicateBehavior": "same-effective-ack"
+    }
+}

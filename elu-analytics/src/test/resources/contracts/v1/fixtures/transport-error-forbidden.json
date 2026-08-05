@@ -1,0 +1,7 @@
+{
+    "schemaVersion": 1,
+    "status": 403,
+    "code": "site-key-scope-forbidden",
+    "disposition": "permanent",
+    "message": "The site key is not allowed for this request context or scope."
+}

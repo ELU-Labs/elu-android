@@ -1,0 +1,477 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/transport-policy.schema.json",
+    "title": "ELU SDK HTTP transport policy v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schemaVersion",
+        "profile",
+        "semanticContractVersion",
+        "transportStatus",
+        "configuration",
+        "authorization",
+        "batching",
+        "replay",
+        "errors",
+        "idempotency"
+    ],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "profile": { "const": "elu-http-v1" },
+        "semanticContractVersion": { "const": "1.0.0" },
+        "transportStatus": { "const": "specified-not-wired" },
+        "configuration": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "method",
+                "pathTemplate",
+                "credentialPlacement",
+                "enabledStatus",
+                "disabledStatus",
+                "transientFailure"
+            ],
+            "properties": {
+                "method": { "const": "GET" },
+                "pathTemplate": { "const": "/sdk/v1/{siteKey}/config" },
+                "credentialPlacement": { "const": "site-key-path-parameter" },
+                "enabledStatus": { "const": 200 },
+                "disabledStatus": { "const": 200 },
+                "transientFailure": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "statusSelectors",
+                        "lastValidatedConfig",
+                        "withoutValidConfig",
+                        "pendingQueue",
+                        "afterExpiry",
+                        "retry",
+                        "isConfigDocument"
+                    ],
+                    "properties": {
+                        "statusSelectors": {
+                            "type": "array",
+                            "prefixItems": [{ "const": 429 }, { "const": "5xx" }, { "const": "network-error" }],
+                            "items": false,
+                            "minItems": 3,
+                            "maxItems": 3
+                        },
+                        "lastValidatedConfig": { "const": "usable-until-expires-at-only" },
+                        "withoutValidConfig": { "const": "fail-closed" },
+                        "pendingQueue": { "const": "bounded-memory-only" },
+                        "afterExpiry": { "const": "discard-pending-and-disable-network" },
+                        "retry": { "const": "backoff-honoring-retry-after" },
+                        "isConfigDocument": { "const": false }
+                    }
+                }
+            }
+        },
+        "authorization": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "credentialKind",
+                "isSecret",
+                "configPlacement",
+                "normalPostPlacement",
+                "beaconPostPlacement",
+                "credentialResolution",
+                "cors",
+                "tenantBinding",
+                "grants",
+                "neverGrants",
+                "rules"
+            ],
+            "properties": {
+                "credentialKind": { "const": "public-routing-site-key" },
+                "isSecret": { "const": false },
+                "configPlacement": { "$ref": "#/$defs/pathPlacement" },
+                "normalPostPlacement": { "$ref": "#/$defs/bearerPlacement" },
+                "beaconPostPlacement": { "$ref": "#/$defs/queryPlacement" },
+                "credentialResolution": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["precedence", "bothEqual", "mismatch"],
+                    "properties": {
+                        "precedence": { "const": "authorization-header" },
+                        "bothEqual": { "const": "accept-once" },
+                        "mismatch": { "const": "reject-401-without-processing" }
+                    }
+                },
+                "cors": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "normalPostRequest",
+                        "beaconPostRequest",
+                        "configGetResponse",
+                        "postResponse",
+                        "preflightResponse"
+                    ],
+                    "properties": {
+                        "normalPostRequest": { "$ref": "#/$defs/normalPostRequest" },
+                        "beaconPostRequest": { "$ref": "#/$defs/beaconPostRequest" },
+                        "configGetResponse": { "$ref": "#/$defs/actualCorsResponse" },
+                        "postResponse": { "$ref": "#/$defs/actualCorsResponse" },
+                        "preflightResponse": { "$ref": "#/$defs/preflightResponse" }
+                    }
+                },
+                "tenantBinding": { "const": "server-derived-from-site-key" },
+                "grants": {
+                    "type": "array",
+                    "items": { "enum": ["config-read", "telemetry-write", "flag-evaluation"] },
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "neverGrants": {
+                    "type": "array",
+                    "items": { "enum": ["admin", "stored-data-read", "cross-site-access"] },
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "rules": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "uniqueItems": true,
+                    "items": { "$ref": "#/$defs/authorizationRule" }
+                }
+            }
+        },
+        "batching": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "requestSchema",
+                "ackSchema",
+                "ordering",
+                "limits",
+                "ackRule",
+                "semanticValidation",
+                "scalarFieldsTrustedBeforeValidation",
+                "terminallyRejectedRecordsRemovable",
+                "retryableHeadBlocksAdvancement",
+                "unchangedRetryReusesRequestAndRecordIdentity",
+                "reshapedRetryUsesNewRequestId",
+                "reshapedRetryPreservesRecordIdentity",
+                "duplicateAck"
+            ],
+            "properties": {
+                "requestSchema": { "const": "schemas/batch-request.schema.json" },
+                "ackSchema": { "const": "schemas/batch-ack.schema.json" },
+                "ordering": { "const": "shared-stream-sequence" },
+                "limits": { "$ref": "#/$defs/batchLimits" },
+                "ackRule": { "const": "resolved-contiguous-prefix" },
+                "semanticValidation": { "const": "required-before-queue-deletion" },
+                "scalarFieldsTrustedBeforeValidation": { "const": false },
+                "terminallyRejectedRecordsRemovable": { "const": true },
+                "retryableHeadBlocksAdvancement": { "const": true },
+                "unchangedRetryReusesRequestAndRecordIdentity": { "const": true },
+                "reshapedRetryUsesNewRequestId": { "const": true },
+                "reshapedRetryPreservesRecordIdentity": { "const": true },
+                "duplicateAck": { "const": "same-effective-ack" }
+            }
+        },
+        "replay": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["requestSchema", "ackSchema", "limits", "retryReusesRequestAndChunkIdentity", "duplicateAck"],
+            "properties": {
+                "requestSchema": { "const": "schemas/replay-request.schema.json" },
+                "ackSchema": { "const": "schemas/replay-ack.schema.json" },
+                "limits": { "$ref": "#/$defs/replayLimits" },
+                "retryReusesRequestAndChunkIdentity": { "const": true },
+                "duplicateAck": { "const": "same-effective-ack" }
+            }
+        },
+        "errors": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "schema",
+                "httpStatusAuthority",
+                "bodyStatus",
+                "retryAfterSyntax",
+                "otherwiseUnspecifiedHttpFailure",
+                "rules"
+            ],
+            "properties": {
+                "schema": { "const": "schemas/transport-error.schema.json" },
+                "httpStatusAuthority": { "const": "authoritative" },
+                "bodyStatus": { "const": "required-and-must-match-http-status" },
+                "retryAfterSyntax": { "const": "delta-seconds-or-http-date" },
+                "otherwiseUnspecifiedHttpFailure": {
+                    "const": "permanent-fail-closed-with-protocol-issue"
+                },
+                "rules": {
+                    "type": "array",
+                    "minItems": 5,
+                    "maxItems": 5,
+                    "items": { "$ref": "#/$defs/errorRule" }
+                }
+            }
+        },
+        "idempotency": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "batchScope",
+                "batchRecordIdFields",
+                "replayScope",
+                "idempotencyRetentionSeconds",
+                "maxRecordAgeSeconds",
+                "retentionStartsAt",
+                "clientRetryBoundary",
+                "duplicateBehavior"
+            ],
+            "properties": {
+                "batchScope": {
+                    "type": "array",
+                    "prefixItems": [
+                        { "const": "site" },
+                        { "const": "streamId" },
+                        { "const": "kind" },
+                        { "const": "recordId" }
+                    ],
+                    "items": false,
+                    "minItems": 4,
+                    "maxItems": 4
+                },
+                "batchRecordIdFields": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["mutation", "event"],
+                    "properties": {
+                        "mutation": { "const": "mutationId" },
+                        "event": { "const": "eventId" }
+                    }
+                },
+                "replayScope": {
+                    "type": "array",
+                    "prefixItems": [{ "const": "site" }, { "const": "replayId" }, { "const": "chunkId" }],
+                    "items": false,
+                    "minItems": 3,
+                    "maxItems": 3
+                },
+                "idempotencyRetentionSeconds": { "type": "integer", "minimum": 691200 },
+                "maxRecordAgeSeconds": { "const": 604800 },
+                "retentionStartsAt": { "const": "first-resolution" },
+                "clientRetryBoundary": { "const": "not-after-max-record-age" },
+                "duplicateBehavior": { "const": "same-effective-ack" }
+            }
+        }
+    },
+    "$defs": {
+        "pathPlacement": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "name", "secondCredentialRequired"],
+            "properties": {
+                "kind": { "const": "path-parameter" },
+                "name": { "const": "siteKey" },
+                "secondCredentialRequired": { "const": false }
+            }
+        },
+        "bearerPlacement": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "name", "scheme"],
+            "properties": {
+                "kind": { "const": "header" },
+                "name": { "const": "Authorization" },
+                "scheme": { "const": "Bearer" }
+            }
+        },
+        "queryPlacement": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "name", "scope"],
+            "properties": {
+                "kind": { "const": "query-parameter" },
+                "name": { "const": "site_key" },
+                "scope": { "const": "discovered-post-endpoints-only" }
+            }
+        },
+        "normalPostRequest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["requestMode", "method", "credentials", "contentType", "preflight"],
+            "properties": {
+                "requestMode": { "const": "cors" },
+                "method": { "const": "POST" },
+                "credentials": { "const": "omit" },
+                "contentType": { "const": "application/json" },
+                "preflight": { "const": "required" }
+            }
+        },
+        "actualCorsResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["headers"],
+            "properties": {
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Access-Control-Allow-Origin", "Access-Control-Expose-Headers"],
+                    "properties": {
+                        "Access-Control-Allow-Origin": { "const": "*" },
+                        "Access-Control-Expose-Headers": { "const": "Retry-After" }
+                    }
+                }
+            }
+        },
+        "preflightResponse": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["headers", "requiresSiteKey"],
+            "properties": {
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "Access-Control-Allow-Origin",
+                        "Access-Control-Allow-Methods",
+                        "Access-Control-Allow-Headers"
+                    ],
+                    "properties": {
+                        "Access-Control-Allow-Origin": { "const": "*" },
+                        "Access-Control-Allow-Methods": { "const": "POST, OPTIONS" },
+                        "Access-Control-Allow-Headers": { "const": "Authorization, Content-Type" }
+                    }
+                },
+                "requiresSiteKey": { "const": false }
+            }
+        },
+        "beaconPostRequest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "requestMode",
+                "method",
+                "contentType",
+                "bodyEncoding",
+                "contentEncoding",
+                "customHeaders",
+                "preflight",
+                "corsSimpleRequest",
+                "cookieAuthorization"
+            ],
+            "properties": {
+                "requestMode": { "const": "no-cors" },
+                "method": { "const": "POST" },
+                "contentType": { "const": "text/plain;charset=UTF-8" },
+                "bodyEncoding": { "const": "utf-8-json" },
+                "contentEncoding": { "const": "identity" },
+                "customHeaders": { "const": false },
+                "preflight": { "const": "forbidden" },
+                "corsSimpleRequest": { "const": true },
+                "cookieAuthorization": { "const": "ignored" }
+            }
+        },
+        "batchLimits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "countConfigPath",
+                "bytesConfigPath",
+                "byteBasis",
+                "packing",
+                "on413Split",
+                "splitDeliveryOrder",
+                "singleRecord413"
+            ],
+            "properties": {
+                "countConfigPath": { "const": "limits.eventBatchCount" },
+                "bytesConfigPath": { "const": "limits.eventBatchBytes" },
+                "byteBasis": { "const": "utf-8-complete-json-request-before-content-encoding" },
+                "packing": { "const": "largest-contiguous-prefix-within-count-and-byte-limits" },
+                "on413Split": { "const": "ordered-halves-first-size-ceiling-record-count-divided-by-two" },
+                "splitDeliveryOrder": { "const": "first-half-before-second-half" },
+                "singleRecord413": { "const": "terminally-reject" }
+            }
+        },
+        "replayLimits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["bytesConfigPath", "byteBasis", "singleChunk413"],
+            "properties": {
+                "bytesConfigPath": { "const": "limits.replayChunkBytes" },
+                "byteBasis": { "const": "utf-8-complete-json-request-before-content-encoding" },
+                "singleChunk413": { "const": "terminally-reject" }
+            }
+        },
+        "authorizationRule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["condition", "status"],
+            "properties": {
+                "condition": {
+                    "enum": [
+                        "missing-malformed-unknown-or-revoked-site-key",
+                        "valid-site-key-disallowed-for-context-or-scope",
+                        "known-disabled-site-config"
+                    ]
+                },
+                "status": { "enum": [200, 401, 403] }
+            }
+        },
+        "errorRule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "disposition", "retryAfter", "action", "fixture"],
+            "properties": {
+                "status": {
+                    "anyOf": [{ "enum": [401, 403, 413, 429] }, { "const": "5xx" }]
+                },
+                "disposition": { "enum": ["permanent", "retry-after-reduction", "retryable"] },
+                "retryAfter": { "enum": ["forbidden", "required", "optional"] },
+                "retryAfterExample": { "type": "string", "minLength": 1, "maxLength": 64 },
+                "action": {
+                    "enum": [
+                        "do-not-retry-with-same-key",
+                        "do-not-retry-same-request",
+                        "retry-reduced-request-with-new-request-id-preserving-record-identities",
+                        "retry-same-request-preserving-identities"
+                    ]
+                },
+                "singleRecordAction": { "const": "terminally-reject" },
+                "fixture": { "type": "string", "pattern": "^fixtures/transport-error-[a-z-]+\\.json$" }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "status": { "const": 413 } } },
+                    "then": { "required": ["singleRecordAction"] },
+                    "else": { "not": { "required": ["singleRecordAction"] } }
+                },
+                {
+                    "if": { "properties": { "retryAfter": { "const": "required" } } },
+                    "then": { "required": ["retryAfterExample"] }
+                },
+                {
+                    "if": { "properties": { "retryAfter": { "const": "forbidden" } } },
+                    "then": { "not": { "required": ["retryAfterExample"] } }
+                },
+                {
+                    "if": { "properties": { "status": { "enum": [401, 403] } } },
+                    "then": { "properties": { "disposition": { "const": "permanent" } } }
+                },
+                {
+                    "if": { "properties": { "status": { "const": 413 } } },
+                    "then": { "properties": { "disposition": { "const": "retry-after-reduction" } } }
+                },
+                {
+                    "if": { "properties": { "status": { "const": 429 } } },
+                    "then": { "properties": { "disposition": { "const": "retryable" } } }
+                },
+                {
+                    "if": { "properties": { "status": { "const": "5xx" } } },
+                    "then": { "properties": { "disposition": { "const": "retryable" } } }
+                }
+            ]
+        }
+    }
+}

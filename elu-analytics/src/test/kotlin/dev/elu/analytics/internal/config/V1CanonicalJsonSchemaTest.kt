@@ -25,6 +25,8 @@ class V1CanonicalJsonSchemaTest {
         assertTrue("manifest must route canonical event fixture", "fixtures/event.json" in fixturePaths)
         assertTrue("manifest must route canonical mutations fixture", "fixtures/mutations.json" in fixturePaths)
         assertTrue("manifest must route canonical version fixture", "fixtures/version.json" in fixturePaths)
+        assertTrue("manifest must route canonical batch acknowledgement", "fixtures/batch-ack.json" in fixturePaths)
+        assertTrue("manifest must route canonical transport policy", "fixtures/transport-policy.json" in fixturePaths)
 
         val enabled = json("contracts/v1/fixtures/config-enabled.json")
         assertValid(validator, schemas.getString("config"), enabled)
@@ -35,6 +37,23 @@ class V1CanonicalJsonSchemaTest {
         assertValid(validator, schemas.getString("event"), json("contracts/v1/fixtures/event.json"))
         assertValid(validator, schemas.getString("mutation"), json("contracts/v1/fixtures/mutations.json"))
         assertValid(validator, schemas.getString("version"), json("contracts/v1/fixtures/version.json"))
+        assertValid(validator, schemas.getString("batchRequest"), json("contracts/v1/fixtures/batch-request.json"))
+        assertValid(validator, schemas.getString("batchAck"), json("contracts/v1/fixtures/batch-ack.json"))
+        assertValid(validator, schemas.getString("batchAck"), json("contracts/v1/fixtures/batch-ack-retryable-head.json"))
+        listOf(
+            "unauthorized",
+            "forbidden",
+            "payload-too-large",
+            "rate-limited",
+            "service-unavailable",
+        ).forEach { fixture ->
+            assertValid(
+                validator,
+                schemas.getString("transportError"),
+                json("contracts/v1/fixtures/transport-error-$fixture.json"),
+            )
+        }
+        assertValid(validator, schemas.getString("transportPolicy"), json("contracts/v1/fixtures/transport-policy.json"))
     }
 
     @Test
@@ -293,8 +312,15 @@ private class ResourceJsonSchemaValidator(
             val unique = (0 until value.length()).map { stableJson(value.get(it).normalized()) }.toSet()
             if (unique.size != value.length()) errors += "$path items are not unique"
         }
+        val prefixItems = schema.optJSONArray("prefixItems")
+        prefixItems?.let { prefix ->
+            repeat(minOf(prefix.length(), value.length())) { index ->
+                evaluate(prefix.get(index), value.get(index).normalized(), context, "$path/$index", errors)
+            }
+        }
         if (schema.has("items")) {
-            repeat(value.length()) { index ->
+            val start = prefixItems?.length() ?: 0
+            for (index in start until value.length()) {
                 evaluate(schema.get("items"), value.get(index).normalized(), context, "$path/$index", errors)
             }
         }

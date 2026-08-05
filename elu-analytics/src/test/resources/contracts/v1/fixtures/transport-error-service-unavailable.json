@@ -1,0 +1,7 @@
+{
+    "schemaVersion": 1,
+    "status": 503,
+    "code": "service-unavailable",
+    "disposition": "retryable",
+    "message": "Retry the same request with backoff and honor Retry-After when present."
+}
