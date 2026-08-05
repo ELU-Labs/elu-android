@@ -101,6 +101,9 @@ internal class RuntimeQueueOwner private constructor(
     private val lifecycleLock = Any()
     private var acceptingTasks: Boolean = true
 
+    /** Blocking adapters must never wait for a task while already running on this worker. */
+    fun isCurrentThreadWorker(): Boolean = Thread.currentThread() === workerThread
+
     fun snapshot(): Future<RuntimeQueueSnapshot> =
         submit {
             assertUsable()

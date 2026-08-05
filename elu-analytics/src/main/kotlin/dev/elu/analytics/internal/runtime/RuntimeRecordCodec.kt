@@ -2,6 +2,8 @@ package dev.elu.analytics.internal.runtime
 
 import dev.elu.analytics.internal.core.JsonValues
 import java.math.BigDecimal
+import java.math.BigInteger
+import java.math.RoundingMode
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -35,6 +37,7 @@ internal const val MAX_RUNTIME_RECORD_BYTES: Int = 10_485_760
 
 /** Strict codecs for the frozen event and mutation schemas copied into test resources. */
 internal object RuntimeRecordCodec {
+    private val LONG_MAX_INTEGER = BigInteger.valueOf(Long.MAX_VALUE)
     private val eventFields =
         setOf(
             "schemaVersion",
@@ -174,6 +177,10 @@ internal object RuntimeRecordCodec {
             is RuntimeQueuedRecord.Mutation -> encodeBatchRecord(record.envelope)
         }
 
+    /** Canonical capture-time version bytes for the v1 batch envelope. */
+    fun encodeBatchVersions(versions: RuntimeVersions): ByteArray =
+        encodeBounded(encodeVersions(versions))
+
     fun decodeQueued(
         kind: RuntimeRecordKind,
         bytes: ByteArray,
@@ -211,6 +218,33 @@ internal object RuntimeRecordCodec {
         } else {
             laterTimestamp.fraction.compareTo(earlierTimestamp.fraction)
         }
+    }
+
+    /** POSIX millisecond floor used only to bound scheduling before an exact timestamp. */
+    fun timestampToEpochMillisFloor(value: String): Long {
+        val timestamp = parseRfc3339(value, "timestamp")
+        val milliseconds = timestamp.fraction.movePointRight(3).toLong()
+        return Math.addExact(Math.multiplyExact(timestamp.epochSecond, 1_000L), milliseconds)
+    }
+
+    /** Millisecond scheduler delay to `earlier + seconds`, rounded up so it never fires early. */
+    fun elapsedBoundaryDelayMillisCeiling(
+        later: String,
+        earlier: String,
+        seconds: Int,
+    ): Long {
+        require(seconds >= 0) { "seconds must be non-negative" }
+        val laterTimestamp = parseRfc3339(later, "later timestamp")
+        val earlierTimestamp = parseRfc3339(earlier, "earlier timestamp")
+        val boundary =
+            BigDecimal.valueOf(earlierTimestamp.epochSecond)
+                .add(earlierTimestamp.fraction)
+                .add(BigDecimal.valueOf(seconds.toLong()))
+        val observed = BigDecimal.valueOf(laterTimestamp.epochSecond).add(laterTimestamp.fraction)
+        val remaining = boundary.subtract(observed)
+        if (remaining.signum() <= 0) return 0
+        val milliseconds = remaining.movePointRight(3).setScale(0, RoundingMode.CEILING).toBigIntegerExact()
+        return if (milliseconds > LONG_MAX_INTEGER) Long.MAX_VALUE else milliseconds.toLong()
     }
 
     private fun encodeEventIdentity(identity: RuntimeEventIdentity): JSONObject =

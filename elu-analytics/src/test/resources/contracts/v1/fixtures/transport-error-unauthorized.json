@@ -1,0 +1,7 @@
+{
+    "schemaVersion": 1,
+    "status": 401,
+    "code": "unauthorized-site-key",
+    "disposition": "permanent",
+    "message": "The site key is missing, malformed, unknown, or revoked."
+}

@@ -1,0 +1,7 @@
+{
+    "schemaVersion": 1,
+    "status": 413,
+    "code": "payload-too-large",
+    "disposition": "retry-after-reduction",
+    "message": "The request exceeds the advertised limit and must be reduced before retrying."
+}

@@ -1,0 +1,7 @@
+{
+    "schemaVersion": 1,
+    "status": 429,
+    "code": "rate-limited",
+    "disposition": "retryable",
+    "message": "Retry the same request after the Retry-After delay."
+}

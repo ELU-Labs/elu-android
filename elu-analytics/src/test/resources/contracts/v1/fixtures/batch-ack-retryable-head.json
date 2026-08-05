@@ -1,0 +1,23 @@
+{
+    "schemaVersion": 1,
+    "requestId": "request_018fcb7cff80721387a19b859e7c53a6",
+    "streamId": "stream_018fcb7cff80721387a19b859e7c53a6",
+    "resolvedThroughSequence": 5,
+    "retryFromSequence": 6,
+    "outcomes": [
+        {
+            "sequence": 5,
+            "recordId": "mutation_000005",
+            "kind": "mutation",
+            "result": "terminally-rejected",
+            "code": "invalid-record"
+        },
+        {
+            "sequence": 6,
+            "recordId": "event_018fcb7cff80721387a19b859e7c53a6",
+            "kind": "event",
+            "result": "retryable",
+            "code": "temporarily-unavailable"
+        }
+    ]
+}
