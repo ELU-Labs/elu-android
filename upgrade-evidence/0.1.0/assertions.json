@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "sourceVersion": "0.1.0",
+  "operations": [
+    "establish-anonymous-identity",
+    "verify-published-anonymous-rehydration",
+    "replace-anonymous-install-with-candidate",
+    "verify-anonymous-identity-continuity",
+    "establish-identified-identity",
+    "verify-published-identified-rehydration",
+    "replace-identified-install-with-candidate",
+    "verify-identified-identity-continuity"
+  ],
+  "expectedContinuity": {
+    "anonymousIdentityEstablished": true,
+    "publishedAnonymousIdentityRehydrated": true,
+    "anonymousIdentityPreserved": true,
+    "identifiedIdentityEstablished": true,
+    "publishedIdentifiedIdentityRehydrated": true,
+    "identifiedIdentityPreserved": true,
+    "applicationDataPreserved": true
+  },
+  "rawEvidence": {
+    "custody": "ephemeral-ci-workspace",
+    "status": "digested-not-retained"
+  }
+}
