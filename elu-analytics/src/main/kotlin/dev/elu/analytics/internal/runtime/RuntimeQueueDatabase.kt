@@ -1,6 +1,7 @@
 package dev.elu.analytics.internal.runtime
 
 import java.io.Closeable
+import java.io.IOException
 
 internal const val RUNTIME_STORAGE_SCHEMA_VERSION: Int = 1
 internal const val MAX_RUNTIME_QUEUE_RECORDS: Int = 10_000
@@ -32,6 +33,12 @@ internal class AmbiguousRuntimeCommitException(
     message: String,
     cause: Throwable? = null,
 ) : IllegalStateException(message, cause)
+
+/** The storage transaction explicitly rolled back; capture may revalidate once before retrying. */
+internal class ProvenNotCommittedRuntimeTransactionException(
+    message: String,
+    cause: Throwable? = null,
+) : IOException(message, cause)
 
 internal data class RuntimeStoredCore(
     val stateJson: ByteArray,
@@ -72,7 +79,9 @@ internal interface RuntimeQueueTransaction {
 internal interface RuntimeQueueDatabase : Closeable {
     /**
      * Executes [block] in a full synchronous transaction. A known pre-commit failure rolls back;
-     * an uncertain commit boundary throws [AmbiguousRuntimeCommitException].
+     * a mutated transaction with an explicitly confirmed rollback throws
+     * [ProvenNotCommittedRuntimeTransactionException], and an uncertain commit boundary throws
+     * [AmbiguousRuntimeCommitException].
      */
     fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T
 }

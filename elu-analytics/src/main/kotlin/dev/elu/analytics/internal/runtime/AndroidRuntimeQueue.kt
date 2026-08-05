@@ -1,6 +1,7 @@
 package dev.elu.analytics.internal.runtime
 
 import android.content.Context
+import android.os.SystemClock
 import dev.elu.analytics.internal.core.AndroidCoreStateStore
 import dev.elu.analytics.internal.core.CoreEpochClock
 import dev.elu.analytics.internal.core.CoreIdentifierGenerator
@@ -15,7 +16,6 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
-import java.security.MessageDigest
 import java.util.concurrent.Future
 
 /** Android-only factory kept separate from the pure-JVM queue algorithm. */
@@ -23,12 +23,12 @@ internal object AndroidRuntimeQueue {
     @Throws(IOException::class)
     fun open(
         context: Context,
-        storageNamespace: String,
+        constructorSiteKey: String,
         limits: RuntimeQueueLimits,
     ): Future<RuntimeQueueOwner> {
         val applicationContext = context.applicationContext ?: context
-        val databaseFile = databaseFileFor(applicationContext, storageNamespace).canonicalFile
-        val legacyFile = AndroidCoreStateStore.fileFor(applicationContext, storageNamespace).canonicalFile
+        val databaseFile = databaseFileFor(applicationContext, constructorSiteKey).canonicalFile
+        val legacyFile = AndroidCoreStateStore.fileFor(applicationContext, constructorSiteKey).canonicalFile
         val legacyStore = AndroidCoreStateStore.forProduction(legacyFile)
         val identifiers = UuidCoreIdentifierGenerator
         return RuntimeQueueOwner.open(
@@ -40,6 +40,8 @@ internal object AndroidRuntimeQueue {
             },
             identifiers = identifiers,
             leaseFactory = { AndroidFileOwnershipLease.acquire(File(databaseFile.path + ".lock")) },
+            trustedSiteKey = constructorSiteKey,
+            captureClock = AndroidRuntimeCaptureClock,
         )
     }
 
@@ -49,6 +51,8 @@ internal object AndroidRuntimeQueue {
         legacyStateLoader: () -> PersistedCoreState,
         identifiers: CoreIdentifierGenerator = UuidCoreIdentifierGenerator,
         faults: AndroidRuntimeDatabaseFaults = AndroidRuntimeDatabaseFaults.None,
+        trustedSiteKey: String? = null,
+        captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
     ): Future<RuntimeQueueOwner> {
         val canonical = databaseFile.canonicalFile
         return RuntimeQueueOwner.open(
@@ -58,6 +62,8 @@ internal object AndroidRuntimeQueue {
             legacyStateLoader = legacyStateLoader,
             identifiers = identifiers,
             leaseFactory = { AndroidFileOwnershipLease.acquire(File(canonical.path + ".lock")) },
+            trustedSiteKey = trustedSiteKey,
+            captureClock = captureClock,
         )
     }
 
@@ -72,15 +78,10 @@ internal object AndroidRuntimeQueue {
 
     internal fun databaseFileFor(
         context: Context,
-        storageNamespace: String,
+        constructorSiteKey: String,
     ): File {
-        require(storageNamespace.isNotEmpty()) { "storageNamespace must not be empty" }
-        val digest =
-            MessageDigest
-                .getInstance("SHA-256")
-                .digest(storageNamespace.toByteArray(Charsets.UTF_8))
-                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-        return File(File(context.noBackupFilesDir, "elu-analytics/runtime"), "$digest-v1.sqlite")
+        val siteDirectory = RuntimeSiteNamespace.directory(constructorSiteKey)
+        return File(File(File(context.noBackupFilesDir, "elu-analytics/runtime"), siteDirectory), "queue-v1.sqlite")
     }
 
     /**
@@ -100,6 +101,12 @@ internal object AndroidRuntimeQueue {
             return CoreStateWriteOutcome.Durable
         }
     }
+}
+
+private object AndroidRuntimeCaptureClock : RuntimeCaptureClock {
+    override fun wallNowEpochMillis(): Long = System.currentTimeMillis()
+
+    override fun elapsedRealtimeNanos(): Long = SystemClock.elapsedRealtimeNanos()
 }
 
 private class AndroidFileOwnershipLease private constructor(

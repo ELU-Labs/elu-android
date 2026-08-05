@@ -59,9 +59,11 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             }
             return result
         } catch (error: Throwable) {
+            var rollbackReported = false
             if (sqlite.inTransaction()) {
                 try {
                     sqlite.endTransaction()
+                    rollbackReported = !markedSuccessful
                 } catch (endError: Throwable) {
                     if (markedSuccessful) {
                         throw AmbiguousRuntimeCommitException(
@@ -69,8 +71,18 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                             endError,
                         ).apply { addSuppressed(error) }
                     }
-                    error.addSuppressed(endError)
+                    throw AmbiguousRuntimeCommitException(
+                        "SQLite could not prove that its unsuccessful transaction rolled back",
+                        endError,
+                    ).apply { addSuppressed(error) }
                 }
+            }
+            if (transaction.mutated && !markedSuccessful && rollbackReported) {
+                if (error is ProvenNotCommittedRuntimeTransactionException) throw error
+                throw ProvenNotCommittedRuntimeTransactionException(
+                    "SQLite explicitly rolled back a mutated runtime transaction",
+                    error,
+                )
             }
             throw error
         }

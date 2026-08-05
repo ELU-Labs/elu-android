@@ -3,6 +3,7 @@ package dev.elu.analytics.internal.runtime
 import android.database.sqlite.SQLiteDatabase
 import android.os.Looper
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.elu.analytics.internal.config.V1StrictCanonicalJson
 import dev.elu.analytics.internal.core.CoreIdentifierGenerator
 import dev.elu.analytics.internal.core.FlagContextState
 import dev.elu.analytics.internal.core.IdentityState
@@ -12,12 +13,15 @@ import dev.elu.analytics.internal.core.SessionState
 import dev.elu.analytics.internal.core.StreamState
 import java.io.File
 import java.io.IOException
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -41,6 +45,20 @@ class AndroidRuntimeQueueInstrumentationTest {
         owners.asReversed().forEach { owner -> runCatching { owner.closeAsync().await() } }
         RuntimeQueueOwner.clearOwnershipForTesting()
         testDirectories.asReversed().forEach { directory -> directory.deleteRecursively() }
+    }
+
+    @Test
+    fun constructorSiteKeySelectsExactHashedDirectoryWithoutNormalization() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val first = AndroidRuntimeQueue.databaseFileFor(context, "elu_pk_test_capture")
+        val other = AndroidRuntimeQueue.databaseFileFor(context, " elu_pk_test_capture ")
+
+        assertEquals(
+            "site-0d28cb28b0d301938550ddaf297a1c9b59a78c1d02534cf2be40aef423d6b943",
+            first.parentFile?.name,
+        )
+        assertEquals("queue-v1.sqlite", first.name)
+        assertNotEquals(first.parentFile?.name, other.parentFile?.name)
     }
 
     @Test
@@ -88,6 +106,62 @@ class AndroidRuntimeQueueInstrumentationTest {
             }
         assertEquals(ids, reopened.peek(10, Long.MAX_VALUE).await().map { it.recordId })
         assertEquals(2L, reopened.snapshot().await().state.stream.nextSequence)
+    }
+
+    @Test
+    fun captureAuthorityAtomicallyCommitsSessionAndEventAfterRealSQLiteRollbackThenReopens() {
+        val file = databaseFile()
+        val faults = RecordingFaults()
+        val identifiers = CountingIdentifiers()
+        val clock = FixedCaptureClock(Instant.parse("2026-08-05T00:01:00Z").toEpochMilli(), 1_000_000_000L)
+        val owner =
+            open(
+                file = file,
+                identifiers = identifiers,
+                faults = faults,
+                stateLoader = ::freshState,
+                trustedSiteKey = "elu_pk_test_capture",
+                captureClock = clock,
+            )
+        assertTrue(
+            owner.submitCaptureAuthority(captureConfig(), capturePrivacy()).await() is
+                RuntimeCaptureAuthorityUpdateResult.Activated,
+        )
+
+        val commitsBeforeCapture = faults.beforeCommitCalls.get()
+        faults.failBeforeCommit.set(true)
+        val accepted =
+            owner.capture(
+                RuntimeCaptureCommand(
+                    kind = RuntimeEventKind.CAPTURE,
+                    name = "instrumented-atomic-capture",
+                    occurredAt = "2026-08-05T00:01:01.000Z",
+                    properties = mapOf("source" to "instrumentation"),
+                    versions = versions(),
+                ),
+            ).await() as RuntimeCaptureResult.Accepted
+        assertEquals(commitsBeforeCapture + 2, faults.beforeCommitCalls.get())
+        assertEquals(1, accepted.snapshot.queuedCount)
+        assertEquals(1L, accepted.snapshot.state.stream.nextSequence)
+        assertEquals(accepted.record.record.sessionId, accepted.snapshot.state.identity.session?.id)
+        assertEquals("instrumentation", accepted.record.record.properties["source"])
+        val recordId = accepted.record.record.eventId
+
+        owner.closeAsync().await()
+        owners.remove(owner)
+        val reopened =
+            open(
+                file = file,
+                identifiers = identifiers,
+                faults = RecordingFaults(),
+                stateLoader = { error("Legacy state must not be read after capture commit") },
+                trustedSiteKey = "elu_pk_test_capture",
+                captureClock = clock,
+            )
+        val persisted = reopened.peek(1, Long.MAX_VALUE).await().single() as RuntimeQueuedRecord.Event
+        assertEquals(recordId, persisted.record.eventId)
+        assertEquals(persisted.record.sessionId, reopened.snapshot().await().state.identity.session?.id)
+        assertEquals(1, reopened.snapshot().await().queuedCount)
     }
 
     @Test
@@ -267,6 +341,8 @@ class AndroidRuntimeQueueInstrumentationTest {
         identifiers: CountingIdentifiers,
         faults: RecordingFaults,
         stateLoader: () -> PersistedCoreState,
+        trustedSiteKey: String? = null,
+        captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
     ): RuntimeQueueOwner {
         val owner =
             AndroidRuntimeQueue.openForTesting(
@@ -275,6 +351,8 @@ class AndroidRuntimeQueueInstrumentationTest {
                 legacyStateLoader = stateLoader,
                 identifiers = identifiers,
                 faults = faults,
+                trustedSiteKey = trustedSiteKey,
+                captureClock = captureClock,
             ).await()
         owners += owner
         return owner
@@ -332,6 +410,109 @@ class AndroidRuntimeQueueInstrumentationTest {
             facade = RuntimeVersionComponent("Elu", "0.1.0"),
             build = "instrumentation",
         )
+
+    private fun captureConfig(): String =
+        JSONObject()
+            .put("schemaVersion", 1)
+            .put("revision", "instrumentation-config-1")
+            .put("issuedAt", "2026-08-05T00:00:00.000Z")
+            .put("expiresAt", "2026-08-05T00:05:00.000Z")
+            .put("status", "enabled")
+            .put("site", JSONObject().put("id", "site_instrumentation"))
+            .put(
+                "endpoints",
+                JSONObject()
+                    .put("events", "https://ingest.elu.dev/v1/events")
+                    .put("flags", "https://ingest.elu.dev/v1/flags"),
+            ).put(
+                "privacy",
+                JSONObject()
+                    .put("schemaVersion", 1)
+                    .put("revision", "privacy-instrumentation-1")
+                    .put("capture", JSONObject().put("enabled", true))
+                    .put(
+                        "replay",
+                        JSONObject()
+                            .put("enabled", false)
+                            .put("sampleRate", 0)
+                            .put("minimumDurationSeconds", 0)
+                            .put("maximumDurationSeconds", 0),
+                    ).put(
+                        "masking",
+                        JSONObject()
+                            .put("text", "sensitive")
+                            .put("inputs", "all")
+                            .put("images", "block")
+                            .put("secureInputsMasked", true),
+                    ).put("regionPolicy", JSONObject().put("mode", "allow")),
+            ).put(
+                "features",
+                JSONObject()
+                    .put("capture", true)
+                    .put("replay", false)
+                    .put("flags", false)
+                    .put("assets", false),
+            ).put(
+                "capabilities",
+                JSONObject()
+                    .put(
+                        "replay",
+                        JSONObject()
+                            .put("acceptedCodecs", JSONArray())
+                            .put("acceptedCompressions", JSONArray()),
+                    ),
+            ).put(
+                "session",
+                JSONObject()
+                    .put("idleTimeoutSeconds", 1_800)
+                    .put("maximumDurationSeconds", 86_400),
+            ).put(
+                "limits",
+                JSONObject()
+                    .put("eventBatchCount", 100)
+                    .put("eventBatchBytes", 1_048_576)
+                    .put("replayChunkBytes", 5_242_880)
+                    .put("queueBytes", 16_777_216),
+            ).toString()
+
+    private fun capturePrivacy(): String {
+        val json =
+            JSONObject()
+                .put("schemaVersion", 1)
+                .put("policyRevision", "privacy-instrumentation-1")
+                .put("contextRevision", 0)
+                .put("effectivePolicyHash", "sha256:" + "0".repeat(64))
+                .put(
+                    "onDeviceDecision",
+                    JSONObject()
+                        .put("decision", "allow")
+                        .put("source", "local-consent")
+                        .put("evaluatedAt", "2026-08-05T00:00:00.000Z"),
+                ).put("captureAllowed", true)
+                .put("replayAllowed", false)
+                .put("replaySampled", false)
+                .put("identityOptedOut", false)
+                .put("maskingValidated", true)
+                .put("replaySessionEligible", false)
+                .put("replayBudgetRemainingSeconds", 0)
+                .put("replayTransport", JSONObject.NULL)
+                .put(
+                    "effectiveMasking",
+                    JSONObject()
+                        .put("text", "sensitive")
+                        .put("inputs", "all")
+                        .put("images", "block")
+                        .put("secureInputsMasked", true)
+                        .put("platformFallbackApplied", true),
+                )
+        val root = V1StrictCanonicalJson.parse(json.toString()) as V1StrictCanonicalJson.Value.ObjectValue
+        val withoutHash =
+            V1StrictCanonicalJson.Value.ObjectValue(
+                root.members.filterNot { member -> member.first == "effectivePolicyHash" },
+            )
+        json.put("effectivePolicyHash", V1StrictCanonicalJson.sha256(withoutHash))
+        return json.toString()
+    }
 
     private fun freshState(): PersistedCoreState =
         PersistedCoreState(
@@ -398,6 +579,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         val failAfterCommit = AtomicBoolean()
         val callbackThreads = mutableListOf<Thread>()
         val connectionSettings = mutableListOf<AndroidRuntimeConnectionSettings>()
+        val beforeCommitCalls = AtomicInteger()
 
         override fun connectionConfigured(settings: AndroidRuntimeConnectionSettings) {
             callbackThreads += Thread.currentThread()
@@ -405,6 +587,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         }
 
         override fun beforeCommit() {
+            beforeCommitCalls.incrementAndGet()
             if (failBeforeCommit.compareAndSet(true, false)) {
                 callbackThreads += Thread.currentThread()
                 throw IOException("Injected pre-commit failure")
@@ -417,6 +600,15 @@ class AndroidRuntimeQueueInstrumentationTest {
                 throw IOException("Injected ambiguous post-commit failure")
             }
         }
+    }
+
+    private class FixedCaptureClock(
+        private val wallEpochMillis: Long,
+        private val monotonicNanos: Long,
+    ) : RuntimeCaptureClock {
+        override fun wallNowEpochMillis(): Long = wallEpochMillis
+
+        override fun elapsedRealtimeNanos(): Long = monotonicNanos
     }
 
     private companion object {
