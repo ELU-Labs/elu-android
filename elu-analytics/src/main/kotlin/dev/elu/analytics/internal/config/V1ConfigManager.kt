@@ -97,6 +97,10 @@ internal class V1ConfigManager(
                 revision = config.revision,
                 issuedAt = config.issuedAt,
                 expiresAt = config.expiresAt,
+                issuedAtInstant = config.issuedAtInstant,
+                expiresAtInstant = config.expiresAtInstant,
+                configSemanticHash = config.configSemanticHash,
+                policySourceHash = checkNotNull(config.policySourceHash),
                 siteId = checkNotNull(config.siteId),
                 endpoints = endpoints,
                 privacy = policy,
@@ -150,7 +154,7 @@ internal class V1ConfigManager(
             val order = boundary.issuedAtInstant.compareTo(retained.issuedAtInstant)
             if (order < 0) return updateRejected(V1ConfigRejection.STALE)
             if (order == 0) {
-                if (boundary.revision != retained.revision || boundary.serialized != retained.serialized) {
+                if (boundary.configSemanticHash != retained.configSemanticHash) {
                     activeConfig = null
                     newestBoundaryPoisoned = true
                     newestOutcome = updateRejected(V1ConfigRejection.CONFLICT)
@@ -390,6 +394,7 @@ internal class V1ConfigManager(
             issuedAtInstant = issuedAtInstant,
             expiresAtInstant = expiresAtInstant,
             serialized = serialized,
+            configSemanticHash = configSemanticHash,
         )
 
     private fun rejected(reason: V1ConfigRejection): V1ConfigResolution = V1ConfigResolution.Rejected(reason)

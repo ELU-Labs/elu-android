@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.config
 
+import java.math.BigInteger
 import java.net.URI
 
 /** The frozen ELU SDK semantic/configuration schema major. */
@@ -68,6 +69,10 @@ internal data class V1AuthorizedConfig(
     val revision: String,
     val issuedAt: String,
     val expiresAt: String,
+    val issuedAtInstant: V1ExactTimestamp,
+    val expiresAtInstant: V1ExactTimestamp,
+    val configSemanticHash: String,
+    val policySourceHash: String,
     val siteId: String,
     val endpoints: V1ResolvedEndpointSet,
     val privacy: V1ServerPrivacyPolicy,
@@ -158,6 +163,8 @@ internal data class V1ParsedConfig(
     val session: V1SessionConfiguration?,
     val limits: V1ConfigLimits?,
     val serialized: String,
+    val configSemanticHash: String,
+    val policySourceHash: String?,
 )
 
 /** Trusted ordering envelope retained even when the document body fails a nested policy check. */
@@ -166,6 +173,7 @@ internal data class V1ParsedConfigBoundary(
     val issuedAtInstant: V1ExactTimestamp,
     val expiresAtInstant: V1ExactTimestamp,
     val serialized: String,
+    val configSemanticHash: String,
 )
 
 /** Exact RFC 3339 comparison value; fractions are never rounded to Android clock precision. */
@@ -192,6 +200,28 @@ internal class V1ExactTimestamp private constructor(
         val milliseconds = fractionalDigits.take(3).padEnd(3, '0').ifEmpty { "0" }.toLong()
         val wholeSecond = if (isLeapSecond) Math.addExact(epochWholeSecond, 1L) else epochWholeSecond
         return Math.addExact(Math.multiplyExact(wholeSecond, 1_000L), milliseconds)
+    }
+
+    /**
+     * Exact non-negative duration floored to nanoseconds. Leap-second arithmetic is deliberately
+     * unsupported so an authority lease can fail closed instead of silently extending.
+     */
+    fun elapsedNanosecondsFloorSince(earlier: V1ExactTimestamp): Long? {
+        if (isLeapSecond || earlier.isLeapSecond || this < earlier) return null
+        val scale = maxOf(fractionalDigits.length, earlier.fractionalDigits.length, 9)
+        val unit = BigInteger.TEN.pow(scale)
+        fun scaled(timestamp: V1ExactTimestamp): BigInteger {
+            val seconds = BigInteger.valueOf(timestamp.epochWholeSecond).multiply(unit)
+            val fraction =
+                timestamp.fractionalDigits
+                    .padEnd(scale, '0')
+                    .ifEmpty { "0" }
+                    .let(::BigInteger)
+            return seconds.add(fraction)
+        }
+        val scaledDifference = scaled(this).subtract(scaled(earlier))
+        val nanos = scaledDifference.divide(BigInteger.TEN.pow(scale - 9))
+        return if (nanos > BigInteger.valueOf(Long.MAX_VALUE)) Long.MAX_VALUE else nanos.toLong()
     }
 
     companion object {

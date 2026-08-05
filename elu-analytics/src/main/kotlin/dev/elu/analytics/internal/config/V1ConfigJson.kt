@@ -70,12 +70,15 @@ internal object V1ConfigJson {
     private val effectiveMaskingRequired =
         setOf("text", "inputs", "images", "secureInputsMasked", "platformFallbackApplied")
 
-    fun parseConfigBoundary(body: String?): V1ParsedConfigBoundary =
-        parseConfigBoundary(parseRoot(body, MAX_CONFIG_BYTES, "config"))
+    fun parseConfigBoundary(body: String?): V1ParsedConfigBoundary {
+        val canonical = canonicalDocument(body, MAX_CONFIG_BYTES, "config")
+        return parseConfigBoundary(parseRoot(body, MAX_CONFIG_BYTES, "config"), canonical)
+    }
 
     fun parseConfig(body: String?): V1ParsedConfig {
+        val canonical = canonicalDocument(body, MAX_CONFIG_BYTES, "config")
         val root = parseRoot(body, MAX_CONFIG_BYTES, "config")
-        val boundary = parseConfigBoundary(root)
+        val boundary = parseConfigBoundary(root, canonical)
         val revision = boundary.revision
         val issuedAt = requiredString(root, "issuedAt", 1, Int.MAX_VALUE, "config")
         val issuedAtInstant = boundary.issuedAtInstant
@@ -127,10 +130,18 @@ internal object V1ConfigJson {
             session = session,
             limits = limits,
             serialized = boundary.serialized,
+            configSemanticHash = boundary.configSemanticHash,
+            policySourceHash =
+                (canonical.value as V1StrictCanonicalJson.Value.ObjectValue)
+                    .member("privacy")
+                    ?.let(V1StrictCanonicalJson::sha256),
         )
     }
 
-    private fun parseConfigBoundary(root: JSONObject): V1ParsedConfigBoundary {
+    private fun parseConfigBoundary(
+        root: JSONObject,
+        canonical: CanonicalDocument,
+    ): V1ParsedConfigBoundary {
         expectFields(root, configRequired, configOptional, "config")
         readSchemaVersion(root, "config")
         val revision = requiredString(root, "revision", 1, 128, "config")
@@ -146,7 +157,8 @@ internal object V1ConfigJson {
             revision = revision,
             issuedAtInstant = issuedAtInstant,
             expiresAtInstant = expiresAtInstant,
-            serialized = root.toString(),
+            serialized = canonical.serialized,
+            configSemanticHash = V1StrictCanonicalJson.sha256(canonical.value),
         )
     }
 
@@ -194,6 +206,9 @@ internal object V1ConfigJson {
             effectiveMasking = effectiveMasking,
         )
     }
+
+    internal fun parseExactTimestamp(value: String): V1ExactTimestamp =
+        parseRfc3339(value, "runtime timestamp")
 
     private fun parseSite(json: JSONObject): String {
         expectFields(json, siteRequired, emptySet(), "config.site")
@@ -407,6 +422,20 @@ internal object V1ConfigJson {
         } catch (error: JSONException) {
             malformed("$path body is not valid JSON", error)
         }
+    }
+
+    private fun canonicalDocument(
+        body: String?,
+        maximumBytes: Int,
+        path: String,
+    ): CanonicalDocument {
+        if (body.isNullOrEmpty()) malformed("$path body is empty")
+        if (body.toByteArray(StandardCharsets.UTF_8).size > maximumBytes) {
+            malformed("$path body exceeds $maximumBytes bytes")
+        }
+        val value = V1StrictCanonicalJson.parse(body)
+        if (value !is V1StrictCanonicalJson.Value.ObjectValue) malformed("$path body must contain one object")
+        return CanonicalDocument(value, V1StrictCanonicalJson.canonicalize(value))
     }
 
     private fun readSchemaVersion(
@@ -708,6 +737,11 @@ internal object V1ConfigJson {
                 "([01]\\d|2[0-3]):([0-5]\\d):([0-5]\\d|60)(?:\\.(\\d+))?" +
                 "([Zz]|[+-]\\d{2}:\\d{2})$",
         )
+
+    private data class CanonicalDocument(
+        val value: V1StrictCanonicalJson.Value,
+        val serialized: String,
+    )
 }
 
 /** Android's platform JSONTokener is deliberately lenient; enforce RFC 8259 before using it. */

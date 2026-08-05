@@ -1,8 +1,21 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.config.V1ChannelAuthorizationStatus
+import dev.elu.analytics.internal.config.V1ChannelAuthorizationReason
+import dev.elu.analytics.internal.config.V1ConfigJson
+import dev.elu.analytics.internal.config.V1ConfigManager
+import dev.elu.analytics.internal.config.V1ConfigRejection
+import dev.elu.analytics.internal.config.V1ConfigResolution
+import dev.elu.analytics.internal.config.V1ConfigStatus
+import dev.elu.analytics.internal.config.V1ConfigUpdateResult
+import dev.elu.analytics.internal.config.V1ExactTimestamp
+import dev.elu.analytics.internal.config.V1MalformedConfigException
+import dev.elu.analytics.internal.config.V1ParsedConfigBoundary
+import dev.elu.analytics.internal.config.V1UnsupportedConfigSchemaException
 import dev.elu.analytics.internal.core.CoreIdentifierGenerator
 import dev.elu.analytics.internal.core.CoreStateCodec
 import dev.elu.analytics.internal.core.FlagContextState
+import dev.elu.analytics.internal.core.JsonValues
 import dev.elu.analytics.internal.core.PersistedCoreState
 import dev.elu.analytics.internal.core.SessionLifecycle
 import dev.elu.analytics.internal.core.SessionState
@@ -93,6 +106,8 @@ internal class RuntimeQueueOwner private constructor(
     private val executor: ExecutorService,
     private val workerThread: Thread,
     private val leaseFactory: () -> RuntimeOwnershipLease,
+    private val trustedSiteKey: String?,
+    private val captureClock: RuntimeCaptureClock,
 ) {
     private var database: RuntimeQueueDatabase? = null
     private var lease: RuntimeOwnershipLease? = null
@@ -100,6 +115,11 @@ internal class RuntimeQueueOwner private constructor(
     private var poison: Throwable? = null
     private val lifecycleLock = Any()
     private var acceptingTasks: Boolean = true
+    private val configManager = V1ConfigManager()
+    private val ownerNamespaceHash: String? = trustedSiteKey?.let(RuntimeSiteNamespace::digest)
+    private var pinnedConfigSiteId: String? = null
+    private var captureAuthority: RuntimeCaptureAuthorityState = RuntimeCaptureAuthorityState.Absent
+    private var authorityEpoch: Long = 0
 
     /** Blocking adapters must never wait for a task while already running on this worker. */
     fun isCurrentThreadWorker(): Boolean = Thread.currentThread() === workerThread
@@ -124,11 +144,66 @@ internal class RuntimeQueueOwner private constructor(
         require(drafts.size in 1..MAX_RUNTIME_APPEND_RECORDS) {
             "Mutation append must contain 1..$MAX_RUNTIME_APPEND_RECORDS mutations"
         }
-        return submit { appendOnWorker(AppendRequest.Mutations(drafts.toList())) }
+        return submit {
+            appendOnWorker(AppendRequest.Mutations(drafts.toList())).also { result ->
+                if (result is RuntimeAppendResult.Accepted) invalidateAuthorizedContext()
+            }
+        }
     }
 
     fun applyLocal(change: RuntimeLocalStateChange): Future<RuntimeAppendResult> =
-        submit { appendOnWorker(AppendRequest.Local(change)) }
+        submit {
+            appendOnWorker(AppendRequest.Local(change)).also { result ->
+                if (result is RuntimeAppendResult.Accepted && change !is RuntimeLocalStateChange.MarkBackgrounded) {
+                    invalidateAuthorizedContext()
+                }
+            }
+        }
+
+    /** Raw config/privacy validation and activation execute on this queue's one owner lane. */
+    fun submitCaptureAuthority(
+        configBody: String?,
+        effectivePrivacyBody: String?,
+    ): Future<RuntimeCaptureAuthorityUpdateResult> =
+        submit { activateCaptureAuthorityOnWorker(configBody, effectivePrivacyBody) }
+
+    /** Creates and consumes capture admission inside this one serialized command. */
+    fun capture(command: RuntimeCaptureCommand): Future<RuntimeCaptureResult> {
+        val copy =
+            command.copy(
+                properties = Collections.unmodifiableMap(LinkedHashMap(command.properties)),
+            )
+        return submit { captureOnWorker(copy) }
+    }
+
+    fun registerSuperProperties(
+        properties: Map<String, Any?>,
+        occurredAt: String,
+    ): Future<RuntimeAppendResult> =
+        applyLocal(
+            RuntimeLocalStateChange.RegisterSuperProperties(
+                Collections.unmodifiableMap(LinkedHashMap(properties)),
+                occurredAt,
+            ),
+        )
+
+    fun unregisterSuperProperties(
+        keys: List<String>,
+        occurredAt: String,
+    ): Future<RuntimeAppendResult> =
+        applyLocal(RuntimeLocalStateChange.UnregisterSuperProperties(keys.toList(), occurredAt))
+
+    fun markBackgrounded(occurredAt: String): Future<RuntimeAppendResult> =
+        applyLocal(RuntimeLocalStateChange.MarkBackgrounded(occurredAt))
+
+    internal fun captureAuthorityForTesting(): Future<RuntimeCaptureAuthorityState> =
+        submit { captureAuthority }
+
+    internal fun pinnedConfigSiteForTesting(): Future<String?> =
+        submit { pinnedConfigSiteId }
+
+    internal fun replaceCaptureAuthorityForTesting(authority: RuntimeCaptureAuthorityState): Future<Unit> =
+        submit { captureAuthority = authority }
 
     /** Bounded FIFO read. A first record larger than [maximumBytes] fails explicitly. */
     fun peek(
@@ -173,13 +248,31 @@ internal class RuntimeQueueOwner private constructor(
         assertWorkerThread()
         lease = leaseFactory()
         database = databaseFactory()
-        val existing = database().transaction { transaction -> loadValidated(transaction, validatePayloads = true) }
+        val existing =
+            try {
+                database().transaction { transaction ->
+                    loadValidated(transaction, validatePayloads = true)?.let { snapshot ->
+                        normalizeLegacyOptedOutSession(transaction, snapshot)
+                    }
+                }
+            } catch (ambiguous: AmbiguousRuntimeCommitException) {
+                val reopened = reopenValidated(ambiguous)
+                if (reopened == null) {
+                    null
+                } else {
+                    database().transaction { transaction ->
+                        val current = loadValidated(transaction, validatePayloads = true)
+                            ?: corrupt("Runtime core disappeared during legacy normalization")
+                        normalizeLegacyOptedOutSession(transaction, current)
+                    }
+                }
+            }
         if (existing != null) {
             loaded = existing
             return
         }
 
-        val imported = canonicalState(legacyStateLoader())
+        val imported = canonicalState(normalizeLegacyOptedOutSession(legacyStateLoader()))
         validateStateInvariants(imported.first)
         val candidate =
             LoadedSnapshot(
@@ -211,6 +304,618 @@ internal class RuntimeQueueOwner private constructor(
             }
         }
     }
+
+    private fun normalizeLegacyOptedOutSession(
+        transaction: RuntimeQueueTransaction,
+        snapshot: LoadedSnapshot,
+    ): LoadedSnapshot {
+        if (!snapshot.state.identity.optedOut || snapshot.state.identity.session == null) return snapshot
+        val normalizedState = normalizeLegacyOptedOutSession(snapshot.state)
+        val canonical = canonicalState(normalizedState)
+        val normalized = snapshot.copy(state = canonical.first, stateJson = canonical.second)
+        transaction.updateCore(normalized.storedCore())
+        return normalized
+    }
+
+    private fun normalizeLegacyOptedOutSession(state: PersistedCoreState): PersistedCoreState =
+        if (state.identity.optedOut && state.identity.session != null) {
+            state.copy(identity = state.identity.copy(session = null))
+        } else {
+            state
+        }
+
+    private fun activateCaptureAuthorityOnWorker(
+        configBody: String?,
+        effectivePrivacyBody: String?,
+    ): RuntimeCaptureAuthorityUpdateResult {
+        assertUsable()
+        requireCaptureRuntime()
+        val nowEpochMillis = captureClock.wallNowEpochMillis()
+        val parsedBoundary =
+            try {
+                V1ConfigJson.parseConfigBoundary(configBody)
+            } catch (_: V1MalformedConfigException) {
+                null
+            } catch (_: V1UnsupportedConfigSchemaException) {
+                null
+            }
+        return when (val update = configManager.install(configBody, nowEpochMillis)) {
+            is V1ConfigUpdateResult.Enabled -> {
+                val previousAuthority = captureAuthority
+                // install() has accepted a new executable candidate. Revoke the old authority
+                // before the first SQLite read or clock sample that can fail. Only a complete
+                // activation below may replace this non-executable latch.
+                captureAuthority =
+                    RuntimeCaptureAuthorityState.Pending(
+                        trustedConfigBoundary =
+                            parsedBoundary?.let { boundary ->
+                                boundary.issuedAtInstant to boundary.configSemanticHash
+                            },
+                    )
+                activateEnabledCaptureAuthority(
+                    effectivePrivacyBody = effectivePrivacyBody,
+                    parsedBoundary = parsedBoundary,
+                    previousAuthority = previousAuthority,
+                )
+            }
+            is V1ConfigUpdateResult.Inactive ->
+                terminateAuthority(
+                    reason =
+                        if (update.status == V1ConfigStatus.REVOKED) {
+                            RuntimeCaptureAuthorityTerminalReason.REVOKED
+                        } else {
+                            RuntimeCaptureAuthorityTerminalReason.DISABLED
+                        },
+                    boundary = parsedBoundary,
+                )
+            is V1ConfigUpdateResult.Rejected ->
+                terminateAuthority(
+                    reason = update.reason.toTerminalReason(),
+                    boundary = parsedBoundary,
+                )
+        }
+    }
+
+    private fun activateEnabledCaptureAuthority(
+        effectivePrivacyBody: String?,
+        parsedBoundary: V1ParsedConfigBoundary?,
+        previousAuthority: RuntimeCaptureAuthorityState,
+    ): RuntimeCaptureAuthorityUpdateResult {
+        // This origin is intentionally adjacent to the authoritative wall sample. The earlier
+        // wall read was only for config installation ordering; it grants no lease time.
+        val monotonicStartedAt = captureClock.elapsedRealtimeNanos()
+        val authoritativeWallMillis = captureClock.wallNowEpochMillis()
+        val exactNow = V1ExactTimestamp.fromEpochMillis(authoritativeWallMillis)
+        val stage =
+            database().transaction { transaction ->
+            val current = requireCurrent(transaction)
+            val resolution = configManager.authorize(effectivePrivacyBody, current.state.identity, authoritativeWallMillis)
+            if (resolution is V1ConfigResolution.Rejected) {
+                return@transaction CaptureAuthorityActivationStage.Terminate(
+                    reason = resolution.reason.toTerminalReason(),
+                    boundary = parsedBoundary,
+                    policySourceHash = null,
+                    contextRevision = current.state.identity.contextRevision,
+                    pinnedSiteId = null,
+                )
+            }
+            val config = (resolution as V1ConfigResolution.Authorized).config
+            val effectivePrivacy = config.effectivePrivacy
+            val pinned = pinnedConfigSiteId
+            if (pinned != null && pinned != config.siteId) {
+                return@transaction CaptureAuthorityActivationStage.Terminate(
+                    reason = RuntimeCaptureAuthorityTerminalReason.SITE_CHANGED,
+                    boundary = parsedBoundary,
+                    policySourceHash = config.policySourceHash,
+                    contextRevision = current.state.identity.contextRevision,
+                    pinnedSiteId = null,
+                )
+            }
+
+            val privacyTerminalReason =
+                when (config.captureAuthorization.status) {
+                    V1ChannelAuthorizationStatus.RESTRICTED -> RuntimeCaptureAuthorityTerminalReason.PRIVACY_BLOCKED
+                    V1ChannelAuthorizationStatus.INVALID ->
+                        if (
+                            config.captureAuthorization.reason == V1ChannelAuthorizationReason.CONTEXT_REVISION_MISMATCH &&
+                            effectivePrivacy != null &&
+                            effectivePrivacy.contextRevision < current.state.identity.contextRevision
+                        ) {
+                            RuntimeCaptureAuthorityTerminalReason.STALE
+                        } else {
+                            RuntimeCaptureAuthorityTerminalReason.MALFORMED
+                        }
+                    V1ChannelAuthorizationStatus.AUTHORIZED ->
+                        if (effectivePrivacy == null || config.endpoints.events == null || current.state.identity.optedOut) {
+                            RuntimeCaptureAuthorityTerminalReason.MALFORMED
+                        } else {
+                            null
+                        }
+                }
+            if (privacyTerminalReason != null) {
+                return@transaction CaptureAuthorityActivationStage.Terminate(
+                    reason = privacyTerminalReason,
+                    boundary = parsedBoundary,
+                    policySourceHash = config.policySourceHash,
+                    contextRevision =
+                        if (privacyTerminalReason == RuntimeCaptureAuthorityTerminalReason.STALE) {
+                            effectivePrivacy?.contextRevision
+                        } else {
+                            current.state.identity.contextRevision
+                        },
+                    // The config itself is fully validated. Publish its owner-lifetime site pin
+                    // only after the read transaction and post-sample both complete.
+                    pinnedSiteId = config.siteId,
+                )
+            }
+            checkNotNull(effectivePrivacy)
+
+            val previousTerminal = previousAuthority as? RuntimeCaptureAuthorityState.Terminal
+            if (
+                previousTerminal != null &&
+                previousTerminal.reason == RuntimeCaptureAuthorityTerminalReason.PRIVACY_BLOCKED &&
+                previousTerminal.trustedConfigBoundary?.second == config.configSemanticHash &&
+                (previousTerminal.contextRevision ?: Long.MAX_VALUE) >= effectivePrivacy.contextRevision
+            ) {
+                // At one immutable config and one decision witness, restriction dominates. A
+                // loosening needs either a newer config or a higher transaction-current context.
+                return@transaction CaptureAuthorityActivationStage.RestoreTerminal(previousTerminal, config.siteId)
+            }
+
+            if (exactNow >= config.expiresAtInstant) {
+                return@transaction CaptureAuthorityActivationStage.Terminate(
+                    RuntimeCaptureAuthorityTerminalReason.EXPIRED,
+                    parsedBoundary,
+                    config.policySourceHash,
+                    effectivePrivacy.contextRevision,
+                    config.siteId,
+                )
+            }
+            val durableFloor = durableWallFloor(transaction, current)
+            val wallRemaining = config.expiresAtInstant.elapsedNanosecondsFloorSince(exactNow)
+            val declaredLifetime = config.expiresAtInstant.elapsedNanosecondsFloorSince(config.issuedAtInstant)
+            val durableRemaining = config.expiresAtInstant.elapsedNanosecondsFloorSince(durableFloor)
+            if (wallRemaining == null || declaredLifetime == null || durableRemaining == null) {
+                return@transaction CaptureAuthorityActivationStage.Terminate(
+                    RuntimeCaptureAuthorityTerminalReason.MALFORMED,
+                    parsedBoundary,
+                    config.policySourceHash,
+                    effectivePrivacy.contextRevision,
+                    config.siteId,
+                )
+            }
+            val monotonicBudget = maxOf(0L, minOf(wallRemaining, declaredLifetime, durableRemaining))
+            if (monotonicBudget == 0L) {
+                return@transaction CaptureAuthorityActivationStage.Terminate(
+                    RuntimeCaptureAuthorityTerminalReason.EXPIRED,
+                    parsedBoundary,
+                    config.policySourceHash,
+                    effectivePrivacy.contextRevision,
+                    config.siteId,
+                )
+            }
+
+            val authority =
+                RuntimeCaptureAuthorityState.Authorized(
+                    ownerEpoch = 0L,
+                    configIssuedAt = config.issuedAtInstant,
+                    configExpiresAt = config.expiresAtInstant,
+                    configSemanticHash = config.configSemanticHash,
+                    policySourceHash = config.policySourceHash,
+                    decisionHash = effectivePrivacy.effectivePolicyHash,
+                    ownerNamespaceHash = checkNotNull(ownerNamespaceHash),
+                    configSiteId = config.siteId,
+                    streamId = current.state.stream.streamId,
+                    identityRevision = current.state.identity.revision,
+                    contextRevision = current.state.identity.contextRevision,
+                    identityOptedOut = current.state.identity.optedOut,
+                    monotonicStartedAt = monotonicStartedAt,
+                    monotonicBudget = monotonicBudget,
+                    idleTimeoutSeconds = config.session.idleTimeoutSeconds,
+                    maximumDurationSeconds = config.session.maximumDurationSeconds,
+                )
+            CaptureAuthorityActivationStage.Activate(authority, config.siteId)
+        }
+
+        // A read-only SQLite transaction can still complete ambiguously. Nothing above mutates
+        // the published authority or site pin; an exception therefore leaves Pending installed.
+        val monotonicCompletedAt = captureClock.elapsedRealtimeNanos()
+        return when (stage) {
+            is CaptureAuthorityActivationStage.Activate -> {
+                if (leaseExpired(stage.authority.monotonicStartedAt, monotonicCompletedAt, stage.authority.monotonicBudget)) {
+                    pinnedConfigSiteId = stage.pinnedSiteId
+                    terminateAuthority(
+                        RuntimeCaptureAuthorityTerminalReason.EXPIRED,
+                        parsedBoundary,
+                        stage.authority.policySourceHash,
+                        stage.authority.contextRevision,
+                    )
+                } else {
+                    val authority = stage.authority.copy(ownerEpoch = nextAuthorityEpoch())
+                    pinnedConfigSiteId = stage.pinnedSiteId
+                    captureAuthority = authority
+                    RuntimeCaptureAuthorityUpdateResult.Activated(authority)
+                }
+            }
+            is CaptureAuthorityActivationStage.Terminate -> {
+                stage.pinnedSiteId?.let { pinnedConfigSiteId = it }
+                terminateAuthority(
+                    stage.reason,
+                    stage.boundary,
+                    stage.policySourceHash,
+                    stage.contextRevision,
+                )
+            }
+            is CaptureAuthorityActivationStage.RestoreTerminal -> {
+                pinnedConfigSiteId = stage.pinnedSiteId
+                captureAuthority = stage.authority
+                RuntimeCaptureAuthorityUpdateResult.Terminated(stage.authority)
+            }
+        }
+    }
+
+    private fun durableWallFloor(
+        transaction: RuntimeQueueTransaction,
+        current: LoadedSnapshot,
+    ): V1ExactTimestamp {
+        val timestamps = ArrayList<V1ExactTimestamp>()
+        timestamps += V1ConfigJson.parseExactTimestamp(current.state.identity.updatedAt)
+        current.state.identity.session?.let { session ->
+            timestamps += V1ConfigJson.parseExactTimestamp(session.startedAt)
+            timestamps += V1ConfigJson.parseExactTimestamp(session.lastActivityAt)
+            session.backgroundedAt?.let { timestamps += V1ConfigJson.parseExactTimestamp(it) }
+        }
+        if (current.queuedCount > 0) {
+            val tailSequence = Math.subtractExact(current.state.stream.nextSequence, 1L)
+            val tail = transaction.readRecord(tailSequence) ?: corrupt("Queue tail is missing")
+            val queued = validateStoredRecord(tail, current.state.stream.streamId)
+            val occurredAt =
+                when (queued) {
+                    is RuntimeQueuedRecord.Event -> queued.record.occurredAt
+                    is RuntimeQueuedRecord.Mutation -> queued.envelope.mutation.occurredAt
+                }
+            timestamps += V1ConfigJson.parseExactTimestamp(occurredAt)
+        }
+        return timestamps.maxOrNull() ?: V1ConfigJson.parseExactTimestamp(current.state.identity.updatedAt)
+    }
+
+    private fun captureOnWorker(command: RuntimeCaptureCommand): RuntimeCaptureResult {
+        assertUsable()
+        requireCaptureRuntime()
+        if (!isValidCaptureCommand(command)) {
+            return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
+        }
+        val captureProperties =
+            try {
+                JsonValues.objectValue(command.properties, "capture.properties").also { normalized ->
+                    requireCaptureUnicode(normalized, "capture.properties")
+                }
+            } catch (_: IllegalArgumentException) {
+                return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
+            }
+
+        var provenNotCommittedRetryUsed = false
+        while (true) {
+            var prepared: PreparedAppend? = null
+            try {
+                val outcome =
+                    database().transaction { transaction ->
+                        val before = requireCurrent(transaction)
+                        validateAppendBoundaries(transaction, before)
+                        captureAuthorityRejection(before)?.let { rejection ->
+                            return@transaction CaptureCommit(
+                                RuntimeCaptureResult.Rejected(rejection, before.publicSnapshot),
+                                published = null,
+                            )
+                        }
+                        val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
+                        val session = planCaptureSession(before.state, command.occurredAt, authority)
+                        val mergedProperties =
+                            LinkedHashMap(before.state.identity.superProperties).apply {
+                                putAll(captureProperties)
+                            }
+                        val draft =
+                            RuntimeRecordDraft.Event(
+                                kind = command.kind,
+                                name = command.name,
+                                occurredAt = command.occurredAt,
+                                expectedSessionId = session.id,
+                                properties = mergedProperties,
+                                versions = command.versions,
+                            )
+                        val created =
+                            prepareAppend(
+                                before,
+                                AppendRequest.Events(
+                                    RuntimeEventSessionUpdate.Replace(before.state.identity.session?.id, session),
+                                    listOf(draft),
+                                ),
+                            )
+                        if (created.rejection != null) {
+                            return@transaction CaptureCommit(
+                                RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.QUEUE_LIMIT, before.publicSnapshot),
+                                published = null,
+                            )
+                        }
+                        prepared = created
+                        // This is the final check after SQLite has begun its transaction and
+                        // immediately before the first queue/core write.
+                        captureAuthorityRejection(before)?.let { rejection ->
+                            return@transaction CaptureCommit(
+                                RuntimeCaptureResult.Rejected(rejection, before.publicSnapshot),
+                                published = null,
+                            )
+                        }
+                        commitPreparedAppend(transaction, created)
+                        val record = created.publicRecords.single() as RuntimeQueuedRecord.Event
+                        CaptureCommit(
+                            RuntimeCaptureResult.Accepted(record, created.after.publicSnapshot),
+                            published = created.after,
+                        )
+                    }
+                outcome.published?.let { loaded = it }
+                return outcome.result
+            } catch (invalid: IllegalArgumentException) {
+                return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
+            } catch (proven: ProvenNotCommittedRuntimeTransactionException) {
+                if (provenNotCommittedRetryUsed) throw proven
+                provenNotCommittedRetryUsed = true
+                // The next loop iteration rebuilds admission and the complete candidate against
+                // transaction-current state. No prepared record or session plan is reused.
+            } catch (ambiguous: AmbiguousRuntimeCommitException) {
+                val candidate = prepared ?: throw ambiguous
+                val reopened = reopenValidated(ambiguous)
+                    ?: poisonAndThrow(RuntimeQueueCorruptionException("Runtime core disappeared after an ambiguous capture", ambiguous))
+                when {
+                    viewsEqual(reopened, candidate.after) && recordsMatch(candidate.records) -> {
+                        loaded = reopened
+                        val record = candidate.publicRecords.single() as RuntimeQueuedRecord.Event
+                        return RuntimeCaptureResult.Accepted(record, reopened.publicSnapshot)
+                    }
+                    viewsEqual(reopened, candidate.before) && recordsAbsent(candidate.records) && !provenNotCommittedRetryUsed -> {
+                        loaded = reopened
+                        provenNotCommittedRetryUsed = true
+                        // The loop rebuilds admission and the session/event candidate, including
+                        // fresh wall/monotonic and identity/context checks.
+                    }
+                    else -> throw ambiguous
+                }
+            }
+        }
+    }
+
+    private fun captureAuthorityRejection(snapshot: LoadedSnapshot): RuntimeCaptureRejection? {
+        val identity = snapshot.state.identity
+        if (identity.optedOut) return RuntimeCaptureRejection.OPTED_OUT
+        val authority = captureAuthority
+        if (authority === RuntimeCaptureAuthorityState.Absent) return RuntimeCaptureRejection.AUTHORITY_ABSENT
+        if (authority is RuntimeCaptureAuthorityState.Pending) return RuntimeCaptureRejection.AUTHORITY_PENDING
+        if (authority is RuntimeCaptureAuthorityState.Terminal) {
+            return if (authority.reason == RuntimeCaptureAuthorityTerminalReason.STALE) {
+                RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED
+            } else {
+                RuntimeCaptureRejection.AUTHORITY_TERMINAL
+            }
+        }
+        authority as RuntimeCaptureAuthorityState.Authorized
+        if (
+            authority.ownerNamespaceHash != ownerNamespaceHash ||
+            authority.configSiteId != pinnedConfigSiteId ||
+            authority.streamId != snapshot.state.stream.streamId ||
+            authority.identityRevision != identity.revision ||
+            authority.contextRevision != identity.contextRevision ||
+            authority.identityOptedOut != identity.optedOut
+        ) {
+            return RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED
+        }
+        val wallNow = V1ExactTimestamp.fromEpochMillis(captureClock.wallNowEpochMillis())
+        if (
+            wallNow >= authority.configExpiresAt ||
+            leaseExpired(
+                authority.monotonicStartedAt,
+                captureClock.elapsedRealtimeNanos(),
+                authority.monotonicBudget,
+            )
+        ) {
+            terminateAuthority(
+                RuntimeCaptureAuthorityTerminalReason.EXPIRED,
+                boundary = null,
+                policySourceHash = authority.policySourceHash,
+                contextRevision = authority.contextRevision,
+            )
+            return RuntimeCaptureRejection.AUTHORITY_EXPIRED
+        }
+        return null
+    }
+
+    /** Budgets are bounded below Long.MAX_VALUE; negative deltas therefore fail closed. */
+    private fun leaseExpired(
+        startedAt: Long,
+        completedAt: Long,
+        budget: Long,
+    ): Boolean {
+        val elapsed = completedAt - startedAt
+        return elapsed < 0L || elapsed >= budget
+    }
+
+    private fun planCaptureSession(
+        state: PersistedCoreState,
+        occurredAt: String,
+        authority: RuntimeCaptureAuthorityState.Authorized,
+    ): SessionState {
+        requireTimestampNotBefore(occurredAt, state.identity.updatedAt, "Capture occurredAt")
+        val current = state.identity.session
+        if (current == null) return newCaptureSession(occurredAt, authority.idleTimeoutSeconds, null)
+
+        validateStoredSession(current, state.identity.updatedAt)
+        requireTimestampNotBefore(occurredAt, current.lastActivityAt, "Capture occurredAt")
+        val effectiveTimeout = minOf(current.timeoutSeconds, authority.idleTimeoutSeconds)
+        val idleExpired = RuntimeRecordCodec.compareElapsedSeconds(occurredAt, current.lastActivityAt, effectiveTimeout) >= 0
+        val maximumExpired =
+            RuntimeRecordCodec.compareElapsedSeconds(
+                occurredAt,
+                current.startedAt,
+                authority.maximumDurationSeconds,
+            ) >= 0
+        if (idleExpired || maximumExpired) {
+            return newCaptureSession(occurredAt, authority.idleTimeoutSeconds, current.id)
+        }
+        return current.copy(
+            lastActivityAt = occurredAt,
+            timeoutSeconds = effectiveTimeout,
+            lifecycle = SessionLifecycle.ACTIVE,
+            backgroundedAt = null,
+        )
+    }
+
+    private fun newCaptureSession(
+        occurredAt: String,
+        timeoutSeconds: Int,
+        excluding: String?,
+    ): SessionState {
+        val id = nextSessionId(excluding)
+        return SessionState(
+            id = id,
+            startedAt = occurredAt,
+            lastActivityAt = occurredAt,
+            timeoutSeconds = timeoutSeconds,
+            lifecycle = SessionLifecycle.ACTIVE,
+            backgroundedAt = null,
+        )
+    }
+
+    private fun nextSessionId(excluding: String?): String {
+        repeat(MAX_ID_GENERATION_ATTEMPTS) {
+            val candidate = identifiers.next("session_")
+            val length = candidate.codePointCount(0, candidate.length)
+            if (length in 1..256 && candidate != excluding) return candidate
+        }
+        throw IllegalStateException("Identifier generator could not create a session ID")
+    }
+
+    private fun isValidCaptureCommand(command: RuntimeCaptureCommand): Boolean {
+        if (command.kind != RuntimeEventKind.CAPTURE && command.kind != RuntimeEventKind.SCREEN) return false
+        val nameLength = command.name.codePointCount(0, command.name.length)
+        if (nameLength !in 1..512) return false
+        if (!hasWellFormedUnicode(command.name)) return false
+        return try {
+            V1ConfigJson.parseExactTimestamp(command.occurredAt)
+            true
+        } catch (_: IllegalArgumentException) {
+            false
+        }
+    }
+
+    private fun requireCaptureUnicode(value: Any?, path: String) {
+        when (value) {
+            null, is Boolean, is Number -> Unit
+            is String -> require(hasWellFormedUnicode(value)) { "$path contains an unpaired Unicode surrogate" }
+            is Map<*, *> ->
+                value.forEach { (key, child) ->
+                    require(key is String && hasWellFormedUnicode(key)) {
+                        "$path contains an invalid object key"
+                    }
+                    requireCaptureUnicode(child, "$path.$key")
+                }
+            is List<*> -> value.forEachIndexed { index, child -> requireCaptureUnicode(child, "$path[$index]") }
+            else -> throw IllegalArgumentException("$path contains a non-JSON value")
+        }
+    }
+
+    private fun hasWellFormedUnicode(value: String): Boolean {
+        var index = 0
+        while (index < value.length) {
+            val character = value[index]
+            when {
+                Character.isHighSurrogate(character) -> {
+                    if (index + 1 >= value.length || !Character.isLowSurrogate(value[index + 1])) return false
+                    index += 2
+                }
+                Character.isLowSurrogate(character) -> return false
+                else -> index += 1
+            }
+        }
+        return true
+    }
+
+    private fun recordsAbsent(records: List<RuntimeStoredRecord>): Boolean =
+        database().transaction { transaction -> records.all { transaction.readRecord(it.sequence) == null } }
+
+    private fun requireCaptureRuntime() {
+        check(trustedSiteKey != null && ownerNamespaceHash != null) {
+            "Capture authority requires a trusted constructor site key"
+        }
+    }
+
+    private fun terminateAuthority(
+        reason: RuntimeCaptureAuthorityTerminalReason,
+        boundary: V1ParsedConfigBoundary?,
+        policySourceHash: String? = null,
+        contextRevision: Long? = null,
+    ): RuntimeCaptureAuthorityUpdateResult.Terminated {
+        val previous = captureAuthority
+        val previousBoundary =
+            (previous as? RuntimeCaptureAuthorityState.Authorized)?.let {
+                it.configIssuedAt to it.configSemanticHash
+            } ?: (previous as? RuntimeCaptureAuthorityState.Terminal)?.trustedConfigBoundary
+                ?: (previous as? RuntimeCaptureAuthorityState.Pending)?.trustedConfigBoundary
+        val candidateBoundary = boundary?.let { it.issuedAtInstant to it.configSemanticHash }
+        val trustedBoundary =
+            when {
+                candidateBoundary == null -> previousBoundary
+                previousBoundary == null -> candidateBoundary
+                candidateBoundary.first > previousBoundary.first -> candidateBoundary
+                candidateBoundary.first < previousBoundary.first -> previousBoundary
+                candidateBoundary.second == previousBoundary.second -> candidateBoundary
+                else -> previousBoundary
+            }
+        val selectedCandidateBoundary = candidateBoundary != null && trustedBoundary == candidateBoundary
+        val previousPolicy =
+            (previous as? RuntimeCaptureAuthorityState.Authorized)?.policySourceHash
+                ?: (previous as? RuntimeCaptureAuthorityState.Terminal)?.policySourceHash
+        val retainedPolicy = if (selectedCandidateBoundary) policySourceHash else policySourceHash ?: previousPolicy
+        val previousContext =
+            (previous as? RuntimeCaptureAuthorityState.Authorized)?.contextRevision
+                ?: (previous as? RuntimeCaptureAuthorityState.Terminal)?.contextRevision
+        val terminal =
+            RuntimeCaptureAuthorityState.Terminal(
+                ownerEpoch = nextAuthorityEpoch(),
+                trustedConfigBoundary = trustedBoundary,
+                policySourceHash = retainedPolicy,
+                contextRevision =
+                    if (selectedCandidateBoundary) contextRevision else contextRevision ?: previousContext,
+                reason = reason,
+            )
+        captureAuthority = terminal
+        return RuntimeCaptureAuthorityUpdateResult.Terminated(terminal)
+    }
+
+    private fun invalidateAuthorizedContext() {
+        if (captureAuthority !is RuntimeCaptureAuthorityState.Authorized) return
+        terminateAuthority(
+            RuntimeCaptureAuthorityTerminalReason.STALE,
+            boundary = null,
+        )
+    }
+
+    private fun nextAuthorityEpoch(): Long =
+        try {
+            Math.addExact(authorityEpoch, 1L).also { authorityEpoch = it }
+        } catch (error: ArithmeticException) {
+            throw IllegalStateException("Capture authority epoch exhausted", error)
+        }
+
+    private fun V1ConfigRejection.toTerminalReason(): RuntimeCaptureAuthorityTerminalReason =
+        when (this) {
+            V1ConfigRejection.EXPIRED -> RuntimeCaptureAuthorityTerminalReason.EXPIRED
+            V1ConfigRejection.STALE -> RuntimeCaptureAuthorityTerminalReason.STALE
+            V1ConfigRejection.CONFLICT -> RuntimeCaptureAuthorityTerminalReason.CONFLICT
+            V1ConfigRejection.INACTIVE -> RuntimeCaptureAuthorityTerminalReason.DISABLED
+            V1ConfigRejection.MALFORMED,
+            V1ConfigRejection.UNSUPPORTED_SCHEMA,
+            V1ConfigRejection.UNAUTHORIZED,
+            -> RuntimeCaptureAuthorityTerminalReason.MALFORMED
+        }
 
     private fun appendOnWorker(request: AppendRequest): RuntimeAppendResult {
         assertUsable()
@@ -885,6 +1590,7 @@ internal class RuntimeQueueOwner private constructor(
                         state.identity.copy(
                             contextRevision = increment(state.identity.contextRevision, "identity context revision"),
                             optedOut = change.optedOut,
+                            session = if (change.optedOut) null else state.identity.session,
                             updatedAt = checkedLocalTimestamp(state, change),
                         ),
                 )
@@ -913,6 +1619,58 @@ internal class RuntimeQueueOwner private constructor(
                         ),
                     flagContext = FlagContextState(personProperties = emptyMap(), groupProperties = emptyMap()),
                 )
+            is RuntimeLocalStateChange.RegisterSuperProperties -> {
+                require(change.properties.keys.none { it.isEmpty() }) { "Super-property names must not be empty" }
+                state.copy(
+                    identity =
+                        state.identity.copy(
+                            contextRevision = increment(state.identity.contextRevision, "identity context revision"),
+                            superProperties =
+                                LinkedHashMap(state.identity.superProperties).apply {
+                                    putAll(change.properties)
+                                },
+                            updatedAt = checkedLocalTimestamp(state, change),
+                        ),
+                )
+            }
+            is RuntimeLocalStateChange.UnregisterSuperProperties -> {
+                require(change.keys.distinct().size == change.keys.size) {
+                    "Super-property unregister keys must be unique"
+                }
+                require(change.keys.none { it.isEmpty() }) { "Super-property names must not be empty" }
+                state.copy(
+                    identity =
+                        state.identity.copy(
+                            contextRevision = increment(state.identity.contextRevision, "identity context revision"),
+                            superProperties =
+                                LinkedHashMap(state.identity.superProperties).apply {
+                                    change.keys.forEach(::remove)
+                                },
+                            updatedAt = checkedLocalTimestamp(state, change),
+                        ),
+                )
+            }
+            is RuntimeLocalStateChange.MarkBackgrounded -> {
+                require(!state.identity.optedOut) { "An opted-out runtime cannot background a session" }
+                val session = state.identity.session ?: return state
+                requireTimestampNotBefore(change.occurredAt, state.identity.updatedAt, "Background occurredAt")
+                requireTimestampNotBefore(change.occurredAt, session.lastActivityAt, "Background occurredAt")
+                if (session.lifecycle == SessionLifecycle.BACKGROUND && session.backgroundedAt == change.occurredAt) {
+                    state
+                } else {
+                    state.copy(
+                        identity =
+                            state.identity.copy(
+                                session =
+                                    session.copy(
+                                        lifecycle = SessionLifecycle.BACKGROUND,
+                                        backgroundedAt = change.occurredAt,
+                                    ),
+                                updatedAt = change.occurredAt,
+                            ),
+                    )
+                }
+            }
         }
 
     private fun checkedLocalTimestamp(
@@ -1243,6 +2001,31 @@ internal class RuntimeQueueOwner private constructor(
         val published: LoadedSnapshot?,
     )
 
+    private data class CaptureCommit(
+        val result: RuntimeCaptureResult,
+        val published: LoadedSnapshot?,
+    )
+
+    private sealed interface CaptureAuthorityActivationStage {
+        data class Activate(
+            val authority: RuntimeCaptureAuthorityState.Authorized,
+            val pinnedSiteId: String,
+        ) : CaptureAuthorityActivationStage
+
+        data class Terminate(
+            val reason: RuntimeCaptureAuthorityTerminalReason,
+            val boundary: V1ParsedConfigBoundary?,
+            val policySourceHash: String?,
+            val contextRevision: Long?,
+            val pinnedSiteId: String?,
+        ) : CaptureAuthorityActivationStage
+
+        data class RestoreTerminal(
+            val authority: RuntimeCaptureAuthorityState.Terminal,
+            val pinnedSiteId: String,
+        ) : CaptureAuthorityActivationStage
+    }
+
     internal companion object {
         private val OWNERSHIP_KEYS = mutableSetOf<String>()
         private const val MAX_RECONCILIATION_ATTEMPTS = 3
@@ -1256,6 +2039,8 @@ internal class RuntimeQueueOwner private constructor(
             legacyStateLoader: () -> PersistedCoreState,
             identifiers: CoreIdentifierGenerator = UuidCoreIdentifierGenerator,
             leaseFactory: () -> RuntimeOwnershipLease = { RuntimeOwnershipLease { } },
+            trustedSiteKey: String? = null,
+            captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
         ): Future<RuntimeQueueOwner> {
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
             lateinit var worker: Thread
@@ -1291,6 +2076,8 @@ internal class RuntimeQueueOwner private constructor(
                                 executor,
                                 worker,
                                 leaseFactory,
+                                trustedSiteKey,
+                                captureClock,
                             )
                         owner.initialize()
                         owner

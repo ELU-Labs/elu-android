@@ -1,21 +1,27 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.core.CoreStateCodec
 import java.util.Collections
 import java.util.TreeMap
 
 internal enum class FakeAmbiguousOutcome {
     COMMIT,
     ROLLBACK,
+    DIVERGE,
 }
 
 internal class FakeRuntimeQueueBacking {
     var core: RuntimeStoredCore? = null
     val records: TreeMap<Long, RuntimeStoredRecord> = TreeMap()
     var failNextKnownCommit: Throwable? = null
+    var failNextCoreRead: Throwable? = null
     var ambiguousNextCommit: FakeAmbiguousOutcome? = null
     var ambiguousNextReadOnlyTransaction: Boolean = false
     var scanCalls: Int = 0
     var connectionCalls: Int = 0
+    var mutatedTransactionAttempts: Int = 0
+    /** Logical storage generation: one step per durably committed mutated transaction. */
+    var committedMutationGeneration: Long = 0L
     val transactionThreads: MutableList<Thread> = Collections.synchronizedList(mutableListOf())
 
     fun connection(): RuntimeQueueDatabase {
@@ -34,8 +40,10 @@ private class FakeRuntimeQueueDatabase(
             check(!closed) { "Fake database is closed" }
             backing.transactionThreads += Thread.currentThread()
             val workingCore = backing.core?.copy(stateJson = backing.core!!.stateJson.copyOf())
+            val originalRecords = TreeMap<Long, RuntimeStoredRecord>()
+            backing.records.forEach { (sequence, row) -> originalRecords[sequence] = row.deepCopy() }
             val workingRecords = TreeMap<Long, RuntimeStoredRecord>()
-            backing.records.forEach { (sequence, row) -> workingRecords[sequence] = row.deepCopy() }
+            originalRecords.forEach { (sequence, row) -> workingRecords[sequence] = row.deepCopy() }
             val transaction = FakeTransaction(backing, workingCore, workingRecords)
             val result = block(transaction)
             if (!transaction.mutated) {
@@ -45,6 +53,7 @@ private class FakeRuntimeQueueDatabase(
                 }
                 return@synchronized result
             }
+            backing.mutatedTransactionAttempts += 1
 
             backing.failNextKnownCommit?.let { failure ->
                 backing.failNextKnownCommit = null
@@ -55,14 +64,32 @@ private class FakeRuntimeQueueDatabase(
                     backing.core = transaction.core?.copy(stateJson = transaction.core!!.stateJson.copyOf())
                     backing.records.clear()
                     transaction.records.forEach { (sequence, row) -> backing.records[sequence] = row.deepCopy() }
+                    backing.advanceCommittedMutationGeneration()
                     throw AmbiguousRuntimeCommitException("Fake committed with an ambiguous result")
                 }
                 FakeAmbiguousOutcome.ROLLBACK ->
                     throw AmbiguousRuntimeCommitException("Fake rolled back with an ambiguous result")
+                FakeAmbiguousOutcome.DIVERGE -> {
+                    val beforeCore = checkNotNull(workingCore)
+                    val beforeState = CoreStateCodec.decode(beforeCore.stateJson)
+                    val divergentState =
+                        beforeState.copy(
+                            identity =
+                                beforeState.identity.copy(
+                                    contextRevision = Math.addExact(beforeState.identity.contextRevision, 1L),
+                                ),
+                        )
+                    backing.core = beforeCore.copy(stateJson = CoreStateCodec.encode(divergentState))
+                    backing.records.clear()
+                    originalRecords.forEach { (sequence, row) -> backing.records[sequence] = row.deepCopy() }
+                    backing.advanceCommittedMutationGeneration()
+                    throw AmbiguousRuntimeCommitException("Fake diverged at an ambiguous result")
+                }
                 null -> {
                     backing.core = transaction.core?.copy(stateJson = transaction.core!!.stateJson.copyOf())
                     backing.records.clear()
                     transaction.records.forEach { (sequence, row) -> backing.records[sequence] = row.deepCopy() }
+                    backing.advanceCommittedMutationGeneration()
                     result
                 }
             }
@@ -80,7 +107,13 @@ private class FakeRuntimeQueueDatabase(
         var mutated: Boolean = false
             private set
 
-        override fun readCore(): RuntimeStoredCore? = core?.copy(stateJson = core!!.stateJson.copyOf())
+        override fun readCore(): RuntimeStoredCore? {
+            backing.failNextCoreRead?.let { failure ->
+                backing.failNextCoreRead = null
+                throw failure
+            }
+            return core?.copy(stateJson = core!!.stateJson.copyOf())
+        }
 
         override fun insertCore(core: RuntimeStoredCore) {
             check(this.core == null) { "Duplicate fake core row" }
@@ -114,6 +147,10 @@ private class FakeRuntimeQueueDatabase(
             return removed
         }
     }
+}
+
+private fun FakeRuntimeQueueBacking.advanceCommittedMutationGeneration() {
+    committedMutationGeneration = Math.addExact(committedMutationGeneration, 1L)
 }
 
 private fun RuntimeStoredRecord.deepCopy(): RuntimeStoredRecord =

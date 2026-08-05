@@ -197,6 +197,18 @@ internal sealed interface RuntimeLocalStateChange {
     data class ResetGroups(override val occurredAt: String) : RuntimeLocalStateChange
 
     data class ResetIdentity(override val occurredAt: String) : RuntimeLocalStateChange
+
+    data class RegisterSuperProperties(
+        val properties: Map<String, Any?>,
+        override val occurredAt: String,
+    ) : RuntimeLocalStateChange
+
+    data class UnregisterSuperProperties(
+        val keys: List<String>,
+        override val occurredAt: String,
+    ) : RuntimeLocalStateChange
+
+    data class MarkBackgrounded(override val occurredAt: String) : RuntimeLocalStateChange
 }
 
 internal sealed interface RuntimeQueuedRecord {

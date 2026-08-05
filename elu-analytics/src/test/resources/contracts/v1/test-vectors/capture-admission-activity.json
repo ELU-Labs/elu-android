@@ -1,0 +1,889 @@
+{
+    "schemaVersion": 1,
+    "vectorId": "elu-capture-admission-activity-v1",
+    "canonicalization": {
+        "algorithm": "elu-canonical-json-v1",
+        "cases": [
+            {
+                "id": "utf16-ordering-and-escaping",
+                "raw": "{\"😀\":\"astral\",\"z\":\"line\\nquote\\\"slash\\\\\",\"a\":[3,true,null],\"\":\"bmp\"}",
+                "expectedCanonicalBase64": "eyJhIjpbMyx0cnVlLG51bGxdLCJ6IjoibGluZVxucXVvdGVcInNsYXNoXFwiLCLwn5iAIjoiYXN0cmFsIiwi7oCAIjoiYm1wIn0=",
+                "expectedSha256": "sha256:933b6c88095d83223339c4dd1cc4af77f5b8d07bf7f3a44535eb2595aaec5b16"
+            },
+            {
+                "id": "exact-numbers-and-jcs-layout",
+                "raw": "[-0,1.0,4.5,2e-3,0.0000001,1e30,1e23,5e-324,1.7976931348623157e308,1424953923781206.25,333333333.33333329,9007199254740991,9007199254740993,9223372036854775807,-9223372036854775808,1e3]",
+                "expectedCanonicalBase64": "WzAsMSw0LjUsMC4wMDIsMWUtNywxZSszMCwxZSsyMyw1ZS0zMjQsMS43OTc2OTMxMzQ4NjIzMTU3ZSszMDgsMTQyNDk1MzkyMzc4MTIwNi4yLDMzMzMzMzMzMy4zMzMzMzMzLDkwMDcxOTkyNTQ3NDA5OTEsOTAwNzE5OTI1NDc0MDk5Myw5MjIzMzcyMDM2ODU0Nzc1ODA3LC05MjIzMzcyMDM2ODU0Nzc1ODA4LDEwMDBd",
+                "expectedSha256": "sha256:f534f0c3097f167ad6354d1ccf232df1804d71092e2b3e5df4ed2dfd6ecb51bc"
+            },
+            {
+                "id": "no-unicode-normalization",
+                "raw": "{\"é\":\"composed\",\"é\":\"decomposed\"}",
+                "expectedCanonicalBase64": "eyJlzIEiOiJkZWNvbXBvc2VkIiwiw6kiOiJjb21wb3NlZCJ9",
+                "expectedSha256": "sha256:8117f7eb721338d1c046fc7a3905d1f77b7a920abc82436194992a55af52f571"
+            },
+            {
+                "id": "escaped-equivalent-duplicate",
+                "raw": "{\"a\":1,\"\\u0061\":2}",
+                "expect": "reject"
+            },
+            {
+                "id": "astral-escaped-duplicate",
+                "raw": "{\"😀\":1,\"\\ud83d\\ude00\":2}",
+                "expect": "reject"
+            },
+            {
+                "id": "lone-high-surrogate",
+                "raw": "{\"value\":\"\\ud800\"}",
+                "expect": "reject"
+            },
+            {
+                "id": "lone-low-surrogate",
+                "raw": "{\"value\":\"\\udc00\"}",
+                "expect": "reject"
+            },
+            {
+                "id": "non-finite-binary64",
+                "raw": "{\"value\":1e400}",
+                "expect": "reject"
+            }
+        ]
+    },
+    "fixtureCatalog": {
+        "configEnabled": {
+            "kind": "config",
+            "fixtureId": "config-enabled"
+        },
+        "configDisabled": {
+            "kind": "config",
+            "fixtureId": "config-disabled"
+        },
+        "privacyAllowed": {
+            "kind": "effectivePrivacy",
+            "fixtureId": "privacy-allowed"
+        },
+        "privacyBlocked": {
+            "kind": "effectivePrivacy",
+            "fixtureId": "privacy-blocked"
+        }
+    },
+    "documentVariants": {
+        "configEnabledContext0": {
+            "baseFixtureId": "configEnabled",
+            "orderedReplacements": []
+        },
+        "configEnabledEquivalentBytes": {
+            "baseFixtureId": "configEnabled",
+            "serialization": "reverse-object-member-order-and-add-json-whitespace"
+        },
+        "configEqualIssuedConflict": {
+            "baseFixtureId": "configEnabled",
+            "orderedReplacements": [
+                {
+                    "pointer": "/session/idleTimeoutSeconds",
+                    "value": 900
+                }
+            ]
+        },
+        "configLongLived": {
+            "baseFixtureId": "configEnabled",
+            "orderedReplacements": [
+                {
+                    "pointer": "/expiresAt",
+                    "value": "2026-08-06T00:05:00.000Z"
+                }
+            ]
+        },
+        "configNewerRevoked": {
+            "baseFixtureId": "configDisabled",
+            "orderedReplacements": [
+                {
+                    "pointer": "/issuedAt",
+                    "value": "2026-08-04T00:01:30.000Z"
+                },
+                {
+                    "pointer": "/expiresAt",
+                    "value": "2026-08-04T00:06:30.000Z"
+                },
+                {
+                    "pointer": "/revision",
+                    "value": "config-revoked-2"
+                },
+                {
+                    "pointer": "/status",
+                    "value": "revoked"
+                }
+            ]
+        },
+        "configChangedSite": {
+            "baseFixtureId": "configEnabled",
+            "orderedReplacements": [
+                {
+                    "pointer": "/issuedAt",
+                    "value": "2026-08-04T00:01:30.000Z"
+                },
+                {
+                    "pointer": "/expiresAt",
+                    "value": "2026-08-04T00:06:30.000Z"
+                },
+                {
+                    "pointer": "/revision",
+                    "value": "config-changed-site"
+                },
+                {
+                    "pointer": "/site/id",
+                    "value": "site_other"
+                }
+            ]
+        },
+        "privacyAllowedContext0": {
+            "baseFixtureId": "privacyAllowed",
+            "orderedReplacements": [
+                {
+                    "pointer": "/contextRevision",
+                    "value": 0
+                }
+            ],
+            "effectivePolicyHash": "recompute-after-replacements"
+        },
+        "privacyAllowedContext1": {
+            "baseFixtureId": "privacyAllowed",
+            "orderedReplacements": [
+                {
+                    "pointer": "/contextRevision",
+                    "value": 1
+                }
+            ],
+            "effectivePolicyHash": "recompute-after-replacements"
+        },
+        "privacyAllowedContext2": {
+            "baseFixtureId": "privacyAllowed",
+            "orderedReplacements": [
+                {
+                    "pointer": "/contextRevision",
+                    "value": 2
+                }
+            ],
+            "effectivePolicyHash": "recompute-after-replacements"
+        },
+        "privacyBlockedSameWitness": {
+            "baseFixtureId": "privacyBlocked",
+            "orderedReplacements": [
+                {
+                    "pointer": "/policyRevision",
+                    "value": "privacy-1"
+                },
+                {
+                    "pointer": "/contextRevision",
+                    "value": 0
+                }
+            ],
+            "effectivePolicyHash": "recompute-after-replacements"
+        },
+        "privacyMalformedDuplicate": {
+            "baseFixtureId": "privacyAllowedContext0",
+            "serialization": "append-escaped-equivalent-contextRevision-member"
+        }
+    },
+    "constants": {
+        "ownerSiteKey": "elu_pk_test_capture",
+        "ownerNamespaceDigest": "0d28cb28b0d301938550ddaf297a1c9b59a78c1d02534cf2be40aef423d6b943",
+        "otherSiteKey": "elu_pk_other_capture",
+        "otherNamespaceDigest": "d9e05b7acacef5303f32cef49acb220f2f4edb65c878424eb4d6a85d1dc3bfed",
+        "configSiteId": "site_demo",
+        "streamId": "stream_capture_vector",
+        "configSemanticHash": "sha256:69da989f31a6a3133dcebcdb64cd7665c666eb6af5a8aa766bc0036d8736ca4f",
+        "policySourceHash": "sha256:6b13dc5469370452e41767356bedd92bbbdf3acf8ff4024447d03b1f19ea72ce",
+        "allowedDecisionHash": "sha256:852aa75195a8a72e48ded6f286ea8634d83e64c55277207756632f7a60883ed3",
+        "blockedDecisionHash": "sha256:e0c5e50f3127f85b1530be39fced4cc7abeae535d3d50ca48acb30cfcca685f6",
+        "idleTimeoutSeconds": 1800,
+        "maximumDurationSeconds": 86400
+    },
+    "initialStates": {
+        "fresh": {
+            "identityRevision": 0,
+            "contextRevision": 0,
+            "identityOptedOut": false,
+            "session": null,
+            "superProperties": {},
+            "streamId": "stream_capture_vector",
+            "nextSequence": 0,
+            "generation": 0
+        },
+        "activeSession": {
+            "identityRevision": 0,
+            "contextRevision": 0,
+            "identityOptedOut": false,
+            "session": {
+                "id": "session_existing",
+                "startedAt": "2026-08-04T00:01:00.000Z",
+                "lastActivityAt": "2026-08-04T00:01:10.000Z",
+                "timeoutSeconds": 1800,
+                "maximumDurationSeconds": 86400,
+                "lifecycle": "active",
+                "backgroundedAt": null
+            },
+            "superProperties": {},
+            "streamId": "stream_capture_vector",
+            "nextSequence": 0,
+            "generation": 0
+        }
+    },
+    "scenarios": [
+        {
+            "id": "same-semantic-different-bytes",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledEquivalentBytes",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized",
+                        "configSemanticHash": "sha256:69da989f31a6a3133dcebcdb64cd7665c666eb6af5a8aa766bc0036d8736ca4f"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "equal-issued-semantic-conflict",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEqualIssuedConflict",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "reason": "conflict"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "newer-revoke-older-cannot-revive",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configNewerRevoked",
+                    "privacy": null,
+                    "wallNow": "2026-08-04T00:02:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "reason": "revoked"
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:02:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "reason": "stale"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "same-witness-restriction-dominates",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyBlockedSameWitness",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "reason": "privacy-blocked"
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "reason": "privacy-blocked"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "higher-context-can-reauthorize",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "registerSuperProperties",
+                    "properties": {
+                        "plan": "pro"
+                    },
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "contextRevision": 1,
+                        "recordsAdded": 0
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext1",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "authority": "authorized",
+                        "contextRevision": 1
+                    }
+                }
+            ]
+        },
+        {
+            "id": "malformed-latches-terminal",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyMalformedDuplicate",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "reason": "malformed"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "blocked_after_malformed",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "monotonicNanos": "3000000000",
+                    "expect": {
+                        "accepted": false,
+                        "recordsAdded": 0
+                    }
+                }
+            ]
+        },
+        {
+            "id": "site-pin",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized",
+                        "configSiteId": "site_demo"
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configChangedSite",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:02:00.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "reason": "site-changed"
+                    }
+                },
+                {
+                    "type": "reopen",
+                    "wallNow": "2026-08-04T00:02:01.000Z",
+                    "monotonicNanos": "3000000000",
+                    "expect": {
+                        "namespaceDigest": "0d28cb28b0d301938550ddaf297a1c9b59a78c1d02534cf2be40aef423d6b943",
+                        "authority": "absent",
+                        "configSitePin": "absent-for-new-owner"
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:02:02.000Z",
+                    "monotonicNanos": "4000000000",
+                    "expect": {
+                        "authority": "authorized",
+                        "configSiteId": "site_demo"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "namespace-and-stream-binding",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized",
+                        "namespaceDigest": "0d28cb28b0d301938550ddaf297a1c9b59a78c1d02534cf2be40aef423d6b943",
+                        "streamId": "stream_capture_vector"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "wrong_binding",
+                    "properties": {},
+                    "authorityOverrideForTest": {
+                        "namespaceDigest": "d9e05b7acacef5303f32cef49acb220f2f4edb65c878424eb4d6a85d1dc3bfed"
+                    },
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "accepted": false,
+                        "reason": "authority-witness-changed"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "super-properties-and-screen",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "registerSuperProperties",
+                    "properties": {
+                        "plan": "free",
+                        "source": "super"
+                    },
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "contextRevision": 1,
+                        "recordsAdded": 0
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext1",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "screen",
+                    "name": "Billing",
+                    "properties": {
+                        "plan": "pro"
+                    },
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "monotonicNanos": "3000000000",
+                    "expect": {
+                        "accepted": true,
+                        "kind": "screen",
+                        "properties": {
+                            "plan": "pro",
+                            "source": "super"
+                        },
+                        "reservedVersionPropertiesAuthoritative": true
+                    }
+                },
+                {
+                    "type": "unregisterSuperProperty",
+                    "key": "source",
+                    "wallNow": "2026-08-04T00:01:03.000Z",
+                    "monotonicNanos": "4000000000",
+                    "expect": {
+                        "contextRevision": 2,
+                        "recordsAdded": 0
+                    }
+                }
+            ]
+        },
+        {
+            "id": "first-capture-is-atomic",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "first_event",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "accepted": true,
+                        "sessionCreated": true,
+                        "recordsAdded": 1,
+                        "atomicStateAndRecord": true
+                    }
+                }
+            ]
+        },
+        {
+            "id": "session-boundaries",
+            "initialState": "activeSession",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configLongLived",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:11.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "idle_equality",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:31:10.000Z",
+                    "monotonicNanos": "1800000000000",
+                    "expect": {
+                        "accepted": true,
+                        "sessionRotated": true,
+                        "boundary": "idle-equality"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "maximum_duration_equality",
+                    "properties": {},
+                    "wallNow": "2026-08-05T00:31:10.000Z",
+                    "monotonicNanos": "88200000000000",
+                    "expect": {
+                        "accepted": true,
+                        "sessionRotated": true,
+                        "boundary": "maximum-duration-equality"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "opt-gap",
+            "initialState": "activeSession",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:11.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "setOptedOut",
+                    "value": true,
+                    "wallNow": "2026-08-04T00:01:12.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "contextRevision": 1,
+                        "session": null
+                    }
+                },
+                {
+                    "type": "setOptedOut",
+                    "value": false,
+                    "wallNow": "2026-08-04T00:01:13.000Z",
+                    "monotonicNanos": "3000000000",
+                    "expect": {
+                        "contextRevision": 2,
+                        "session": null
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "stale_after_opt_gap",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:14.000Z",
+                    "monotonicNanos": "4000000000",
+                    "expect": {
+                        "accepted": false,
+                        "reason": "authority-witness-changed"
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext2",
+                    "wallNow": "2026-08-04T00:01:15.000Z",
+                    "monotonicNanos": "5000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "fresh_after_opt_gap",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:16.000Z",
+                    "monotonicNanos": "6000000000",
+                    "expect": {
+                        "accepted": true,
+                        "sessionCreated": true
+                    }
+                }
+            ]
+        },
+        {
+            "id": "expiry",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:04:59.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized",
+                        "monotonicBudgetNoGreaterThanNanos": "1000000000"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "at_exact_expiry",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:05:00.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "accepted": false,
+                        "reason": "authority-expired"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "browser-shared-barrier",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "realm": "A",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyBlockedSameWitness",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "terminal",
+                        "sharedBarrier": "terminal"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "realm": "B",
+                    "name": "stale_other_realm",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "accepted": false,
+                        "reason": "barrier-mismatch"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "native-background-order",
+            "initialState": "activeSession",
+            "steps": [
+                {
+                    "type": "background",
+                    "wallNow": "2026-08-04T00:01:10.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "lifecycle": "background",
+                        "recordsAdded": 0
+                    }
+                },
+                {
+                    "type": "background",
+                    "wallNow": "2026-08-04T00:01:10.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "idempotent": true,
+                        "recordsAdded": 0
+                    }
+                },
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:10.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "same_time_resume",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:10.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "accepted": true,
+                        "lifecycle": "active"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "generation-is-not-authority",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "first",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "accepted": true,
+                        "generation": 1
+                    }
+                },
+                {
+                    "type": "acknowledgePrefix",
+                    "count": 1,
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "monotonicNanos": "3000000000",
+                    "expect": {
+                        "generation": 2
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "second",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:03.000Z",
+                    "monotonicNanos": "4000000000",
+                    "expect": {
+                        "accepted": true,
+                        "authorityUnchanged": true
+                    }
+                }
+            ]
+        },
+        {
+            "id": "ambiguous-storage",
+            "initialState": "fresh",
+            "steps": [
+                {
+                    "type": "submitCandidate",
+                    "config": "configEnabledContext0",
+                    "privacy": "privacyAllowedContext0",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "monotonicNanos": "1000000000",
+                    "expect": {
+                        "authority": "authorized"
+                    }
+                },
+                {
+                    "type": "injectStorageOutcome",
+                    "outcome": "proven-not-committed-once",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "nextCaptureRevalidatesBeforeOneRetry": true
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "bounded_retry",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "monotonicNanos": "2000000000",
+                    "expect": {
+                        "accepted": true,
+                        "attempts": 2,
+                        "recordsAdded": 1
+                    }
+                },
+                {
+                    "type": "injectStorageOutcome",
+                    "outcome": "unknown",
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "monotonicNanos": "3000000000",
+                    "expect": {
+                        "nextCaptureRetries": 0
+                    }
+                },
+                {
+                    "type": "capture",
+                    "name": "unknown_no_retry",
+                    "properties": {},
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "monotonicNanos": "3000000000",
+                    "expect": {
+                        "accepted": false,
+                        "reason": "storage-outcome-unknown",
+                        "attempts": 1
+                    }
+                }
+            ]
+        }
+    ],
+    "platformSpecificExclusions": [
+        "recordId",
+        "payloadBytes",
+        "versions.platform"
+    ]
+}
