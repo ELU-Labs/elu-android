@@ -211,7 +211,14 @@ class AndroidRuntimeQueueInstrumentationTest {
     @Test
     fun lazyFlagMigrationPreservesCoreAndQueueBytesAndKeepsRuntimeStateAtV1() {
         val file = databaseFile()
-        val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
+        val owner =
+            open(
+                file,
+                CountingIdentifiers(),
+                RecordingFaults(),
+                ::freshState,
+                trustedSiteKey = "elu_pk_test_capture",
+            )
         appendEvents(owner, event("before-flag-migration"))
         owner.closeAsync().await()
         owners.remove(owner)
@@ -231,6 +238,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                 CountingIdentifiers(),
                 RecordingFaults(),
                 { error("Migration must retain the existing SQLite core") },
+                trustedSiteKey = "elu_pk_test_capture",
             )
         migrated.ensureFeatureFlagRuntime().await()
         migrated.closeAsync().await()
@@ -257,7 +265,14 @@ class AndroidRuntimeQueueInstrumentationTest {
     @Test
     fun ordinaryV2ReopenBytePreservesCurrentAndFutureFlagRows() {
         val file = databaseFile()
-        val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
+        val owner =
+            open(
+                file,
+                CountingIdentifiers(),
+                RecordingFaults(),
+                ::freshState,
+                trustedSiteKey = "elu_pk_test_capture",
+            )
         owner.ensureFeatureFlagRuntime().await()
         owner.closeAsync().await()
         owners.remove(owner)
@@ -281,6 +296,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                 CountingIdentifiers(),
                 RecordingFaults(),
                 { error("A valid v2 reopen must use the retained SQLite core") },
+                trustedSiteKey = "elu_pk_test_capture",
             )
         assertEquals(0, reopened.snapshot().await().queuedCount)
         reopened.closeAsync().await()
@@ -302,7 +318,14 @@ class AndroidRuntimeQueueInstrumentationTest {
     @Test
     fun flagStorageAcceptsExactlyFourOneMiBChunksAndRejectsOneByteOverARow() {
         val file = databaseFile()
-        val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
+        val owner =
+            open(
+                file,
+                CountingIdentifiers(),
+                RecordingFaults(),
+                ::freshState,
+                trustedSiteKey = "elu_pk_test_capture",
+            )
         owner.ensureFeatureFlagRuntime().await()
         owner.closeAsync().await()
         owners.remove(owner)
