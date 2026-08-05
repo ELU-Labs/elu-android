@@ -1,19 +1,27 @@
 package dev.elu.analytics.internal.core
 
+import java.time.Instant
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class IdentityStateCoreTest {
+    @After
+    fun clearProductionSingletons() {
+        IdentityStateCore.clearProductionSingletonsForTesting()
+    }
+
     @Test
     fun `fresh state is durable schema v1 with separate stream metadata`() {
         val store = MemoryStore()
@@ -80,7 +88,7 @@ class IdentityStateCoreTest {
         core.registerSuperProperties(mapOf("plan" to "growth"))
         core.setPersonPropertiesForFlags(mapOf("role" to "owner"))
         core.setGroupPropertiesForFlags("organization", mapOf("tier" to "partner"))
-        core.setSession(validSession())
+        core.installSessionForTestingOrMigration(validSession())
         val before = core.snapshot()
 
         val reset = core.reset()
@@ -132,7 +140,7 @@ class IdentityStateCoreTest {
     fun `identity alias group and property mutations do not create or rotate a session`() {
         val core = newCore()
         val session = validSession()
-        core.setSession(session)
+        core.installSessionForTestingOrMigration(session)
         val revision = core.snapshot().identity.revision
 
         core.identify("user-123")
@@ -143,6 +151,128 @@ class IdentityStateCoreTest {
 
         assertEquals(session, core.snapshot().identity.session)
         assertEquals(revision + 1, core.snapshot().identity.revision)
+    }
+
+    @Test
+    fun `eligible activity resumes before idle boundary and rotates exactly at it`() {
+        val clock = MutableClock(FIXED_NOW_MILLIS)
+        val core = newCore(clock = clock)
+        val first = core.recordEligibleActivity()
+
+        clock.nowEpochMillis = FIXED_NOW_MILLIS + DEFAULT_SESSION_TIMEOUT_SECONDS * 1_000L - 1L
+        val resumed = core.recordEligibleActivity()
+
+        assertEquals(first.id, resumed.id)
+        assertEquals("2026-08-04T00:29:59.999Z", resumed.lastActivityAt)
+
+        clock.nowEpochMillis += DEFAULT_SESSION_TIMEOUT_SECONDS * 1_000L
+        val rotated = core.recordEligibleActivity()
+
+        assertNotEquals(first.id, rotated.id)
+        assertEquals(rotated.startedAt, rotated.lastActivityAt)
+    }
+
+    @Test
+    fun `eligible activity applies a tightened timeout immediately`() {
+        val clock = MutableClock(FIXED_NOW_MILLIS)
+        val core = newCore(clock = clock)
+        val first = core.recordEligibleActivity(DEFAULT_SESSION_TIMEOUT_SECONDS)
+
+        clock.nowEpochMillis += MIN_SESSION_TIMEOUT_SECONDS * 1_000L
+        val rotated = core.recordEligibleActivity(MIN_SESSION_TIMEOUT_SECONDS)
+
+        assertNotEquals(first.id, rotated.id)
+        assertEquals(MIN_SESSION_TIMEOUT_SECONDS, rotated.timeoutSeconds)
+    }
+
+    @Test
+    fun `eligible activity does not revive an expired session when timeout is relaxed`() {
+        val clock = MutableClock(FIXED_NOW_MILLIS)
+        val core = newCore(clock = clock)
+        val first = core.recordEligibleActivity(MIN_SESSION_TIMEOUT_SECONDS)
+
+        clock.nowEpochMillis += MIN_SESSION_TIMEOUT_SECONDS * 1_000L
+        val rotated = core.recordEligibleActivity(MAX_SESSION_TIMEOUT_SECONDS)
+
+        assertNotEquals(first.id, rotated.id)
+        assertEquals(MAX_SESSION_TIMEOUT_SECONDS, rotated.timeoutSeconds)
+    }
+
+    @Test
+    fun `eligible activity rotates when the wall clock moves backward`() {
+        val clock = MutableClock(FIXED_NOW_MILLIS)
+        val core = newCore(clock = clock)
+        val first = core.recordEligibleActivity()
+
+        clock.nowEpochMillis -= 1L
+        val rotated = core.recordEligibleActivity()
+
+        assertNotEquals(first.id, rotated.id)
+        assertEquals("2026-08-03T23:59:59.999Z", rotated.startedAt)
+    }
+
+    @Test
+    fun `eligible activity clamps timeout and rotates at maximum duration boundary`() {
+        val clock = MutableClock(FIXED_NOW_MILLIS)
+        val core = newCore(clock = clock)
+        assertEquals(MIN_SESSION_TIMEOUT_SECONDS, core.recordEligibleActivity(1).timeoutSeconds)
+
+        val justBeforeMaximum = FIXED_NOW_MILLIS + SESSION_MAXIMUM_DURATION_SECONDS * 1_000L - 1L
+        core.installSessionForTestingOrMigration(
+            validSession(
+                id = "session-before-maximum",
+                startedAt = "2026-08-04T00:00:00.000Z",
+                lastActivityAt = "2026-08-04T23:59:59.999Z",
+                timeoutSeconds = MAX_SESSION_TIMEOUT_SECONDS,
+            ),
+        )
+        clock.nowEpochMillis = justBeforeMaximum
+        val resumed = core.recordEligibleActivity(Int.MAX_VALUE)
+        assertEquals("session-before-maximum", resumed.id)
+        assertEquals(MAX_SESSION_TIMEOUT_SECONDS, resumed.timeoutSeconds)
+
+        clock.nowEpochMillis = FIXED_NOW_MILLIS + SESSION_MAXIMUM_DURATION_SECONDS * 1_000L
+        val rotated = core.recordEligibleActivity()
+        assertNotEquals(resumed.id, rotated.id)
+    }
+
+    @Test
+    fun `background and foreground update lifecycle without ending the session`() {
+        val clock = MutableClock(FIXED_NOW_MILLIS)
+        val core = newCore(clock = clock)
+        assertNull(core.setSessionLifecycle(SessionLifecycle.BACKGROUND))
+        val active = core.recordEligibleActivity()
+
+        clock.nowEpochMillis += 1_000L
+        val background = checkNotNull(core.setSessionLifecycle(SessionLifecycle.BACKGROUND))
+        assertEquals(active.id, background.id)
+        assertEquals(SessionLifecycle.BACKGROUND, background.lifecycle)
+        assertEquals("2026-08-04T00:00:01.000Z", background.backgroundedAt)
+
+        clock.nowEpochMillis += 1_000L
+        val foreground = checkNotNull(core.setSessionLifecycle(SessionLifecycle.ACTIVE))
+        assertEquals(active.id, foreground.id)
+        assertEquals(SessionLifecycle.ACTIVE, foreground.lifecycle)
+        assertNull(foreground.backgroundedAt)
+    }
+
+    @Test
+    fun `production singleton prevents stale aggregate writes for one canonical path`() {
+        val store = MemoryStore()
+        val first =
+            IdentityStateCore.productionSingletonForTesting("/canonical/core-state.json") {
+                newCore(store)
+            }
+        first.setOptedOut(true)
+        val second =
+            IdentityStateCore.productionSingletonForTesting("/canonical/core-state.json") {
+                throw AssertionError("a second production core must not be constructed")
+            }
+
+        assertSame(first, second)
+        second.identify("user-123")
+        assertTrue(first.snapshot().identity.optedOut)
+        assertTrue(CoreStateCodec.decode(store.bytes!!).identity.optedOut)
     }
 
     @Test
@@ -228,6 +358,79 @@ class IdentityStateCoreTest {
     }
 
     @Test
+    fun `future nested schema with new fields is rejected without overwriting bytes`() {
+        val originalStore = MemoryStore()
+        newCore(originalStore)
+        val root = JSONObject(String(originalStore.bytes!!, Charsets.UTF_8))
+        root.getJSONObject("identity")
+            .put("schemaVersion", 2)
+            .put("futureIdentityField", true)
+        val bytes = root.toString().toByteArray()
+        val store = MemoryStore(bytes)
+
+        assertThrows(UnsupportedCoreSchemaException::class.java) { newCore(store) }
+        assertTrue(bytes.contentEquals(store.bytes))
+    }
+
+    @Test
+    fun `unknown same-major extension is rejected without overwriting bytes`() {
+        val originalStore = MemoryStore()
+        newCore(originalStore)
+        val root = JSONObject(String(originalStore.bytes!!, Charsets.UTF_8))
+        root.getJSONObject("identity").put("futureConsentState", true)
+        val bytes = root.toString().toByteArray()
+        val store = MemoryStore(bytes)
+
+        assertThrows(UnsupportedCoreSchemaExtensionException::class.java) { newCore(store) }
+        assertTrue(bytes.contentEquals(store.bytes))
+    }
+
+    @Test
+    fun `damaged aggregate marker repairs from independently valid children`() {
+        val originalStore = MemoryStore()
+        val expected = newCore(originalStore).identify("user-123")
+        val root = JSONObject(String(originalStore.bytes!!, Charsets.UTF_8)).apply { remove("schemaVersion") }
+        val store = MemoryStore(root.toString().toByteArray())
+
+        val recovered = newCore(store).snapshot()
+
+        assertEquals(expected, recovered.identity)
+        assertEquals(1, JSONObject(String(store.bytes!!, Charsets.UTF_8)).getInt("schemaVersion"))
+    }
+
+    @Test
+    fun `damaged aggregate marker with unsupported child preserves store bytes`() {
+        val originalStore = MemoryStore()
+        newCore(originalStore)
+        val root =
+            JSONObject(String(originalStore.bytes!!, Charsets.UTF_8)).apply {
+                remove("schemaVersion")
+                getJSONObject("stream").put("schemaVersion", 2)
+            }
+        val bytes = root.toString().toByteArray()
+        val store = MemoryStore(bytes)
+
+        assertThrows(UnsupportedCoreSchemaException::class.java) { newCore(store) }
+        assertTrue(bytes.contentEquals(store.bytes))
+    }
+
+    @Test
+    fun `damaged aggregate marker with child extension preserves store bytes`() {
+        val originalStore = MemoryStore()
+        newCore(originalStore)
+        val root =
+            JSONObject(String(originalStore.bytes!!, Charsets.UTF_8)).apply {
+                put("schemaVersion", "one")
+                getJSONObject("flagContext").put("futureFlagState", true)
+            }
+        val bytes = root.toString().toByteArray()
+        val store = MemoryStore(bytes)
+
+        assertThrows(UnsupportedCoreSchemaExtensionException::class.java) { newCore(store) }
+        assertTrue(bytes.contentEquals(store.bytes))
+    }
+
+    @Test
     fun `failed persistence does not expose an uncommitted mutation`() {
         val store = MemoryStore()
         val core = newCore(store)
@@ -238,22 +441,34 @@ class IdentityStateCoreTest {
         assertEquals(before, core.snapshot())
     }
 
-    private fun newCore(store: MemoryStore = MemoryStore()): IdentityStateCore =
-        IdentityStateCore(
+    private fun newCore(
+        store: MemoryStore = MemoryStore(),
+        clock: CoreEpochClock = MutableClock(FIXED_NOW_MILLIS),
+    ): IdentityStateCore =
+        IdentityStateCore.forTesting(
             store = store,
             identifiers = CountingIdentifiers(),
-            timestamps = CoreTimestampProvider { "2026-08-04T00:00:00.000Z" },
+            clock = clock,
         )
 
-    private fun validSession(): SessionState =
+    private fun validSession(
+        id: String = "session-1",
+        startedAt: String = "2026-08-04T00:00:00.000Z",
+        lastActivityAt: String = "2026-08-04T00:01:00.000Z",
+        timeoutSeconds: Int = 1_800,
+    ): SessionState =
         SessionState(
-            id = "session-1",
-            startedAt = "2026-08-04T00:00:00.000Z",
-            lastActivityAt = "2026-08-04T00:01:00.000Z",
-            timeoutSeconds = 1_800,
+            id = id,
+            startedAt = startedAt,
+            lastActivityAt = lastActivityAt,
+            timeoutSeconds = timeoutSeconds,
             lifecycle = SessionLifecycle.ACTIVE,
             backgroundedAt = null,
         )
+
+    private class MutableClock(@Volatile var nowEpochMillis: Long) : CoreEpochClock {
+        override fun nowEpochMillis(): Long = nowEpochMillis
+    }
 
     private class CountingIdentifiers : CoreIdentifierGenerator {
         private val counter = AtomicLong()
@@ -270,13 +485,18 @@ class IdentityStateCoreTest {
         override fun read(): ByteArray? = bytes?.copyOf()
 
         @Synchronized
-        override fun write(bytes: ByteArray) {
+        override fun write(bytes: ByteArray): CoreStateWriteOutcome {
             if (failWrites) throw java.io.IOException("injected failure")
             this.bytes = bytes.copyOf()
             writes += bytes.copyOf()
+            return CoreStateWriteOutcome.Durable
         }
 
         @Synchronized
         fun persistedWrites(): List<ByteArray> = writes.map { it.copyOf() }
+    }
+
+    private companion object {
+        val FIXED_NOW_MILLIS: Long = Instant.parse("2026-08-04T00:00:00.000Z").toEpochMilli()
     }
 }

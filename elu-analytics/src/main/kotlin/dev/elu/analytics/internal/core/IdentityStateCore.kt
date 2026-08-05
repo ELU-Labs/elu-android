@@ -1,8 +1,13 @@
 package dev.elu.analytics.internal.core
 
+import android.content.Context
+import java.io.IOException
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Collections
 import java.util.Date
+import java.util.GregorianCalendar
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
@@ -11,8 +16,8 @@ internal fun interface CoreIdentifierGenerator {
     fun next(prefix: String): String
 }
 
-internal fun interface CoreTimestampProvider {
-    fun now(): String
+internal fun interface CoreEpochClock {
+    fun nowEpochMillis(): Long
 }
 
 internal object UuidCoreIdentifierGenerator : CoreIdentifierGenerator {
@@ -20,11 +25,8 @@ internal object UuidCoreIdentifierGenerator : CoreIdentifierGenerator {
         prefix + UUID.randomUUID().toString().replace("-", "")
 }
 
-internal object SystemCoreTimestampProvider : CoreTimestampProvider {
-    override fun now(): String =
-        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
-            .apply { timeZone = TimeZone.getTimeZone("UTC") }
-            .format(Date())
+internal object SystemCoreEpochClock : CoreEpochClock {
+    override fun nowEpochMillis(): Long = System.currentTimeMillis()
 }
 
 /**
@@ -34,10 +36,10 @@ internal object SystemCoreTimestampProvider : CoreTimestampProvider {
  * writes the complete next aggregate before making it visible. The current
  * production facade is intentionally not wired to this class yet.
  */
-internal class IdentityStateCore(
+internal class IdentityStateCore private constructor(
     private val store: CoreStateStore,
     private val identifiers: CoreIdentifierGenerator = UuidCoreIdentifierGenerator,
-    private val timestamps: CoreTimestampProvider = SystemCoreTimestampProvider,
+    private val clock: CoreEpochClock = SystemCoreEpochClock,
 ) {
     private var state: PersistedCoreState = loadOrCreate()
 
@@ -56,7 +58,7 @@ internal class IdentityStateCore(
                     if (identityChanged) increment(current.revision, "identity revision") else current.revision,
                 contextRevision = increment(current.contextRevision, "context revision"),
                 userId = userId,
-                updatedAt = timestamps.now(),
+                updatedAt = nowTimestamp(),
             )
         commit(state.copy(identity = nextIdentity))
         return nextIdentity
@@ -180,11 +182,72 @@ internal class IdentityStateCore(
         return nextIdentity
     }
 
-    /** Session lifecycle logic can install or clear a schema-valid session without provider coupling. */
+    /**
+     * Applies one contract-defined session-eligible activity under the same lock
+     * as identity persistence. Identity/group/flag operations never call this.
+     */
     @Synchronized
-    fun setSession(session: SessionState?): IdentityState {
-        val nextIdentity = state.identity.copy(session = session, updatedAt = timestamps.now())
-        // Encoding performs the same closed-schema validation used for disk reads.
+    fun recordEligibleActivity(requestedTimeoutSeconds: Int = DEFAULT_SESSION_TIMEOUT_SECONDS): SessionState {
+        val timeoutSeconds =
+            requestedTimeoutSeconds.coerceIn(MIN_SESSION_TIMEOUT_SECONDS, MAX_SESSION_TIMEOUT_SECONDS)
+        val nowEpochMillis = clock.nowEpochMillis()
+        val now = formatTimestamp(nowEpochMillis)
+        val previous = state.identity.session
+        val shouldRotate =
+            if (previous == null) {
+                true
+            } else {
+                val previousLastActivity = parseTimestamp(previous.lastActivityAt)
+                val previousStart = parseTimestamp(previous.startedAt)
+                // Tightening applies immediately, while relaxing must not
+                // retroactively revive a session that already crossed its
+                // previously persisted idle boundary.
+                val effectiveIdleTimeoutSeconds = minOf(previous.timeoutSeconds, timeoutSeconds)
+                nowEpochMillis < previousLastActivity ||
+                    nowEpochMillis < previousStart ||
+                    nowEpochMillis - previousLastActivity >= effectiveIdleTimeoutSeconds * MILLIS_PER_SECOND ||
+                    nowEpochMillis - previousStart >=
+                    SESSION_MAXIMUM_DURATION_SECONDS * MILLIS_PER_SECOND
+            }
+        val session =
+            if (shouldRotate) {
+                SessionState(
+                    id = nextSessionId(excluding = previous?.id),
+                    startedAt = now,
+                    lastActivityAt = now,
+                    timeoutSeconds = timeoutSeconds,
+                    lifecycle = SessionLifecycle.ACTIVE,
+                    backgroundedAt = null,
+                )
+            } else {
+                checkNotNull(previous).copy(
+                    lastActivityAt = now,
+                    timeoutSeconds = timeoutSeconds,
+                )
+            }
+        val nextIdentity = state.identity.copy(session = session, updatedAt = now)
+        commit(state.copy(identity = nextIdentity))
+        return session
+    }
+
+    /** Backgrounding records lifecycle but never ends or creates a session. */
+    @Synchronized
+    fun setSessionLifecycle(lifecycle: SessionLifecycle): SessionState? {
+        val currentSession = state.identity.session ?: return null
+        val now = nowTimestamp()
+        val session =
+            currentSession.copy(
+                lifecycle = lifecycle,
+                backgroundedAt = if (lifecycle == SessionLifecycle.BACKGROUND) now else null,
+            )
+        commit(state.copy(identity = state.identity.copy(session = session, updatedAt = now)))
+        return session
+    }
+
+    /** Raw state installation exists only for migration and focused tests. */
+    @Synchronized
+    internal fun installSessionForTestingOrMigration(session: SessionState?): IdentityState {
+        val nextIdentity = state.identity.copy(session = session, updatedAt = nowTimestamp())
         CoreStateCodec.encodeIdentity(nextIdentity)
         commit(state.copy(identity = nextIdentity))
         return nextIdentity
@@ -193,7 +256,7 @@ internal class IdentityStateCore(
     @Synchronized
     fun setOptedOut(optedOut: Boolean): IdentityState {
         if (state.identity.optedOut == optedOut) return state.identity
-        val nextIdentity = state.identity.copy(optedOut = optedOut, updatedAt = timestamps.now())
+        val nextIdentity = state.identity.copy(optedOut = optedOut, updatedAt = nowTimestamp())
         commit(state.copy(identity = nextIdentity))
         return nextIdentity
     }
@@ -215,7 +278,7 @@ internal class IdentityStateCore(
                 superProperties = emptyMap(),
                 session = null,
                 optedOut = current.optedOut,
-                updatedAt = timestamps.now(),
+                updatedAt = nowTimestamp(),
             )
         commit(
             state.copy(
@@ -247,7 +310,7 @@ internal class IdentityStateCore(
 
     private fun createAndPersistFreshState(): PersistedCoreState {
         val fresh = newState(optedOut = false)
-        store.write(CoreStateCodec.encode(fresh))
+        requireDurableInitialization(store.write(CoreStateCodec.encode(fresh)))
         return fresh
     }
 
@@ -266,7 +329,7 @@ internal class IdentityStateCore(
                         records.flagContext ?: freshFlagContext()
                     },
             )
-        store.write(CoreStateCodec.encode(recovered))
+        requireDurableInitialization(store.write(CoreStateCodec.encode(recovered)))
         return recovered
     }
 
@@ -278,7 +341,7 @@ internal class IdentityStateCore(
         )
 
     private fun newIdentity(optedOut: Boolean): IdentityState {
-        val now = timestamps.now()
+        val now = nowTimestamp()
         return IdentityState(
             revision = 0,
             contextRevision = 0,
@@ -299,14 +362,29 @@ internal class IdentityStateCore(
         )
 
     private fun commit(next: PersistedCoreState) {
-        store.write(CoreStateCodec.encode(next))
+        val outcome = store.write(CoreStateCodec.encode(next))
+        // Both outcomes mean staging was renamed to the authoritative primary.
+        // Install the same aggregate before reporting a durability uncertainty,
+        // otherwise a later mutation could overwrite a committed privacy choice
+        // from stale memory.
         state = next
+        if (outcome is CoreStateWriteOutcome.CommittedWithDurabilityFailure) {
+            throw outcome.failure
+        }
+    }
+
+    private fun requireDurableInitialization(outcome: CoreStateWriteOutcome) {
+        if (outcome is CoreStateWriteOutcome.CommittedWithDurabilityFailure) {
+            // Construction aborts, so no stale actor can escape. A retry loads
+            // the already-installed primary and completes recovery.
+            throw outcome.failure
+        }
     }
 
     private fun advanceContext(identity: IdentityState): IdentityState =
         identity.copy(
             contextRevision = increment(identity.contextRevision, "context revision"),
-            updatedAt = timestamps.now(),
+            updatedAt = nowTimestamp(),
         )
 
     private fun nextAnonymousId(excluding: String? = null): String {
@@ -322,6 +400,47 @@ internal class IdentityStateCore(
         val candidate = identifiers.next("stream_")
         requireGeneratedIdentifier(candidate, 256, "stream ID")
         return candidate
+    }
+
+    private fun nextSessionId(excluding: String?): String {
+        repeat(MAX_ID_GENERATION_ATTEMPTS) {
+            val candidate = identifiers.next("session_")
+            requireGeneratedIdentifier(candidate, 256, "session ID")
+            if (candidate != excluding) return candidate
+        }
+        throw IllegalStateException("Identifier generator could not rotate the session ID")
+    }
+
+    private fun nowTimestamp(): String = formatTimestamp(clock.nowEpochMillis())
+
+    private fun formatTimestamp(epochMillis: Long): String =
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+            .apply { timeZone = UTC }
+            .format(Date(epochMillis))
+
+    private fun parseTimestamp(value: String): Long {
+        val match = SESSION_TIMESTAMP.matchEntire(value)
+            ?: throw CoreStateCorruptionException("Session timestamp is not RFC 3339 UTC")
+        val fraction = match.groupValues[7]
+        val milliseconds = fraction.take(3).padEnd(3, '0').ifEmpty { "0" }.toInt()
+        return try {
+            GregorianCalendar(UTC, Locale.US)
+                .apply {
+                    isLenient = false
+                    gregorianChange = Date(Long.MIN_VALUE)
+                    clear()
+                    set(Calendar.ERA, GregorianCalendar.AD)
+                    set(Calendar.YEAR, match.groupValues[1].toInt())
+                    set(Calendar.MONTH, match.groupValues[2].toInt() - 1)
+                    set(Calendar.DAY_OF_MONTH, match.groupValues[3].toInt())
+                    set(Calendar.HOUR_OF_DAY, match.groupValues[4].toInt())
+                    set(Calendar.MINUTE, match.groupValues[5].toInt())
+                    set(Calendar.SECOND, match.groupValues[6].toInt())
+                    set(Calendar.MILLISECOND, milliseconds)
+                }.timeInMillis
+        } catch (error: IllegalArgumentException) {
+            throw CoreStateCorruptionException("Session timestamp contains an invalid date", error)
+        }
     }
 
     private fun requireIdentifier(
@@ -361,7 +480,51 @@ internal class IdentityStateCore(
     private fun <K, V> immutableMap(value: Map<K, V>): Map<K, V> =
         Collections.unmodifiableMap(LinkedHashMap(value))
 
-    private companion object {
+    internal companion object {
+        private val UTC: TimeZone = TimeZone.getTimeZone("UTC")
+        private val PRODUCTION_INSTANCES = LinkedHashMap<String, IdentityStateCore>()
+        private val SESSION_TIMESTAMP =
+            Regex(
+                "^(\\d{4})-(0[1-9]|1[0-2])-([0-2]\\d|3[01])T" +
+                    "([01]\\d|2[0-3]):([0-5]\\d):([0-5]\\d)(?:\\.(\\d+))?Z$",
+            )
+        private const val MILLIS_PER_SECOND = 1_000L
         const val MAX_ID_GENERATION_ATTEMPTS = 8
+
+        /** The supported production boundary is one core per canonical file in this process. */
+        @Throws(IOException::class)
+        internal fun forAndroid(
+            context: Context,
+            storageNamespace: String,
+        ): IdentityStateCore {
+            val applicationContext = context.applicationContext ?: context
+            val file = AndroidCoreStateStore.fileFor(applicationContext, storageNamespace).canonicalFile
+            return productionSingleton(file.path) {
+                IdentityStateCore(AndroidCoreStateStore.forProduction(file))
+            }
+        }
+
+        internal fun forTesting(
+            store: CoreStateStore,
+            identifiers: CoreIdentifierGenerator = UuidCoreIdentifierGenerator,
+            clock: CoreEpochClock = SystemCoreEpochClock,
+        ): IdentityStateCore = IdentityStateCore(store, identifiers, clock)
+
+        internal fun productionSingletonForTesting(
+            canonicalPath: String,
+            create: () -> IdentityStateCore,
+        ): IdentityStateCore = productionSingleton(canonicalPath, create)
+
+        internal fun clearProductionSingletonsForTesting() {
+            synchronized(PRODUCTION_INSTANCES) { PRODUCTION_INSTANCES.clear() }
+        }
+
+        private fun productionSingleton(
+            canonicalPath: String,
+            create: () -> IdentityStateCore,
+        ): IdentityStateCore =
+            synchronized(PRODUCTION_INSTANCES) {
+                PRODUCTION_INSTANCES.getOrPut(canonicalPath, create)
+            }
     }
 }

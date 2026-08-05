@@ -22,6 +22,19 @@ internal class CoreStateCorruptionException(
 internal class UnsupportedCoreSchemaException(val foundVersion: Long) :
     IllegalStateException("Unsupported ELU core state schema version: $foundVersion")
 
+/**
+ * A record claims the supported schema major but contains fields this SDK does not understand.
+ *
+ * This is deliberately not a [CoreStateCorruptionException]. Treating a forward-compatible
+ * extension as corruption would allow startup recovery to overwrite state written by a newer SDK.
+ */
+internal class UnsupportedCoreSchemaExtensionException(
+    val recordPath: String,
+    val unknownFields: Set<String>,
+) : IllegalStateException(
+        "$recordPath contains unsupported schema fields: ${unknownFields.sorted().joinToString()}",
+    )
+
 internal data class RecoverableCoreRecords(
     val identity: IdentityState? = null,
     val stream: StreamState? = null,
@@ -60,19 +73,179 @@ internal object CoreStateCodec {
 
     fun encode(state: PersistedCoreState): ByteArray {
         validateSchemaVersion(state.schemaVersion.toLong())
+        validatePreEncodeBudget(state)
         val json =
             JSONObject()
                 .put("schemaVersion", CORE_SCHEMA_VERSION)
                 .put("identity", encodeIdentity(state.identity))
                 .put("stream", encodeStream(state.stream))
                 .put("flagContext", encodeFlagContext(state.flagContext))
-        return json.toString().toByteArray(StandardCharsets.UTF_8)
+        return encodeBounded(json)
+    }
+
+    /**
+     * Bounds aggregate work before any JSONObject/JSONArray tree is materialized. The estimate
+     * deliberately over-counts separators and numeric representations; the serialized byte cap
+     * remains the final source of truth after encoding.
+     */
+    private fun validatePreEncodeBudget(state: PersistedCoreState) {
+        val budget = PreEncodeBudget()
+        budget.addObjectNode()
+        budget.addObjectEntry("schemaVersion")
+        budget.addInteger(state.schemaVersion.toLong())
+        budget.addObjectEntry("identity")
+        budgetIdentity(state.identity, budget)
+        budget.addObjectEntry("stream")
+        budgetStream(state.stream, budget)
+        budget.addObjectEntry("flagContext")
+        budgetFlagContext(state.flagContext, budget)
+    }
+
+    private fun budgetIdentity(
+        state: IdentityState,
+        budget: PreEncodeBudget,
+    ) {
+        budget.addObjectNode()
+        budget.addObjectEntry("schemaVersion")
+        budget.addInteger(state.schemaVersion.toLong())
+        budget.addObjectEntry("revision")
+        budget.addInteger(state.revision)
+        budget.addObjectEntry("contextRevision")
+        budget.addInteger(state.contextRevision)
+        budget.addObjectEntry("anonymousId")
+        budget.addString(state.anonymousId)
+        budget.addObjectEntry("userId")
+        state.userId?.let(budget::addString) ?: budget.addNull()
+        budget.addObjectEntry("groups")
+        budgetStringMap(state.groups, budget)
+        budget.addObjectEntry("superProperties")
+        budgetJsonObject(state.superProperties, budget)
+        budget.addObjectEntry("session")
+        state.session?.let { budgetSession(it, budget) } ?: budget.addNull()
+        budget.addObjectEntry("optedOut")
+        budget.addBoolean(state.optedOut)
+        budget.addObjectEntry("updatedAt")
+        budget.addString(state.updatedAt)
+        state.migration?.let { migration ->
+            budget.addObjectEntry("migration")
+            budget.addObjectNode()
+            budget.addObjectEntry("sourceSchema")
+            budget.addString(migration.sourceSchema)
+            budget.addObjectEntry("completedAt")
+            budget.addString(migration.completedAt)
+        }
+    }
+
+    private fun budgetSession(
+        state: SessionState,
+        budget: PreEncodeBudget,
+    ) {
+        budget.addObjectNode()
+        budget.addObjectEntry("id")
+        budget.addString(state.id)
+        budget.addObjectEntry("startedAt")
+        budget.addString(state.startedAt)
+        budget.addObjectEntry("lastActivityAt")
+        budget.addString(state.lastActivityAt)
+        budget.addObjectEntry("timeoutSeconds")
+        budget.addInteger(state.timeoutSeconds.toLong())
+        budget.addObjectEntry("maximumDurationSeconds")
+        budget.addInteger(state.maximumDurationSeconds.toLong())
+        budget.addObjectEntry("lifecycle")
+        budget.addString(state.lifecycle.wireValue)
+        budget.addObjectEntry("backgroundedAt")
+        state.backgroundedAt?.let(budget::addString) ?: budget.addNull()
+    }
+
+    private fun budgetStream(
+        state: StreamState,
+        budget: PreEncodeBudget,
+    ) {
+        budget.addObjectNode()
+        budget.addObjectEntry("schemaVersion")
+        budget.addInteger(state.schemaVersion.toLong())
+        budget.addObjectEntry("streamId")
+        budget.addString(state.streamId)
+        budget.addObjectEntry("nextSequence")
+        budget.addInteger(state.nextSequence)
+    }
+
+    private fun budgetFlagContext(
+        state: FlagContextState,
+        budget: PreEncodeBudget,
+    ) {
+        budget.addObjectNode()
+        budget.addObjectEntry("schemaVersion")
+        budget.addInteger(state.schemaVersion.toLong())
+        budget.addObjectEntry("personProperties")
+        budgetJsonObject(state.personProperties, budget)
+        budget.addObjectEntry("groupProperties")
+        budget.addObjectNode()
+        state.groupProperties.forEach { (type, properties) ->
+            budget.addObjectEntry(type)
+            budgetJsonObject(properties, budget)
+        }
+    }
+
+    private fun budgetStringMap(
+        value: Map<String, String>,
+        budget: PreEncodeBudget,
+    ) {
+        budget.addObjectNode()
+        value.forEach { (key, child) ->
+            budget.addObjectEntry(key)
+            budget.addString(child)
+        }
+    }
+
+    private fun budgetJsonObject(
+        value: Map<*, *>,
+        budget: PreEncodeBudget,
+        depth: Int = 0,
+    ) {
+        if (depth > MAX_JSON_DEPTH) corrupt("Core state exceeds the maximum JSON nesting depth")
+        budget.addObjectNode()
+        value.forEach { (key, child) ->
+            if (key !is String) corrupt("Core state contains a non-string JSON object key")
+            budget.addObjectEntry(key)
+            budgetJsonValue(child, budget, depth + 1)
+        }
+    }
+
+    private fun budgetJsonValue(
+        value: Any?,
+        budget: PreEncodeBudget,
+        depth: Int,
+    ) {
+        if (depth > MAX_JSON_DEPTH) corrupt("Core state exceeds the maximum JSON nesting depth")
+        when (value) {
+            null -> budget.addNull()
+            is String -> budget.addString(value)
+            is Boolean -> budget.addBoolean(value)
+            is Byte -> budget.addInteger(value.toLong())
+            is Short -> budget.addInteger(value.toLong())
+            is Int -> budget.addInteger(value.toLong())
+            is Long -> budget.addInteger(value)
+            is BigInteger -> budget.addBigInteger(value)
+            is BigDecimal -> budget.addBigDecimal(value)
+            is Float -> budget.addFloatingPoint(value.toDouble())
+            is Double -> budget.addFloatingPoint(value)
+            is Map<*, *> -> budgetJsonObject(value, budget, depth)
+            is List<*> -> {
+                budget.addArrayNode()
+                value.forEach { child ->
+                    budget.addArrayEntry()
+                    budgetJsonValue(child, budget, depth + 1)
+                }
+            }
+            else -> corrupt("Core state contains a non-JSON value of type ${value::class.java.name}")
+        }
     }
 
     fun decode(bytes: ByteArray): PersistedCoreState {
         val root = parseObject(bytes)
-        expectFields(root, aggregateFields, emptySet(), "core state")
         readSchemaVersion(root)
+        expectFields(root, aggregateFields, emptySet(), "core state")
         return PersistedCoreState(
             identity = decodeIdentity(requiredObject(root, "identity")),
             stream = decodeStream(requiredObject(root, "stream")),
@@ -91,10 +264,19 @@ internal object CoreStateCodec {
             } catch (_: CoreStateCorruptionException) {
                 return RecoverableCoreRecords()
             }
-        try {
-            readSchemaVersion(root)
-        } catch (_: CoreStateCorruptionException) {
-            return RecoverableCoreRecords()
+        val hasValidAggregateSchema =
+            try {
+                readSchemaVersion(root)
+                true
+            } catch (unsupported: UnsupportedCoreSchemaException) {
+                throw unsupported
+            } catch (_: CoreStateCorruptionException) {
+                // The independently versioned children remain recoverable when only
+                // the aggregate marker is absent or malformed.
+                false
+            }
+        if (hasValidAggregateSchema) {
+            rejectUnknownFields(root, aggregateFields, emptySet(), "core state")
         }
 
         fun <T> recover(block: () -> T): T? =
@@ -155,8 +337,8 @@ internal object CoreStateCodec {
     }
 
     fun decodeIdentity(json: JSONObject): IdentityState {
-        expectFields(json, identityRequiredFields, setOf("migration"), "identity")
         readSchemaVersion(json)
+        expectFields(json, identityRequiredFields, setOf("migration"), "identity")
         val revision = requiredLong(json, "revision", "identity")
         val contextRevision = requiredLong(json, "contextRevision", "identity")
         requireNonNegative(revision, "identity.revision")
@@ -219,8 +401,8 @@ internal object CoreStateCodec {
     }
 
     private fun decodeStream(json: JSONObject): StreamState {
-        expectFields(json, streamFields, emptySet(), "stream")
         readSchemaVersion(json)
+        expectFields(json, streamFields, emptySet(), "stream")
         val nextSequence = requiredLong(json, "nextSequence", "stream")
         requireNonNegative(nextSequence, "stream.nextSequence")
         return StreamState(
@@ -243,8 +425,8 @@ internal object CoreStateCodec {
     }
 
     private fun decodeFlagContext(json: JSONObject): FlagContextState {
-        expectFields(json, flagContextFields, emptySet(), "flagContext")
         readSchemaVersion(json)
+        expectFields(json, flagContextFields, emptySet(), "flagContext")
         val groupsJson = requiredObject(json, "groupProperties")
         if (groupsJson.length() > 64) corrupt("flagContext.groupProperties exceeds 64 entries")
         val groups = linkedMapOf<String, Map<String, Any?>>()
@@ -310,6 +492,9 @@ internal object CoreStateCodec {
     }
 
     private fun parseObject(bytes: ByteArray): JSONObject {
+        if (bytes.size > MAX_PERSISTED_CORE_STATE_BYTES) {
+            corrupt("Core state exceeds the maximum persisted size")
+        }
         try {
             val text =
                 StandardCharsets.UTF_8
@@ -319,6 +504,7 @@ internal object CoreStateCodec {
                     .decode(ByteBuffer.wrap(bytes))
                     .toString()
             if ('\u0000' in text) corrupt("Core state contains an invalid null character")
+            validateStructuralDepth(text)
             val tokener = JSONTokener(text)
             val value = tokener.nextValue()
             if (value !is JSONObject) corrupt("Core state root must be an object")
@@ -333,6 +519,60 @@ internal object CoreStateCodec {
         } catch (error: RuntimeException) {
             throw CoreStateCorruptionException("Core state could not be decoded", error)
         }
+    }
+
+    private fun encodeBounded(json: JSONObject): ByteArray {
+        val text = json.toString()
+        val bytes = text.toByteArray(StandardCharsets.UTF_8)
+        if (bytes.size > MAX_PERSISTED_CORE_STATE_BYTES) {
+            corrupt("Core state exceeds the maximum persisted size")
+        }
+        validateStructuralDepth(text)
+        return bytes
+    }
+
+    /**
+     * Bounds recursive work before [JSONTokener] materializes the document. Quotes and escapes
+     * are handled here so delimiter-looking customer strings do not affect the structural depth.
+     */
+    private fun validateStructuralDepth(text: String) {
+        val containers = CharArray(MAX_STRUCTURAL_JSON_DEPTH)
+        var depth = 0
+        var inString = false
+        var escaped = false
+
+        text.forEach { character ->
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    character == '\\' -> escaped = true
+                    character == '"' -> inString = false
+                }
+                return@forEach
+            }
+
+            when (character) {
+                '"' -> inString = true
+                '{', '[' -> {
+                    if (depth == MAX_STRUCTURAL_JSON_DEPTH) {
+                        corrupt("Core state exceeds the maximum JSON nesting depth")
+                    }
+                    containers[depth] = character
+                    depth += 1
+                }
+                '}', ']' -> {
+                    if (depth == 0) corrupt("Core state contains unmatched JSON delimiters")
+                    val expectedOpening = if (character == '}') '{' else '['
+                    if (containers[depth - 1] != expectedOpening) {
+                        corrupt("Core state contains mismatched JSON delimiters")
+                    }
+                    depth -= 1
+                }
+            }
+        }
+
+        if (inString) corrupt("Core state contains an unterminated JSON string")
+        if (depth != 0) corrupt("Core state contains unterminated JSON containers")
     }
 
     private fun readSchemaVersion(json: JSONObject) {
@@ -350,10 +590,28 @@ internal object CoreStateCodec {
         path: String,
     ) {
         val actual = json.keys().asSequence().toSet()
+        rejectUnknownFields(actual, required, optional, path)
         val missing = required - actual
         if (missing.isNotEmpty()) corrupt("$path is missing fields: ${missing.sorted().joinToString()}")
+    }
+
+    private fun rejectUnknownFields(
+        json: JSONObject,
+        required: Set<String>,
+        optional: Set<String>,
+        path: String,
+    ) = rejectUnknownFields(json.keys().asSequence().toSet(), required, optional, path)
+
+    private fun rejectUnknownFields(
+        actual: Set<String>,
+        required: Set<String>,
+        optional: Set<String>,
+        path: String,
+    ) {
         val unknown = actual - required - optional
-        if (unknown.isNotEmpty()) corrupt("$path contains unknown fields: ${unknown.sorted().joinToString()}")
+        if (unknown.isNotEmpty()) {
+            throw UnsupportedCoreSchemaExtensionException(path, unknown)
+        }
     }
 
     private fun requiredObject(
@@ -509,7 +767,7 @@ internal object CoreStateCodec {
     private fun decodeJsonObject(
         value: JSONObject,
         path: String,
-        depth: Int = 1,
+        depth: Int = 0,
     ): Map<String, Any?> {
         if (depth > MAX_JSON_DEPTH) corrupt("$path exceeds the maximum JSON nesting depth")
         val out = linkedMapOf<String, Any?>()
@@ -548,7 +806,151 @@ internal object CoreStateCodec {
     private fun <K, V> immutableMap(value: Map<K, V>): Map<K, V> =
         Collections.unmodifiableMap(LinkedHashMap(value))
 
+    private class PreEncodeBudget {
+        private var nodes: Int = 0
+        private var estimatedBytes: Long = 0
+
+        fun addObjectNode() {
+            addNode()
+            addBytes(2) // Braces.
+        }
+
+        fun addObjectEntry(key: String) {
+            addQuotedStringBytes(key)
+            addBytes(2) // Colon plus a conservatively counted comma.
+        }
+
+        fun addArrayNode() {
+            addNode()
+            addBytes(2) // Brackets.
+        }
+
+        fun addArrayEntry() {
+            addBytes(1) // Conservatively count a comma for every element.
+        }
+
+        fun addString(value: String) {
+            addNode()
+            addQuotedStringBytes(value)
+        }
+
+        fun addNull() {
+            addNode()
+            addBytes(4)
+        }
+
+        fun addBoolean(value: Boolean) {
+            addNode()
+            addBytes(if (value) 4 else 5)
+        }
+
+        fun addInteger(value: Long) {
+            addNode()
+            var remaining = value
+            var length = if (value < 0) 1L else 0L
+            do {
+                length += 1
+                remaining /= 10
+            } while (remaining != 0L)
+            addBytes(length)
+        }
+
+        fun addBigInteger(value: BigInteger) {
+            addNode()
+            addBytes(estimatedBigIntegerBytes(value))
+        }
+
+        fun addBigDecimal(value: BigDecimal) {
+            addNode()
+            val precision = value.precision().toLong()
+            val scale = value.scale().toLong()
+            val adjustedExponent = -scale + precision - 1
+            val signBytes = if (value.signum() < 0) 1L else 0L
+            val canonicalBytes =
+                if (scale >= 0 && adjustedExponent >= -6) {
+                    when {
+                        scale == 0L -> precision
+                        scale < precision -> precision + 1 // Embedded decimal point.
+                        else -> scale + 2 // Leading "0." and zero padding.
+                    }
+                } else {
+                    val coefficientBytes = if (precision == 1L) 1L else precision + 1
+                    coefficientBytes + 2 + unsignedDecimalDigits(adjustedExponent)
+                }
+            addBytes(signBytes + canonicalBytes)
+        }
+
+        fun addFloatingPoint(value: Double) {
+            if (!value.isFinite()) corruptBudget("Core state contains a non-finite JSON number")
+            addNode()
+            addBytes(MAX_FLOATING_POINT_JSON_BYTES)
+        }
+
+        private fun addQuotedStringBytes(value: String) {
+            addBytes(2) // Quotes.
+            var index = 0
+            while (index < value.length) {
+                val codePoint = Character.codePointAt(value, index)
+                val bytes =
+                    when {
+                        codePoint > 0xffff -> 4L
+                        codePoint == 0x22 || codePoint == 0x5c || codePoint == 0x2f -> 2L
+                        codePoint < 0x20 -> 6L
+                        codePoint in 0x80..0x9f || codePoint in 0x2000..0x20ff -> 6L
+                        codePoint in 0xd800..0xdfff -> 6L // Unpaired surrogate.
+                        codePoint < 0x80 -> 1L
+                        codePoint < 0x800 -> 2L
+                        else -> 3L
+                    }
+                addBytes(bytes)
+                index += Character.charCount(codePoint)
+            }
+        }
+
+        private fun addNode() {
+            if (nodes >= MAX_PRE_ENCODE_JSON_NODES) {
+                corruptBudget("Core state exceeds the pre-encode JSON node budget before materialization")
+            }
+            nodes += 1
+        }
+
+        private fun addBytes(amount: Long) {
+            val limit = MAX_PERSISTED_CORE_STATE_BYTES.toLong()
+            if (amount < 0 || estimatedBytes > limit - amount) {
+                corruptBudget("Core state exceeds the maximum persisted size estimate before JSON materialization")
+            }
+            estimatedBytes += amount
+        }
+
+        private fun estimatedBigIntegerBytes(value: BigInteger): Long {
+            if (value.signum() == 0) return 1
+            val bits = value.bitLength().coerceAtLeast(1).toLong()
+            val magnitudeDigits = (bits * 30_103L + 99_999L) / 100_000L
+            return magnitudeDigits + if (value.signum() < 0) 1 else 0
+        }
+
+        private fun unsignedDecimalDigits(value: Long): Long {
+            var remaining = value
+            var digits = 0L
+            do {
+                digits += 1
+                remaining /= 10
+            } while (remaining != 0L)
+            return digits
+        }
+
+        private fun corruptBudget(message: String): Nothing =
+            throw CoreStateCorruptionException(message)
+    }
+
     private const val MAX_JSON_DEPTH = 64
+    // A customer properties object can begin at aggregate -> flagContext ->
+    // groupProperties -> group key (structural depth four), then use all 64
+    // relative child levels accepted by the customer JSON validators.
+    private const val CORE_STATE_WRAPPER_DEPTH = 4
+    private const val MAX_STRUCTURAL_JSON_DEPTH = MAX_JSON_DEPTH + CORE_STATE_WRAPPER_DEPTH
+    private const val MAX_PRE_ENCODE_JSON_NODES = 65_536
+    private const val MAX_FLOATING_POINT_JSON_BYTES = 32L
 
     private val RFC_3339 =
         Regex(
