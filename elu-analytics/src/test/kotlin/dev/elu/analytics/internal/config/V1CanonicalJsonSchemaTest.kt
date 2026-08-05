@@ -22,6 +22,9 @@ class V1CanonicalJsonSchemaTest {
         assertTrue("manifest must route disabled config fixture", "fixtures/config-disabled.json" in fixturePaths)
         assertTrue("manifest must route allowed privacy fixture", "fixtures/privacy-allowed.json" in fixturePaths)
         assertTrue("manifest must route blocked privacy fixture", "fixtures/privacy-blocked.json" in fixturePaths)
+        assertTrue("manifest must route canonical event fixture", "fixtures/event.json" in fixturePaths)
+        assertTrue("manifest must route canonical mutations fixture", "fixtures/mutations.json" in fixturePaths)
+        assertTrue("manifest must route canonical version fixture", "fixtures/version.json" in fixturePaths)
 
         val enabled = json("contracts/v1/fixtures/config-enabled.json")
         assertValid(validator, schemas.getString("config"), enabled)
@@ -29,6 +32,9 @@ class V1CanonicalJsonSchemaTest {
         assertValid(validator, schemas.getString("privacyPolicy"), enabled.getJSONObject("privacy"))
         assertValid(validator, schemas.getString("privacyState"), json("contracts/v1/fixtures/privacy-allowed.json"))
         assertValid(validator, schemas.getString("privacyState"), json("contracts/v1/fixtures/privacy-blocked.json"))
+        assertValid(validator, schemas.getString("event"), json("contracts/v1/fixtures/event.json"))
+        assertValid(validator, schemas.getString("mutation"), json("contracts/v1/fixtures/mutations.json"))
+        assertValid(validator, schemas.getString("version"), json("contracts/v1/fixtures/version.json"))
     }
 
     @Test
@@ -62,6 +68,25 @@ class V1CanonicalJsonSchemaTest {
                 .getJSONObject("privacy")
                 .apply { getJSONObject("masking").put("secureInputsMasked", false) }
         assertInvalid(validator, schemas.getString("privacyPolicy"), insecurePolicy)
+
+        val eventWithFutureField = json("contracts/v1/fixtures/event.json").put("futureField", true)
+        assertInvalid(validator, schemas.getString("event"), eventWithFutureField)
+
+        val tooManyGroups = json("contracts/v1/fixtures/event.json")
+        tooManyGroups.put(
+            "groups",
+            JSONObject().apply { repeat(65) { index -> put("type-$index", "group-$index") } },
+        )
+        assertInvalid(validator, schemas.getString("event"), tooManyGroups)
+
+        val duplicateUnset = json("contracts/v1/fixtures/mutations.json")
+        duplicateUnset.getJSONArray("mutations").getJSONObject(2).getJSONObject("change")
+            .put("unset", JSONArray().put("role").put("role"))
+        assertInvalid(validator, schemas.getString("mutation"), duplicateUnset)
+
+        val malformedRuntimeName = json("contracts/v1/fixtures/version.json")
+        malformedRuntimeName.getJSONObject("runtime").put("name", "invalid_runtime")
+        assertInvalid(validator, schemas.getString("version"), malformedRuntimeName)
     }
 
     private fun assertValid(
@@ -283,6 +308,9 @@ private class ResourceJsonSchemaValidator(
         errors: MutableList<String>,
     ) {
         val keys = value.keys().asSequence().toSet()
+        if (schema.has("maxProperties") && keys.size > schema.getInt("maxProperties")) {
+            errors += "$path has too many properties"
+        }
         schema.optJSONArray("required")?.strings()?.forEach { required ->
             if (!value.has(required)) errors += "$path/$required is required"
         }
@@ -452,6 +480,7 @@ private class ResourceJsonSchemaValidator(
                 "format",
                 "minItems",
                 "maxItems",
+                "maxProperties",
                 "uniqueItems",
                 "prefixItems",
                 "items",

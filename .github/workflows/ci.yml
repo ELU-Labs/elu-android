@@ -86,7 +86,9 @@ jobs:
           api-level: 35
           arch: x86_64
           disable-animations: true
-          script: bash scripts/run-android-upgrade-evidence.sh
+          script: |
+            ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
+            bash scripts/run-android-upgrade-evidence.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

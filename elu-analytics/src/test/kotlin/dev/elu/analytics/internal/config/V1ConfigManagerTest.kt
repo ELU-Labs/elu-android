@@ -25,12 +25,19 @@ class V1ConfigManagerTest {
             mapOf(
                 "contracts/v1/manifest.json" to "98152d8725c286f29402ba3e420bda8dd364200fb6fdf1cfe49b2da9b8f63e54",
                 "contracts/v1/schemas/config.schema.json" to "4cd1e8fce0298048ec60ded16f9a215d10dc1022477f059e01db0349ec478307",
+                "contracts/v1/schemas/event.schema.json" to "4a0deeb19b8406d31aa519bf1d3978294d6d06eb451d4588668cb6f67f4edee9",
+                "contracts/v1/schemas/mutation.schema.json" to "8482af6b66c04701b014acd27e6d59aaef3f27864086c755f9abde498e5c8f5f",
                 "contracts/v1/schemas/privacy-policy.schema.json" to "73beb1856358f5e3cc45b225fdf0608294124e6d6f7c13e2ec3db1c285db6fc4",
                 "contracts/v1/schemas/privacy.schema.json" to "830726002dce98eafce30981067ea892afe12db2b985296514a8da3597776b14",
+                "contracts/v1/schemas/version.schema.json" to "3b4ca74e470efbf6610f2a1743f2bc78805882bd294a6984ef2c93fe42fea4ab",
                 "contracts/v1/fixtures/config-enabled.json" to "91be45589959f53c73a78f916f5e722b77a853fa0a6b952601400bf107b591e5",
                 "contracts/v1/fixtures/config-disabled.json" to "c60d32c9701ea726cac342a8c06b89d9a6bd0cf6cea3441bcdd37c2de9055270",
+                "contracts/v1/fixtures/batch-request.json" to "c0446316c5b75c163b27e27abe7b079b1c88bdb198a4985f4ceb544a8d154bbb",
+                "contracts/v1/fixtures/event.json" to "44ea5d14646ec08aaa1805dffd8ea6403487ba7cb48e8ce7ea7f3752b241809d",
+                "contracts/v1/fixtures/mutations.json" to "a02a4db1d1ef0bf6b9eac0334fe83c3564526cbd21c79ccfe14aa303ff2ae3d4",
                 "contracts/v1/fixtures/privacy-allowed.json" to "a0fa41fbb06f263510b35c8d27863e8c69ecc52c940eac8fa23bdd4411c68f40",
                 "contracts/v1/fixtures/privacy-blocked.json" to "503a2d118737bff7206f05c3cb83f4098579a5c92e7f49670b80e86df2e1e24d",
+                "contracts/v1/fixtures/version.json" to "61bf97e8eeea78df05df13434501a4bc9e81eaa3351fecaff2bdc06da9f1f8e2",
             )
 
         expected.forEach { (path, digest) -> assertEquals(path, digest, sha256(resourceBytes(path))) }

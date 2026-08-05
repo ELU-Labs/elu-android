@@ -1,0 +1,86 @@
+{
+    "schemaVersion": 1,
+    "requestId": "request_018fcb7cff80721387a19b859e7c53a6",
+    "streamId": "stream_018fcb7cff80721387a19b859e7c53a6",
+    "sentAt": "2026-08-04T00:01:01.000Z",
+    "versions": {
+        "schemaVersion": 1,
+        "contractVersion": "1.0.0",
+        "platform": "browser",
+        "runtime": {
+            "name": "elu-js",
+            "version": "1.409.5-elu.1"
+        },
+        "facade": {
+            "name": "window.elu",
+            "version": "1.0.0"
+        },
+        "build": "4670b69e98ed590c31cf42fc840a25bdadf45ae7"
+    },
+    "records": [
+        {
+            "kind": "mutation",
+            "mutation": {
+                "mutationId": "mutation_000005",
+                "sequence": 5,
+                "contextRevision": 5,
+                "occurredAt": "2026-08-04T00:00:05.000Z",
+                "subject": {
+                    "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+                    "userId": "user_123",
+                    "identityRevision": 1
+                },
+                "change": {
+                    "type": "setGroupProperties",
+                    "groupType": "organization",
+                    "groupKey": "org_456",
+                    "set": { "tier": "design-partner" },
+                    "setOnce": {},
+                    "unset": []
+                }
+            }
+        },
+        {
+            "kind": "event",
+            "event": {
+                "schemaVersion": 1,
+                "eventId": "event_018fcb7cff80721387a19b859e7c53a6",
+                "streamId": "stream_018fcb7cff80721387a19b859e7c53a6",
+                "sequence": 6,
+                "contextRevision": 5,
+                "kind": "capture",
+                "name": "checkout_started",
+                "occurredAt": "2026-08-04T00:01:00.000Z",
+                "identity": {
+                    "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+                    "userId": "user_123",
+                    "revision": 1
+                },
+                "sessionId": "session_018fcb7cff80721387a19b859e7c53a6",
+                "properties": {
+                    "plan": "growth",
+                    "$elu_contract_version": "1.0.0",
+                    "$elu_sdk_version": "1.409.5-elu.1",
+                    "$elu_facade_version": "1.0.0"
+                },
+                "groups": {
+                    "organization": "org_456"
+                },
+                "versions": {
+                    "schemaVersion": 1,
+                    "contractVersion": "1.0.0",
+                    "platform": "browser",
+                    "runtime": {
+                        "name": "elu-js",
+                        "version": "1.409.5-elu.1"
+                    },
+                    "facade": {
+                        "name": "window.elu",
+                        "version": "1.0.0"
+                    },
+                    "build": "4670b69e98ed590c31cf42fc840a25bdadf45ae7"
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,113 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/mutation.schema.json",
+    "title": "ELU SDK ordered identity and entity mutation batch v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["schemaVersion", "streamId", "versions", "mutations"],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "streamId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "versions": { "$ref": "version.schema.json" },
+        "mutations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": { "$ref": "#/$defs/mutation" }
+        }
+    },
+    "$defs": {
+        "jsonProperties": { "type": "object" },
+        "propertyNames": {
+            "type": "array",
+            "maxItems": 256,
+            "items": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "uniqueItems": true
+        },
+        "mutation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mutationId", "sequence", "contextRevision", "occurredAt", "subject", "change"],
+            "properties": {
+                "mutationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "sequence": { "type": "integer", "minimum": 0 },
+                "contextRevision": { "type": "integer", "minimum": 0 },
+                "occurredAt": { "type": "string", "format": "date-time" },
+                "subject": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["anonymousId", "userId", "identityRevision"],
+                    "properties": {
+                        "anonymousId": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "userId": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+                        "identityRevision": { "type": "integer", "minimum": 0 }
+                    }
+                },
+                "change": {
+                    "oneOf": [
+                        { "$ref": "#/$defs/identify" },
+                        { "$ref": "#/$defs/linkAlias" },
+                        { "$ref": "#/$defs/setPersonProperties" },
+                        { "$ref": "#/$defs/associateGroup" },
+                        { "$ref": "#/$defs/setGroupProperties" }
+                    ]
+                }
+            }
+        },
+        "identify": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "userId", "set", "setOnce"],
+            "properties": {
+                "type": { "const": "identify" },
+                "userId": { "type": "string", "minLength": 1, "maxLength": 512 },
+                "set": { "$ref": "#/$defs/jsonProperties" },
+                "setOnce": { "$ref": "#/$defs/jsonProperties" }
+            }
+        },
+        "linkAlias": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "aliasId", "canonicalId"],
+            "properties": {
+                "type": { "const": "linkAlias" },
+                "aliasId": { "type": "string", "minLength": 1, "maxLength": 512 },
+                "canonicalId": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+        },
+        "setPersonProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "set", "setOnce", "unset"],
+            "properties": {
+                "type": { "const": "setPersonProperties" },
+                "set": { "$ref": "#/$defs/jsonProperties" },
+                "setOnce": { "$ref": "#/$defs/jsonProperties" },
+                "unset": { "$ref": "#/$defs/propertyNames" }
+            }
+        },
+        "associateGroup": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "groupType", "groupKey"],
+            "properties": {
+                "type": { "const": "associateGroup" },
+                "groupType": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "groupKey": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+        },
+        "setGroupProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "groupType", "groupKey", "set", "setOnce", "unset"],
+            "properties": {
+                "type": { "const": "setGroupProperties" },
+                "groupType": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "groupKey": { "type": "string", "minLength": 1, "maxLength": 512 },
+                "set": { "$ref": "#/$defs/jsonProperties" },
+                "setOnce": { "$ref": "#/$defs/jsonProperties" },
+                "unset": { "$ref": "#/$defs/propertyNames" }
+            }
+        }
+    }
+}
