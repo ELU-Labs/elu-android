@@ -28,6 +28,7 @@ jobs:
           :elu-analytics:javaDocReleaseJar
           :sample:assembleDebug
           checkConformanceFixtures
+          checkFeatureFlagBoundary
           checkZeroBrandScanner
           checkZeroBrandRatchet
           --stacktrace

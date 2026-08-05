@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -208,6 +209,142 @@ class AndroidRuntimeQueueInstrumentationTest {
     }
 
     @Test
+    fun lazyFlagMigrationPreservesCoreAndQueueBytesAndKeepsRuntimeStateAtV1() {
+        val file = databaseFile()
+        val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
+        appendEvents(owner, event("before-flag-migration"))
+        owner.closeAsync().await()
+        owners.remove(owner)
+
+        val beforeCore: ByteArray
+        val beforeQueue: List<ByteArray>
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            assertEquals(1L, pragmaLong(sqlite, "PRAGMA user_version"))
+            beforeCore = singleBlob(sqlite, "SELECT state_json FROM core_state WHERE singleton_id = 1")
+            beforeQueue = orderedBlobs(sqlite, "SELECT internal_payload FROM queue_records ORDER BY sequence")
+            assertEquals(1, JSONObject(String(beforeCore, Charsets.UTF_8)).getInt("schemaVersion"))
+        }
+
+        val migrated =
+            open(
+                file,
+                CountingIdentifiers(),
+                RecordingFaults(),
+                { error("Migration must retain the existing SQLite core") },
+            )
+        migrated.ensureFeatureFlagRuntime().await()
+        migrated.closeAsync().await()
+        owners.remove(migrated)
+
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            assertEquals(2L, pragmaLong(sqlite, "PRAGMA user_version"))
+            assertArrayEquals(beforeCore, singleBlob(sqlite, "SELECT state_json FROM core_state WHERE singleton_id = 1"))
+            val afterQueue = orderedBlobs(sqlite, "SELECT internal_payload FROM queue_records ORDER BY sequence")
+            assertEquals(beforeQueue.size, afterQueue.size)
+            beforeQueue.zip(afterQueue).forEach { (before, after) -> assertArrayEquals(before, after) }
+            sqlite.rawQuery(
+                "SELECT storage_schema_version, length(payload) FROM flag_cache WHERE record_key = ?",
+                arrayOf(RUNTIME_FLAG_AUTHORITY_KEY),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1L, cursor.getLong(0))
+                assertTrue(cursor.getLong(1) > 0L)
+                assertFalse(cursor.moveToNext())
+            }
+        }
+    }
+
+    @Test
+    fun ordinaryV2ReopenBytePreservesCurrentAndFutureFlagRows() {
+        val file = databaseFile()
+        val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
+        owner.ensureFeatureFlagRuntime().await()
+        owner.closeAsync().await()
+        owners.remove(owner)
+
+        val current = byteArrayOf(0, 1, 2, 3, 127, -1)
+        val future = "{\"declaredBodyBytes\":4194305,\"future\":true}".toByteArray(Charsets.UTF_8)
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { sqlite ->
+            sqlite.execSQL(
+                "INSERT INTO flag_cache(record_key, storage_schema_version, payload) VALUES (?, ?, ?)",
+                arrayOf<Any>("cache-body:preserved:0000", 1L, current),
+            )
+            sqlite.execSQL(
+                "INSERT INTO flag_cache(record_key, storage_schema_version, payload) VALUES (?, ?, ?)",
+                arrayOf<Any>(RUNTIME_FLAG_CACHE_METADATA_KEY, 2L, future),
+            )
+        }
+
+        val reopened =
+            open(
+                file,
+                CountingIdentifiers(),
+                RecordingFaults(),
+                { error("A valid v2 reopen must use the retained SQLite core") },
+            )
+        assertEquals(0, reopened.snapshot().await().queuedCount)
+        reopened.closeAsync().await()
+        owners.remove(reopened)
+
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            assertEquals(2L, pragmaLong(sqlite, "PRAGMA user_version"))
+            assertArrayEquals(
+                current,
+                keyedFlagPayload(sqlite, "cache-body:preserved:0000", expectedSchema = 1L),
+            )
+            assertArrayEquals(
+                future,
+                keyedFlagPayload(sqlite, RUNTIME_FLAG_CACHE_METADATA_KEY, expectedSchema = 2L),
+            )
+        }
+    }
+
+    @Test
+    fun flagStorageAcceptsExactlyFourOneMiBChunksAndRejectsOneByteOverARow() {
+        val file = databaseFile()
+        val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
+        owner.ensureFeatureFlagRuntime().await()
+        owner.closeAsync().await()
+        owners.remove(owner)
+
+        val chunks = List(4) { index -> ByteArray(MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) { index.toByte() } }
+        val database = AndroidSQLiteRuntimeDatabase.open(file)
+        try {
+            database.transaction { transaction ->
+                chunks.forEachIndexed { index, payload ->
+                    transaction.putFlagRow(
+                        RuntimeFlagStoredRow("cache-body:limit:${index.toString().padStart(4, '0')}", 1L, payload),
+                    )
+                }
+            }
+            val loaded = mutableListOf<ByteArray>()
+            database.transaction { transaction ->
+                transaction.scanFlagRows("cache-body:limit:") { row -> loaded += row.payload.copyOf() }
+            }
+            assertEquals(4, loaded.size)
+            chunks.zip(loaded).forEach { (expected, actual) -> assertArrayEquals(expected, actual) }
+            assertEquals(4_194_304L, loaded.sumOf { it.size.toLong() })
+
+            try {
+                database.transaction { transaction ->
+                    transaction.putFlagRow(
+                        RuntimeFlagStoredRow(
+                            "cache-body:over:0000",
+                            1L,
+                            ByteArray(MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES + 1),
+                        ),
+                    )
+                }
+                fail("Expected a flag row one byte over the SQLite limit to be rejected")
+            } catch (_: IllegalArgumentException) {
+                // Expected before SQLite mutation.
+            }
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
     fun sqliteMultiRecordAppendAndExactAcknowledgementAreAtomic() {
         val file = databaseFile()
         val faults = RecordingFaults()
@@ -258,7 +395,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         SQLiteDatabase.openOrCreateDatabase(unsupportedFile, null).use { sqlite ->
             sqlite.execSQL("CREATE TABLE preserved_marker (value TEXT NOT NULL)")
             sqlite.execSQL("INSERT INTO preserved_marker(value) VALUES ('keep')")
-            executePragma(sqlite, "PRAGMA user_version = 2")
+            executePragma(sqlite, "PRAGMA user_version = 3")
         }
 
         assertFutureCause(UnsupportedRuntimeStorageSchemaException::class.java) {
@@ -269,7 +406,7 @@ class AndroidRuntimeQueueInstrumentationTest {
             ).await()
         }
         SQLiteDatabase.openDatabase(unsupportedFile.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(2L, pragmaLong(sqlite, "PRAGMA user_version"))
+            assertEquals(3L, pragmaLong(sqlite, "PRAGMA user_version"))
             sqlite.rawQuery("SELECT value FROM preserved_marker", null).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals("keep", cursor.getString(0))
@@ -387,6 +524,43 @@ class AndroidRuntimeQueueInstrumentationTest {
         testDirectories += directory
         return File(directory, "runtime.sqlite")
     }
+
+    private fun singleBlob(
+        sqlite: SQLiteDatabase,
+        query: String,
+    ): ByteArray =
+        sqlite.rawQuery(query, null).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            val value = cursor.getBlob(0).copyOf()
+            assertFalse(cursor.moveToNext())
+            value
+        }
+
+    private fun orderedBlobs(
+        sqlite: SQLiteDatabase,
+        query: String,
+    ): List<ByteArray> =
+        sqlite.rawQuery(query, null).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getBlob(0).copyOf())
+            }
+        }
+
+    private fun keyedFlagPayload(
+        sqlite: SQLiteDatabase,
+        key: String,
+        expectedSchema: Long,
+    ): ByteArray =
+        sqlite.rawQuery(
+            "SELECT storage_schema_version, payload FROM flag_cache WHERE record_key = ?",
+            arrayOf(key),
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(expectedSchema, cursor.getLong(0))
+            val payload = cursor.getBlob(1).copyOf()
+            assertFalse(cursor.moveToNext())
+            payload
+        }
 
     private fun appendEvents(
         owner: RuntimeQueueOwner,

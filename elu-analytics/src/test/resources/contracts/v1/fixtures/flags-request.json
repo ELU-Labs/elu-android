@@ -1,0 +1,36 @@
+{
+    "schemaVersion": 1,
+    "requestId": "flags_018fcb7cff80721387a19b859e7c53a6",
+    "contextRevision": 7,
+    "identity": {
+        "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+        "userId": "user_123",
+        "revision": 1
+    },
+    "personProperties": {
+        "plan": "growth",
+        "role": "owner"
+    },
+    "groups": {
+        "organization": "org_456"
+    },
+    "groupProperties": {
+        "organization": {
+            "tier": "design-partner"
+        }
+    },
+    "versions": {
+        "schemaVersion": 1,
+        "contractVersion": "1.0.0",
+        "platform": "browser",
+        "runtime": {
+            "name": "elu-js",
+            "version": "1.409.5-elu.1"
+        },
+        "facade": {
+            "name": "window.elu",
+            "version": "1.0.0"
+        },
+        "build": "4670b69e98ed590c31cf42fc840a25bdadf45ae7"
+    }
+}

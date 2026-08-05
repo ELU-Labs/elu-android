@@ -34,6 +34,8 @@ class V1ConfigManagerTest {
                 "contracts/v1/schemas/batch-ack.schema.json" to "95ccd5e87001515b258fd2ea6a6e346ac265220708f8b1931d4f000276e0f3d9",
                 "contracts/v1/schemas/transport-error.schema.json" to "67255aa898bb33fd75440e29573969c14b1d883f5b846865a3b3e5ba3051aaae",
                 "contracts/v1/schemas/transport-policy.schema.json" to "16064cf3f7c513f3a05f57dbb4ad91386918dda4b0910c51aec544a492e2df6b",
+                "contracts/v1/schemas/flags-request.schema.json" to "aef0ae186355db81806561abb4b1c89885ee5024eb3d99a587531a9c7430a770",
+                "contracts/v1/schemas/flags-response.schema.json" to "723161b3c0f3a448d679faa7a0723cb819cdb162e62ba605fc7935e15df69db2",
                 "contracts/v1/fixtures/config-enabled.json" to "91be45589959f53c73a78f916f5e722b77a853fa0a6b952601400bf107b591e5",
                 "contracts/v1/fixtures/config-disabled.json" to "c60d32c9701ea726cac342a8c06b89d9a6bd0cf6cea3441bcdd37c2de9055270",
                 "contracts/v1/fixtures/batch-request.json" to "c0446316c5b75c163b27e27abe7b079b1c88bdb198a4985f4ceb544a8d154bbb",
@@ -50,6 +52,9 @@ class V1ConfigManagerTest {
                 "contracts/v1/fixtures/privacy-allowed.json" to "a0fa41fbb06f263510b35c8d27863e8c69ecc52c940eac8fa23bdd4411c68f40",
                 "contracts/v1/fixtures/privacy-blocked.json" to "503a2d118737bff7206f05c3cb83f4098579a5c92e7f49670b80e86df2e1e24d",
                 "contracts/v1/fixtures/version.json" to "61bf97e8eeea78df05df13434501a4bc9e81eaa3351fecaff2bdc06da9f1f8e2",
+                "contracts/v1/fixtures/flags-request.json" to "19b4f681c8f2c059d39403a5621c0c60a4b6b4328e2bbe8ae28341724604238a",
+                "contracts/v1/fixtures/flags-response.json" to "ae943a59d4362cd297e2ea6d7838f5075ad1f949d1401d07d5585db0102326be",
+                "contracts/v1/test-vectors/feature-flag-activity.json" to "dbceaa7bee48caf8bf54b73e494fb3f28460eeaf366bbe26f606b659c62a47c4",
             )
 
         expected.forEach { (path, digest) -> assertEquals(path, digest, sha256(resourceBytes(path))) }

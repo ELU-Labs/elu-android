@@ -3,7 +3,11 @@ package dev.elu.analytics.internal.runtime
 import java.io.Closeable
 import java.io.IOException
 
+/** Runtime-state row schema. It remains v1 when the additive database schema moves to v2. */
 internal const val RUNTIME_STORAGE_SCHEMA_VERSION: Int = 1
+internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS: Int = 2
+internal const val RUNTIME_FLAG_AUTHORITY_KEY: String = "authority"
+internal const val RUNTIME_FLAG_CACHE_METADATA_KEY: String = "cache-metadata"
 internal const val MAX_RUNTIME_QUEUE_RECORDS: Int = 10_000
 internal const val MAX_RUNTIME_QUEUE_BYTES: Long = 268_435_456L
 
@@ -57,6 +61,12 @@ internal data class RuntimeStoredRecord(
     val accountedBytes: Int,
 )
 
+internal data class RuntimeFlagStoredRow(
+    val key: String,
+    val storageSchemaVersion: Long,
+    val payload: ByteArray,
+)
+
 /** Minimal transaction surface shared by the SQLite implementation and deterministic fake. */
 internal interface RuntimeQueueTransaction {
     fun readCore(): RuntimeStoredCore?
@@ -74,9 +84,26 @@ internal interface RuntimeQueueTransaction {
     fun insertRecord(record: RuntimeStoredRecord)
 
     fun deleteRecord(sequence: Long): Boolean
+
+    fun readFlagRow(key: String): RuntimeFlagStoredRow?
+
+    fun scanFlagRows(prefix: String, visitor: (RuntimeFlagStoredRow) -> Unit)
+
+    fun putFlagRow(row: RuntimeFlagStoredRow)
+
+    fun deleteFlagRow(key: String): Boolean
+
+    /**
+     * Context revision changes are themselves the atomic cache-invalidating witness. Stored bytes
+     * remain for the flag layer to quarantine or preserve with schema-aware rules.
+     */
+    fun invalidateCurrentFlagCache()
 }
 
 internal interface RuntimeQueueDatabase : Closeable {
+    /** Explicit, internal-only lazy v1→v2 migration. Ordinary open never invokes this. */
+    fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow)
+
     /**
      * Executes [block] in a full synchronous transaction. A known pre-commit failure rolls back;
      * a mutated transaction with an explicitly confirmed rollback throws

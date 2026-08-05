@@ -13,6 +13,8 @@ internal enum class FakeAmbiguousOutcome {
 internal class FakeRuntimeQueueBacking {
     var core: RuntimeStoredCore? = null
     val records: TreeMap<Long, RuntimeStoredRecord> = TreeMap()
+    var databaseSchemaVersion: Int = RUNTIME_STORAGE_SCHEMA_VERSION
+    val flagRows: TreeMap<String, RuntimeFlagStoredRow> = TreeMap()
     var failNextKnownCommit: Throwable? = null
     var failNextCoreRead: Throwable? = null
     var ambiguousNextCommit: FakeAmbiguousOutcome? = null
@@ -35,6 +37,21 @@ private class FakeRuntimeQueueDatabase(
 ) : RuntimeQueueDatabase {
     private var closed = false
 
+    override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) =
+        synchronized(backing) {
+            check(!closed) { "Fake database is closed" }
+            when (backing.databaseSchemaVersion) {
+                RUNTIME_STORAGE_SCHEMA_VERSION -> {
+                    check(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
+                    backing.flagRows[initialAuthority.key] = initialAuthority.deepCopy()
+                    backing.databaseSchemaVersion = RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS
+                    backing.advanceCommittedMutationGeneration()
+                }
+                RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS -> Unit
+                else -> throw UnsupportedRuntimeStorageSchemaException(backing.databaseSchemaVersion.toLong())
+            }
+        }
+
     override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T =
         synchronized(backing) {
             check(!closed) { "Fake database is closed" }
@@ -44,7 +61,11 @@ private class FakeRuntimeQueueDatabase(
             backing.records.forEach { (sequence, row) -> originalRecords[sequence] = row.deepCopy() }
             val workingRecords = TreeMap<Long, RuntimeStoredRecord>()
             originalRecords.forEach { (sequence, row) -> workingRecords[sequence] = row.deepCopy() }
-            val transaction = FakeTransaction(backing, workingCore, workingRecords)
+            val originalFlagRows = TreeMap<String, RuntimeFlagStoredRow>()
+            backing.flagRows.forEach { (key, row) -> originalFlagRows[key] = row.deepCopy() }
+            val workingFlagRows = TreeMap<String, RuntimeFlagStoredRow>()
+            originalFlagRows.forEach { (key, row) -> workingFlagRows[key] = row.deepCopy() }
+            val transaction = FakeTransaction(backing, workingCore, workingRecords, workingFlagRows)
             val result = block(transaction)
             if (!transaction.mutated) {
                 if (backing.ambiguousNextReadOnlyTransaction) {
@@ -64,6 +85,8 @@ private class FakeRuntimeQueueDatabase(
                     backing.core = transaction.core?.copy(stateJson = transaction.core!!.stateJson.copyOf())
                     backing.records.clear()
                     transaction.records.forEach { (sequence, row) -> backing.records[sequence] = row.deepCopy() }
+                    backing.flagRows.clear()
+                    transaction.flagRows.forEach { (key, row) -> backing.flagRows[key] = row.deepCopy() }
                     backing.advanceCommittedMutationGeneration()
                     throw AmbiguousRuntimeCommitException("Fake committed with an ambiguous result")
                 }
@@ -82,6 +105,8 @@ private class FakeRuntimeQueueDatabase(
                     backing.core = beforeCore.copy(stateJson = CoreStateCodec.encode(divergentState))
                     backing.records.clear()
                     originalRecords.forEach { (sequence, row) -> backing.records[sequence] = row.deepCopy() }
+                    backing.flagRows.clear()
+                    originalFlagRows.forEach { (key, row) -> backing.flagRows[key] = row.deepCopy() }
                     backing.advanceCommittedMutationGeneration()
                     throw AmbiguousRuntimeCommitException("Fake diverged at an ambiguous result")
                 }
@@ -89,6 +114,8 @@ private class FakeRuntimeQueueDatabase(
                     backing.core = transaction.core?.copy(stateJson = transaction.core!!.stateJson.copyOf())
                     backing.records.clear()
                     transaction.records.forEach { (sequence, row) -> backing.records[sequence] = row.deepCopy() }
+                    backing.flagRows.clear()
+                    transaction.flagRows.forEach { (key, row) -> backing.flagRows[key] = row.deepCopy() }
                     backing.advanceCommittedMutationGeneration()
                     result
                 }
@@ -103,6 +130,7 @@ private class FakeRuntimeQueueDatabase(
         private val backing: FakeRuntimeQueueBacking,
         var core: RuntimeStoredCore?,
         val records: TreeMap<Long, RuntimeStoredRecord>,
+        val flagRows: TreeMap<String, RuntimeFlagStoredRow>,
     ) : RuntimeQueueTransaction {
         var mutated: Boolean = false
             private set
@@ -146,6 +174,40 @@ private class FakeRuntimeQueueDatabase(
             if (removed) mutated = true
             return removed
         }
+
+        override fun readFlagRow(key: String): RuntimeFlagStoredRow? {
+            requireFlagSchema()
+            return flagRows[key]?.deepCopy()
+        }
+
+        override fun scanFlagRows(prefix: String, visitor: (RuntimeFlagStoredRow) -> Unit) {
+            requireFlagSchema()
+            flagRows.values.filter { it.key.startsWith(prefix) }.forEach { visitor(it.deepCopy()) }
+        }
+
+        override fun putFlagRow(row: RuntimeFlagStoredRow) {
+            requireFlagSchema()
+            flagRows[row.key] = row.deepCopy()
+            mutated = true
+        }
+
+        override fun deleteFlagRow(key: String): Boolean {
+            requireFlagSchema()
+            val removed = flagRows.remove(key) != null
+            if (removed) mutated = true
+            return removed
+        }
+
+        override fun invalidateCurrentFlagCache() {
+            // The persisted context revision is the invalidation witness. Schema-aware cleanup is
+            // intentionally deferred to FlagDurableStore so future envelopes remain byte-exact.
+        }
+
+        private fun requireFlagSchema() {
+            check(backing.databaseSchemaVersion == RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS) {
+                "Fake flag schema has not been initialized"
+            }
+        }
     }
 }
 
@@ -155,3 +217,5 @@ private fun FakeRuntimeQueueBacking.advanceCommittedMutationGeneration() {
 
 private fun RuntimeStoredRecord.deepCopy(): RuntimeStoredRecord =
     copy(internalPayload = internalPayload.copyOf())
+
+private fun RuntimeFlagStoredRow.deepCopy(): RuntimeFlagStoredRow = copy(payload = payload.copyOf())

@@ -9,6 +9,8 @@ import dev.elu.analytics.internal.config.V1ConfigResolution
 import dev.elu.analytics.internal.config.V1ConfigStatus
 import dev.elu.analytics.internal.config.V1ConfigUpdateResult
 import dev.elu.analytics.internal.config.V1ExactTimestamp
+import dev.elu.analytics.internal.config.V1FlagAuthorizationResolution
+import dev.elu.analytics.internal.config.V1FlagProjectionRejection
 import dev.elu.analytics.internal.config.V1MalformedConfigException
 import dev.elu.analytics.internal.config.V1ParsedConfigBoundary
 import dev.elu.analytics.internal.config.V1UnsupportedConfigSchemaException
@@ -20,6 +22,20 @@ import dev.elu.analytics.internal.core.PersistedCoreState
 import dev.elu.analytics.internal.core.SessionLifecycle
 import dev.elu.analytics.internal.core.SessionState
 import dev.elu.analytics.internal.core.UuidCoreIdentifierGenerator
+import dev.elu.analytics.internal.flags.FlagBeginResult
+import dev.elu.analytics.internal.flags.FlagCacheExpiryStoreResult
+import dev.elu.analytics.internal.flags.FlagCacheLeaseToken
+import dev.elu.analytics.internal.flags.FlagCommitStoreResult
+import dev.elu.analytics.internal.flags.FlagConfigStoreResult
+import dev.elu.analytics.internal.flags.FlagDurableStore
+import dev.elu.analytics.internal.flags.FlagFinalizeStoreResult
+import dev.elu.analytics.internal.flags.FlagLeaseExpiryStoreResult
+import dev.elu.analytics.internal.flags.FlagReadResult
+import dev.elu.analytics.internal.flags.FlagReloadResult
+import dev.elu.analytics.internal.flags.FlagReloadWitnessSnapshot
+import dev.elu.analytics.internal.flags.FlagPreSendResult
+import dev.elu.analytics.internal.flags.FlagResponse
+import dev.elu.analytics.internal.flags.FlagRestrictionReason
 import java.util.Collections
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
@@ -115,11 +131,17 @@ internal class RuntimeQueueOwner private constructor(
     private var poison: Throwable? = null
     private val lifecycleLock = Any()
     private var acceptingTasks: Boolean = true
-    private val configManager = V1ConfigManager()
+    private val configManager =
+        V1ConfigManager(
+            trustedFlagSiteKey = trustedSiteKey,
+            trustedFlagNamespaceDigest = trustedSiteKey?.let(RuntimeSiteNamespace::digest),
+        )
     private val ownerNamespaceHash: String? = trustedSiteKey?.let(RuntimeSiteNamespace::digest)
     private var pinnedConfigSiteId: String? = null
     private var captureAuthority: RuntimeCaptureAuthorityState = RuntimeCaptureAuthorityState.Absent
     private var authorityEpoch: Long = 0
+    /** A durable wall-floor violation poisons only the feature-flag authority for this owner life. */
+    private var featureFlagClockPoisoned: Boolean = false
 
     /** Blocking adapters must never wait for a task while already running on this worker. */
     fun isCurrentThreadWorker(): Boolean = Thread.currentThread() === workerThread
@@ -204,6 +226,293 @@ internal class RuntimeQueueOwner private constructor(
 
     internal fun replaceCaptureAuthorityForTesting(authority: RuntimeCaptureAuthorityState): Future<Unit> =
         submit { captureAuthority = authority }
+
+    /** Explicit internal-only activation of the additive database schema. */
+    internal fun ensureFeatureFlagRuntime(): Future<Unit> =
+        submit {
+            assertUsable()
+            val siteKey = trustedSiteKey ?: throw IllegalStateException("Feature flags require an exact trusted site key")
+            val namespace = ownerNamespaceHash ?: throw IllegalStateException("Feature flags require a site namespace")
+            database().ensureFlagSchema(FlagDurableStore.uninitializedAuthorityRow(siteKey, namespace))
+        }
+
+    internal fun applyFeatureFlagConfiguration(
+        configBody: String?,
+        wallNowEpochMillis: Long,
+    ): Future<V1FlagAuthorizationResolution> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) {
+                return@submit V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.STORAGE)
+            }
+            val prepared = configManager.prepareFlagConfiguration(configBody, wallNowEpochMillis)
+            try {
+                when (
+                    val stored =
+                        database().transaction { transaction ->
+                            FlagDurableStore.applyConfiguration(transaction, prepared, wallNowEpochMillis)
+                        }
+                ) {
+                    is FlagConfigStoreResult.Allowed ->
+                        configManager.commitFlagConfiguration(prepared, stored.barrierGeneration)
+                    is FlagConfigStoreResult.Restricted -> {
+                        if (stored.reason == V1FlagProjectionRejection.STORAGE) featureFlagClockPoisoned = true
+                        configManager.rejectFlagConfiguration(prepared)
+                        V1FlagAuthorizationResolution.Restricted(stored.reason)
+                    }
+                    FlagConfigStoreResult.Terminal -> {
+                        configManager.rejectFlagConfiguration(prepared)
+                        V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.TERMINAL)
+                    }
+                }
+            } catch (error: Throwable) {
+                configManager.rejectFlagConfiguration(prepared)
+                throw error
+            }
+        }
+
+    /** Commits an active owner's monotonic lease expiry before retiring its local snapshot. */
+    internal fun expireFeatureFlagAuthorization(
+        expected: dev.elu.analytics.internal.config.V1FlagAuthorizationSnapshot,
+        wallNowEpochMillis: Long,
+    ): Future<V1FlagProjectionRejection> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) return@submit V1FlagProjectionRejection.STORAGE
+            when (
+                val stored =
+                    database().transaction { transaction ->
+                        FlagDurableStore.expireAuthorizationLease(transaction, expected, wallNowEpochMillis)
+                    }
+            ) {
+                FlagLeaseExpiryStoreResult.Expired -> {
+                    configManager.retireFlagAuthorization(expected, terminal = false)
+                    V1FlagProjectionRejection.EXPIRED
+                }
+                is FlagLeaseExpiryStoreResult.Restricted -> {
+                    if (stored.reason == V1FlagProjectionRejection.STORAGE) featureFlagClockPoisoned = true
+                    stored.reason
+                }
+                FlagLeaseExpiryStoreResult.Stale -> V1FlagProjectionRejection.STALE
+                FlagLeaseExpiryStoreResult.Terminal -> {
+                    configManager.retireFlagAuthorization(expected, terminal = true)
+                    V1FlagProjectionRejection.TERMINAL
+                }
+            }
+        }
+
+    internal fun beginFeatureFlagReload(
+        versions: RuntimeVersions,
+        requestId: String,
+        replacementStoreEpoch: String,
+        wallNowEpochMillis: Long,
+    ): Future<FlagBeginResult> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) {
+                return@submit FlagBeginResult.Restricted(FlagRestrictionReason.WALL_ROLLBACK, null)
+            }
+            val authorization = configManager.flagAuthorizationForTransaction()
+            database().transaction { transaction ->
+                val current = requireCurrent(transaction)
+                FlagDurableStore.begin(
+                    transaction,
+                    authorization,
+                    current.state,
+                    versions,
+                    requestId,
+                    replacementStoreEpoch,
+                    wallNowEpochMillis,
+                ).also { result ->
+                    if (
+                        result is FlagBeginResult.Restricted &&
+                        result.reason == FlagRestrictionReason.WALL_ROLLBACK
+                    ) {
+                        featureFlagClockPoisoned = true
+                    }
+                }
+            }
+        }
+
+    internal fun authorizeFeatureFlagSend(
+        begun: dev.elu.analytics.internal.flags.FlagBegunRequest,
+        versions: RuntimeVersions,
+        wallNowEpochMillis: Long,
+    ): Future<FlagPreSendResult> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) {
+                return@submit FlagPreSendResult.Restricted(FlagRestrictionReason.WALL_ROLLBACK)
+            }
+            val authorization = configManager.flagAuthorizationForTransaction()
+                ?: return@submit FlagPreSendResult.Stale
+            database().transaction { transaction ->
+                val current = requireCurrent(transaction)
+                FlagDurableStore.authorizeSend(
+                    transaction,
+                    begun,
+                    authorization,
+                    current.state,
+                    versions,
+                    wallNowEpochMillis,
+                ).also { result ->
+                    if (
+                        result is FlagPreSendResult.Restricted &&
+                        result.reason == FlagRestrictionReason.WALL_ROLLBACK
+                    ) {
+                        featureFlagClockPoisoned = true
+                    }
+                }
+            }
+        }
+
+    /** Read-only owner-lane hint used solely for same-witness in-flight arbitration. */
+    internal fun snapshotFeatureFlagReload(versions: RuntimeVersions): Future<FlagReloadWitnessSnapshot?> =
+        submit {
+            assertUsable()
+            val authorization = configManager.flagAuthorizationForTransaction() ?: return@submit null
+            database().transaction { transaction ->
+                val current = requireCurrent(transaction)
+                FlagReloadWitnessSnapshot(authorization, FlagDurableStore.snapshotWitness(current.state, versions))
+            }
+        }
+
+    internal fun commitFeatureFlagReload(
+        begun: dev.elu.analytics.internal.flags.FlagBegunRequest,
+        versions: RuntimeVersions,
+        response: FlagResponse,
+        wallNowEpochMillis: Long,
+    ): Future<FlagReloadResult> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) {
+                return@submit FlagReloadResult.Restricted(FlagRestrictionReason.WALL_ROLLBACK)
+            }
+            val authorization = configManager.flagAuthorizationForTransaction()
+                ?: return@submit FlagReloadResult.Stale
+            when (
+                val committed = database().transaction { transaction ->
+                    val current = requireCurrent(transaction)
+                    FlagDurableStore.commit(
+                        transaction,
+                        begun,
+                        authorization,
+                        current.state,
+                        versions,
+                        response,
+                        wallNowEpochMillis,
+                    )
+                }
+            ) {
+                FlagCommitStoreResult.Updated ->
+                    FlagReloadResult.Updated(response.flagsRevision, begun.token.requestGeneration)
+                FlagCommitStoreResult.Stale -> FlagReloadResult.Stale
+                is FlagCommitStoreResult.Restricted -> {
+                    if (committed.reason == V1FlagProjectionRejection.STORAGE) featureFlagClockPoisoned = true
+                    FlagReloadResult.Restricted(committed.reason.toFlagRestrictionReason())
+                }
+                FlagCommitStoreResult.Terminal -> FlagReloadResult.Terminal
+            }
+        }
+
+    internal fun finalizeFeatureFlagReload(
+        begun: dev.elu.analytics.internal.flags.FlagBegunRequest,
+        versions: RuntimeVersions,
+        response: FlagResponse,
+        wallNowEpochMillis: Long,
+    ): Future<FlagReloadResult> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) {
+                return@submit FlagReloadResult.Restricted(FlagRestrictionReason.WALL_ROLLBACK)
+            }
+            val authorization = configManager.flagAuthorizationForTransaction()
+                ?: return@submit FlagReloadResult.Stale
+            when (
+                val finalized = database().transaction { transaction ->
+                    val current = requireCurrent(transaction)
+                    FlagDurableStore.finalizeCommit(
+                        transaction,
+                        begun,
+                        authorization,
+                        current.state,
+                        versions,
+                        response,
+                        wallNowEpochMillis,
+                    )
+                }
+            ) {
+                is FlagFinalizeStoreResult.Current ->
+                    FlagReloadResult.Updated(
+                        response.flagsRevision,
+                        begun.token.requestGeneration,
+                        finalized.cacheLeaseToken,
+                    )
+                FlagFinalizeStoreResult.Stale -> FlagReloadResult.Stale
+                is FlagFinalizeStoreResult.Restricted -> {
+                    if (finalized.reason == FlagRestrictionReason.WALL_ROLLBACK) featureFlagClockPoisoned = true
+                    FlagReloadResult.Restricted(finalized.reason)
+                }
+                FlagFinalizeStoreResult.Terminal -> FlagReloadResult.Terminal
+            }
+        }
+
+    internal fun expireFeatureFlagCache(
+        expected: dev.elu.analytics.internal.config.V1FlagAuthorizationSnapshot,
+        versions: RuntimeVersions,
+        token: FlagCacheLeaseToken,
+        wallNowEpochMillis: Long,
+    ): Future<FlagCacheExpiryStoreResult> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) {
+                return@submit FlagCacheExpiryStoreResult.Restricted(V1FlagProjectionRejection.STORAGE)
+            }
+            database().transaction { transaction ->
+                val current = requireCurrent(transaction)
+                FlagDurableStore.expireCacheLease(
+                    transaction,
+                    expected,
+                    current.state,
+                    versions,
+                    token,
+                    wallNowEpochMillis,
+                ).also { result ->
+                    if (
+                        result is FlagCacheExpiryStoreResult.Restricted &&
+                        result.reason == V1FlagProjectionRejection.STORAGE
+                    ) {
+                        featureFlagClockPoisoned = true
+                    }
+                }
+            }
+        }
+
+    internal fun readFeatureFlag(
+        versions: RuntimeVersions,
+        key: String,
+        wallNowEpochMillis: Long,
+    ): Future<FlagReadResult> =
+        submit {
+            assertUsable()
+            if (featureFlagClockPoisoned) {
+                return@submit FlagReadResult.Restricted(FlagRestrictionReason.WALL_ROLLBACK)
+            }
+            val authorization = configManager.flagAuthorizationForTransaction()
+                ?: return@submit FlagReadResult.Missing
+            database().transaction { transaction ->
+                val current = requireCurrent(transaction)
+                FlagDurableStore.read(transaction, authorization, current.state, versions, key, wallNowEpochMillis)
+                    .also { result ->
+                        if (
+                            result is FlagReadResult.Restricted &&
+                            result.reason == FlagRestrictionReason.WALL_ROLLBACK
+                        ) {
+                            featureFlagClockPoisoned = true
+                        }
+                    }
+            }
+        }
 
     /** Bounded FIFO read. A first record larger than [maximumBytes] fails explicitly. */
     fun peek(
@@ -1076,6 +1385,9 @@ internal class RuntimeQueueOwner private constructor(
         transaction: RuntimeQueueTransaction,
         candidate: PreparedAppend,
     ) {
+        if (candidate.before.state.identity.contextRevision != candidate.after.state.identity.contextRevision) {
+            transaction.invalidateCurrentFlagCache()
+        }
         candidate.records.forEach { record ->
             if (transaction.readRecord(record.sequence) != null) {
                 corrupt("Runtime append target sequence is already occupied")
@@ -2103,3 +2415,19 @@ internal class RuntimeQueueOwner private constructor(
         }
     }
 }
+
+private fun V1FlagProjectionRejection.toFlagRestrictionReason(): FlagRestrictionReason =
+    when (this) {
+        V1FlagProjectionRejection.MISSING -> FlagRestrictionReason.MISSING
+        V1FlagProjectionRejection.MALFORMED -> FlagRestrictionReason.MALFORMED
+        V1FlagProjectionRejection.UNSUPPORTED_SCHEMA -> FlagRestrictionReason.UNSUPPORTED_SCHEMA
+        V1FlagProjectionRejection.EXPIRED -> FlagRestrictionReason.CONFIG_EXPIRED
+        V1FlagProjectionRejection.INACTIVE -> FlagRestrictionReason.DISABLED
+        V1FlagProjectionRejection.REVOKED -> FlagRestrictionReason.REVOKED
+        V1FlagProjectionRejection.FLAGS_DISABLED -> FlagRestrictionReason.FLAGS_DISABLED
+        V1FlagProjectionRejection.UNAUTHORIZED -> FlagRestrictionReason.UNAUTHORIZED
+        V1FlagProjectionRejection.STALE -> FlagRestrictionReason.STALE
+        V1FlagProjectionRejection.CONFLICT -> FlagRestrictionReason.CONFLICT
+        V1FlagProjectionRejection.STORAGE -> FlagRestrictionReason.WALL_ROLLBACK
+        V1FlagProjectionRejection.TERMINAL -> FlagRestrictionReason.TERMINAL
+    }

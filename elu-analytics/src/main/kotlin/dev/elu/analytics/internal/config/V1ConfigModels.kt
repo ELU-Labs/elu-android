@@ -170,7 +170,9 @@ internal data class V1ParsedConfig(
 /** Trusted ordering envelope retained even when the document body fails a nested policy check. */
 internal data class V1ParsedConfigBoundary(
     val revision: String,
+    val issuedAt: String,
     val issuedAtInstant: V1ExactTimestamp,
+    val expiresAt: String,
     val expiresAtInstant: V1ExactTimestamp,
     val serialized: String,
     val configSemanticHash: String,
@@ -180,7 +182,7 @@ internal data class V1ParsedConfigBoundary(
 internal class V1ExactTimestamp private constructor(
     val epochWholeSecond: Long,
     val fractionalDigits: String,
-    private val isLeapSecond: Boolean,
+    val isLeapSecond: Boolean,
 ) : Comparable<V1ExactTimestamp> {
     override fun compareTo(other: V1ExactTimestamp): Int {
         val seconds = epochWholeSecond.compareTo(other.epochWholeSecond)

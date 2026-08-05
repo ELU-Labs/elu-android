@@ -1,0 +1,18 @@
+{
+    "schemaVersion": 1,
+    "requestId": "flags_018fcb7cff80721387a19b859e7c53a6",
+    "contextRevision": 7,
+    "identityRevision": 1,
+    "flagsRevision": "flags-42",
+    "evaluatedAt": "2026-08-04T00:01:00.000Z",
+    "expiresAt": "2026-08-04T00:06:00.000Z",
+    "flags": {
+        "new-checkout": "variant-a",
+        "replay-enabled": true
+    },
+    "payloads": {
+        "new-checkout": {
+            "buttonColor": "violet"
+        }
+    }
+}

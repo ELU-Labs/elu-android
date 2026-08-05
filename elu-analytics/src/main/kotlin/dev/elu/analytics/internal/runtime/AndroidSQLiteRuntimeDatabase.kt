@@ -29,6 +29,55 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val ownerThread: Thread,
     private val faults: AndroidRuntimeDatabaseFaults,
 ) : RuntimeQueueDatabase {
+    override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) {
+        assertOwnerThread()
+        require(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY) { "Initial flag authority row has the wrong key" }
+        require(initialAuthority.storageSchemaVersion == 1L) { "Initial flag authority schema must be v1" }
+        require(initialAuthority.payload.isNotEmpty()) { "Initial flag authority payload must not be empty" }
+        require(initialAuthority.payload.size <= MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) {
+            "Initial flag authority payload exceeds the SQLite row limit"
+        }
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        if (version == RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
+            validateSchemaObjects(sqlite, flagsPresent = true)
+            return
+        }
+        if (version != RUNTIME_STORAGE_SCHEMA_VERSION.toLong()) {
+            throw UnsupportedRuntimeStorageSchemaException(version)
+        }
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            sqlite.execSQL(CREATE_FLAG_CACHE)
+            val values =
+                ContentValues().apply {
+                    put("record_key", initialAuthority.key)
+                    put("storage_schema_version", initialAuthority.storageSchemaVersion)
+                    put("payload", initialAuthority.payload)
+                }
+            sqlite.insertOrThrow(FLAG_CACHE_TABLE, null, values)
+            executePragma(sqlite, "PRAGMA user_version = $RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS")
+            if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
+                corrupt("Runtime database could not persist its additive flag schema version")
+            }
+            sqlite.setTransactionSuccessful()
+            markedSuccessful = true
+        } finally {
+            try {
+                sqlite.endTransaction()
+            } catch (error: Throwable) {
+                if (markedSuccessful) {
+                    throw AmbiguousRuntimeCommitException(
+                        "SQLite could not report a definitive flag-schema transaction outcome",
+                        error,
+                    )
+                }
+                throw error
+            }
+        }
+        validateSchemaObjects(sqlite, flagsPresent = true)
+    }
+
     override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T {
         assertOwnerThread()
         sqlite.beginTransaction()
@@ -227,8 +276,88 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             return changed == 1
         }
 
+        override fun readFlagRow(key: String): RuntimeFlagStoredRow? {
+            requireTransaction()
+            requireFlagTable()
+            require(key.isNotEmpty()) { "Flag row key must not be empty" }
+            sqlite.query(
+                FLAG_CACHE_TABLE,
+                FLAG_ROW_COLUMNS,
+                "record_key = ?",
+                arrayOf(key),
+                null,
+                null,
+                null,
+                "2",
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) return null
+                val row = cursor.flagRow()
+                if (cursor.moveToNext()) corrupt("Runtime database contains duplicate flag row keys")
+                return row
+            }
+        }
+
+        override fun scanFlagRows(prefix: String, visitor: (RuntimeFlagStoredRow) -> Unit) {
+            requireTransaction()
+            requireFlagTable()
+            sqlite.query(
+                FLAG_CACHE_TABLE,
+                FLAG_ROW_COLUMNS,
+                "substr(record_key, 1, ?) = ?",
+                arrayOf(prefix.length.toString(), prefix),
+                null,
+                null,
+                "record_key ASC",
+                null,
+            ).use { cursor -> while (cursor.moveToNext()) visitor(cursor.flagRow()) }
+        }
+
+        override fun putFlagRow(row: RuntimeFlagStoredRow) {
+            requireTransaction()
+            requireFlagTable()
+            require(row.key.isNotEmpty() && row.key.length <= MAX_FLAG_ROW_KEY_CHARS) {
+                "Flag row key is outside its bounds"
+            }
+            require(row.storageSchemaVersion >= 1L) { "Flag row schema version must be positive" }
+            require(row.payload.isNotEmpty() && row.payload.size <= MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) {
+                "Flag row payload is outside the Android SQLite row limit"
+            }
+            val values =
+                ContentValues().apply {
+                    put("record_key", row.key)
+                    put("storage_schema_version", row.storageSchemaVersion)
+                    put("payload", row.payload)
+                }
+            sqlite.insertWithOnConflict(FLAG_CACHE_TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE).also { inserted ->
+                if (inserted == -1L) corrupt("Flag row upsert failed")
+            }
+            mutated = true
+        }
+
+        override fun deleteFlagRow(key: String): Boolean {
+            requireTransaction()
+            requireFlagTable()
+            val changed = sqlite.delete(FLAG_CACHE_TABLE, "record_key = ?", arrayOf(key))
+            if (changed > 1) corrupt("Flag row deletion affected more than one key")
+            if (changed == 1) mutated = true
+            return changed == 1
+        }
+
+        override fun invalidateCurrentFlagCache() {
+            requireTransaction()
+            // The core context revision committed by this same transaction makes every old flag
+            // witness unreadable. Deletion belongs to FlagDurableStore, which can distinguish a
+            // corrupt v1 envelope from a byte-preserved future schema.
+        }
+
         private fun requireTransaction() {
             check(sqlite.inTransaction()) { "Runtime database operation requires an active transaction" }
+        }
+
+        private fun requireFlagTable() {
+            if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
+                throw IllegalStateException("Flag storage schema has not been initialized")
+            }
         }
 
         private fun Cursor.storedRecord(): RuntimeStoredRecord =
@@ -240,14 +369,24 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                 internalPayload = requiredBlob(4, "queue_records.internal_payload"),
                 accountedBytes = getInt(5),
             )
+
+        private fun Cursor.flagRow(): RuntimeFlagStoredRow =
+            RuntimeFlagStoredRow(
+                key = requiredString(0, "flag_cache.record_key"),
+                storageSchemaVersion = getLong(1),
+                payload = requiredBlob(2, "flag_cache.payload"),
+            )
     }
 
     internal companion object {
         private const val CORE_TABLE = "core_state"
         private const val QUEUE_TABLE = "queue_records"
+        private const val FLAG_CACHE_TABLE = "flag_cache"
         private const val SINGLETON_ID = 1
+        private const val MAX_FLAG_ROW_KEY_CHARS = 512
         private val RECORD_COLUMNS =
             arrayOf("sequence", "stream_id", "kind", "record_id", "internal_payload", "accounted_bytes")
+        private val FLAG_ROW_COLUMNS = arrayOf("record_key", "storage_schema_version", "payload")
 
         private val CREATE_CORE =
             """
@@ -271,6 +410,17 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                 ),
                 accounted_bytes INTEGER NOT NULL CHECK (
                     accounted_bytes BETWEEN 1 AND $MAX_RUNTIME_QUEUE_BYTES
+                )
+            )
+            """.trimIndent()
+
+        private val CREATE_FLAG_CACHE =
+            """
+            CREATE TABLE flag_cache (
+                record_key TEXT NOT NULL PRIMARY KEY CHECK (length(record_key) BETWEEN 1 AND $MAX_FLAG_ROW_KEY_CHARS),
+                storage_schema_version INTEGER NOT NULL CHECK (storage_schema_version >= 1),
+                payload BLOB NOT NULL CHECK (
+                    length(payload) BETWEEN 1 AND $MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES
                 )
             )
             """.trimIndent()
@@ -400,15 +550,30 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version != RUNTIME_STORAGE_SCHEMA_VERSION.toLong() ->
+                version != RUNTIME_STORAGE_SCHEMA_VERSION.toLong() &&
+                    version != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong() ->
                     throw UnsupportedRuntimeStorageSchemaException(version)
             }
+            validateSchemaObjects(
+                sqlite,
+                flagsPresent = pragmaLong(sqlite, "PRAGMA user_version") == RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong(),
+            )
+        }
+
+        private fun validateSchemaObjects(sqlite: SQLiteDatabase, flagsPresent: Boolean) {
+            val expected =
+                if (flagsPresent) {
+                    setOf("table:$CORE_TABLE", "table:$QUEUE_TABLE", "table:$FLAG_CACHE_TABLE")
+                } else {
+                    setOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
+                }
             val objects = applicationSchemaObjects(sqlite)
-            if (objects != setOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")) {
+            if (objects != expected) {
                 corrupt("Runtime database schema object set is unsupported: ${objects.joinToString()}")
             }
             validateTableSql(sqlite, CORE_TABLE, CREATE_CORE)
             validateTableSql(sqlite, QUEUE_TABLE, CREATE_QUEUE)
+            if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
         }
 
         private const val SQLITE_SYNCHRONOUS_FULL = 2L

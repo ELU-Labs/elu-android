@@ -12,6 +12,12 @@ tasks.register<Exec>("checkConformanceFixtures") {
     commandLine("python3", "scripts/validate-conformance-fixtures.py")
 }
 
+tasks.register<Exec>("checkFeatureFlagBoundary") {
+    group = "verification"
+    description = "Enforces the internal-only, transport-free feature-flag release boundary."
+    commandLine("python3", "scripts/verify-feature-flag-boundary.py")
+}
+
 tasks.register<Exec>("checkZeroBrandScanner") {
     group = "verification"
     description = "Runs the zero-brand scanner's dependency-free tests."
