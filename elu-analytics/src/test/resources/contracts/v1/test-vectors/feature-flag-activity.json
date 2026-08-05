@@ -1,0 +1,626 @@
+{
+    "schemaVersion": 1,
+    "vectorId": "elu-feature-flag-activity-v1",
+    "canonicalization": {
+        "algorithm": "elu-feature-flag-canonical-json-v1",
+        "cases": [
+            {
+                "id": "utf16-ordering-no-normalization",
+                "raw": "{\"😀\":\"astral\",\"é\":\"composed\",\"é\":\"decomposed\",\"\":\"bmp\"}",
+                "expectedCanonicalBase64": "eyJlzIEiOiJkZWNvbXBvc2VkIiwiw6kiOiJjb21wb3NlZCIsIvCfmIAiOiJhc3RyYWwiLCLugIAiOiJibXAifQ=="
+            },
+            {
+                "id": "negative-zero-normalizes",
+                "raw": "{\"flag\":-0,\"payload\":[-0.0,-0e0]}",
+                "expectedCanonicalBase64": "eyJmbGFnIjowLCJwYXlsb2FkIjpbMCwwXX0="
+            },
+            {
+                "id": "binary64-boundaries",
+                "raw": "[5e-324,1.7976931348623157e308,1424953923781206.25,333333333.33333329,9007199254740991,-9007199254740991]",
+                "expectedCanonicalBase64": "WzVlLTMyNCwxLjc5NzY5MzEzNDg2MjMxNTdlKzMwOCwxNDI0OTUzOTIzNzgxMjA2LjIsMzMzMzMzMzMzLjMzMzMzMzMsOTAwNzE5OTI1NDc0MDk5MSwtOTAwNzE5OTI1NDc0MDk5MV0="
+            },
+            {
+                "id": "escaped-equivalent-duplicate",
+                "raw": "{\"a\":1,\"\\u0061\":2}",
+                "expect": "reject"
+            },
+            {
+                "id": "astral-escaped-duplicate",
+                "raw": "{\"😀\":1,\"\\ud83d\\ude00\":2}",
+                "expect": "reject"
+            },
+            {
+                "id": "unsafe-positive-integer",
+                "raw": "{\"value\":9007199254740992}",
+                "expect": "reject"
+            },
+            {
+                "id": "unsafe-negative-integer",
+                "raw": "{\"value\":-9007199254740992}",
+                "expect": "reject"
+            },
+            {
+                "id": "lone-high-surrogate",
+                "raw": "{\"value\":\"\\ud800\"}",
+                "expect": "reject"
+            },
+            {
+                "id": "non-finite-binary64",
+                "raw": "{\"value\":1e400}",
+                "expect": "reject"
+            }
+        ]
+    },
+    "invalidUtf8Cases": [
+        {
+            "id": "leading-utf8-bom",
+            "rawBase64": "77u/eyJzY2hlbWFWZXJzaW9uIjoxfQ==",
+            "expect": "reject"
+        },
+        {
+            "id": "invalid-continuation-byte",
+            "rawBase64": "eyJ2YWx1ZSI6IsMoIn0=",
+            "expect": "reject"
+        }
+    ],
+    "fixtureCatalog": {
+        "configEnabled": {
+            "kind": "config",
+            "fixtureId": "config-enabled"
+        },
+        "configDisabled": {
+            "kind": "config",
+            "fixtureId": "config-disabled"
+        },
+        "flagsRequest": {
+            "kind": "flagsRequest",
+            "fixtureId": "flags-request"
+        },
+        "flagsResponse": {
+            "kind": "flagsResponse",
+            "fixtureId": "flags-response"
+        }
+    },
+    "documentVariants": {
+        "configAllowed": {
+            "baseFixtureId": "configEnabled",
+            "orderedReplacements": []
+        },
+        "configAllowedEquivalentBytes": {
+            "baseFixtureId": "configEnabled",
+            "serialization": "reverse-object-member-order-and-add-json-whitespace"
+        },
+        "configNewerRevoked": {
+            "baseFixtureId": "configDisabled",
+            "orderedReplacements": [
+                {
+                    "pointer": "/issuedAt",
+                    "value": "2026-08-04T00:01:30.000Z"
+                },
+                {
+                    "pointer": "/expiresAt",
+                    "value": "2026-08-04T00:06:30.000Z"
+                },
+                {
+                    "pointer": "/revision",
+                    "value": "config-revoked-2"
+                },
+                {
+                    "pointer": "/status",
+                    "value": "revoked"
+                }
+            ]
+        },
+        "responseMixedValues": {
+            "baseFixtureId": "flagsResponse",
+            "orderedReplacements": [
+                {
+                    "pointer": "/requestId",
+                    "value": "flags_request_1"
+                },
+                {
+                    "pointer": "/flagsRevision",
+                    "value": "flags-mixed-1"
+                },
+                {
+                    "pointer": "/expiresAt",
+                    "value": "2026-08-04T00:04:00.000Z"
+                },
+                {
+                    "pointer": "/flags",
+                    "value": {
+                        "bool-false": false,
+                        "empty-string": "",
+                        "null-value": null,
+                        "number-zero": -0,
+                        "variant": "variant-a"
+                    }
+                },
+                {
+                    "pointer": "/payloads",
+                    "value": {
+                        "orphan": {
+                            "ignored": true
+                        },
+                        "variant": {
+                            "buttonColor": "violet"
+                        }
+                    }
+                }
+            ]
+        },
+        "responseEmpty": {
+            "baseFixtureId": "flagsResponse",
+            "orderedReplacements": [
+                {
+                    "pointer": "/requestId",
+                    "value": "flags_request_2"
+                },
+                {
+                    "pointer": "/flagsRevision",
+                    "value": "flags-empty-2"
+                },
+                {
+                    "pointer": "/evaluatedAt",
+                    "value": "2026-08-04T00:02:00.000Z"
+                },
+                {
+                    "pointer": "/expiresAt",
+                    "value": "2026-08-04T00:04:00.000Z"
+                },
+                {
+                    "pointer": "/flags",
+                    "value": {}
+                },
+                {
+                    "pointer": "/payloads",
+                    "value": {}
+                }
+            ]
+        },
+        "responseNewContext": {
+            "baseFixtureId": "flagsResponse",
+            "orderedReplacements": [
+                {
+                    "pointer": "/requestId",
+                    "value": "flags_request_context_2"
+                },
+                {
+                    "pointer": "/contextRevision",
+                    "value": 8
+                },
+                {
+                    "pointer": "/flagsRevision",
+                    "value": "flags-context-2"
+                }
+            ]
+        }
+    },
+    "constants": {
+        "ownerSiteKey": "elu_pk_test_flags",
+        "ownerNamespaceDigest": "e022120a4cf6f191c56dc3a05293e784290a1841ec71fb61c0eb530c2458b884",
+        "otherSiteKey": "elu_pk_other_flags",
+        "otherNamespaceDigest": "73dcce7a8d2157199d0481d798eb5e728ea9834248e512ffa641c754ca7db0b4",
+        "configSiteId": "site_demo",
+        "flagsEndpoint": "https://ingest.elu.dev/v1/flags",
+        "configRevision": "config-2026-08-04-1",
+        "configIssuedAt": "2026-08-04T00:00:00.000Z",
+        "configExpiresAt": "2026-08-04T00:05:00.000Z",
+        "configSemanticHash": "sha256:69da989f31a6a3133dcebcdb64cd7665c666eb6af5a8aa766bc0036d8736ca4f",
+        "anonymousId": "anon_flags_1",
+        "userId": "user_123",
+        "identityRevision": 1,
+        "contextRevision": 7,
+        "initialStoreEpoch": "store_epoch_1",
+        "replacementStoreEpoch": "store_epoch_2",
+        "maximumWireBytes": 1048576,
+        "maximumCacheBytes": 4194304
+    },
+    "requestOracle": {
+        "requestId": "flags_request_1",
+        "canonicalBase64": "eyJjb250ZXh0UmV2aXNpb24iOjcsImdyb3VwUHJvcGVydGllcyI6eyJvcmdhbml6YXRpb24iOnsidGllciI6ImRlc2lnbi1wYXJ0bmVyIn19LCJncm91cHMiOnsib3JnYW5pemF0aW9uIjoib3JnXzQ1NiJ9LCJpZGVudGl0eSI6eyJhbm9ueW1vdXNJZCI6ImFub25fZmxhZ3NfMSIsInJldmlzaW9uIjoxLCJ1c2VySWQiOiJ1c2VyXzEyMyJ9LCJwZXJzb25Qcm9wZXJ0aWVzIjp7InBsYW4iOiJncm93dGgiLCJyb2xlIjoib3duZXIifSwicmVxdWVzdElkIjoiZmxhZ3NfcmVxdWVzdF8xIiwic2NoZW1hVmVyc2lvbiI6MSwidmVyc2lvbnMiOnsiYnVpbGQiOiI0NjcwYjY5ZTk4ZWQ1OTBjMzFjZjQyZmM4NDBhMjViZGFkZjQ1YWU3IiwiY29udHJhY3RWZXJzaW9uIjoiMS4wLjAiLCJmYWNhZGUiOnsibmFtZSI6IndpbmRvdy5lbHUiLCJ2ZXJzaW9uIjoiMS4wLjAifSwicGxhdGZvcm0iOiJicm93c2VyIiwicnVudGltZSI6eyJuYW1lIjoiZWx1LWpzIiwidmVyc2lvbiI6IjEuNDA5LjUtZWx1LjEifSwic2NoZW1hVmVyc2lvbiI6MX19",
+        "canonicalSha256": "sha256:f5de81f5fcfb0ed0eeb3b5ba7f64430a82332bb5077175e5474e42512139f568"
+    },
+    "initialState": {
+        "identity": {
+            "anonymousId": "anon_flags_1",
+            "userId": "user_123",
+            "revision": 1
+        },
+        "contextRevision": 7,
+        "optedOut": false,
+        "personProperties": {
+            "plan": "growth",
+            "role": "owner"
+        },
+        "groups": {
+            "organization": "org_456"
+        },
+        "groupProperties": {
+            "organization": {
+                "tier": "design-partner"
+            }
+        },
+        "authority": {
+            "initialized": false,
+            "barrierGeneration": 0,
+            "lastObservedWall": null
+        },
+        "cache": null
+    },
+    "scenarios": [
+        {
+            "id": "install-and-read-complete-snapshot",
+            "steps": [
+                {
+                    "type": "applyConfig",
+                    "config": "configAllowedEquivalentBytes",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "expect": {
+                        "authorization": "allowed",
+                        "barrierGeneration": 1,
+                        "lastObservedWall": "2026-08-04T00:01:00.000Z"
+                    }
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_1",
+                    "storeEpoch": "store_epoch_1",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "expect": {
+                        "requestGeneration": 1,
+                        "barrierGeneration": 1,
+                        "requestCanonicalSha256": "sha256:f5de81f5fcfb0ed0eeb3b5ba7f64430a82332bb5077175e5474e42512139f568"
+                    }
+                },
+                {
+                    "type": "completeReload",
+                    "requestId": "flags_request_1",
+                    "response": "responseMixedValues",
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "expect": {
+                        "result": "updated",
+                        "flagsRevision": "flags-mixed-1"
+                    }
+                },
+                {
+                    "type": "readAll",
+                    "wallNow": "2026-08-04T00:01:03.000Z",
+                    "expect": {
+                        "bool-false": {
+                            "status": "found",
+                            "value": false
+                        },
+                        "empty-string": {
+                            "status": "found",
+                            "value": ""
+                        },
+                        "null-value": {
+                            "status": "found",
+                            "value": null
+                        },
+                        "number-zero": {
+                            "status": "found",
+                            "value": 0
+                        },
+                        "variant": {
+                            "status": "found",
+                            "value": "variant-a",
+                            "payload": {
+                                "buttonColor": "violet"
+                            }
+                        },
+                        "missing": {
+                            "status": "missing"
+                        },
+                        "orphanPayloadExposed": false
+                    }
+                }
+            ]
+        },
+        {
+            "id": "empty-snapshot-replaces",
+            "steps": [
+                {
+                    "type": "seedScenario",
+                    "scenario": "install-and-read-complete-snapshot"
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_2",
+                    "wallNow": "2026-08-04T00:01:59.000Z",
+                    "expect": {
+                        "requestGeneration": 2
+                    }
+                },
+                {
+                    "type": "completeReload",
+                    "requestId": "flags_request_2",
+                    "response": "responseEmpty",
+                    "wallNow": "2026-08-04T00:02:01.000Z",
+                    "expect": {
+                        "result": "updated",
+                        "flagCount": 0,
+                        "payloadCount": 0
+                    }
+                }
+            ]
+        },
+        {
+            "id": "context-change-drops-response",
+            "steps": [
+                {
+                    "type": "applyConfig",
+                    "config": "configAllowed",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "expect": {
+                        "authorization": "allowed"
+                    }
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_1",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "expect": {
+                        "requestGeneration": 1
+                    }
+                },
+                {
+                    "type": "setPersonProperties",
+                    "set": {
+                        "plan": "enterprise"
+                    },
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "expect": {
+                        "contextRevision": 8
+                    }
+                },
+                {
+                    "type": "completeReload",
+                    "requestId": "flags_request_1",
+                    "response": "responseMixedValues",
+                    "wallNow": "2026-08-04T00:01:03.000Z",
+                    "expect": {
+                        "result": "stale",
+                        "cache": null
+                    }
+                }
+            ]
+        },
+        {
+            "id": "older-completion-cannot-overwrite-newer-begin",
+            "steps": [
+                {
+                    "type": "applyConfig",
+                    "config": "configAllowed",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "expect": {
+                        "authorization": "allowed"
+                    }
+                },
+                {
+                    "type": "beginReload",
+                    "realm": "A",
+                    "requestId": "flags_request_old",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "expect": {
+                        "requestGeneration": 1
+                    }
+                },
+                {
+                    "type": "beginReload",
+                    "realm": "B",
+                    "requestId": "flags_request_1",
+                    "wallNow": "2026-08-04T00:01:02.000Z",
+                    "expect": {
+                        "requestGeneration": 2
+                    }
+                },
+                {
+                    "type": "completeReload",
+                    "realm": "A",
+                    "requestId": "flags_request_old",
+                    "response": "responseMixedValues",
+                    "wallNow": "2026-08-04T00:01:03.000Z",
+                    "expect": {
+                        "result": "stale"
+                    }
+                },
+                {
+                    "type": "completeReload",
+                    "realm": "B",
+                    "requestId": "flags_request_1",
+                    "response": "responseMixedValues",
+                    "wallNow": "2026-08-04T00:01:04.000Z",
+                    "expect": {
+                        "result": "updated",
+                        "requestGeneration": 2
+                    }
+                }
+            ]
+        },
+        {
+            "id": "cache-expiry-retains-config-barrier",
+            "steps": [
+                {
+                    "type": "seedScenario",
+                    "scenario": "install-and-read-complete-snapshot"
+                },
+                {
+                    "type": "readAll",
+                    "wallNow": "2026-08-04T00:04:00.000Z",
+                    "expect": {
+                        "status": "miss",
+                        "barrierGeneration": 1,
+                        "requestGeneration": 2,
+                        "activeRequestId": null
+                    }
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_after_expiry",
+                    "wallNow": "2026-08-04T00:04:00.000Z",
+                    "expect": {
+                        "result": "begun",
+                        "barrierGeneration": 1,
+                        "requestGeneration": 3
+                    }
+                }
+            ]
+        },
+        {
+            "id": "config-expiry-is-durable-restriction",
+            "steps": [
+                {
+                    "type": "applyConfig",
+                    "config": "configAllowed",
+                    "wallNow": "2026-08-04T00:04:59.000Z",
+                    "expect": {
+                        "authorization": "allowed",
+                        "barrierGeneration": 1
+                    }
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_expired_config",
+                    "wallNow": "2026-08-04T00:05:00.000Z",
+                    "expect": {
+                        "result": "restricted",
+                        "barrierGeneration": 2,
+                        "restriction": "config-expired"
+                    }
+                },
+                {
+                    "type": "applyConfig",
+                    "config": "configAllowed",
+                    "wallNow": "2026-08-04T00:04:59.500Z",
+                    "expect": {
+                        "authorization": "restricted",
+                        "reason": "wall-rollback"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "newer-revoke-rejects-old-completion",
+            "steps": [
+                {
+                    "type": "applyConfig",
+                    "config": "configAllowed",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "expect": {
+                        "authorization": "allowed",
+                        "barrierGeneration": 1
+                    }
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_1",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "expect": {
+                        "requestGeneration": 1
+                    }
+                },
+                {
+                    "type": "applyConfig",
+                    "config": "configNewerRevoked",
+                    "wallNow": "2026-08-04T00:02:00.000Z",
+                    "expect": {
+                        "authorization": "restricted",
+                        "barrierGeneration": 2
+                    }
+                },
+                {
+                    "type": "completeReload",
+                    "requestId": "flags_request_1",
+                    "response": "responseMixedValues",
+                    "wallNow": "2026-08-04T00:02:01.000Z",
+                    "expect": {
+                        "result": "stale",
+                        "cache": null
+                    }
+                }
+            ]
+        },
+        {
+            "id": "cache-corruption-rotates-only-request-epoch",
+            "steps": [
+                {
+                    "type": "seedScenario",
+                    "scenario": "install-and-read-complete-snapshot"
+                },
+                {
+                    "type": "injectCacheCorruption",
+                    "kind": "digest-mismatch"
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_recovery",
+                    "storeEpoch": "store_epoch_2",
+                    "wallNow": "2026-08-04T00:01:04.000Z",
+                    "expect": {
+                        "result": "begun",
+                        "barrierGeneration": 1,
+                        "storeEpoch": "store_epoch_2",
+                        "requestGeneration": 1,
+                        "authorityPreserved": true
+                    }
+                }
+            ]
+        },
+        {
+            "id": "authority-corruption-is-terminal",
+            "steps": [
+                {
+                    "type": "applyConfig",
+                    "config": "configAllowed",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "expect": {
+                        "authorization": "allowed"
+                    }
+                },
+                {
+                    "type": "injectAuthorityCorruption",
+                    "kind": "missing-after-initialized"
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_after_authority_corruption",
+                    "wallNow": "2026-08-04T00:01:01.000Z",
+                    "expect": {
+                        "result": "terminal",
+                        "storageMutation": false
+                    }
+                }
+            ]
+        },
+        {
+            "id": "future-schema-is-preserved",
+            "steps": [
+                {
+                    "type": "injectFutureCacheRecord",
+                    "storageSchemaVersion": 2,
+                    "declaredBodyBytes": 4194305
+                },
+                {
+                    "type": "beginReload",
+                    "requestId": "flags_request_future_schema",
+                    "wallNow": "2026-08-04T00:01:00.000Z",
+                    "expect": {
+                        "result": "terminal",
+                        "futureRecordPreservedByteForByte": true,
+                        "bodyMaterialized": false
+                    }
+                }
+            ]
+        }
+    ],
+    "platformSpecificExclusions": [
+        "cacheRecordId",
+        "storeEpoch",
+        "bodySha256",
+        "versions.platform",
+        "versions.runtime",
+        "versions.facade"
+    ]
+}

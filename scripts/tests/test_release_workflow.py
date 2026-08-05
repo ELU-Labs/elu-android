@@ -25,6 +25,13 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("-iname '*sbom*'", text)
         self.assertIn('--input "sbom-${sbom_index}=${sbom}"', text)
 
+    def test_feature_flag_isolation_runs_before_publish(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertLess(
+            text.index("checkFeatureFlagBoundary"),
+            text.index("./gradlew publishAndReleaseToMavenCentral"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

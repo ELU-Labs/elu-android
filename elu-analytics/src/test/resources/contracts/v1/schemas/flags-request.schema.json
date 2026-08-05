@@ -1,0 +1,44 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/flags-request.schema.json",
+    "title": "ELU SDK feature flag request v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schemaVersion",
+        "requestId",
+        "contextRevision",
+        "identity",
+        "personProperties",
+        "groups",
+        "groupProperties",
+        "versions"
+    ],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "contextRevision": { "type": "integer", "minimum": 0 },
+        "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["anonymousId", "userId", "revision"],
+            "properties": {
+                "anonymousId": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "userId": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+                "revision": { "type": "integer", "minimum": 0 }
+            }
+        },
+        "personProperties": { "type": "object" },
+        "groups": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "groupProperties": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": { "type": "object" }
+        },
+        "versions": { "$ref": "version.schema.json" }
+    }
+}

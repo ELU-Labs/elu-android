@@ -29,7 +29,11 @@ internal object V1ConfigJson {
     private val siteRequired = setOf("id")
     private val endpointsRequired = setOf("events", "flags")
     private val endpointsOptional = setOf("replay", "assets")
+    private val flagEndpointsRequired = setOf("flags")
+    private val flagEndpointsOptional = setOf("events", "replay", "assets")
     private val featuresRequired = setOf("capture", "replay", "flags", "assets")
+    private val flagFeaturesRequired = setOf("flags")
+    private val flagFeaturesOptional = setOf("capture", "replay", "assets")
     private val capabilitiesRequired = setOf("replay")
     private val replayCapabilitiesRequired = setOf("acceptedCodecs", "acceptedCompressions")
     private val sessionRequired = setOf("idleTimeoutSeconds", "maximumDurationSeconds")
@@ -138,6 +142,53 @@ internal object V1ConfigJson {
         )
     }
 
+    /**
+     * Parses only the authority needed by feature flags. The top-level/site/endpoints/features
+     * records remain closed, while unrelated channel values are opaque and may be absent.
+     */
+    fun parseFlagConfig(body: String?): V1ParsedFlagConfig {
+        val canonical = canonicalDocument(body, MAX_CONFIG_BYTES, "config")
+        val root = parseRoot(body, MAX_CONFIG_BYTES, "config")
+        val boundary = parseConfigBoundary(root, canonical)
+        val status =
+            checkNotNull(enumValue<V1ConfigStatus>(requiredString(root, "status", 1, Int.MAX_VALUE, "config")))
+        val siteId = optionalObject(root, "site")?.let(::parseSite)
+        val flagsEndpoint =
+            optionalObject(root, "endpoints")?.let { endpoints ->
+                expectFields(endpoints, flagEndpointsRequired, flagEndpointsOptional, "config.endpoints")
+                requiredString(endpoints, "flags", 1, Int.MAX_VALUE, "config.endpoints")
+            }
+        val flagsEnabled =
+            optionalObject(root, "features")?.let { features ->
+                expectFields(features, flagFeaturesRequired, flagFeaturesOptional, "config.features")
+                requiredBoolean(features, "flags", "config.features")
+            }
+        val reason = optionalString(root, "reason", 0, 256, "config")
+        if (status == V1ConfigStatus.ENABLED) {
+            if (siteId == null || flagsEndpoint == null || flagsEnabled == null) {
+                malformed("enabled config is missing a flag authorization field")
+            }
+        } else {
+            if (reason == null) malformed("inactive config must include reason")
+            if (root.has("site") || root.has("endpoints")) {
+                malformed("inactive config must not include site or endpoints")
+            }
+        }
+        return V1ParsedFlagConfig(
+            revision = boundary.revision,
+            issuedAt = boundary.issuedAt,
+            issuedAtInstant = boundary.issuedAtInstant,
+            expiresAt = boundary.expiresAt,
+            expiresAtInstant = boundary.expiresAtInstant,
+            status = status,
+            siteId = siteId,
+            flagsEndpoint = flagsEndpoint,
+            flagsEnabled = flagsEnabled,
+            serialized = boundary.serialized,
+            configSemanticHash = boundary.configSemanticHash,
+        )
+    }
+
     private fun parseConfigBoundary(
         root: JSONObject,
         canonical: CanonicalDocument,
@@ -155,7 +206,9 @@ internal object V1ConfigJson {
         }
         return V1ParsedConfigBoundary(
             revision = revision,
+            issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
+            expiresAt = expiresAt,
             expiresAtInstant = expiresAtInstant,
             serialized = canonical.serialized,
             configSemanticHash = V1StrictCanonicalJson.sha256(canonical.value),

@@ -27,6 +27,8 @@ class V1CanonicalJsonSchemaTest {
         assertTrue("manifest must route canonical version fixture", "fixtures/version.json" in fixturePaths)
         assertTrue("manifest must route canonical batch acknowledgement", "fixtures/batch-ack.json" in fixturePaths)
         assertTrue("manifest must route canonical transport policy", "fixtures/transport-policy.json" in fixturePaths)
+        assertTrue("manifest must route canonical flags request", "fixtures/flags-request.json" in fixturePaths)
+        assertTrue("manifest must route canonical flags response", "fixtures/flags-response.json" in fixturePaths)
 
         val enabled = json("contracts/v1/fixtures/config-enabled.json")
         assertValid(validator, schemas.getString("config"), enabled)
@@ -54,6 +56,8 @@ class V1CanonicalJsonSchemaTest {
             )
         }
         assertValid(validator, schemas.getString("transportPolicy"), json("contracts/v1/fixtures/transport-policy.json"))
+        assertValid(validator, schemas.getString("flagsRequest"), json("contracts/v1/fixtures/flags-request.json"))
+        assertValid(validator, schemas.getString("flagsResponse"), json("contracts/v1/fixtures/flags-response.json"))
     }
 
     @Test

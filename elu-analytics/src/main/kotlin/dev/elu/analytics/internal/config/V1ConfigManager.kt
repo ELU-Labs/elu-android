@@ -1,6 +1,8 @@
 package dev.elu.analytics.internal.config
 
 import dev.elu.analytics.internal.core.IdentityState
+import dev.elu.analytics.internal.flags.FLAG_MAX_SAFE_INTEGER
+import dev.elu.analytics.internal.flags.FlagExactInstant
 import java.net.URI
 import java.net.URISyntaxException
 import java.net.URLDecoder
@@ -21,6 +23,8 @@ import java.util.TreeMap
  */
 internal class V1ConfigManager(
     readbackProvenReplayTransports: Set<V1ReplayTransport> = emptySet(),
+    private val trustedFlagSiteKey: String? = null,
+    private val trustedFlagNamespaceDigest: String? = null,
 ) {
     private val readbackProvenReplayTransports: Set<V1ReplayTransport> =
         Collections.unmodifiableSet(LinkedHashSet(readbackProvenReplayTransports))
@@ -29,6 +33,10 @@ internal class V1ConfigManager(
     private var newestBoundary: V1ParsedConfigBoundary? = null
     private var newestOutcome: V1ConfigUpdateResult? = null
     private var newestBoundaryPoisoned: Boolean = false
+    private var flagPreparationGeneration: Long = 0
+    private var pendingFlagConfiguration: V1PreparedFlagConfiguration? = null
+    private var activeFlagAuthorization: V1FlagAuthorizationSnapshot? = null
+    private var flagProjectionTerminal: Boolean = false
 
     /** Installs a document only if it is newer than the retained issuance boundary. */
     @Synchronized
@@ -36,6 +44,7 @@ internal class V1ConfigManager(
         configBody: String?,
         nowEpochMillis: Long,
     ): V1ConfigUpdateResult {
+        invalidateFlagProjection()
         val parsed: V1ParsedConfig
         try {
             parsed = V1ConfigJson.parseConfig(configBody)
@@ -123,7 +132,236 @@ internal class V1ConfigManager(
         newestBoundary = null
         newestOutcome = null
         newestBoundaryPoisoned = false
+        invalidateFlagProjection()
     }
+
+    /**
+     * Strictly prepares a flags-only decision without publishing allow authority. Persistence is
+     * coordinated by the caller; any preparation immediately makes the previous projection
+     * restrictive so a store failure cannot leave stale executable authority.
+     */
+    @Synchronized
+    fun prepareFlagConfiguration(
+        configBody: String?,
+        nowEpochMillis: Long,
+    ): V1PreparedFlagConfiguration {
+        val priorAuthorization = activeFlagAuthorization
+        val generation = invalidateFlagProjection()
+        val unboundOwnership = flagSiteOwnership(siteId = null)
+        if (flagProjectionTerminal) {
+            return V1PreparedFlagConfiguration(
+                generation,
+                V1PreparedFlagDecision.Restricted(V1FlagProjectionRejection.TERMINAL, null),
+                unboundOwnership,
+                priorAuthorization,
+            ).also { pendingFlagConfiguration = it }
+        }
+
+        val boundary =
+            try {
+                V1ConfigJson.parseConfigBoundary(configBody).toFlagBoundary()
+            } catch (_: V1MalformedConfigException) {
+                null
+            } catch (_: V1UnsupportedConfigSchemaException) {
+                null
+            }
+        val parsed =
+            try {
+                V1ConfigJson.parseFlagConfig(configBody)
+            } catch (_: V1UnsupportedConfigSchemaException) {
+                return preparedRestriction(
+                    generation,
+                    V1FlagProjectionRejection.UNSUPPORTED_SCHEMA,
+                    boundary,
+                    unboundOwnership,
+                    priorAuthorization,
+                )
+            } catch (_: V1MalformedConfigException) {
+                return preparedRestriction(
+                    generation,
+                    V1FlagProjectionRejection.MALFORMED,
+                    null,
+                    unboundOwnership,
+                    priorAuthorization,
+                )
+            }
+
+        val parsedBoundary = parsed.toBoundary().toFlagBoundary()
+        val ownership = flagSiteOwnership(parsed.siteId)
+        val now = V1ExactTimestamp.fromEpochMillis(nowEpochMillis)
+        if (parsed.expiresAtInstant <= now) {
+            return preparedRestriction(generation, V1FlagProjectionRejection.EXPIRED, parsedBoundary, ownership, priorAuthorization)
+        }
+        if (parsed.status != V1ConfigStatus.ENABLED) {
+            return preparedRestriction(
+                generation,
+                if (parsed.status == V1ConfigStatus.REVOKED) V1FlagProjectionRejection.REVOKED else V1FlagProjectionRejection.INACTIVE,
+                parsedBoundary,
+                ownership,
+                priorAuthorization,
+            )
+        }
+        val flagsEndpoint =
+            try {
+                validateEndpoint(V1EndpointRole.FLAGS, checkNotNull(parsed.flagsEndpoint))
+            } catch (_: V1EndpointAuthorizationException) {
+                return preparedRestriction(
+                    generation,
+                    V1FlagProjectionRejection.UNAUTHORIZED,
+                    parsedBoundary,
+                    ownership,
+                    priorAuthorization,
+                )
+            }
+        if (parsed.flagsEnabled != true) {
+            return preparedRestriction(
+                generation,
+                V1FlagProjectionRejection.FLAGS_DISABLED,
+                parsedBoundary,
+                ownership,
+                priorAuthorization,
+            )
+        }
+        val siteKey = trustedFlagSiteKey
+            ?: return preparedRestriction(
+                generation,
+                V1FlagProjectionRejection.MISSING,
+                parsedBoundary,
+                ownership,
+                priorAuthorization,
+            )
+        val namespace = trustedFlagNamespaceDigest
+            ?: return preparedRestriction(
+                generation,
+                V1FlagProjectionRejection.MISSING,
+                parsedBoundary,
+                ownership,
+                priorAuthorization,
+            )
+        val witness =
+            V1FlagConfigWitness(
+                trustedSiteKey = siteKey,
+                siteNamespaceDigest = namespace,
+                siteId = checkNotNull(parsed.siteId),
+                endpoint = flagsEndpoint,
+                configRevision = parsed.revision,
+                configIssuedAt = parsed.issuedAtInstant.toFlagInstant(parsed.issuedAt),
+                configSemanticHash = parsed.configSemanticHash,
+                configExpiresAt = parsed.expiresAtInstant.toFlagInstant(parsed.expiresAt),
+            )
+        return V1PreparedFlagConfiguration(
+            generation,
+            V1PreparedFlagDecision.Allowed(witness, parsedBoundary),
+            ownership,
+            priorAuthorization,
+        ).also { pendingFlagConfiguration = it }
+    }
+
+    /** Publishes only the exact still-pending allowed preparation after its durable barrier. */
+    @Synchronized
+    fun commitFlagConfiguration(
+        prepared: V1PreparedFlagConfiguration,
+        barrierGeneration: Long,
+    ): V1FlagAuthorizationResolution {
+        if (flagProjectionTerminal) return V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.TERMINAL)
+        if (pendingFlagConfiguration !== prepared || prepared.preparationGeneration != flagPreparationGeneration) {
+            return V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.STALE)
+        }
+        pendingFlagConfiguration = null
+        val allowed = prepared.decision as? V1PreparedFlagDecision.Allowed
+            ?: return V1FlagAuthorizationResolution.Restricted(
+                (prepared.decision as V1PreparedFlagDecision.Restricted).reason,
+            )
+        if (barrierGeneration !in 1..FLAG_MAX_SAFE_INTEGER) {
+            flagProjectionTerminal = true
+            return V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.TERMINAL)
+        }
+        val retained = prepared.priorAuthorization
+        val snapshot =
+            if (
+                retained != null &&
+                retained.witness == allowed.witness &&
+                retained.barrierGeneration == barrierGeneration
+            ) {
+                retained
+            } else {
+                V1FlagAuthorizationSnapshot(allowed.witness, flagPreparationGeneration, barrierGeneration)
+            }
+        activeFlagAuthorization = snapshot
+        return V1FlagAuthorizationResolution.Allowed(snapshot)
+    }
+
+    /** Leaves the projection restrictive after persistence failure or a rejected barrier. */
+    @Synchronized
+    fun rejectFlagConfiguration(prepared: V1PreparedFlagConfiguration) {
+        if (pendingFlagConfiguration === prepared) pendingFlagConfiguration = null
+        activeFlagAuthorization = null
+    }
+
+    /** Retires only the exact authorization whose durable lease transition committed. */
+    @Synchronized
+    fun retireFlagAuthorization(
+        expected: V1FlagAuthorizationSnapshot,
+        terminal: Boolean,
+    ) {
+        if (terminal) {
+            activeFlagAuthorization = null
+            pendingFlagConfiguration = null
+            flagProjectionTerminal = true
+        } else if (activeFlagAuthorization == expected) {
+            activeFlagAuthorization = null
+        }
+    }
+
+    /** Store-facing snapshot; expiry is decided and persisted by the transaction's one wall sample. */
+    @Synchronized
+    fun flagAuthorizationForTransaction(): V1FlagAuthorizationSnapshot? =
+        if (flagProjectionTerminal) null else activeFlagAuthorization
+
+    private fun preparedRestriction(
+        generation: Long,
+        reason: V1FlagProjectionRejection,
+        boundary: V1FlagConfigBoundary?,
+        ownership: V1FlagSiteOwnership?,
+        priorAuthorization: V1FlagAuthorizationSnapshot?,
+    ): V1PreparedFlagConfiguration =
+        V1PreparedFlagConfiguration(
+            generation,
+            V1PreparedFlagDecision.Restricted(reason, boundary),
+            ownership,
+            priorAuthorization,
+        )
+            .also { pendingFlagConfiguration = it }
+
+    private fun flagSiteOwnership(siteId: String?): V1FlagSiteOwnership? {
+        val siteKey = trustedFlagSiteKey ?: return null
+        val namespace = trustedFlagNamespaceDigest ?: return null
+        return V1FlagSiteOwnership(siteKey, namespace, siteId)
+    }
+
+    /** Returns the new owner-local generation, or latches terminal at the safe-integer ceiling. */
+    private fun invalidateFlagProjection(): Long {
+        activeFlagAuthorization = null
+        pendingFlagConfiguration = null
+        // Reserve MAX as the terminal sentinel; it is never issued to an executable candidate.
+        if (flagPreparationGeneration >= FLAG_MAX_SAFE_INTEGER - 1) {
+            flagProjectionTerminal = true
+            flagPreparationGeneration = FLAG_MAX_SAFE_INTEGER
+            return FLAG_MAX_SAFE_INTEGER
+        }
+        flagPreparationGeneration += 1
+        return flagPreparationGeneration
+    }
+
+    private fun V1ParsedConfigBoundary.toFlagBoundary(): V1FlagConfigBoundary =
+        V1FlagConfigBoundary(
+            revision = revision,
+            issuedAt = issuedAtInstant.toFlagInstant(source = issuedAt),
+            semanticHash = configSemanticHash,
+        )
+
+    private fun V1ExactTimestamp.toFlagInstant(source: String): FlagExactInstant =
+        FlagExactInstant(source, epochWholeSecond, fractionalDigits, isLeapSecond)
 
     private fun installInvalidDocument(
         configBody: String?,
@@ -391,7 +629,20 @@ internal class V1ConfigManager(
     private fun V1ParsedConfig.toBoundary(): V1ParsedConfigBoundary =
         V1ParsedConfigBoundary(
             revision = revision,
+            issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
+            expiresAt = expiresAt,
+            expiresAtInstant = expiresAtInstant,
+            serialized = serialized,
+            configSemanticHash = configSemanticHash,
+        )
+
+    private fun V1ParsedFlagConfig.toBoundary(): V1ParsedConfigBoundary =
+        V1ParsedConfigBoundary(
+            revision = revision,
+            issuedAt = issuedAt,
+            issuedAtInstant = issuedAtInstant,
+            expiresAt = expiresAt,
             expiresAtInstant = expiresAtInstant,
             serialized = serialized,
             configSemanticHash = configSemanticHash,
