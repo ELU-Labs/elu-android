@@ -1,0 +1,698 @@
+{
+    "schemaVersion": 2,
+    "vectorId": "elu-replay-activity-v2",
+    "contractVersion": "2.0.0",
+    "artifactCatalog": {
+        "fixtures/config-enabled.json": "sha256:0c7332d145e359064bdeda604292ce78e4d10d648957fcd03b3e058f4588b527",
+        "fixtures/config-disabled.json": "sha256:6c5804caf8f7d97d45e02ee3ecae05711f7bfd63f725957c18ca99dce1516696",
+        "fixtures/replay.json": "sha256:b98869ae7ee873d094ed2d0c06b08139f7836698002bd94ca23679a1196946af",
+        "fixtures/replay-request.json": "sha256:ca5d0b3edbbbc52768dd088c478e251dfbc42f81bb906a6f558d509a352e3e23",
+        "fixtures/replay-ack.json": "sha256:44e2159bde873107d3c3690334f3ad72d6dc982b82493f573e4d897694b62d0d",
+        "fixtures/replay-error-identity-conflict.json": "sha256:12069323c5480fc3c398795f006c6f939b476b981bd5870e83393eab367061fa"
+    },
+    "constants": {
+        "maximumSafeInteger": 9007199254740991,
+        "maximumConfigBytes": 65536,
+        "maximumReplayRequestBytes": 5242880,
+        "maximumAggregateQueueRecords": 10000,
+        "maximumAggregateQueueBytes": 268435456,
+        "maximumReplayDecodedBytes": 16777216,
+        "maximumReplayLogicalRecords": 10000,
+        "maximumJsonNestingDepth": 256,
+        "maximumRecordAgeSeconds": 604800,
+        "idempotencyRetentionSeconds": 691200,
+        "resolutionReservationBytes": 2048
+    },
+    "transport": {
+        "configV2": {
+            "delivery": {
+                "api": "fetch",
+                "mode": "cors",
+                "credentials": "omit",
+                "cache": "default",
+                "preflight": "not-required"
+            },
+            "cors": {
+                "optionsRequest": {
+                    "method": "OPTIONS",
+                    "authorizationRequired": false
+                },
+                "optionsResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlAllowMethods": ["GET", "OPTIONS"],
+                    "accessControlAllowCredentials": "omitted"
+                },
+                "getResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlAllowCredentials": "omitted"
+                }
+            },
+            "successfulResponses": {
+                "statuses": ["enabled", "disabled", "revoked"],
+                "cacheControlTemplate": "public, max-age={ttl}, s-maxage={ttl}, must-revalidate",
+                "ttlSecondsFormula": "max(0, floor(min(300, remainingIssuanceLifetimeSeconds, revocationBudgetSeconds)))",
+                "maximumTtlSeconds": 300,
+                "maximumRevocationBudgetSeconds": 300,
+                "staleWhileRevalidate": "forbidden",
+                "sdkRejectsAtOrAfterExpiresAt": true
+            },
+            "transientFailures": {
+                "httpStatuses": [429, 500, 502, 503, 504],
+                "httpResponseCacheControl": "no-store, max-age=0, s-maxage=0",
+                "validConfigBody": "none",
+                "staleConfigMayAuthorizeSend": false,
+                "clientAction": "preserve-queue-and-block-send"
+            }
+        },
+        "replayV2": {
+            "authorization": {
+                "credential": "public-routing-site-key",
+                "placement": "Authorization: Bearer {siteKey}",
+                "queryFallback": "forbidden",
+                "cookies": "forbidden",
+                "providerCredentials": "forbidden",
+                "serverAuthority": "current-site-route",
+                "serverRecordsProtocolGeneration": true,
+                "serverRecordedGenerationProvesCaptureGeneration": false,
+                "clientQueuePersistsProtocolGeneration": true,
+                "generationChangePurgesBeforeSend": true,
+                "requestIdentityCarriesConfigRevision": false,
+                "requestIdentityCarriesProtocolGeneration": false,
+                "captureAuditHashesAuthorizeCaller": false
+            },
+            "delivery": {
+                "api": "fetch",
+                "mode": "cors",
+                "credentials": "omit",
+                "contentType": "application/json",
+                "httpContentEncoding": "identity",
+                "preflight": "required",
+                "beacon": "unsupported"
+            },
+            "cors": {
+                "preflightRequest": {
+                    "method": "OPTIONS",
+                    "authorizationRequired": false,
+                    "accessControlRequestMethod": "POST",
+                    "accessControlRequestHeaders": ["authorization", "content-type"]
+                },
+                "preflightResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlAllowMethods": ["POST", "OPTIONS"],
+                    "accessControlAllowHeaders": ["Authorization", "Content-Type"]
+                },
+                "postResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlExposeHeaders": ["Retry-After"]
+                }
+            },
+            "responses": {
+                "accepted": {
+                    "httpStatus": 200,
+                    "schema": "schemas/replay-ack.schema.json",
+                    "duplicateBehavior": "same-stored-effective-ack"
+                },
+                "identityConflict": {
+                    "httpStatus": 409,
+                    "schema": "schemas/replay-error.schema.json",
+                    "disposition": "permanent",
+                    "acknowledgement": "none"
+                }
+            }
+        }
+    },
+    "configCaching": {
+        "cases": [
+            {
+                "remainingIssuanceLifetimeSeconds": 600,
+                "revocationBudgetSeconds": 300,
+                "expectedTtlSeconds": 300
+            },
+            {
+                "remainingIssuanceLifetimeSeconds": 120,
+                "revocationBudgetSeconds": 300,
+                "expectedTtlSeconds": 120
+            },
+            {
+                "remainingIssuanceLifetimeSeconds": 600,
+                "revocationBudgetSeconds": 45,
+                "expectedTtlSeconds": 45
+            },
+            {
+                "remainingIssuanceLifetimeSeconds": 0,
+                "revocationBudgetSeconds": 300,
+                "expectedTtlSeconds": 0
+            }
+        ]
+    },
+    "negotiation": {
+        "configSchemaVersion": 2,
+        "configurationPathTemplate": "/sdk/v2/{siteKey}/config",
+        "channels": {
+            "events": {
+                "contractVersion": "1.0.0",
+                "schemaVersion": 1,
+                "endpointPath": "/v1/events"
+            },
+            "mutations": {
+                "contractVersion": "1.0.0",
+                "schemaVersion": 1,
+                "transport": "events"
+            },
+            "flags": {
+                "contractVersion": "1.0.0",
+                "schemaVersion": 1,
+                "endpointPath": "/v1/flags"
+            },
+            "replay": {
+                "replayContractVersion": "2.0.0",
+                "replaySchemaVersion": 2,
+                "replayProtocolGeneration": "replay-v2-generation-1",
+                "endpointPath": "/v2/replay",
+                "transports": [
+                    {
+                        "codec": "elu-browser-dom-v1",
+                        "compression": "gzip"
+                    }
+                ]
+            }
+        },
+        "replayV1": "reject"
+    },
+    "masking": {
+        "requiredOrder": [
+            "mask-and-block",
+            "serialize-codec-payload",
+            "compress-once",
+            "base64",
+            "build-outer-envelope",
+            "persist-exact-request",
+            "transport"
+        ],
+        "profile": {
+            "schemaVersion": 1,
+            "targetDialect": "elu-css-selector-v1",
+            "textRule": "sensitive",
+            "inputRule": "all",
+            "imageRule": "block",
+            "secureInputsMasked": true,
+            "platformFallbackApplied": false,
+            "resolvedMaskSelectors": [".elu-mask"],
+            "resolvedBlockSelectors": [".elu-block"]
+        },
+        "canonicalProfileBase64": "eyJpbWFnZVJ1bGUiOiJibG9jayIsImlucHV0UnVsZSI6ImFsbCIsInBsYXRmb3JtRmFsbGJhY2tBcHBsaWVkIjpmYWxzZSwicmVzb2x2ZWRCbG9ja1NlbGVjdG9ycyI6WyIuZWx1LWJsb2NrIl0sInJlc29sdmVkTWFza1NlbGVjdG9ycyI6WyIuZWx1LW1hc2siXSwic2NoZW1hVmVyc2lvbiI6MSwic2VjdXJlSW5wdXRzTWFza2VkIjp0cnVlLCJ0YXJnZXREaWFsZWN0IjoiZWx1LWNzcy1zZWxlY3Rvci12MSIsInRleHRSdWxlIjoic2Vuc2l0aXZlIn0=",
+        "maskingProfileHash": "sha256:410f116852d0c302486d6c81595582aa87a396eac32a4044039deb3b9c548cc6",
+        "outerAuditAssertionConstants": {
+            "appliedBeforeSerialization": true,
+            "secureInputsMasked": true
+        }
+    },
+    "codecPayload": {
+        "codec": "elu-browser-dom-v1",
+        "representation": "canonical-json-utf8",
+        "compression": "gzip",
+        "compressionPasses": 1,
+        "recordCount": 2,
+        "orderedRecordTypes": [4, 2],
+        "maskedText": "[masked]",
+        "decompressedLength": 593,
+        "decompressedSha256": "sha256:f402191184d6b559ed1ebfb6485c398b27fd9f84bbb0af0c2fb65bfe0b0f0eaa",
+        "decompressedBase64": "W3siZGF0YSI6eyJoZWlnaHQiOjcyMCwiaHJlZiI6Imh0dHBzOi8vZml4dHVyZS5lbHUuZGV2LyIsIndpZHRoIjoxMjgwfSwidGltZXN0YW1wIjoxNzg1ODg4MDYwMDAwLCJ0eXBlIjo0fSx7ImRhdGEiOnsiaW5pdGlhbE9mZnNldCI6eyJsZWZ0IjowLCJ0b3AiOjB9LCJub2RlIjp7ImNoaWxkTm9kZXMiOlt7ImlkIjoyLCJuYW1lIjoiaHRtbCIsInB1YmxpY0lkIjoiIiwic3lzdGVtSWQiOiIiLCJ0eXBlIjoxfSx7ImF0dHJpYnV0ZXMiOnt9LCJjaGlsZE5vZGVzIjpbeyJhdHRyaWJ1dGVzIjp7fSwiY2hpbGROb2RlcyI6W10sImlkIjo0LCJ0YWdOYW1lIjoiaGVhZCIsInR5cGUiOjJ9LHsiYXR0cmlidXRlcyI6e30sImNoaWxkTm9kZXMiOlt7ImF0dHJpYnV0ZXMiOnt9LCJjaGlsZE5vZGVzIjpbeyJpZCI6NywidGV4dENvbnRlbnQiOiJbbWFza2VkXSIsInR5cGUiOjN9XSwiaWQiOjYsInRhZ05hbWUiOiJwIiwidHlwZSI6Mn1dLCJpZCI6NSwidGFnTmFtZSI6ImJvZHkiLCJ0eXBlIjoyfV0sImlkIjozLCJ0YWdOYW1lIjoiaHRtbCIsInR5cGUiOjJ9XSwiaWQiOjEsInR5cGUiOjB9fSwidGltZXN0YW1wIjoxNzg1ODg4MDYwMDAxLCJ0eXBlIjoyfV0=",
+        "compressedLength": 283,
+        "compressedSha256": "sha256:18cb213d0ba45aa4b90806a087d1bdde913d2348ee60fdcc8954539cd72ce7ef",
+        "compressedBase64": "H4sIAAAAAAACE6WRzW6DMBCE32XOVjDkD+21p1zSB0A5OPESrGJAeGkTId69In+lqdpLj94ZzzdrZz2sEQPqUbA7FgJaJ1qhaDkHoRBpAkVR7k7StTzjsptZfo+g8OGsFKA4SfWgIM5zEOMbULxOl2ma6pXWWivIuWHQYlBfJFc5caZ8zfPAMg5KzgU0musGNOZVteVRORSutNvacgBlPZwFJQqV8Xxp50soNN2+dIeNBQEK4RyE/f10pccj3Yi0bt/JGNUP6jn6T3mnLuiFgpjj9kZnYx+E5L+E625rBeGTvNSVcCUgZN6EN7a7B2g+3Lqspl2aSZGbvpzq+9qef1rm39a5PuaTJb5P9PD7L8eTa59YoJYPUQIAAA=="
+    },
+    "payloadAdmission": {
+        "operationOrder": [
+            "strict-canonical-base64",
+            "stream-single-gzip-member",
+            "enforce-decoded-byte-limit",
+            "reject-nested-compression",
+            "strict-json-and-depth",
+            "enforce-logical-record-limit"
+        ],
+        "base64": {
+            "alphabet": "RFC4648-standard",
+            "padding": "required-when-applicable",
+            "canonicalReencodingMustMatch": true
+        },
+        "gzip": {
+            "members": 1,
+            "trailingData": "forbidden",
+            "nestedCompression": "forbidden",
+            "streamingAbortBeforeDecodedBytesExceed": 16777216
+        },
+        "codecJson": {
+            "topLevel": "array",
+            "maximumLogicalRecords": 10000,
+            "maximumNestingDepth": 256,
+            "canonicalization": "elu-canonical-json-v1"
+        },
+        "failure": {
+            "disposition": "permanent",
+            "acknowledgement": "none"
+        },
+        "exactLimitCases": [
+            {
+                "id": "decoded-bytes-exact-limit",
+                "construction": "canonical-array-bytes-16777216",
+                "expectedDecodedBytes": 16777216,
+                "expectedLogicalRecords": 1
+            },
+            {
+                "id": "logical-records-exact-limit",
+                "construction": "logical-records-10000",
+                "expectedLogicalRecords": 10000
+            },
+            {
+                "id": "json-nesting-exact-limit",
+                "construction": "json-nesting-depth-256",
+                "expectedLogicalRecords": 1,
+                "expectedNestingDepth": 256
+            }
+        ],
+        "negativeCases": [
+            { "id": "invalid-gzip", "construction": "invalid-gzip-bytes", "expectedError": "invalid-gzip" },
+            { "id": "malformed-base64", "construction": "invalid-base64-alphabet", "expectedError": "invalid-base64" },
+            { "id": "noncanonical-base64", "construction": "remove-required-padding", "expectedError": "noncanonical-base64" },
+            { "id": "nested-gzip", "construction": "gzip-of-gzip", "expectedError": "nested-compression" },
+            { "id": "trailing-gzip-member", "construction": "concatenated-gzip-members", "expectedError": "trailing-gzip-data" },
+            { "id": "trailing-gzip-data", "construction": "gzip-plus-one-byte", "expectedError": "trailing-gzip-data" },
+            { "id": "decoded-byte-one-over", "construction": "decoded-bytes-16777217", "expectedError": "decoded-byte-limit" },
+            { "id": "logical-record-one-over", "construction": "logical-records-10001", "expectedError": "logical-record-limit" },
+            { "id": "json-nesting-one-over", "construction": "json-nesting-depth-257", "expectedError": "json-nesting-limit" },
+            { "id": "lone-surrogate", "construction": "escaped-lone-high-surrogate", "expectedError": "invalid-unicode" },
+            { "id": "invalid-utf8", "construction": "invalid-utf8-in-json-string", "expectedError": "invalid-unicode" }
+        ]
+    },
+    "requestIdentity": {
+        "domain": "elu-sdk-replay-request-v2",
+        "domainUtf8Base64": "ZWx1LXNkay1yZXBsYXktcmVxdWVzdC12Mg==",
+        "separatorHex": "00",
+        "canonicalization": "elu-canonical-json-v1",
+        "completeRequestTopLevelOrder": ["chunk", "requestId", "schemaVersion"],
+        "canonicalChunkLength": 1354,
+        "canonicalChunkLengthUint32beHex": "0000054a",
+        "canonicalChunkSha256": "sha256:7f09f51dee53d9121c9e0ee7e594ac4d3c00273d6cd626d8df759cd00e3010d9",
+        "canonicalChunkBase64": "eyJjaHVua0lkIjoiY2h1bmtfMDAwMDAxIiwiY29kZWMiOiJlbHUtYnJvd3Nlci1kb20tdjEiLCJjb21wcmVzc2lvbiI6Imd6aXAiLCJjb250ZW50RW5jb2RpbmciOiJiYXNlNjQiLCJjb250ZXh0UmV2aXNpb24iOjcsImVuZGVkQXQiOiIyMDI2LTA4LTA1VDAwOjAxOjA1LjAwMFoiLCJpZGVudGl0eSI6eyJhbm9ueW1vdXNJZCI6ImFub25fMDE4ZmNiN2NmZjgwNzIxMzg3YTE5Yjg1OWU3YzUzYTYiLCJyZXZpc2lvbiI6MSwidXNlcklkIjoidXNlcl8xMjMifSwicGF5bG9hZCI6Ikg0c0lBQUFBQUFBQ0U2V1J6VzZETUJDRTMyWE9WakRrRCsyMXAxelNCMEE1T1BFU3JHSkFlR2tUSWQ2OUluK2xxZHBMajk0Wnp6ZHJaejJzRVFQcVViQTdGZ0phSjFxaGFEa0hvUkJwQWtWUjdrN1N0VHpqc3B0WmZvK2c4T0dzRktBNFNmV2dJTTV6RU9NYlVMeE9sMm1hNnBYV1dpdkl1V0hRWWxCZkpGYzVjYVo4emZQQU1nNUt6Z1UwbXVzR05PWlZ0ZVZST1JTdXROdmFjZ0JsUFp3RkpRcVY4WHhwNTBzb05OMitkSWVOQlFFSzRSeUUvZjEwcGNjajNZaTBidC9KR05VUDZqbjZUM21uTHVpRmdwamo5a1puWXgrRTVMK0U2MjVyQmVHVHZOU1ZjQ1VnWk42RU43YTdCMmcrM0xxc3BsMmFTWkdidnB6cSs5cWVmMXJtMzlhNVB1YVRKYjVQOVBEN0w4ZVRhNTlZb0pZUFVRSUFBQT09IiwicHJpdmFjeSI6eyJhcHBsaWVkQmVmb3JlU2VyaWFsaXphdGlvbiI6dHJ1ZSwiZWZmZWN0aXZlUG9saWN5SGFzaCI6InNoYTI1Njo4NTJhYTc1MTk1YThhNzJlNDhkZWQ2ZjI4NmVhODYzNGQ4M2U2NGM1NTI3NzIwNzc1NjYzMmY3YTYwODgzZWQzIiwibWFza2luZ1Byb2ZpbGVIYXNoIjoic2hhMjU2OjQxMGYxMTY4NTJkMGMzMDI0ODZkNmM4MTU5NTU4MmFhODdhMzk2ZWFjMzJhNDA0NDAzOWRlYjNiOWM1NDhjYzYiLCJwbGF0Zm9ybUZhbGxiYWNrQXBwbGllZCI6ZmFsc2UsInBvbGljeVJldmlzaW9uIjoicHJpdmFjeS0xIiwic2VjdXJlSW5wdXRzTWFza2VkIjp0cnVlfSwicmVwbGF5SWQiOiJyZXBsYXlfMDE4ZmNiN2NmZjgwNzIxMzg3YTE5Yjg1OWU3YzUzYTYiLCJzY2hlbWFWZXJzaW9uIjoyLCJzZXF1ZW5jZSI6MSwic2Vzc2lvbklkIjoic2Vzc2lvbl8wMThmY2I3Y2ZmODA3MjEzODdhMTliODU5ZTdjNTNhNiIsInN0YXJ0ZWRBdCI6IjIwMjYtMDgtMDVUMDA6MDE6MDAuMDAwWiIsInZlcnNpb25zIjp7ImJ1aWxkIjoiMzNkNjY3MCIsImNvbnRyYWN0VmVyc2lvbiI6IjIuMC4wIiwiZmFjYWRlIjp7Im5hbWUiOiJ3aW5kb3cuZWx1IiwidmVyc2lvbiI6IjEuMC4wIn0sInBsYXRmb3JtIjoiYnJvd3NlciIsInJ1bnRpbWUiOnsibmFtZSI6ImVsdS1qcyIsInZlcnNpb24iOiIxLjQwOS41LWVsdS4xIn0sInNjaGVtYVZlcnNpb24iOjJ9fQ==",
+        "materialLength": 1384,
+        "materialSha256": "sha256:fc8f5188920b236355fba0142235aaffd9eb08073d6d9725bcea42fc85d0e20b",
+        "requestId": "request_fc8f5188920b236355fba0142235aaffd9eb08073d6d9725bcea42fc85d0e20b",
+        "canonicalRequestLength": 1469,
+        "canonicalRequestSha256": "sha256:87b8a7c2c3ce926a9489cd1d385fe528cc5d8f9040cbcffc0c975992532e0c73",
+        "canonicalRequestBase64": "eyJjaHVuayI6eyJjaHVua0lkIjoiY2h1bmtfMDAwMDAxIiwiY29kZWMiOiJlbHUtYnJvd3Nlci1kb20tdjEiLCJjb21wcmVzc2lvbiI6Imd6aXAiLCJjb250ZW50RW5jb2RpbmciOiJiYXNlNjQiLCJjb250ZXh0UmV2aXNpb24iOjcsImVuZGVkQXQiOiIyMDI2LTA4LTA1VDAwOjAxOjA1LjAwMFoiLCJpZGVudGl0eSI6eyJhbm9ueW1vdXNJZCI6ImFub25fMDE4ZmNiN2NmZjgwNzIxMzg3YTE5Yjg1OWU3YzUzYTYiLCJyZXZpc2lvbiI6MSwidXNlcklkIjoidXNlcl8xMjMifSwicGF5bG9hZCI6Ikg0c0lBQUFBQUFBQ0U2V1J6VzZETUJDRTMyWE9WakRrRCsyMXAxelNCMEE1T1BFU3JHSkFlR2tUSWQ2OUluK2xxZHBMajk0Wnp6ZHJaejJzRVFQcVViQTdGZ0phSjFxaGFEa0hvUkJwQWtWUjdrN1N0VHpqc3B0WmZvK2c4T0dzRktBNFNmV2dJTTV6RU9NYlVMeE9sMm1hNnBYV1dpdkl1V0hRWWxCZkpGYzVjYVo4emZQQU1nNUt6Z1UwbXVzR05PWlZ0ZVZST1JTdXROdmFjZ0JsUFp3RkpRcVY4WHhwNTBzb05OMitkSWVOQlFFSzRSeUUvZjEwcGNjajNZaTBidC9KR05VUDZqbjZUM21uTHVpRmdwamo5a1puWXgrRTVMK0U2MjVyQmVHVHZOU1ZjQ1VnWk42RU43YTdCMmcrM0xxc3BsMmFTWkdidnB6cSs5cWVmMXJtMzlhNVB1YVRKYjVQOVBEN0w4ZVRhNTlZb0pZUFVRSUFBQT09IiwicHJpdmFjeSI6eyJhcHBsaWVkQmVmb3JlU2VyaWFsaXphdGlvbiI6dHJ1ZSwiZWZmZWN0aXZlUG9saWN5SGFzaCI6InNoYTI1Njo4NTJhYTc1MTk1YThhNzJlNDhkZWQ2ZjI4NmVhODYzNGQ4M2U2NGM1NTI3NzIwNzc1NjYzMmY3YTYwODgzZWQzIiwibWFza2luZ1Byb2ZpbGVIYXNoIjoic2hhMjU2OjQxMGYxMTY4NTJkMGMzMDI0ODZkNmM4MTU5NTU4MmFhODdhMzk2ZWFjMzJhNDA0NDAzOWRlYjNiOWM1NDhjYzYiLCJwbGF0Zm9ybUZhbGxiYWNrQXBwbGllZCI6ZmFsc2UsInBvbGljeVJldmlzaW9uIjoicHJpdmFjeS0xIiwic2VjdXJlSW5wdXRzTWFza2VkIjp0cnVlfSwicmVwbGF5SWQiOiJyZXBsYXlfMDE4ZmNiN2NmZjgwNzIxMzg3YTE5Yjg1OWU3YzUzYTYiLCJzY2hlbWFWZXJzaW9uIjoyLCJzZXF1ZW5jZSI6MSwic2Vzc2lvbklkIjoic2Vzc2lvbl8wMThmY2I3Y2ZmODA3MjEzODdhMTliODU5ZTdjNTNhNiIsInN0YXJ0ZWRBdCI6IjIwMjYtMDgtMDVUMDA6MDE6MDAuMDAwWiIsInZlcnNpb25zIjp7ImJ1aWxkIjoiMzNkNjY3MCIsImNvbnRyYWN0VmVyc2lvbiI6IjIuMC4wIiwiZmFjYWRlIjp7Im5hbWUiOiJ3aW5kb3cuZWx1IiwidmVyc2lvbiI6IjEuMC4wIn0sInBsYXRmb3JtIjoiYnJvd3NlciIsInJ1bnRpbWUiOnsibmFtZSI6ImVsdS1qcyIsInZlcnNpb24iOiIxLjQwOS41LWVsdS4xIn0sInNjaGVtYVZlcnNpb24iOjJ9fSwicmVxdWVzdElkIjoicmVxdWVzdF9mYzhmNTE4ODkyMGIyMzYzNTVmYmEwMTQyMjM1YWFmZmQ5ZWIwODA3M2Q2ZDk3MjViY2VhNDJmYzg1ZDBlMjBiIiwic2NoZW1hVmVyc2lvbiI6Mn0="
+    },
+    "canonicalizationSupplement": {
+        "algorithm": "elu-canonical-json-v1",
+        "runtimeSemanticSource": "packages/browser/src/elu-http-v1/strict-canonical-json.ts",
+        "integerRule": "exact-signed-int64-across-integer-decimal-and-exponent-spellings",
+        "fallbackRule": "finite-binary64-then-JSON.stringify",
+        "cases": [
+            {
+                "id": "positive-int64-max",
+                "raw": "9223372036854775807",
+                "expectedCanonicalBase64": "OTIyMzM3MjAzNjg1NDc3NTgwNw==",
+                "expectedSha256": "sha256:b34a1c30a715f6bf8b7243afa7fab883ce3612b7231716bdcbbdc1982e1aed29"
+            },
+            {
+                "id": "negative-int64-min",
+                "raw": "-9223372036854775808",
+                "expectedCanonicalBase64": "LTkyMjMzNzIwMzY4NTQ3NzU4MDg=",
+                "expectedSha256": "sha256:85386477f3af47e4a0b308ee3b3a688df16e8b2228105dd7d4dcd42a9807cb78"
+            },
+            {
+                "id": "positive-int64-one-over",
+                "raw": "9223372036854775808",
+                "expectedCanonicalBase64": "OTIyMzM3MjAzNjg1NDc3NjAwMA==",
+                "expectedSha256": "sha256:81f4af99eb4386a96b14a16ab44fbb5d4fdbea1a9f78154307ba83b6b6139a35"
+            },
+            {
+                "id": "negative-int64-one-over",
+                "raw": "-9223372036854775809",
+                "expectedCanonicalBase64": "LTkyMjMzNzIwMzY4NTQ3NzYwMDA=",
+                "expectedSha256": "sha256:b35244209d87dcfa7df86b5efd09651683c9e38b95053d7562a1b9c25b567469"
+            },
+            {
+                "id": "unsafe-decimal-exact-integer",
+                "raw": "9007199254740993.0",
+                "expectedCanonicalBase64": "OTAwNzE5OTI1NDc0MDk5Mw==",
+                "expectedSha256": "sha256:a1c367c29158357e62a3ff5d3e800fb7698a22396439dbc0a9d4929322afd35d"
+            },
+            {
+                "id": "unsafe-exponent-exact-integer",
+                "raw": "9007199254740993e0",
+                "expectedCanonicalBase64": "OTAwNzE5OTI1NDc0MDk5Mw==",
+                "expectedSha256": "sha256:a1c367c29158357e62a3ff5d3e800fb7698a22396439dbc0a9d4929322afd35d"
+            },
+            {
+                "id": "unsafe-scientific-exact-integer",
+                "raw": "9.007199254740993e15",
+                "expectedCanonicalBase64": "OTAwNzE5OTI1NDc0MDk5Mw==",
+                "expectedSha256": "sha256:a1c367c29158357e62a3ff5d3e800fb7698a22396439dbc0a9d4929322afd35d"
+            },
+            {
+                "id": "unsafe-fraction-binary64-fallback",
+                "raw": "9007199254740993.5",
+                "expectedCanonicalBase64": "OTAwNzE5OTI1NDc0MDk5NA==",
+                "expectedSha256": "sha256:25aa68783313802627958889943e895749ac4c0c7469b2a305cd450a12120768"
+            },
+            {
+                "id": "ordinary-fraction-binary64-fallback",
+                "raw": "1.25",
+                "expectedCanonicalBase64": "MS4yNQ==",
+                "expectedSha256": "sha256:004a9e0878ff83e6b91f50d50dad439d2065c6cbb0d20f1f328b2fd75e085d6a"
+            },
+            {
+                "id": "safe-max-decimal-integer",
+                "raw": "9007199254740991.0",
+                "expectedCanonicalBase64": "OTAwNzE5OTI1NDc0MDk5MQ==",
+                "expectedSha256": "sha256:f40b423c2dd95ff2b2f027e22208f438cf7242862e5e746860e697308c9add26"
+            },
+            {
+                "id": "safe-max-plus-one-decimal-integer",
+                "raw": "9007199254740992.0",
+                "expectedCanonicalBase64": "OTAwNzE5OTI1NDc0MDk5Mg==",
+                "expectedSha256": "sha256:c681da39d7273a6a24c15c9cac3a75526ff2ecf8ba4ee60346a0c70c8163bdb2"
+            },
+            {
+                "id": "negative-safe-max-decimal-integer",
+                "raw": "-9007199254740991.0",
+                "expectedCanonicalBase64": "LTkwMDcxOTkyNTQ3NDA5OTE=",
+                "expectedSha256": "sha256:4c933a456bb8f2e9894b2d0b26480439cd72d52fb8a27cbf8fd7f323f22c7815"
+            },
+            {
+                "id": "negative-safe-max-plus-one-decimal-integer",
+                "raw": "-9007199254740992.0",
+                "expectedCanonicalBase64": "LTkwMDcxOTkyNTQ3NDA5OTI=",
+                "expectedSha256": "sha256:83e109bfd7fb4984b47a46f363627c18dbbd7e57e36b05a04cd162d304df72e9"
+            },
+            {
+                "id": "negative-zero-decimal",
+                "raw": "-0.0",
+                "expectedCanonicalBase64": "MA==",
+                "expectedSha256": "sha256:5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+            },
+            {
+                "id": "decimal-exponent-integer",
+                "raw": "1.2300e2",
+                "expectedCanonicalBase64": "MTIz",
+                "expectedSha256": "sha256:a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
+            },
+            {
+                "id": "decimal-exponent-fraction",
+                "raw": "1.2301e2",
+                "expectedCanonicalBase64": "MTIzLjAx",
+                "expectedSha256": "sha256:ce1d829914aa62ccac6de17dabd9368930aabd5aa5beb1f54e7219c310546d50"
+            }
+        ]
+    },
+    "aggregateQueueAccounting": {
+        "formulas": {
+            "count": "eventMutationCount + replayCount",
+            "bytes": "eventMutationBytes + replayRequestBytes",
+            "effectiveQueueByteLimit": "min(configQueueBytes, 268435456)",
+            "effectiveReplayRequestLimit": "min(configReplayChunkBytes, 5242880)"
+        },
+        "cases": [
+            {
+                "id": "ordinary-admission",
+                "eventMutationCount": 2,
+                "eventMutationBytes": 4096,
+                "replayCount": 1,
+                "replayRequestBytes": 1469,
+                "configQueueBytes": 16777216,
+                "expectedCount": 3,
+                "expectedBytes": 5565,
+                "admit": true
+            },
+            {
+                "id": "exact-config-byte-limit",
+                "eventMutationCount": 9,
+                "eventMutationBytes": 16775747,
+                "replayCount": 1,
+                "replayRequestBytes": 1469,
+                "configQueueBytes": 16777216,
+                "expectedCount": 10,
+                "expectedBytes": 16777216,
+                "admit": true
+            },
+            {
+                "id": "one-byte-over-config-limit",
+                "eventMutationCount": 9,
+                "eventMutationBytes": 16775748,
+                "replayCount": 1,
+                "replayRequestBytes": 1469,
+                "configQueueBytes": 16777216,
+                "expectedCount": 10,
+                "expectedBytes": 16777217,
+                "admit": false
+            },
+            {
+                "id": "exact-hard-limits",
+                "eventMutationCount": 9999,
+                "eventMutationBytes": 263192576,
+                "replayCount": 1,
+                "replayRequestBytes": 5242880,
+                "configQueueBytes": 268435456,
+                "expectedCount": 10000,
+                "expectedBytes": 268435456,
+                "admit": true
+            },
+            {
+                "id": "one-record-over-hard-limit",
+                "eventMutationCount": 10000,
+                "eventMutationBytes": 4096,
+                "replayCount": 1,
+                "replayRequestBytes": 1469,
+                "configQueueBytes": 268435456,
+                "expectedCount": 10001,
+                "expectedBytes": 5565,
+                "admit": false
+            }
+        ]
+    },
+    "invalidation": {
+        "cases": [
+            { "id": "replay-disabled", "action": "purge" },
+            { "id": "integration-revoked", "action": "purge" },
+            { "id": "identity-opted-out", "action": "purge" },
+            { "id": "region-block", "action": "purge" },
+            { "id": "region-unknown", "action": "purge" },
+            { "id": "masking-profile-stricter", "action": "purge" },
+            { "id": "masking-profile-incomparable", "action": "purge" },
+            { "id": "transport-pair-removed", "action": "purge" },
+            { "id": "config-expired", "action": "preserve-and-block-send" },
+            { "id": "config-fetch-failed", "action": "preserve-and-block-send" },
+            { "id": "wall-clock-untrusted", "action": "preserve-and-block-send" },
+            { "id": "masking-profile-equal", "action": "preserve" },
+            { "id": "masking-profile-looser", "action": "preserve" },
+            { "id": "context-revision-changed", "action": "preserve" },
+            { "id": "sampling-changed", "action": "preserve" },
+            { "id": "budget-decremented", "action": "preserve" },
+            { "id": "identity-reset-sealed-row", "action": "preserve" }
+        ]
+    },
+    "generationQueue": {
+        "persistedField": "replayProtocolGeneration",
+        "comparisonPoint": "before-any-send-attempt",
+        "serverRecordsCurrentGeneration": true,
+        "serverRecordProvesClientCaptureGeneration": false,
+        "cases": [
+            {
+                "id": "same-generation",
+                "queuedGeneration": "replay-v2-generation-1",
+                "currentGeneration": "replay-v2-generation-1",
+                "currentGenerationSupported": true,
+                "transportPairChanged": false,
+                "expectedAction": "preserve-and-send"
+            },
+            {
+                "id": "changed-generation-same-transport",
+                "queuedGeneration": "replay-v2-generation-1",
+                "currentGeneration": "replay-v2-generation-2",
+                "currentGenerationSupported": true,
+                "transportPairChanged": false,
+                "expectedAction": "purge-before-send"
+            },
+            {
+                "id": "unsupported-current-generation",
+                "queuedGeneration": "replay-v2-generation-1",
+                "currentGeneration": "replay-v2-generation-unknown",
+                "currentGenerationSupported": false,
+                "transportPairChanged": false,
+                "expectedAction": "purge-and-fail-closed"
+            }
+        ]
+    },
+    "scheduling": {
+        "rule": "lowest-unresolved-sequence-per-replay-then-lowest-global-ordinal",
+        "rows": [
+            { "replayId": "replay_a", "sequence": 2, "globalOrdinal": 5, "eligibleAt": 0 },
+            { "replayId": "replay_a", "sequence": 3, "globalOrdinal": 1, "eligibleAt": 0 },
+            { "replayId": "replay_b", "sequence": 0, "globalOrdinal": 4, "eligibleAt": 0 },
+            { "replayId": "replay_c", "sequence": 0, "globalOrdinal": 2, "eligibleAt": 100 }
+        ],
+        "cases": [
+            { "now": 50, "expectedReplayId": "replay_b", "expectedSequence": 0 },
+            { "now": 100, "expectedReplayId": "replay_c", "expectedSequence": 0 }
+        ]
+    },
+    "safeIntegerParity": {
+        "cases": [
+            { "raw": "1", "expect": "accept", "canonical": "1" },
+            { "raw": "1.0", "expect": "accept", "canonical": "1" },
+            { "raw": "1e0", "expect": "accept", "canonical": "1" },
+            { "raw": "9007199254740991", "expect": "accept", "canonical": "9007199254740991" },
+            { "raw": "9007199254740992", "expect": "reject" },
+            { "raw": "-1", "expect": "reject" },
+            { "raw": "1.5", "expect": "reject" }
+        ]
+    },
+    "acknowledgement": {
+        "requiredBindings": ["requestId", "replayId", "chunkId", "sequence", "result"],
+        "acceptedResult": "accepted",
+        "deleteOnlyAfterCompleteValidation": true,
+        "duplicateBehavior": "same-stored-effective-ack"
+    },
+    "idempotency": {
+        "siteAuthority": "authorized-site-id",
+        "requestScope": ["siteId", "requestId"],
+        "requestBinding": ["canonicalRequestSha256"],
+        "semanticScope": ["siteId", "replayId", "chunkId"],
+        "orderingScope": ["siteId", "replayId", "sequence"],
+        "exactDuplicateResponse": "same-stored-effective-ack",
+        "conflictResponseFixture": "fixtures/replay-error-identity-conflict.json",
+        "conflictDisposition": "permanent",
+        "conflictAcknowledgement": "none",
+        "initial": {
+            "siteId": "site_demo",
+            "requestId": "request_fc8f5188920b236355fba0142235aaffd9eb08073d6d9725bcea42fc85d0e20b",
+            "canonicalRequestSha256": "sha256:87b8a7c2c3ce926a9489cd1d385fe528cc5d8f9040cbcffc0c975992532e0c73",
+            "replayId": "replay_018fcb7cff80721387a19b859e7c53a6",
+            "chunkId": "chunk_000001",
+            "sequence": 1,
+            "storedResponseFixture": "fixtures/replay-ack.json"
+        },
+        "cases": [
+            {
+                "id": "exact-duplicate",
+                "overrides": {},
+                "expected": "same-stored-effective-ack"
+            },
+            {
+                "id": "request-id-different-body",
+                "overrides": {
+                    "canonicalRequestSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "expected": "permanent-conflict",
+                "conflictScope": "request"
+            },
+            {
+                "id": "semantic-chunk-different-binding",
+                "overrides": {
+                    "requestId": "request_1111111111111111111111111111111111111111111111111111111111111111",
+                    "canonicalRequestSha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "sequence": 2
+                },
+                "expected": "permanent-conflict",
+                "conflictScope": "chunk"
+            },
+            {
+                "id": "ordering-sequence-different-binding",
+                "overrides": {
+                    "requestId": "request_2222222222222222222222222222222222222222222222222222222222222222",
+                    "canonicalRequestSha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                    "chunkId": "chunk_000002"
+                },
+                "expected": "permanent-conflict",
+                "conflictScope": "sequence"
+            },
+            {
+                "id": "same-identities-other-site",
+                "overrides": { "siteId": "site_other" },
+                "expected": "accepted-new-site-scope"
+            }
+        ]
+    },
+    "rawStrictJson": {
+        "valid": "{\"schemaVersion\":2,\"requestId\":\"request_a\",\"chunk\":{\"sequence\":1}}",
+        "duplicateKeyCases": [
+            {
+                "id": "literal-request-key",
+                "raw": "{\"schemaVersion\":2,\"requestId\":\"request_a\",\"requestId\":\"request_b\",\"chunk\":{}}",
+                "expectedError": "duplicate-key"
+            },
+            {
+                "id": "literal-chunk-key",
+                "raw": "{\"schemaVersion\":2,\"requestId\":\"request_a\",\"chunk\":{\"sequence\":1,\"sequence\":2}}",
+                "expectedError": "duplicate-key"
+            },
+            {
+                "id": "escaped-equivalent-request-key",
+                "raw": "{\"schemaVersion\":2,\"requestId\":\"request_a\",\"request\\u0049d\":\"request_b\",\"chunk\":{}}",
+                "expectedError": "duplicate-key"
+            },
+            {
+                "id": "escaped-equivalent-chunk-key",
+                "raw": "{\"schemaVersion\":2,\"requestId\":\"request_a\",\"chunk\":{\"sequence\":1,\"seque\\u006ece\":2}}",
+                "expectedError": "duplicate-key"
+            }
+        ]
+    },
+    "negativeRequests": [
+        {
+            "id": "request-schema-v1",
+            "operation": "replace",
+            "path": ["schemaVersion"],
+            "value": 1
+        },
+        {
+            "id": "chunk-schema-v1",
+            "operation": "replace",
+            "path": ["chunk", "schemaVersion"],
+            "value": 1
+        },
+        {
+            "id": "unknown-request-field",
+            "operation": "add",
+            "path": ["unknown"],
+            "value": true
+        },
+        {
+            "id": "missing-identity",
+            "operation": "remove",
+            "path": ["chunk", "identity"]
+        },
+        {
+            "id": "unsafe-sequence",
+            "operation": "replace",
+            "path": ["chunk", "sequence"],
+            "value": 9007199254740992
+        },
+        {
+            "id": "wrong-request-id-shape",
+            "operation": "replace",
+            "path": ["requestId"],
+            "value": "request_not-a-digest",
+            "validation": "schema"
+        },
+        {
+            "id": "wrong-request-id-digest",
+            "operation": "replace",
+            "path": ["requestId"],
+            "value": "request_0000000000000000000000000000000000000000000000000000000000000000",
+            "validation": "semantic"
+        },
+        {
+            "id": "v1-version-context",
+            "operation": "replace",
+            "path": ["chunk", "versions", "contractVersion"],
+            "value": "1.0.0"
+        },
+        {
+            "id": "missing-masking-profile-hash",
+            "operation": "remove",
+            "path": ["chunk", "privacy", "maskingProfileHash"]
+        }
+    ]
+}

@@ -1,0 +1,41 @@
+{
+    "schemaVersion": 2,
+    "replayId": "replay_018fcb7cff80721387a19b859e7c53a6",
+    "sessionId": "session_018fcb7cff80721387a19b859e7c53a6",
+    "chunkId": "chunk_000001",
+    "sequence": 1,
+    "startedAt": "2026-08-05T00:01:00.000Z",
+    "endedAt": "2026-08-05T00:01:05.000Z",
+    "identity": {
+        "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+        "userId": "user_123",
+        "revision": 1
+    },
+    "contextRevision": 7,
+    "codec": "elu-browser-dom-v1",
+    "compression": "gzip",
+    "contentEncoding": "base64",
+    "payload": "H4sIAAAAAAACE6WRzW6DMBCE32XOVjDkD+21p1zSB0A5OPESrGJAeGkTId69In+lqdpLj94ZzzdrZz2sEQPqUbA7FgJaJ1qhaDkHoRBpAkVR7k7StTzjsptZfo+g8OGsFKA4SfWgIM5zEOMbULxOl2ma6pXWWivIuWHQYlBfJFc5caZ8zfPAMg5KzgU0musGNOZVteVRORSutNvacgBlPZwFJQqV8Xxp50soNN2+dIeNBQEK4RyE/f10pccj3Yi0bt/JGNUP6jn6T3mnLuiFgpjj9kZnYx+E5L+E625rBeGTvNSVcCUgZN6EN7a7B2g+3Lqspl2aSZGbvpzq+9qef1rm39a5PuaTJb5P9PD7L8eTa59YoJYPUQIAAA==",
+    "privacy": {
+        "policyRevision": "privacy-1",
+        "effectivePolicyHash": "sha256:852aa75195a8a72e48ded6f286ea8634d83e64c55277207756632f7a60883ed3",
+        "maskingProfileHash": "sha256:410f116852d0c302486d6c81595582aa87a396eac32a4044039deb3b9c548cc6",
+        "appliedBeforeSerialization": true,
+        "secureInputsMasked": true,
+        "platformFallbackApplied": false
+    },
+    "versions": {
+        "schemaVersion": 2,
+        "contractVersion": "2.0.0",
+        "platform": "browser",
+        "runtime": {
+            "name": "elu-js",
+            "version": "1.409.5-elu.1"
+        },
+        "facade": {
+            "name": "window.elu",
+            "version": "1.0.0"
+        },
+        "build": "33d6670"
+    }
+}

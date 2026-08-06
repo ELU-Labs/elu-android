@@ -25,8 +25,12 @@ class V1ConfigManagerTest {
             mapOf(
                 "contracts/v1/manifest.json" to "98152d8725c286f29402ba3e420bda8dd364200fb6fdf1cfe49b2da9b8f63e54",
                 "contracts/v1/schemas/config.schema.json" to "4cd1e8fce0298048ec60ded16f9a215d10dc1022477f059e01db0349ec478307",
+                "contracts/v1/schemas/identity.schema.json" to "c41dee2d3693ece1c831a5adbfd7ee0d5660a9bb8c8e21005b34e1faea38d91d",
                 "contracts/v1/schemas/event.schema.json" to "4a0deeb19b8406d31aa519bf1d3978294d6d06eb451d4588668cb6f67f4edee9",
                 "contracts/v1/schemas/mutation.schema.json" to "8482af6b66c04701b014acd27e6d59aaef3f27864086c755f9abde498e5c8f5f",
+                "contracts/v1/schemas/replay.schema.json" to "1effbcf8defe59013b49cf6c586e601a2a6d4806c89aafb6efe4115b2c078623",
+                "contracts/v1/schemas/replay-request.schema.json" to "d3d8900d8f17b951bbfb3789b964a15ebeefe68fb0a816232ae67ab5a036a7c0",
+                "contracts/v1/schemas/replay-ack.schema.json" to "10a2e6bd6ce528fc8a2083c11e5dc69c12d08bfc7b12e690f8c629eb1350e17c",
                 "contracts/v1/schemas/privacy-policy.schema.json" to "73beb1856358f5e3cc45b225fdf0608294124e6d6f7c13e2ec3db1c285db6fc4",
                 "contracts/v1/schemas/privacy.schema.json" to "830726002dce98eafce30981067ea892afe12db2b985296514a8da3597776b14",
                 "contracts/v1/schemas/version.schema.json" to "3b4ca74e470efbf6610f2a1743f2bc78805882bd294a6984ef2c93fe42fea4ab",
@@ -38,6 +42,10 @@ class V1ConfigManagerTest {
                 "contracts/v1/schemas/flags-response.schema.json" to "723161b3c0f3a448d679faa7a0723cb819cdb162e62ba605fc7935e15df69db2",
                 "contracts/v1/fixtures/config-enabled.json" to "91be45589959f53c73a78f916f5e722b77a853fa0a6b952601400bf107b591e5",
                 "contracts/v1/fixtures/config-disabled.json" to "c60d32c9701ea726cac342a8c06b89d9a6bd0cf6cea3441bcdd37c2de9055270",
+                "contracts/v1/fixtures/identity.json" to "31da461a12b7f5f0d8a8bf7c8b66db8f7db91f6f1e6c9b51f8c0d0eba898d34b",
+                "contracts/v1/fixtures/replay.json" to "73ab61893bc8625f486345b69f2e527aa1ed1ceba05a0aefbd943ec314d75609",
+                "contracts/v1/fixtures/replay-request.json" to "1fb8ea52be5891a7b140a2f37764c50294f8fc637db1254cb06061ca5165e910",
+                "contracts/v1/fixtures/replay-ack.json" to "86fdcd571de4d5894bb572b06b6a96c5da653056b2bfb1ced62a5c968db09a63",
                 "contracts/v1/fixtures/batch-request.json" to "c0446316c5b75c163b27e27abe7b079b1c88bdb198a4985f4ceb544a8d154bbb",
                 "contracts/v1/fixtures/batch-ack.json" to "0a71284941a71646641095f772c34f9f84d8d7d0083574d7d35ef0148bf22cb5",
                 "contracts/v1/fixtures/batch-ack-retryable-head.json" to "f9e79b1a7bb913b2a07a3a66257c29f2a68973bbe6db7de99d47b30dbb2aa27e",
@@ -55,6 +63,7 @@ class V1ConfigManagerTest {
                 "contracts/v1/fixtures/flags-request.json" to "19b4f681c8f2c059d39403a5621c0c60a4b6b4328e2bbe8ae28341724604238a",
                 "contracts/v1/fixtures/flags-response.json" to "ae943a59d4362cd297e2ea6d7838f5075ad1f949d1401d07d5585db0102326be",
                 "contracts/v1/test-vectors/feature-flag-activity.json" to "dbceaa7bee48caf8bf54b73e494fb3f28460eeaf366bbe26f606b659c62a47c4",
+                "contracts/v1/readback-expectations.json" to "4958ca487c1bd3ca6592e42ca28c7de3c2ae929fceae71d53df3e96bca1f7594",
             )
 
         expected.forEach { (path, digest) -> assertEquals(path, digest, sha256(resourceBytes(path))) }

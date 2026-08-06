@@ -1,0 +1,24 @@
+{
+    "schemaVersion": 1,
+    "revision": 1,
+    "contextRevision": 7,
+    "anonymousId": "anon_018fcb7cff80721387a19b859e7c53a6",
+    "userId": "user_123",
+    "groups": {
+        "organization": "org_456"
+    },
+    "superProperties": {
+        "plan": "growth"
+    },
+    "session": {
+        "id": "session_018fcb7cff80721387a19b859e7c53a6",
+        "startedAt": "2026-08-04T00:00:00.000Z",
+        "lastActivityAt": "2026-08-04T00:01:00.000Z",
+        "timeoutSeconds": 1800,
+        "maximumDurationSeconds": 86400,
+        "lifecycle": "active",
+        "backgroundedAt": null
+    },
+    "optedOut": false,
+    "updatedAt": "2026-08-04T00:01:00.000Z"
+}

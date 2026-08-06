@@ -1,0 +1,54 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/replay.schema.json",
+    "title": "ELU SDK replay chunk envelope v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schemaVersion",
+        "replayId",
+        "sessionId",
+        "chunkId",
+        "sequence",
+        "startedAt",
+        "endedAt",
+        "codec",
+        "compression",
+        "contentEncoding",
+        "payload",
+        "privacy",
+        "versions"
+    ],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "replayId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "chunkId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "codec": { "type": "string", "pattern": "^elu-[a-z0-9][a-z0-9.-]{0,63}$" },
+        "compression": { "enum": ["none", "gzip"] },
+        "contentEncoding": { "const": "base64" },
+        "payload": { "type": "string", "minLength": 1 },
+        "privacy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "policyRevision",
+                "effectivePolicyHash",
+                "appliedBeforeSerialization",
+                "secureInputsMasked",
+                "platformFallbackApplied"
+            ],
+            "properties": {
+                "policyRevision": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "effectivePolicyHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+                "appliedBeforeSerialization": { "const": true },
+                "secureInputsMasked": { "const": true },
+                "platformFallbackApplied": { "type": "boolean" }
+            }
+        },
+        "versions": { "$ref": "version.schema.json" }
+    }
+}

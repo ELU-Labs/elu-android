@@ -1,0 +1,65 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/identity.schema.json",
+    "title": "ELU SDK persisted identity state v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "schemaVersion",
+        "revision",
+        "contextRevision",
+        "anonymousId",
+        "userId",
+        "groups",
+        "superProperties",
+        "session",
+        "optedOut",
+        "updatedAt"
+    ],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "contextRevision": { "type": "integer", "minimum": 0 },
+        "anonymousId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "userId": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+        "groups": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "superProperties": { "type": "object" },
+        "session": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": [
+                "id",
+                "startedAt",
+                "lastActivityAt",
+                "timeoutSeconds",
+                "maximumDurationSeconds",
+                "lifecycle",
+                "backgroundedAt"
+            ],
+            "properties": {
+                "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "startedAt": { "type": "string", "format": "date-time" },
+                "lastActivityAt": { "type": "string", "format": "date-time" },
+                "timeoutSeconds": { "type": "integer", "minimum": 60, "maximum": 36000 },
+                "maximumDurationSeconds": { "const": 86400 },
+                "lifecycle": { "enum": ["active", "background"] },
+                "backgroundedAt": { "type": ["string", "null"], "format": "date-time" }
+            }
+        },
+        "optedOut": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "migration": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sourceSchema", "completedAt"],
+            "properties": {
+                "sourceSchema": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "completedAt": { "type": "string", "format": "date-time" }
+            }
+        }
+    }
+}

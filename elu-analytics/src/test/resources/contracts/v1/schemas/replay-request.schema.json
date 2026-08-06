@@ -1,0 +1,13 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v1/replay-request.schema.json",
+    "title": "ELU SDK replay transport request v1",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["schemaVersion", "requestId", "chunk"],
+    "properties": {
+        "schemaVersion": { "const": 1 },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "chunk": { "$ref": "replay.schema.json" }
+    }
+}

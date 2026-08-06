@@ -29,6 +29,10 @@ class V1CanonicalJsonSchemaTest {
         assertTrue("manifest must route canonical transport policy", "fixtures/transport-policy.json" in fixturePaths)
         assertTrue("manifest must route canonical flags request", "fixtures/flags-request.json" in fixturePaths)
         assertTrue("manifest must route canonical flags response", "fixtures/flags-response.json" in fixturePaths)
+        assertTrue("manifest must route canonical identity", "fixtures/identity.json" in fixturePaths)
+        assertTrue("manifest must route canonical replay", "fixtures/replay.json" in fixturePaths)
+        assertTrue("manifest must route canonical replay request", "fixtures/replay-request.json" in fixturePaths)
+        assertTrue("manifest must route canonical replay acknowledgement", "fixtures/replay-ack.json" in fixturePaths)
 
         val enabled = json("contracts/v1/fixtures/config-enabled.json")
         assertValid(validator, schemas.getString("config"), enabled)
@@ -58,6 +62,31 @@ class V1CanonicalJsonSchemaTest {
         assertValid(validator, schemas.getString("transportPolicy"), json("contracts/v1/fixtures/transport-policy.json"))
         assertValid(validator, schemas.getString("flagsRequest"), json("contracts/v1/fixtures/flags-request.json"))
         assertValid(validator, schemas.getString("flagsResponse"), json("contracts/v1/fixtures/flags-response.json"))
+        assertValid(validator, schemas.getString("identity"), json("contracts/v1/fixtures/identity.json"))
+        assertValid(validator, schemas.getString("replay"), json("contracts/v1/fixtures/replay.json"))
+        assertValid(validator, schemas.getString("replayRequest"), json("contracts/v1/fixtures/replay-request.json"))
+        assertValid(validator, schemas.getString("replayAck"), json("contracts/v1/fixtures/replay-ack.json"))
+    }
+
+    @Test
+    fun `every manifest dependency resolves with exact canonical casing`() {
+        val manifest = json("contracts/v1/manifest.json")
+        val routed =
+            buildList {
+                manifest.getJSONObject("schemas").keys().forEach { role ->
+                    add(manifest.getJSONObject("schemas").getString(role))
+                }
+                add(manifest.getJSONObject("transport").getString("policy"))
+                addAll(manifest.getJSONArray("fixtures").strings())
+                manifest.getJSONObject("gates").keys().forEach { gate ->
+                    add(manifest.getJSONObject("gates").getString(gate))
+                }
+            }
+        routed.forEach { path ->
+            checkNotNull(javaClass.classLoader?.getResource("contracts/v1/$path")) {
+                "Manifest dependency is missing or has wrong case: contracts/v1/$path"
+            }
+        }
     }
 
     @Test
@@ -136,7 +165,7 @@ class V1CanonicalJsonSchemaTest {
         )
 }
 
-private class ResourceJsonSchemaValidator(
+internal class ResourceJsonSchemaValidator(
     private val contractRoot: String,
 ) {
     private val documents = mutableMapOf<String, JSONObject>()
@@ -397,10 +426,11 @@ private class ResourceJsonSchemaValidator(
     ): Context {
         val parts = reference.split('#', limit = 2)
         val documentPath =
-            if (parts.first().isEmpty()) {
-                context.path
-            } else {
-                normalizePath(context.path.substringBeforeLast('/', "") + "/" + parts.first())
+            when {
+                parts.first().isEmpty() -> context.path
+                parts.first().startsWith(CONTRACT_SCHEMA_PREFIX) ->
+                    absoluteSchemaResourcePath(parts.first())
+                else -> normalizePath(context.path.substringBeforeLast('/', "") + "/" + parts.first())
             }
         val document = load(documentPath)
         var schema: Any = document
@@ -412,6 +442,14 @@ private class ResourceJsonSchemaValidator(
             }
         }
         return Context(documentPath, document, schema)
+    }
+
+    private fun absoluteSchemaResourcePath(reference: String): String {
+        val canonical = normalizePath(reference.removePrefix(CONTRACT_SCHEMA_PREFIX))
+        val version = canonical.substringBefore('/')
+        val fileName = canonical.substringAfter('/')
+        val resource = "$version/schemas/$fileName"
+        return if (contractRoot == "contracts") resource else resource.removePrefix("$version/")
     }
 
     private fun load(relativePath: String): JSONObject =
@@ -521,6 +559,7 @@ private class ResourceJsonSchemaValidator(
                     "([Zz]|([+-])(\\d{2}):(\\d{2}))$",
             )
         const val SECONDS_PER_DAY = 86_400L
+        const val CONTRACT_SCHEMA_PREFIX = "https://sdk.elu.dev/contracts/"
     }
 }
 
