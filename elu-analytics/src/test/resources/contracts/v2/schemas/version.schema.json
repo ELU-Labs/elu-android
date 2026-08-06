@@ -1,0 +1,32 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://sdk.elu.dev/contracts/v2/version.schema.json",
+    "title": "ELU SDK version context v2",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["schemaVersion", "contractVersion", "platform", "runtime", "facade"],
+    "properties": {
+        "schemaVersion": { "const": 2 },
+        "contractVersion": { "const": "2.0.0" },
+        "platform": { "enum": ["browser", "android", "ios"] },
+        "runtime": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version"],
+            "properties": {
+                "name": { "type": "string", "pattern": "^elu-[a-z0-9-]+$" },
+                "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+            }
+        },
+        "facade": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version"],
+            "properties": {
+                "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]+$" },
+                "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+            }
+        },
+        "build": { "type": "string", "minLength": 1, "maxLength": 128 }
+    }
+}

@@ -1,0 +1,46 @@
+{
+    "contractVersion": "1.0.0",
+    "verificationStatus": "pending-external-verification",
+    "blocking": true,
+    "reason": "Repository conformance alone is insufficient; end-to-end readback must be verified before publication.",
+    "orderedInput": {
+        "mutationFixture": "fixtures/mutations.json",
+        "eventFixture": "fixtures/event.json",
+        "replayFixture": "fixtures/replay.json",
+        "flagsRequestFixture": "fixtures/flags-request.json"
+    },
+    "expectedReadback": {
+        "person": {
+            "canonicalId": "user_123",
+            "aliasesInclude": ["legacy_user_123"],
+            "propertiesInclude": {
+                "plan": "growth",
+                "role": "owner",
+                "createdFrom": "sdk"
+            }
+        },
+        "groups": {
+            "organization": {
+                "key": "org_456",
+                "propertiesInclude": {
+                    "tier": "design-partner"
+                }
+            }
+        },
+        "event": {
+            "eventId": "event_018fcb7cff80721387a19b859e7c53a6",
+            "name": "checkout_started",
+            "orderedAfterSequence": 5
+        },
+        "flags": {
+            "contextRevision": 7,
+            "mustUsePersonAndGroupProperties": true
+        },
+        "replay": {
+            "chunkId": "chunk_000001",
+            "accepted": true,
+            "playable": true,
+            "secureInputsMasked": true
+        }
+    }
+}

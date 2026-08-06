@@ -1,0 +1,8 @@
+{
+    "schemaVersion": 2,
+    "requestId": "request_0000000000000000000000000000000000000000000000000000000000000000",
+    "status": 409,
+    "code": "replay-identity-conflict",
+    "disposition": "permanent",
+    "conflictScope": "sequence"
+}

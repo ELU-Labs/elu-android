@@ -1,0 +1,94 @@
+{
+    "schemaVersion": 2,
+    "revision": "config-v2-2026-08-05-1",
+    "issuedAt": "2026-08-05T00:00:00.000Z",
+    "expiresAt": "2026-08-05T00:05:00.000Z",
+    "status": "enabled",
+    "site": {
+        "id": "site_demo"
+    },
+    "endpoints": {
+        "events": "https://ingest.elu.dev/v1/events",
+        "replay": "https://ingest.elu.dev/v2/replay",
+        "flags": "https://ingest.elu.dev/v1/flags",
+        "assets": "https://assets.elu.dev/sdk/"
+    },
+    "privacy": {
+        "schemaVersion": 1,
+        "revision": "privacy-1",
+        "capture": {
+            "enabled": true
+        },
+        "replay": {
+            "enabled": true,
+            "sampleRate": 0.25,
+            "minimumDurationSeconds": 2,
+            "maximumDurationSeconds": 3600
+        },
+        "masking": {
+            "text": "sensitive",
+            "inputs": "all",
+            "images": "block",
+            "secureInputsMasked": true,
+            "platformRules": [
+                {
+                    "platform": "browser",
+                    "action": "mask",
+                    "targetDialect": "elu-css-selector-v1",
+                    "target": ".elu-mask"
+                },
+                {
+                    "platform": "browser",
+                    "action": "block",
+                    "targetDialect": "elu-css-selector-v1",
+                    "target": ".elu-block"
+                }
+            ]
+        },
+        "regionPolicy": {
+            "mode": "block-eu-on-device",
+            "evaluator": "elu-eu-timezone-v1"
+        }
+    },
+    "features": {
+        "capture": true,
+        "replay": true,
+        "flags": true,
+        "assets": true
+    },
+    "capabilities": {
+        "events": {
+            "contractVersion": "1.0.0",
+            "schemaVersion": 1
+        },
+        "mutations": {
+            "contractVersion": "1.0.0",
+            "schemaVersion": 1
+        },
+        "flags": {
+            "contractVersion": "1.0.0",
+            "schemaVersion": 1
+        },
+        "replay": {
+            "replayContractVersion": "2.0.0",
+            "replaySchemaVersion": 2,
+            "replayProtocolGeneration": "replay-v2-generation-1",
+            "transports": [
+                {
+                    "codec": "elu-browser-dom-v1",
+                    "compression": "gzip"
+                }
+            ]
+        }
+    },
+    "session": {
+        "idleTimeoutSeconds": 1800,
+        "maximumDurationSeconds": 86400
+    },
+    "limits": {
+        "eventBatchCount": 100,
+        "eventBatchBytes": 1048576,
+        "replayChunkBytes": 5242880,
+        "queueBytes": 16777216
+    }
+}

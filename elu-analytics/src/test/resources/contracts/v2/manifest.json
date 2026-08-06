@@ -1,0 +1,163 @@
+{
+    "contract": "elu-sdk",
+    "contractScope": "config-and-replay",
+    "contractVersion": "2.0.0",
+    "schemaVersion": 2,
+    "status": "frozen",
+    "statusScope": "semantic-contract",
+    "semanticContract": {
+        "contractVersion": "2.0.0",
+        "scope": "config-and-replay",
+        "status": "frozen"
+    },
+    "transport": {
+        "profile": "elu-http-v2",
+        "status": "specified-not-wired",
+        "runtimeBehavior": "unchanged",
+        "repositoryConformance": "schemas-fixtures-checksums-and-vectors",
+        "liveReadbackVerification": "pending-external-verification",
+        "configurationEndpoint": {
+            "method": "GET",
+            "pathTemplate": "/sdk/v2/{siteKey}/config",
+            "delivery": {
+                "api": "fetch",
+                "mode": "cors",
+                "credentials": "omit",
+                "cache": "default",
+                "preflight": "not-required"
+            },
+            "cors": {
+                "optionsRequest": {
+                    "method": "OPTIONS",
+                    "authorizationRequired": false
+                },
+                "optionsResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlAllowMethods": ["GET", "OPTIONS"],
+                    "accessControlAllowCredentials": "omitted"
+                },
+                "getResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlAllowCredentials": "omitted"
+                }
+            },
+            "successfulResponses": {
+                "statuses": ["enabled", "disabled", "revoked"],
+                "cacheControlTemplate": "public, max-age={ttl}, s-maxage={ttl}, must-revalidate",
+                "ttlSecondsFormula": "max(0, floor(min(300, remainingIssuanceLifetimeSeconds, revocationBudgetSeconds)))",
+                "maximumTtlSeconds": 300,
+                "maximumRevocationBudgetSeconds": 300,
+                "staleWhileRevalidate": "forbidden",
+                "sdkRejectsAtOrAfterExpiresAt": true
+            },
+            "transientFailures": {
+                "httpStatuses": [429, 500, 502, 503, 504],
+                "httpResponseCacheControl": "no-store, max-age=0, s-maxage=0",
+                "validConfigBody": "none",
+                "staleConfigMayAuthorizeSend": false,
+                "clientAction": "preserve-queue-and-block-send"
+            }
+        },
+        "replayEndpoint": {
+            "method": "POST",
+            "path": "/v2/replay",
+            "replayV1": "unsupported",
+            "authorization": {
+                "credential": "public-routing-site-key",
+                "placement": "Authorization: Bearer {siteKey}",
+                "queryFallback": "forbidden",
+                "cookies": "forbidden",
+                "providerCredentials": "forbidden",
+                "serverAuthority": "current-site-route",
+                "serverRecordsProtocolGeneration": true,
+                "serverRecordedGenerationProvesCaptureGeneration": false,
+                "clientQueuePersistsProtocolGeneration": true,
+                "generationChangePurgesBeforeSend": true,
+                "requestIdentityCarriesConfigRevision": false,
+                "requestIdentityCarriesProtocolGeneration": false,
+                "captureAuditHashesAuthorizeCaller": false
+            },
+            "delivery": {
+                "api": "fetch",
+                "mode": "cors",
+                "credentials": "omit",
+                "contentType": "application/json",
+                "httpContentEncoding": "identity",
+                "preflight": "required",
+                "beacon": "unsupported"
+            },
+            "cors": {
+                "preflightRequest": {
+                    "method": "OPTIONS",
+                    "authorizationRequired": false,
+                    "accessControlRequestMethod": "POST",
+                    "accessControlRequestHeaders": ["authorization", "content-type"]
+                },
+                "preflightResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlAllowMethods": ["POST", "OPTIONS"],
+                    "accessControlAllowHeaders": ["Authorization", "Content-Type"]
+                },
+                "postResponse": {
+                    "accessControlAllowOrigin": "*",
+                    "accessControlExposeHeaders": ["Retry-After"]
+                }
+            },
+            "responses": {
+                "accepted": {
+                    "httpStatus": 200,
+                    "schema": "schemas/replay-ack.schema.json",
+                    "duplicateBehavior": "same-stored-effective-ack"
+                },
+                "identityConflict": {
+                    "httpStatus": 409,
+                    "schema": "schemas/replay-error.schema.json",
+                    "disposition": "permanent",
+                    "acknowledgement": "none"
+                }
+            }
+        }
+    },
+    "compatibility": {
+        "v1ArtifactsUnchanged": true,
+        "eventContractVersion": "1.0.0",
+        "mutationContractVersion": "1.0.0",
+        "flagContractVersion": "1.0.0",
+        "replayV1Supported": false,
+        "breakingChangeRequiresContractMajor": true
+    },
+    "schemas": {
+        "config": "schemas/config.schema.json",
+        "version": "schemas/version.schema.json",
+        "replay": "schemas/replay.schema.json",
+        "replayRequest": "schemas/replay-request.schema.json",
+        "replayAck": "schemas/replay-ack.schema.json",
+        "replayError": "schemas/replay-error.schema.json"
+    },
+    "dependencies": {
+        "privacyPolicyV1": {
+            "path": "../v1/schemas/privacy-policy.schema.json",
+            "sha256": "73beb1856358f5e3cc45b225fdf0608294124e6d6f7c13e2ec3db1c285db6fc4"
+        },
+        "canonicalJsonV1": {
+            "algorithm": "elu-canonical-json-v1",
+            "path": "../v1/test-vectors/capture-admission-activity.json",
+            "sha256": "80b07e6a5456588727cbdd7d05e1e37cc6e49336993b2de8c9ba08bd1ed3eb99"
+        }
+    },
+    "fixtures": [
+        "fixtures/config-enabled.json",
+        "fixtures/config-disabled.json",
+        "fixtures/replay.json",
+        "fixtures/replay-request.json",
+        "fixtures/replay-ack.json",
+        "fixtures/replay-error-identity-conflict.json"
+    ],
+    "testVectors": {
+        "replayActivity": "test-vectors/replay-activity.json"
+    },
+    "gates": {
+        "liveEngineReadback": "readback-expectations.json"
+    },
+    "checksums": "SHA256SUMS"
+}

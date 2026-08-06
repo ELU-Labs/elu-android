@@ -1,0 +1,8 @@
+{
+    "schemaVersion": 2,
+    "revision": "config-v2-disabled-1",
+    "issuedAt": "2026-08-05T00:00:00.000Z",
+    "expiresAt": "2026-08-05T00:05:00.000Z",
+    "status": "disabled",
+    "reason": "remote-kill-switch"
+}
