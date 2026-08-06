@@ -38,15 +38,16 @@ includeBuild("path/to/elu-android") {
 }
 ```
 
-> **Already using another analytics SDK? Stop before installing ELU.** Do not
-> remove or reconfigure the existing integration as part of an automated
-> install. If the app already resolves this SDK's underlying analytics runtime,
-> the two integrations can compete for a process-wide singleton: a second
+> **Already using `posthog-android` directly? Stop before installing ELU.** Do
+> not remove or reconfigure that integration as part of an automated install.
+> The two integrations can compete for a process-wide singleton: a second
 > `setup` may no-op, disable one integration, or route events to the wrong
 > project. Ask ELU to review coexistence and choose either the existing-provider
 > connection or a deliberate migration. Only remove an existing integration as
 > an explicit, reviewed migration step. Incompatible runtime versions fail
-> Gradle resolution instead of silently overriding one another.
+> Gradle resolution instead of silently overriding one another. Other analytics
+> SDKs do not trigger this warning unless they bundle or configure the same
+> runtime themselves.
 
 ## Setup
 
