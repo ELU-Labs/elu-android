@@ -11,6 +11,12 @@ is managed from your ELU dashboard and delivered as remote config. See
   applied **client-side at capture time** and managed from the ELU dashboard.
 - `minSdk 23`; session replay activates on API 26+.
 
+ELU Analytics 0.1.0 exposes an ELU-owned API and currently uses PostHog's
+Android runtime for managed capture and ingest. You do not need a PostHog
+account or key; application code should call only `Elu.*`. This disclosure is
+intentionally scoped to 0.1.0 and must be removed together with the provider
+runtime dependency before a standalone release.
+
 ## Install
 
 From Maven Central:
@@ -32,12 +38,16 @@ includeBuild("path/to/elu-android") {
 }
 ```
 
-> **Do not initialize a second copy of the resolved analytics runtime alongside
-> this SDK.** The runtime owns a process-wide singleton, so a second `setup`
-> can no-op, disable one integration, or route events to the wrong project.
-> Its dependency version is strictly pinned; incompatible versions fail
-> Gradle resolution instead of silently overriding it. Remove any direct
-> integration with the same runtime before installing ELU Analytics.
+> **Already using `posthog-android` directly? Stop before installing ELU.** Do
+> not remove or reconfigure that integration as part of an automated install.
+> The two integrations can compete for a process-wide singleton: a second
+> `setup` may no-op, disable one integration, or route events to the wrong
+> project. Ask ELU to review coexistence and choose either the existing-provider
+> connection or a deliberate migration. Only remove an existing integration as
+> an explicit, reviewed migration step. Incompatible runtime versions fail
+> Gradle resolution instead of silently overriding one another. Other analytics
+> SDKs do not trigger this warning unless they bundle or configure the same
+> runtime themselves.
 
 ## Setup
 
@@ -46,6 +56,9 @@ required** (foreground-driven config refresh and screen/lifecycle
 autocapture hook `Application.registerActivityLifecycleCallbacks`):
 
 ```kotlin
+import android.app.Application
+import dev.elu.analytics.Elu
+
 class MyApp : Application() {
     override fun onCreate() {
         super.onCreate()
@@ -53,6 +66,19 @@ class MyApp : Application() {
     }
 }
 ```
+
+Register that class in `AndroidManifest.xml`. Keep the app's existing
+`<application>` attributes and child components:
+
+```xml
+<application
+    android:name=".MyApp">
+    <!-- Existing activities, services, providers, and metadata stay here. -->
+</application>
+```
+
+If the app already has an `Application` subclass, add `Elu.setup(...)` to its
+existing `onCreate`; do not create or register a second subclass.
 
 `Elu.setup` is idempotent and never throws. Every `Elu.*` method is safe in
 every state: before config arrives, event calls are buffered in memory
@@ -64,6 +90,8 @@ a re-enabled site can recover.
 Dev override for the config endpoint:
 
 ```kotlin
+import dev.elu.analytics.EluOptions
+
 Elu.setup(this, "YOUR_SITE_KEY", EluOptions(configHost = "https://dev.elu.example"))
 ```
 
@@ -77,6 +105,9 @@ Elu.identify("user-123", mapOf("plan" to "pro"))
 // on logout:
 Elu.reset()
 ```
+
+Use the app's stable, immutable internal user ID. Do not use an email address,
+name, phone number, or another direct identifier as the ID.
 
 ## Events and screens
 
