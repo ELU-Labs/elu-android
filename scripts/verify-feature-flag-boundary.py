@@ -22,7 +22,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
         "4aab165f3a94b7ec5a3493440e2dadaff7c1c3258709ec068c07cae48d8f9136",
     "elu-analytics/build.gradle.kts":
-        "25e842753cc622e80b3942688a587f72877bd59867c78a02f11a234bf5774d4f",
+        "0bdacadd03710d8b1fe1480196a53afab996e45018f98a679fa58731fd4ae0a1",
     # These files carry the explicit no-wire release status.
     "elu-analytics/src/test/resources/contracts/v1/manifest.json":
         "98152d8725c286f29402ba3e420bda8dd364200fb6fdf1cfe49b2da9b8f63e54",
