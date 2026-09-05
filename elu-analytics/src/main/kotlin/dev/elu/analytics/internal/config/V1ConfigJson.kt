@@ -36,6 +36,11 @@ internal object V1ConfigJson {
     private val flagFeaturesOptional = setOf("capture", "replay", "assets")
     private val capabilitiesRequired = setOf("replay")
     private val replayCapabilitiesRequired = setOf("acceptedCodecs", "acceptedCompressions")
+    private val capabilitiesV2Required = setOf("events", "mutations", "flags", "replay")
+    private val channelCapabilityRequired = setOf("contractVersion", "schemaVersion")
+    private val replayCapabilitiesV2Required =
+        setOf("replayContractVersion", "replaySchemaVersion", "replayProtocolGeneration", "transports")
+    private val replayTransportPairRequired = setOf("codec", "compression")
     private val sessionRequired = setOf("idleTimeoutSeconds", "maximumDurationSeconds")
     private val limitsRequired = setOf("eventBatchCount", "eventBatchBytes", "replayChunkBytes", "queueBytes")
 
@@ -95,7 +100,8 @@ internal object V1ConfigJson {
         val endpoints = optionalObject(root, "endpoints")?.let(::parseEndpoints)
         val privacy = optionalObject(root, "privacy")?.let(::parsePrivacyPolicy)
         val features = optionalObject(root, "features")?.let(::parseFeatures)
-        val replayCapabilities = optionalObject(root, "capabilities")?.let(::parseCapabilities)
+        val replayCapabilities =
+            optionalObject(root, "capabilities")?.let { parseCapabilities(it, boundary.schemaVersion) }
         val session = optionalObject(root, "session")?.let(::parseSession)
         val limits = optionalObject(root, "limits")?.let(::parseLimits)
         val reason = optionalString(root, "reason", 0, 256, "config")
@@ -107,7 +113,7 @@ internal object V1ConfigJson {
             ) {
                 malformed("enabled config is missing an authorization field")
             }
-            if (features.replay && (endpoints.replay == null || replayCapabilities.acceptedCodecs.isEmpty() || replayCapabilities.acceptedCompressions.isEmpty())) {
+            if (features.replay && (endpoints.replay == null || replayCapabilities.advertisedTransports.isEmpty())) {
                 malformed("replay-enabled config must advertise an endpoint, codec, and compression")
             }
             if (features.assets && endpoints.assets == null) {
@@ -119,6 +125,7 @@ internal object V1ConfigJson {
         }
 
         return V1ParsedConfig(
+            schemaVersion = boundary.schemaVersion,
             revision = revision,
             issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
@@ -175,6 +182,7 @@ internal object V1ConfigJson {
             }
         }
         return V1ParsedFlagConfig(
+            schemaVersion = boundary.schemaVersion,
             revision = boundary.revision,
             issuedAt = boundary.issuedAt,
             issuedAtInstant = boundary.issuedAtInstant,
@@ -194,7 +202,7 @@ internal object V1ConfigJson {
         canonical: CanonicalDocument,
     ): V1ParsedConfigBoundary {
         expectFields(root, configRequired, configOptional, "config")
-        readSchemaVersion(root, "config")
+        val schemaVersion = readConfigSchemaVersion(root)
         val revision = requiredString(root, "revision", 1, 128, "config")
         val issuedAt = requiredString(root, "issuedAt", 1, Int.MAX_VALUE, "config")
         val issuedAtInstant = parseRfc3339(issuedAt, "config.issuedAt")
@@ -205,6 +213,7 @@ internal object V1ConfigJson {
             malformed("config.status is unsupported")
         }
         return V1ParsedConfigBoundary(
+            schemaVersion = schemaVersion,
             revision = revision,
             issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
@@ -288,7 +297,14 @@ internal object V1ConfigJson {
         )
     }
 
-    private fun parseCapabilities(json: JSONObject): V1ReplayCapabilities {
+    private fun parseCapabilities(
+        json: JSONObject,
+        schemaVersion: Int,
+    ): V1ReplayCapabilities =
+        if (schemaVersion == V2_CONFIG_SCHEMA_VERSION) parseCapabilitiesV2(json) else parseCapabilitiesV1(json)
+
+    /** Contract v1: independent codec and compression lists; the advertised set is their product. */
+    private fun parseCapabilitiesV1(json: JSONObject): V1ReplayCapabilities {
         expectFields(json, capabilitiesRequired, emptySet(), "config.capabilities")
         val replay = requiredObject(json, "replay", "config.capabilities")
         expectFields(replay, replayCapabilitiesRequired, emptySet(), "config.capabilities.replay")
@@ -305,7 +321,55 @@ internal object V1ConfigJson {
                 path = "config.capabilities.replay.acceptedCompressions",
             ) { value -> enumValue<V1ReplayCompression>(value) != null }
                 .map { value -> checkNotNull(enumValue<V1ReplayCompression>(value)) }
-        return V1ReplayCapabilities(immutableList(codecs), immutableList(compressions))
+        val advertised = LinkedHashSet<V1ReplayTransport>()
+        codecs.forEach { codec -> compressions.forEach { compression -> advertised += V1ReplayTransport(codec, compression) } }
+        return V1ReplayCapabilities(Collections.unmodifiableSet(advertised), replayProtocolGeneration = null)
+    }
+
+    /**
+     * Contract v2: exact v1 channel versions for events, mutations, and flags, plus literal replay
+     * `(codec, compression)` pairs and a bounded protocol generation. No Cartesian product is formed.
+     */
+    private fun parseCapabilitiesV2(json: JSONObject): V1ReplayCapabilities {
+        expectFields(json, capabilitiesV2Required, emptySet(), "config.capabilities")
+        listOf("events", "mutations", "flags").forEach { channel ->
+            val path = "config.capabilities.$channel"
+            val capability = requiredObject(json, channel, "config.capabilities")
+            expectFields(capability, channelCapabilityRequired, emptySet(), path)
+            if (requiredString(capability, "contractVersion", 1, 32, path) != V1_CHANNEL_CONTRACT_VERSION) {
+                malformed("$path.contractVersion must be $V1_CHANNEL_CONTRACT_VERSION")
+            }
+            if (requiredLong(capability, "schemaVersion", Long.MIN_VALUE, Long.MAX_VALUE, path) != V1_CONFIG_SCHEMA_VERSION.toLong()) {
+                malformed("$path.schemaVersion must be $V1_CONFIG_SCHEMA_VERSION")
+            }
+        }
+        val replay = requiredObject(json, "replay", "config.capabilities")
+        expectFields(replay, replayCapabilitiesV2Required, emptySet(), "config.capabilities.replay")
+        if (requiredString(replay, "replayContractVersion", 1, 32, "config.capabilities.replay") != V2_REPLAY_CONTRACT_VERSION) {
+            malformed("config.capabilities.replay.replayContractVersion must be $V2_REPLAY_CONTRACT_VERSION")
+        }
+        if (requiredLong(replay, "replaySchemaVersion", Long.MIN_VALUE, Long.MAX_VALUE, "config.capabilities.replay") != V2_CONFIG_SCHEMA_VERSION.toLong()) {
+            malformed("config.capabilities.replay.replaySchemaVersion must be $V2_CONFIG_SCHEMA_VERSION")
+        }
+        val protocolGeneration =
+            requiredString(replay, "replayProtocolGeneration", 1, 128, "config.capabilities.replay")
+        val transports = requiredArray(replay, "transports", "config.capabilities.replay")
+        if (transports.length() > 32) malformed("config.capabilities.replay.transports must contain at most 32 pairs")
+        val advertised = LinkedHashSet<V1ReplayTransport>()
+        for (index in 0 until transports.length()) {
+            val path = "config.capabilities.replay.transports[$index]"
+            val entry = transports.opt(index) as? JSONObject ?: malformed("$path must be an object")
+            expectFields(entry, replayTransportPairRequired, emptySet(), path)
+            val codec = requiredString(entry, "codec", 1, 68, path)
+            if (!REPLAY_CODEC.matches(codec)) malformed("$path.codec is malformed")
+            val compression =
+                enumValue<V1ReplayCompression>(requiredString(entry, "compression", 1, 16, path))
+                    ?: malformed("$path.compression is unsupported")
+            if (!advertised.add(V1ReplayTransport(codec, compression))) {
+                malformed("config.capabilities.replay.transports must be unique")
+            }
+        }
+        return V1ReplayCapabilities(Collections.unmodifiableSet(advertised), protocolGeneration)
     }
 
     private fun parseSession(json: JSONObject): V1SessionConfiguration {
@@ -498,6 +562,13 @@ internal object V1ConfigJson {
         val version = requiredLong(json, "schemaVersion", Long.MIN_VALUE, Long.MAX_VALUE, path)
         if (version != V1_CONFIG_SCHEMA_VERSION.toLong()) throw V1UnsupportedConfigSchemaException(version)
         return V1_CONFIG_SCHEMA_VERSION
+    }
+
+    /** The top-level configuration document may be contract major 1 or 2; nested v1 records stay at 1. */
+    private fun readConfigSchemaVersion(json: JSONObject): Int {
+        val version = requiredLong(json, "schemaVersion", Long.MIN_VALUE, Long.MAX_VALUE, "config")
+        val supported = SUPPORTED_CONFIG_SCHEMA_VERSIONS.firstOrNull { it.toLong() == version }
+        return supported ?: throw V1UnsupportedConfigSchemaException(version)
     }
 
     private fun expectFields(
@@ -784,6 +855,8 @@ internal object V1ConfigJson {
     private const val SECONDS_PER_DAY = 86_400L
     private val REPLAY_CODEC = Regex("^elu-[a-z0-9][a-z0-9.-]{0,63}$")
     private val POLICY_HASH = Regex("^sha256:[a-f0-9]{64}$")
+    private const val V1_CHANNEL_CONTRACT_VERSION = "1.0.0"
+    private const val V2_REPLAY_CONTRACT_VERSION = "2.0.0"
     private val RFC_3339 =
         Regex(
             "^(\\d{4})-(0[1-9]|1[0-2])-([0-2]\\d|3[01])[Tt]" +

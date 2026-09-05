@@ -273,9 +273,118 @@ class V1ConfigManagerTest {
     }
 
     @Test
+    fun `frozen v2 document installs with v2 replay role exact pairs and protocol generation`() {
+        val pair = V1ReplayTransport("elu-browser-dom-v1", V1ReplayCompression.GZIP)
+        val proven = V1ConfigManager(setOf(pair))
+        val config = authorized(v2EnabledConfig().toString(), v2AllowedPrivacy().toString(), identity(5), V2_NOW_MS, proven)
+
+        assertEquals(2, config.schemaVersion)
+        assertEquals("config-v2-2026-08-05-1", config.revision)
+        assertEquals("site_demo", config.siteId)
+        assertEquals("https://ingest.elu.dev/v1/events", config.endpoints.events.toString())
+        assertEquals("https://ingest.elu.dev/v2/replay", config.endpoints.replay.toString())
+        assertEquals("https://ingest.elu.dev/v1/flags", config.endpoints.flags.toString())
+        assertNull(config.endpoints.assets)
+        assertEquals("replay-v2-generation-1", config.replayCapabilities.replayProtocolGeneration)
+        assertEquals(setOf(pair), config.replayCapabilities.advertisedTransports)
+        assertEquals(pair, config.negotiatedReplayTransport)
+        assertEquals(1_800, config.session.idleTimeoutSeconds)
+        assertEquals(16_777_216, config.limits.queueBytes)
+
+        // Pairs are exact under v2: the codec is advertised only together with gzip.
+        val uncompressed = V1ReplayTransport(pair.codec, V1ReplayCompression.NONE)
+        val onlyUncompressed = V1ConfigManager(setOf(uncompressed))
+        assertEnabled(onlyUncompressed.install(v2EnabledConfig().toString(), V2_NOW_MS))
+        val privacy = v2AllowedPrivacy().apply { getJSONObject("replayTransport").put("compression", "none"); rehash(this) }
+        val result = assertAuthorized(onlyUncompressed.authorize(privacy.toString(), identity(5), V2_NOW_MS))
+        assertEquals(
+            V1ChannelAuthorization(V1ChannelAuthorizationStatus.INVALID, V1ChannelAuthorizationReason.TRANSPORT_NOT_ADVERTISED),
+            result.replayAuthorization,
+        )
+        assertNull(result.endpoints.replay)
+        assertTrue(result.endpoints.events != null)
+    }
+
+    @Test
+    fun `v2 disabled fixture stays inactive and majors order by issuedAt like any revision`() {
+        assertRejected(v2DisabledConfig(), null, identity(), V1ConfigRejection.INACTIVE, V2_NOW_MS)
+
+        val manager = V1ConfigManager()
+        assertEnabled(manager.install(canonicalEnabledConfig().toString(), NOW_MS))
+        assertEnabled(manager.install(v2EnabledConfig().toString(), V2_NOW_MS))
+        assertEquals(
+            V1ConfigUpdateResult.Rejected(V1ConfigRejection.STALE),
+            manager.install(canonicalEnabledConfig().toString(), V2_NOW_MS),
+        )
+        assertEquals(2, assertAuthorized(manager.authorize(v2AllowedPrivacy().toString(), identity(5), V2_NOW_MS)).schemaVersion)
+    }
+
+    @Test
+    fun `v2 documents reject every regression of the frozen capability and replay role rules`() {
+        fun replay(mutate: JSONObject.() -> Unit): JSONObject =
+            v2EnabledConfig().apply { getJSONObject("capabilities").getJSONObject("replay").mutate() }
+
+        assertRejected(
+            v2EnabledConfig().apply { getJSONObject("endpoints").put("replay", "https://ingest.elu.dev/v1/replay") },
+            v2AllowedPrivacy(),
+            identity(5),
+            V1ConfigRejection.UNAUTHORIZED,
+            V2_NOW_MS,
+        )
+        assertRejected(
+            enabledConfig().apply { getJSONObject("endpoints").put("replay", "https://ingest.elu.dev/v2/replay") },
+            androidAllowedPrivacy(),
+            identity(5),
+            V1ConfigRejection.UNAUTHORIZED,
+        )
+        val malformed =
+            listOf(
+                v2EnabledConfig().apply { getJSONObject("capabilities").remove("events") },
+                v2EnabledConfig().apply { getJSONObject("capabilities").getJSONObject("events").put("contractVersion", "2.0.0") },
+                v2EnabledConfig().apply { getJSONObject("capabilities").getJSONObject("flags").put("schemaVersion", 2) },
+                replay { put("replayContractVersion", "1.0.0") },
+                replay { put("replaySchemaVersion", 1) },
+                replay { put("replayProtocolGeneration", "") },
+                replay { put("replayProtocolGeneration", "g".repeat(129)) },
+                replay { put("transports", JSONArray(listOf(getJSONArray("transports").getJSONObject(0), getJSONArray("transports").getJSONObject(0)))) },
+                replay {
+                    remove("transports")
+                    put("acceptedCodecs", JSONArray(listOf("elu-browser-dom-v1")))
+                    put("acceptedCompressions", JSONArray(listOf("gzip")))
+                },
+                replay { put("transports", JSONArray()) },
+                replay { getJSONArray("transports").getJSONObject(0).put("compression", "br") },
+                replay {
+                    put(
+                        "transports",
+                        JSONArray((1..33).map { JSONObject().put("codec", "elu-browser-dom-v$it").put("compression", "gzip") }),
+                    )
+                },
+                enabledConfig().put("schemaVersion", 2),
+            )
+        malformed.forEach { config ->
+            assertRejected(config, v2AllowedPrivacy(), identity(5), V1ConfigRejection.MALFORMED, V2_NOW_MS)
+        }
+        assertRejected(v2EnabledConfig().put("schemaVersion", 3), v2AllowedPrivacy(), identity(5), V1ConfigRejection.UNSUPPORTED_SCHEMA, V2_NOW_MS)
+
+        // The codec bound is the frozen schema pattern (elu- plus up to 64 characters), not a shorter local limit.
+        val longestCodec = "elu-" + "a".repeat(64)
+        val longest = replay { getJSONArray("transports").getJSONObject(0).put("codec", longestCodec) }
+        val provenLongest = V1ConfigManager(setOf(V1ReplayTransport(longestCodec, V1ReplayCompression.GZIP)))
+        assertEnabled(provenLongest.install(longest.toString(), V2_NOW_MS))
+        assertRejected(
+            replay { getJSONArray("transports").getJSONObject(0).put("codec", longestCodec + "a") },
+            v2AllowedPrivacy(),
+            identity(5),
+            V1ConfigRejection.MALFORMED,
+            V2_NOW_MS,
+        )
+    }
+
+    @Test
     fun `unsupported schema major fails closed at every versioned boundary`() {
         assertRejected(
-            enabledConfig().put("schemaVersion", 2),
+            enabledConfig().put("schemaVersion", 3),
             androidAllowedPrivacy(),
             identity(5),
             V1ConfigRejection.UNSUPPORTED_SCHEMA,
@@ -842,6 +951,17 @@ class V1ConfigManagerTest {
 
     private fun disabledConfig(): JSONObject = JSONObject(resourceText("contracts/v1/fixtures/config-disabled.json"))
 
+    private fun v2EnabledConfig(): JSONObject = JSONObject(resourceText("contracts/v2/fixtures/config-enabled.json"))
+
+    private fun v2DisabledConfig(): JSONObject = JSONObject(resourceText("contracts/v2/fixtures/config-disabled.json"))
+
+    /** The frozen v1 privacy fixture already selects the v2 fixture's only advertised pair. */
+    private fun v2AllowedPrivacy(): JSONObject =
+        canonicalAllowedPrivacy().apply {
+            getJSONObject("effectiveMasking").put("platformFallbackApplied", true)
+            rehash(this)
+        }
+
     private fun canonicalAllowedPrivacy(): JSONObject =
         JSONObject(resourceText("contracts/v1/fixtures/privacy-allowed.json"))
 
@@ -940,6 +1060,7 @@ class V1ConfigManagerTest {
         val PROVEN_REPLAY = V1ReplayTransport("elu-android-replay-v1", V1ReplayCompression.GZIP)
         val ISSUED_AT_MS: Long = Instant.parse("2026-08-04T00:00:00.000Z").toEpochMilli()
         val NOW_MS: Long = Instant.parse("2026-08-04T00:01:30.000Z").toEpochMilli()
+        val V2_NOW_MS: Long = Instant.parse("2026-08-05T00:01:30.000Z").toEpochMilli()
         val EXPIRES_AT_MS: Long = Instant.parse("2026-08-04T00:05:00.000Z").toEpochMilli()
     }
 }

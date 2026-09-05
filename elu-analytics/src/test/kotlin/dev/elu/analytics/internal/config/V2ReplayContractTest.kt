@@ -581,14 +581,28 @@ class V2ReplayContractTest {
 
     @Test
     fun `contract assets do not activate a production v2 transport`() {
+        // The internal config projection may decode the frozen v2 document; it stays dark. Every other
+        // production source, including the public facade and the runtime owner, must not know the v2
+        // replay role or protocol generation until the facade cutover is reviewed.
         val sourceRoot = repositoryRoot().resolve("elu-analytics/src/main/kotlin")
+        val configPackage = sourceRoot.resolve("dev/elu/analytics/internal/config")
+        var configProjectionFound = false
         Files.walk(sourceRoot).use { paths ->
             paths.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".kt") }.forEach { path ->
                 val source = String(Files.readAllBytes(path), StandardCharsets.UTF_8)
                 assertFalse(path.toString(), source.contains("elu-http-v2"))
+                if (path.startsWith(configPackage)) {
+                    if (source.contains("/v2/replay")) configProjectionFound = true
+                    return@forEach
+                }
                 assertFalse(path.toString(), source.contains("replayProtocolGeneration"))
                 assertFalse(path.toString(), source.contains("/v2/replay"))
             }
+        }
+        assertTrue("the internal config package must project the frozen v2 replay role", configProjectionFound)
+        listOf("Elu.kt", "EluCore.kt", "EluConfigClient.kt", "EluRemoteConfig.kt").forEach { facadeFile ->
+            val source = String(Files.readAllBytes(sourceRoot.resolve("dev/elu/analytics/$facadeFile")), StandardCharsets.UTF_8)
+            assertFalse(facadeFile, source.contains("V1ConfigManager") || source.contains("V1ConfigJson"))
         }
     }
 

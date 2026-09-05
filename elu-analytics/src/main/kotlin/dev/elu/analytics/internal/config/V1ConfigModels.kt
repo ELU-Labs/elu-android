@@ -6,6 +6,15 @@ import java.net.URI
 /** The frozen ELU SDK semantic/configuration schema major. */
 internal const val V1_CONFIG_SCHEMA_VERSION: Int = 1
 
+/**
+ * The owned standalone configuration major. Contract v1 froze `/sdk/v1/{siteKey}/config` with replay
+ * at `/v1/replay`; contract v2 is `/sdk/v2/{siteKey}/config` with replay at `/v2/replay`. Event,
+ * mutation, and flag channels stay at contract v1 under both majors.
+ */
+internal const val V2_CONFIG_SCHEMA_VERSION: Int = 2
+
+internal val SUPPORTED_CONFIG_SCHEMA_VERSIONS: Set<Int> = setOf(V1_CONFIG_SCHEMA_VERSION, V2_CONFIG_SCHEMA_VERSION)
+
 /** Why a config document exposed no network authority to the caller. */
 internal enum class V1ConfigRejection {
     MALFORMED,
@@ -148,6 +157,7 @@ internal data class V1ConfiguredEndpointSet(
 )
 
 internal data class V1ParsedConfig(
+    val schemaVersion: Int,
     val revision: String,
     val issuedAt: String,
     val issuedAtInstant: V1ExactTimestamp,
@@ -169,6 +179,7 @@ internal data class V1ParsedConfig(
 
 /** Trusted ordering envelope retained even when the document body fails a nested policy check. */
 internal data class V1ParsedConfigBoundary(
+    val schemaVersion: Int,
     val revision: String,
     val issuedAt: String,
     val issuedAtInstant: V1ExactTimestamp,
@@ -250,9 +261,14 @@ internal enum class V1ReplayCompression(val wireValue: String) {
     ;
 }
 
+/**
+ * Exact advertised replay pairs. Contract v1 advertised codec and compression lists whose Cartesian
+ * product is the advertised set; contract v2 advertises literal pairs plus a bounded protocol
+ * generation and never forms a product. A pair is advertised only when it is in this set.
+ */
 internal data class V1ReplayCapabilities(
-    val acceptedCodecs: List<String>,
-    val acceptedCompressions: List<V1ReplayCompression>,
+    val advertisedTransports: Set<V1ReplayTransport>,
+    val replayProtocolGeneration: String?,
 )
 
 /** A codec/compression pair whose local decoder has passed engine readback. */

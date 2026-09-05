@@ -27,6 +27,7 @@ internal data class V1FlagConfigBoundary(
 
 /** Strict flags-only projection. Unrelated channel documents are intentionally not decoded. */
 internal data class V1ParsedFlagConfig(
+    val schemaVersion: Int,
     val revision: String,
     val issuedAt: String,
     val issuedAtInstant: V1ExactTimestamp,

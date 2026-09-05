@@ -103,6 +103,7 @@ internal class V1ConfigManager(
 
         return V1ConfigResolution.Authorized(
             V1AuthorizedConfig(
+                schemaVersion = config.schemaVersion,
                 revision = config.revision,
                 issuedAt = config.issuedAt,
                 expiresAt = config.expiresAt,
@@ -203,7 +204,7 @@ internal class V1ConfigManager(
         }
         val flagsEndpoint =
             try {
-                validateEndpoint(V1EndpointRole.FLAGS, checkNotNull(parsed.flagsEndpoint))
+                validateEndpoint(V1EndpointRole.FLAGS, checkNotNull(parsed.flagsEndpoint), parsed.schemaVersion)
             } catch (_: V1EndpointAuthorizationException) {
                 return preparedRestriction(
                     generation,
@@ -424,7 +425,7 @@ internal class V1ConfigManager(
 
         val endpoints =
             try {
-                validateEndpointSet(checkNotNull(parsed.endpoints))
+                validateEndpointSet(checkNotNull(parsed.endpoints), parsed.schemaVersion)
             } catch (_: V1EndpointAuthorizationException) {
                 return remember(updateRejected(V1ConfigRejection.UNAUTHORIZED))
             }
@@ -476,11 +477,11 @@ internal class V1ConfigManager(
 
         val selectedTransport = effective.replayTransport
         val selectedPair = selectedTransport?.let { V1ReplayTransport(it.codec, it.compression) }
+        // Advertisement is exact-pair membership under both majors; v1 lists were expanded at parse time.
         val transportAdvertised =
             selectedTransport != null &&
                 selectedTransport.advertised &&
-                selectedTransport.codec in replayCapabilities.acceptedCodecs &&
-                selectedTransport.compression in replayCapabilities.acceptedCompressions
+                selectedPair in replayCapabilities.advertisedTransports
 
         val expectedCaptureAllowed =
             features.capture &&
@@ -579,17 +580,21 @@ internal class V1ConfigManager(
         return true
     }
 
-    private fun validateEndpointSet(configured: V1ConfiguredEndpointSet): ParsedEndpointSet =
+    private fun validateEndpointSet(
+        configured: V1ConfiguredEndpointSet,
+        schemaVersion: Int,
+    ): ParsedEndpointSet =
         ParsedEndpointSet(
-            events = validateEndpoint(V1EndpointRole.EVENTS, configured.events),
-            replay = configured.replay?.let { validateEndpoint(V1EndpointRole.REPLAY, it) },
-            flags = validateEndpoint(V1EndpointRole.FLAGS, configured.flags),
-            assets = configured.assets?.let { validateEndpoint(V1EndpointRole.ASSETS, it) },
+            events = validateEndpoint(V1EndpointRole.EVENTS, configured.events, schemaVersion),
+            replay = configured.replay?.let { validateEndpoint(V1EndpointRole.REPLAY, it, schemaVersion) },
+            flags = validateEndpoint(V1EndpointRole.FLAGS, configured.flags, schemaVersion),
+            assets = configured.assets?.let { validateEndpoint(V1EndpointRole.ASSETS, it, schemaVersion) },
         )
 
     private fun validateEndpoint(
         role: V1EndpointRole,
         raw: String,
+        schemaVersion: Int,
     ): URI {
         if (raw.any { it.code !in 0x21..0x7e }) unauthorized("$role endpoint must be an ASCII URI")
         if (!raw.startsWith("https://")) unauthorized("$role endpoint must use HTTPS")
@@ -604,7 +609,7 @@ internal class V1ConfigManager(
         if (uri.rawFragment != null) unauthorized("$role endpoint must not contain a fragment")
         if (uri.port != -1 && uri.port != 443) unauthorized("$role endpoint uses an untrusted port")
 
-        val authority = ENDPOINT_AUTHORITIES.getValue(role)
+        val authority = endpointAuthority(role, schemaVersion)
         if (uri.host.lowercase(Locale.US) != authority.host || uri.rawPath != authority.path) {
             unauthorized("$role endpoint is outside its ELU role allowlist")
         }
@@ -628,6 +633,7 @@ internal class V1ConfigManager(
 
     private fun V1ParsedConfig.toBoundary(): V1ParsedConfigBoundary =
         V1ParsedConfigBoundary(
+            schemaVersion = schemaVersion,
             revision = revision,
             issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
@@ -639,6 +645,7 @@ internal class V1ConfigManager(
 
     private fun V1ParsedFlagConfig.toBoundary(): V1ParsedConfigBoundary =
         V1ParsedConfigBoundary(
+            schemaVersion = schemaVersion,
             revision = revision,
             issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
@@ -682,6 +689,7 @@ internal class V1ConfigManager(
     )
 
     private companion object {
+        /** Contract v1 roles. Replay v1 is the only role whose path changes under contract v2. */
         val ENDPOINT_AUTHORITIES =
             mapOf(
                 V1EndpointRole.EVENTS to EndpointAuthority("ingest.elu.dev", "/v1/events"),
@@ -689,6 +697,15 @@ internal class V1ConfigManager(
                 V1EndpointRole.FLAGS to EndpointAuthority("ingest.elu.dev", "/v1/flags"),
                 V1EndpointRole.ASSETS to EndpointAuthority("assets.elu.dev", "/sdk/"),
             )
+        val V2_ENDPOINT_AUTHORITIES =
+            ENDPOINT_AUTHORITIES + (V1EndpointRole.REPLAY to EndpointAuthority("ingest.elu.dev", "/v2/replay"))
+
+        fun endpointAuthority(
+            role: V1EndpointRole,
+            schemaVersion: Int,
+        ): EndpointAuthority =
+            (if (schemaVersion == V2_CONFIG_SCHEMA_VERSION) V2_ENDPOINT_AUTHORITIES else ENDPOINT_AUTHORITIES).getValue(role)
+
         val RECOGNIZED_ANDROID_MASKING_DIALECTS: Set<String> = emptySet()
         const val SITE_KEY_QUERY_PARAMETER = "site_key"
     }
