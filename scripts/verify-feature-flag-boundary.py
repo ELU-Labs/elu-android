@@ -14,13 +14,13 @@ import sys
 PINNED_FILES = {
     # Existing public/provider/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "541dafbcf2735de5f879ecb0951b7ff368675a2ba453ac502a643f725f418475",
+        "1ec2f725db4d165d7ac0ed0d8fce9bac9c8fc5c648e013294b43a0953764a8fc",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluCore.kt":
-        "a1f497a7576936d91f0b413fc9ad558a86662a1732ddadddf14944d7f4458ccc",
+        "9db1875e03a27bb98b33f647f212e29f4025e61839902d1aef3c298b2f92b945",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "4aab165f3a94b7ec5a3493440e2dadaff7c1c3258709ec068c07cae48d8f9136",
+        "9ddb19c0fc3ca1a6f255ad8c287f3dc46069d292264326587106b85cc4ea310f",
     "elu-analytics/build.gradle.kts":
         "0bdacadd03710d8b1fe1480196a53afab996e45018f98a679fa58731fd4ae0a1",
     # These files carry the explicit no-wire release status.

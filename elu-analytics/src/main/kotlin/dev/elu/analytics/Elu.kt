@@ -1,6 +1,7 @@
 package dev.elu.analytics
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import com.posthog.PostHog
 import com.posthog.PostHogOnFeatureFlags
@@ -47,7 +48,19 @@ public object Elu {
                 return
             }
             try {
-                val c = EluCore(context.applicationContext, siteKey.trim(), options)
+                val appContext = context.applicationContext
+                val debuggable =
+                    (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                val configHost = EluConfigHostPolicy.resolve(options.configHost, debuggable)
+                if (configHost == null) {
+                    Log.w(
+                        TAG,
+                        "Elu.setup called with a configHost that is not an approved ELU origin " +
+                            "(or a loopback origin in a debuggable app); ignoring.",
+                    )
+                    return
+                }
+                val c = EluCore(appContext, siteKey.trim(), configHost)
                 core = c
                 c.start()
             } catch (t: Throwable) {
