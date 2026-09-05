@@ -23,6 +23,11 @@ configuration protocol.
 ## Contents
 
 - `api/public-api.txt`: `javap -public` output from the published AAR.
+- `api/jvm-classes.txt`: every public, non-synthetic JVM class in the
+  release `classes.jar` built from this tree. The library is not minified, so
+  Kotlin `internal` declarations are public at the JVM level; the inventory
+  makes any widening of that surface a reviewed change. Regenerate it with
+  `python3 scripts/check-api-snapshot.py --update-classes <aar>`.
 - `maven/`: normalized POM representation and published repository metadata.
 - `artifact-manifest.json`: published sizes, hashes, and archive entries.
 - `dependencies/release-runtime-classpath.txt`: normalized summary of the
