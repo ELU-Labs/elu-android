@@ -4,6 +4,7 @@ plugins {
     id("com.android.application") version "8.13.2" apply false
     id("org.jetbrains.kotlin.android") version "2.1.20" apply false
     id("com.vanniktech.maven.publish") version "0.37.0" apply false
+    id("org.cyclonedx.bom") version "3.4.1" apply false
 }
 
 tasks.register<Exec>("checkConformanceFixtures") {

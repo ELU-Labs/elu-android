@@ -92,8 +92,21 @@ Dev override for the config endpoint:
 ```kotlin
 import dev.elu.analytics.EluOptions
 
-Elu.setup(this, "YOUR_SITE_KEY", EluOptions(configHost = "https://dev.elu.example"))
+Elu.setup(this, "YOUR_SITE_KEY", EluOptions(configHost = "http://10.0.2.2:8787"))
 ```
+
+`configHost` accepts an ELU HTTPS origin (`https://elu.dev` or one of its
+subdomains) in every build. A debuggable build may also use a loopback origin
+(`localhost`, `127.0.0.1`, `[::1]`, or the emulator host alias `10.0.2.2`, over
+HTTP or HTTPS, on any port). Any other value makes `Elu.setup` log a warning
+and leave the SDK idle, so a release build cannot be pointed at a third-party
+endpoint.
+
+An `http://` loopback origin also needs the app to permit cleartext traffic,
+which Android 9 and later block by default: add
+`android:usesCleartextTraffic="true"` to the `<application>` element of a
+debug-only manifest (`src/debug/AndroidManifest.xml`), as the sample app does,
+or use a debug network security configuration.
 
 ## Identity
 

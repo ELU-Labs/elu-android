@@ -25,6 +25,30 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("-iname '*sbom*'", text)
         self.assertIn('--input "sbom-${sbom_index}=${sbom}"', text)
 
+    def test_sbom_is_generated_before_the_strict_scan(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        generate = text.index(":elu-analytics:cyclonedxDirectBom")
+        scan = text.index("-iname '*sbom*'")
+        self.assertLess(generate, scan)
+
+    def test_runtime_network_evidence_is_required_and_replay_is_opt_in(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("runtimeNetworkEvidence", text)
+        self.assertIn("replayNetworkEvidence:", text)
+        require = text.index("name: Require generated Android runtime-network evidence")
+        verify = text.index("name: Verify public API and legal-only artifact gate")
+        self.assertNotIn("if:", text[require:verify])
+        self.assertIn('if [[ "$REPLAY_EVIDENCE" == "true" ]]; then', text)
+        self.assertIn("scanner_inputs+=(--network runtime=build/reports/android-runtime-network-evidence.json)", text)
+        self.assertNotIn('if [[ "$RUNTIME_EVIDENCE" == "true" ]]', text)
+        self.assertNotIn("--expect replay=1 \\", text)
+
+    def test_dry_run_skips_only_the_publish_step(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        publish = text.index("name: Publish and release")
+        self.assertIn("if: ${{ !inputs.dryRun }}", text[publish:])
+        self.assertEqual(1, text.count("inputs.dryRun"))
+
     def test_feature_flag_isolation_runs_before_publish(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertLess(
