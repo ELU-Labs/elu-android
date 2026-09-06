@@ -13,14 +13,6 @@ on:
         description: Exact trusted signed semantic-version tag to publish
         required: true
         type: string
-      runtimeNetworkEvidence:
-        description: >-
-          Require generated runtime-network evidence at
-          build/reports/android-runtime-network-evidence.json (config, capture,
-          and flags requests) and scan it against the network allowlist
-        required: false
-        type: boolean
-        default: false
       replayNetworkEvidence:
         description: >-
           Also require a replay upload request in the runtime-network evidence;
@@ -94,7 +86,6 @@ jobs:
           python3 scripts/zero-brand-gate.py --mode strict --skip-tree \
             --network parser-smoke=scanner/fixtures/network-parser-smoke.json
       - name: Require generated Android runtime-network evidence
-        if: ${{ inputs.runtimeNetworkEvidence }}
         env:
           REPLAY_EVIDENCE: ${{ inputs.replayNetworkEvidence }}
         run: |
@@ -106,8 +97,6 @@ jobs:
             build/reports/android-runtime-network-evidence.json \
             "${expectations[@]}"
       - name: Verify public API and legal-only artifact gate
-        env:
-          RUNTIME_EVIDENCE: ${{ inputs.runtimeNetworkEvidence }}
         run: |
           python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
           scanner_inputs=(
@@ -125,9 +114,7 @@ jobs:
               \( -iname '*sbom*' -o -iname 'bom.json' -o -iname 'bom.xml' \) \
               -print0
           )
-          if [[ "$RUNTIME_EVIDENCE" == "true" ]]; then
-            scanner_inputs+=(--network runtime=build/reports/android-runtime-network-evidence.json)
-          fi
+          scanner_inputs+=(--network runtime=build/reports/android-runtime-network-evidence.json)
           python3 scripts/zero-brand-gate.py --mode strict "${scanner_inputs[@]}"
       - name: Publish and release
         if: ${{ !inputs.dryRun }}
