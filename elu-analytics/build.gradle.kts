@@ -1,3 +1,6 @@
+import org.cyclonedx.gradle.CyclonedxDirectTask
+import org.cyclonedx.model.Component
+import org.gradle.api.file.RegularFile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 val sdkVersion =
@@ -11,6 +14,7 @@ plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
     id("com.vanniktech.maven.publish")
+    id("org.cyclonedx.bom")
 }
 
 android {
@@ -95,6 +99,21 @@ mavenPublishing {
             developerConnection.set("scm:git:ssh://git@github.com/ELU-Labs/elu-android.git")
         }
     }
+}
+
+// CycloneDX SBOM of the resolved release runtime closure, written next to the
+// other release reports so the release workflow's SBOM scan picks it up.
+tasks.named<CyclonedxDirectTask>("cyclonedxDirectBom") {
+    componentGroup = "dev.elu"
+    componentName = "elu-analytics"
+    componentVersion = sdkVersion
+    projectType = Component.Type.LIBRARY
+    includeConfigs = listOf("releaseRuntimeClasspath")
+    testConfigs = emptyList()
+    includeBomSerialNumber = false
+    includeBuildSystem = false
+    jsonOutput = layout.buildDirectory.file("reports/sbom/elu-analytics-release-sbom.json")
+    xmlOutput.convention(null as RegularFile?)
 }
 
 tasks.register("printSdkVersion") {

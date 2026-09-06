@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger
 internal class EluCore(
     private val appContext: Context,
     private val siteKey: String,
-    options: EluOptions,
+    configHost: String,
 ) {
     private val executor: ScheduledExecutorService =
         Executors.newSingleThreadScheduledExecutor { r ->
@@ -38,7 +38,7 @@ internal class EluCore(
         }
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences("dev.elu.analytics", Context.MODE_PRIVATE)
-    private val configClient = EluConfigClient(appContext.filesDir, siteKey, options.configHost)
+    private val configClient = EluConfigClient(appContext.filesDir, siteKey, configHost)
     private val buffer = EluEventBuffer()
     private val budget = EluReplayBudget(prefs, executor)
     private val flagListeners = CopyOnWriteArrayList<() -> Unit>()

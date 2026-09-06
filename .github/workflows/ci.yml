@@ -26,6 +26,7 @@ jobs:
           :elu-analytics:generateMetadataFileForMavenPublication
           :elu-analytics:releaseSourcesJar
           :elu-analytics:javaDocReleaseJar
+          :elu-analytics:cyclonedxDirectBom
           :sample:assembleDebug
           checkConformanceFixtures
           checkFeatureFlagBoundary
@@ -52,6 +53,7 @@ jobs:
             --input publication=elu-analytics/build/publications/maven \
             --input archives=elu-analytics/build/libs \
             --input dependencies=build/reports/release-runtime-classpath.txt \
+            --input sbom=elu-analytics/build/reports/sbom/elu-analytics-release-sbom.json \
             | tee build/reports/zero-brand-artifacts.txt
           python3 scripts/zero-brand-gate.py --mode strict --skip-tree \
             --network parser-smoke=scanner/fixtures/network-parser-smoke.json
@@ -62,6 +64,7 @@ jobs:
           path: |
             elu-analytics/build/reports/tests/
             elu-analytics/build/publications/maven/
+            elu-analytics/build/reports/sbom/
             build/reports/
 
   upgrade-evidence:
