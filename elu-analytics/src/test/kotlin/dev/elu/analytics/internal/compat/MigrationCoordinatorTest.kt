@@ -181,6 +181,19 @@ class MigrationCoordinatorTest {
     }
 
     @Test
+    fun `a document nested deeper than the schema accepts counts as oversized`() {
+        var nested: Map<String, Any?> = mapOf("leaf" to "value")
+        repeat(200) { nested = mapOf("child" to nested) }
+        val source = supportedSource().apply { document(LegacyStateKey.SUPER_PROPERTIES, nested) }
+
+        val result = run(source)
+
+        assertEquals(MigrationOutcome.IMPORTED, result.report.outcome)
+        assertTrue(LegacyStateKey.SUPER_PROPERTIES in result.report.droppedContext)
+        assertEquals(emptyMap<String, Any?>(), committed(result).identity.superProperties)
+    }
+
+    @Test
     fun `a partially written source keeps its identity out of the new state`() {
         val source = supportedSource().apply { values.remove(LegacyStateKey.ANONYMOUS_ID) }
 

@@ -481,25 +481,37 @@ internal class MigrationCoordinator(
         return if (oversized) LegacyValue.Unreadable(LegacyValueProblem.OVERSIZED) else value
     }
 
+    /**
+     * Estimates a document's encoded size without encoding it. A value nested deeper
+     * than the runtime schema accepts, or of a type the schema has no encoding for,
+     * counts as over the bound so the key is rejected rather than measured further.
+     */
     private fun documentTooLarge(
         document: Map<String, Any?>,
         maxBytes: Int,
     ): Boolean {
         var total = 0L
-        fun measure(value: Any?) {
+        fun measure(
+            value: Any?,
+            depth: Int,
+        ) {
+            if (depth > MAX_DOCUMENT_DEPTH) {
+                total += maxBytes.toLong() + 1
+                return
+            }
             when (value) {
                 null -> total += 4
                 is String -> total += value.toByteArray(Charsets.UTF_8).size + 2
                 is Boolean, is Number -> total += 8
                 is Map<*, *> -> value.forEach { (key, child) ->
-                    measure(key)
-                    measure(child)
+                    measure(key, depth + 1)
+                    measure(child, depth + 1)
                 }
-                is List<*> -> value.forEach(::measure)
+                is List<*> -> value.forEach { child -> measure(child, depth + 1) }
                 else -> total += maxBytes.toLong() + 1
             }
         }
-        measure(document)
+        measure(document, 0)
         return total > maxBytes
     }
 
@@ -653,6 +665,7 @@ internal class MigrationCoordinator(
         const val NO_SOURCE_WITNESS: String = "none"
         private const val MAX_WITNESS_LENGTH = 128
         private const val MAX_DOCUMENT_ENTRIES = 256
+        private const val MAX_DOCUMENT_DEPTH = 64
         private const val NANOS_PER_MILLI = 1_000_000L
         private val CONTEXT_KEYS =
             setOf(
