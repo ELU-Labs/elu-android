@@ -283,12 +283,19 @@ internal class MigrationCoordinator(
             val acceptedIds = page.map { record -> record.id }.filter { id -> id in acceptance.acceptedIds }
             accepted += acceptedIds.size
             if (acceptedIds.isNotEmpty()) {
-                discarded +=
+                val removed =
                     try {
                         source.discardQueuedRecords(acceptedIds)
                     } catch (_: Exception) {
                         return LegacyQueueDisposition(examined, accepted, discarded, LegacyQueueStop.SOURCE_FAILURE)
                     }
+                discarded += removed
+                // Pages are read oldest first with no cursor, so the head of the queue moves
+                // only as records are removed. A source that removed fewer records than it was
+                // asked to would hand the same ones to the sink again on the next page.
+                if (removed < acceptedIds.size) {
+                    return LegacyQueueDisposition(examined, accepted, discarded, LegacyQueueStop.NO_PROGRESS)
+                }
             }
             // Records the sink did not accept stay at the head of the queue; another page
             // would return them again.
@@ -318,13 +325,18 @@ internal class MigrationCoordinator(
                     occurredAt != null && occurredAt < policy.cutoffEpochMillis
                 }.map { record -> record.id }
             if (expired.isEmpty()) return LegacyQueueDisposition(examined, 0, discarded, LegacyQueueStop.NO_PROGRESS)
-            discarded +=
+            val removed =
                 try {
                     source.discardQueuedRecords(expired)
                 } catch (_: Exception) {
                     return LegacyQueueDisposition(examined, 0, discarded, LegacyQueueStop.SOURCE_FAILURE)
                 }
-            if (expired.size < page.size) return LegacyQueueDisposition(examined, 0, discarded, LegacyQueueStop.NO_PROGRESS)
+            discarded += removed
+            // The head of the queue moves only as records are removed, so a page that was not
+            // fully removed would be read again unchanged.
+            if (removed < expired.size || expired.size < page.size) {
+                return LegacyQueueDisposition(examined, 0, discarded, LegacyQueueStop.NO_PROGRESS)
+            }
         }
         return LegacyQueueDisposition(examined, 0, discarded, LegacyQueueStop.LIMIT_REACHED)
     }

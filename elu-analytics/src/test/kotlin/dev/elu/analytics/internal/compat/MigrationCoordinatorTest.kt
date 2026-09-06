@@ -383,6 +383,48 @@ class MigrationCoordinatorTest {
     }
 
     @Test
+    fun `a drain stops after one page when the prior store removes nothing`() {
+        val source =
+            FakeLegacyStateSource().apply {
+                queue += listOf(legacyRecord("r1"), legacyRecord("r2"), legacyRecord("r3"))
+                discardRemovalLimit = 0
+            }
+        val seen = mutableListOf<String>()
+        val sink =
+            LegacyRecordSink { records ->
+                seen += records.map { record -> record.id }
+                LegacyRecordAcceptance(records.map { record -> record.id }.toSet())
+            }
+
+        val disposition = coordinator(source).disposeLegacyQueue(LegacyQueuePolicy.Drain(sink, pageSize = 2))
+
+        assertEquals(listOf("r1", "r2"), seen)
+        assertEquals(LegacyQueueDisposition(2, 2, 0, LegacyQueueStop.NO_PROGRESS), disposition)
+        assertEquals(listOf("r1", "r2", "r3"), source.queue.map { record -> record.id })
+    }
+
+    @Test
+    fun `a drain reports how many records the prior store removed and stops on a partial removal`() {
+        val source =
+            FakeLegacyStateSource().apply {
+                queue += listOf(legacyRecord("r1"), legacyRecord("r2"), legacyRecord("r3"))
+                discardRemovalLimit = 1
+            }
+        val seen = mutableListOf<String>()
+        val sink =
+            LegacyRecordSink { records ->
+                seen += records.map { record -> record.id }
+                LegacyRecordAcceptance(records.map { record -> record.id }.toSet())
+            }
+
+        val disposition = coordinator(source).disposeLegacyQueue(LegacyQueuePolicy.Drain(sink, pageSize = 2))
+
+        assertEquals(listOf("r1", "r2"), seen)
+        assertEquals(LegacyQueueDisposition(2, 2, 1, LegacyQueueStop.NO_PROGRESS), disposition)
+        assertEquals(listOf("r2", "r3"), source.queue.map { record -> record.id })
+    }
+
+    @Test
     fun `a drain reports a source failure without claiming acceptance`() {
         val source = FakeLegacyStateSource().apply { queueFailure = IOException("prior queue unreadable") }
 
@@ -413,6 +455,22 @@ class MigrationCoordinatorTest {
         assertEquals(0, disposition.accepted)
         assertEquals(LegacyQueueStop.NO_PROGRESS, disposition.stop)
         assertEquals(listOf("undated", "recent"), source.queue.map { record -> record.id })
+    }
+
+    @Test
+    fun `expiry stops after one page when the prior store removes nothing`() {
+        val source =
+            FakeLegacyStateSource().apply {
+                queue += listOf(legacyRecord("old", occurredAt = 100), legacyRecord("older", occurredAt = 50))
+                discardRemovalLimit = 0
+            }
+
+        val disposition =
+            coordinator(source).disposeLegacyQueue(LegacyQueuePolicy.Expire(cutoffEpochMillis = 500))
+
+        assertEquals(LegacyQueueDisposition(2, 0, 0, LegacyQueueStop.NO_PROGRESS), disposition)
+        assertEquals(1, source.readPages.size)
+        assertEquals(listOf("old", "older"), source.queue.map { record -> record.id })
     }
 
     private fun supportedSource(): FakeLegacyStateSource =

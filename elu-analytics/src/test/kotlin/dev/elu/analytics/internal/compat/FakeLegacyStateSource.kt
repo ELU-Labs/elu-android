@@ -16,6 +16,13 @@ internal class FakeLegacyStateSource(
     var queueFailure: Throwable? = null
     var discardFailure: Throwable? = null
 
+    /**
+     * How many of the ids handed to a discard are actually removed, or null to remove them
+     * all. A store that has become read-only, or whose files are being rotated by another
+     * writer, answers a discard without removing everything it was asked to.
+     */
+    var discardRemovalLimit: Int? = null
+
     val values: MutableMap<LegacyStateKey, LegacyValue> = LinkedHashMap()
     val queue: MutableList<LegacyQueuedRecord> = mutableListOf()
 
@@ -81,8 +88,9 @@ internal class FakeLegacyStateSource(
     override fun discardQueuedRecords(ids: Collection<String>): Int {
         discardFailure?.let { throw it }
         discarded += ids
+        val removable = discardRemovalLimit?.let { limit -> ids.take(limit) }?.toSet() ?: ids.toSet()
         val before = queue.size
-        queue.removeAll { record -> record.id in ids }
+        queue.removeAll { record -> record.id in removable }
         return before - queue.size
     }
 
