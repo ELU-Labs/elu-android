@@ -449,6 +449,29 @@ class CaptureAuthorityRuntimeTest {
     }
 
     @Test
+    fun `exception kind is admitted while diagnostic kind is rejected before storage`() {
+        val backing = FakeRuntimeQueueBacking()
+        val owner = open(backing = backing)
+        owner.submitCaptureAuthority(config(), privacy(5)).await()
+
+        val exception =
+            owner.capture(
+                command("\$exception", NOW, mapOf("\$exception_type" to "IllegalStateException"), RuntimeEventKind.EXCEPTION),
+            ).await() as RuntimeCaptureResult.Accepted
+        assertEquals(RuntimeEventKind.EXCEPTION, exception.record.record.kind)
+        assertEquals("IllegalStateException", exception.record.record.properties["\$exception_type"])
+        assertEquals(exception.record.record.sessionId, exception.snapshot.state.identity.session?.id)
+
+        val transactionsBefore = backing.transactionThreads.size
+        val diagnostic =
+            owner.capture(command("diagnostic", NOW, kind = RuntimeEventKind.DIAGNOSTIC)).await()
+                as RuntimeCaptureResult.Rejected
+        assertEquals(RuntimeCaptureRejection.EVENT_INVALID, diagnostic.reason)
+        assertEquals(transactionsBefore, backing.transactionThreads.size)
+        assertEquals(1, diagnostic.snapshot.queuedCount)
+    }
+
+    @Test
     fun `legacy opted-out state with session clears only session during open`() {
         val legacy =
             state(optedOut = true).let { original ->

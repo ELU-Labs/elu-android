@@ -1103,7 +1103,8 @@ internal class RuntimeQueueOwner private constructor(
     }
 
     private fun isValidCaptureCommand(command: RuntimeCaptureCommand): Boolean {
-        if (command.kind != RuntimeEventKind.CAPTURE && command.kind != RuntimeEventKind.SCREEN) return false
+        // Diagnostic events are runtime-internal and never admitted through a capture command.
+        if (command.kind == RuntimeEventKind.DIAGNOSTIC) return false
         val nameLength = command.name.codePointCount(0, command.name.length)
         if (nameLength !in 1..512) return false
         if (!hasWellFormedUnicode(command.name)) return false

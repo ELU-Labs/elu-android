@@ -228,7 +228,7 @@ internal class BatchResponseTooLargeException(
     val maximumBytes: Int,
 ) : IllegalStateException("Batch response exceeds $maximumBytes bytes")
 
-/** Bounded synchronous HTTP boundary. It is intentionally not instantiated by production code. */
+/** Bounded synchronous HTTP boundary. Only the standalone runtime composition constructs it. */
 internal class HttpURLConnectionBatchTransport(
     private val connectTimeoutMillis: Int = 10_000,
     private val readTimeoutMillis: Int = 10_000,
