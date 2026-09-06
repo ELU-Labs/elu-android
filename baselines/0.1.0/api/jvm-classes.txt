@@ -222,6 +222,9 @@ dev.elu.analytics.internal.flags.FlagResponse
 dev.elu.analytics.internal.flags.FlagRestrictionReason
 dev.elu.analytics.internal.flags.FlagTransport
 dev.elu.analytics.internal.flags.FlagTransportRequest
+dev.elu.analytics.internal.runtime.ActivityLifecycleEmitter
+dev.elu.analytics.internal.runtime.ActivityLifecycleEmitter$Companion
+dev.elu.analytics.internal.runtime.ActivityLifecycleTracker
 dev.elu.analytics.internal.runtime.AmbiguousRuntimeCommitException
 dev.elu.analytics.internal.runtime.AndroidFileOwnershipLease$Companion
 dev.elu.analytics.internal.runtime.AndroidRuntimeConnectionSettings
@@ -231,7 +234,12 @@ dev.elu.analytics.internal.runtime.AndroidRuntimeDatabaseFaults$None
 dev.elu.analytics.internal.runtime.AndroidRuntimeQueue
 dev.elu.analytics.internal.runtime.AndroidSQLiteRuntimeDatabase
 dev.elu.analytics.internal.runtime.AndroidSQLiteRuntimeDatabase$Companion
+dev.elu.analytics.internal.runtime.ExceptionSerializer
 dev.elu.analytics.internal.runtime.JvmRuntimeCaptureClock
+dev.elu.analytics.internal.runtime.PrivacyProjectionInput
+dev.elu.analytics.internal.runtime.PrivacyReplayInput
+dev.elu.analytics.internal.runtime.PrivacyReplayInput$Companion
+dev.elu.analytics.internal.runtime.PrivacyStateProjector
 dev.elu.analytics.internal.runtime.ProvenNotCommittedRuntimeTransactionException
 dev.elu.analytics.internal.runtime.RuntimeAcknowledgement
 dev.elu.analytics.internal.runtime.RuntimeAcknowledgementMismatchException
@@ -266,6 +274,7 @@ dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate
 dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate$Preserve
 dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate$Replace
 dev.elu.analytics.internal.runtime.RuntimeFlagStoredRow
+dev.elu.analytics.internal.runtime.RuntimeLifecycleSink
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$MarkBackgrounded
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$RegisterSuperProperties
@@ -322,6 +331,10 @@ dev.elu.analytics.internal.runtime.RuntimeStoredCore
 dev.elu.analytics.internal.runtime.RuntimeStoredRecord
 dev.elu.analytics.internal.runtime.RuntimeVersionComponent
 dev.elu.analytics.internal.runtime.RuntimeVersions
+dev.elu.analytics.internal.runtime.RuntimeWallTimestamps
+dev.elu.analytics.internal.runtime.StandaloneRuntime
+dev.elu.analytics.internal.runtime.StandaloneRuntime$Companion
+dev.elu.analytics.internal.runtime.ThreadLocalRandomBatchJitter
 dev.elu.analytics.internal.runtime.UnsupportedRuntimeRecordSchemaException
 dev.elu.analytics.internal.runtime.UnsupportedRuntimeRecordSchemaExtensionException
 dev.elu.analytics.internal.runtime.UnsupportedRuntimeStorageSchemaException
