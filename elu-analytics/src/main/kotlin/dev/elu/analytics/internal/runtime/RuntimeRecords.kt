@@ -208,6 +208,19 @@ internal sealed interface RuntimeLocalStateChange {
         override val occurredAt: String,
     ) : RuntimeLocalStateChange
 
+    /** Merges person properties into the context future flag evaluations are bound to. */
+    data class SetFlagPersonProperties(
+        val properties: Map<String, Any?>,
+        override val occurredAt: String,
+    ) : RuntimeLocalStateChange
+
+    /** Merges properties for one group type into the flag evaluation context. */
+    data class SetFlagGroupProperties(
+        val groupType: String,
+        val properties: Map<String, Any?>,
+        override val occurredAt: String,
+    ) : RuntimeLocalStateChange
+
     data class MarkBackgrounded(override val occurredAt: String) : RuntimeLocalStateChange
 }
 

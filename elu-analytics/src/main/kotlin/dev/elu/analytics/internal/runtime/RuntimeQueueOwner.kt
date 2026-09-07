@@ -1963,6 +1963,43 @@ internal class RuntimeQueueOwner private constructor(
                         ),
                 )
             }
+            is RuntimeLocalStateChange.SetFlagPersonProperties -> {
+                val normalized = JsonValues.objectValue(change.properties, "flagContext.personProperties")
+                state.copy(
+                    identity =
+                        state.identity.copy(
+                            contextRevision = increment(state.identity.contextRevision, "identity context revision"),
+                            updatedAt = checkedLocalTimestamp(state, change),
+                        ),
+                    flagContext =
+                        state.flagContext.copy(
+                            personProperties =
+                                LinkedHashMap(state.flagContext.personProperties).apply {
+                                    putAll(normalized)
+                                },
+                        ),
+                )
+            }
+            is RuntimeLocalStateChange.SetFlagGroupProperties -> {
+                require(change.groupType.isNotEmpty()) { "Flag group type must not be empty" }
+                val known = state.flagContext.groupProperties
+                require(known.containsKey(change.groupType) || known.size < MAX_FLAG_CONTEXT_GROUP_TYPES) {
+                    "Flag group properties may describe at most $MAX_FLAG_CONTEXT_GROUP_TYPES group types"
+                }
+                val normalized = JsonValues.objectValue(change.properties, "flagContext.groupProperties")
+                val merged = LinkedHashMap(known[change.groupType].orEmpty()).apply { putAll(normalized) }
+                state.copy(
+                    identity =
+                        state.identity.copy(
+                            contextRevision = increment(state.identity.contextRevision, "identity context revision"),
+                            updatedAt = checkedLocalTimestamp(state, change),
+                        ),
+                    flagContext =
+                        state.flagContext.copy(
+                            groupProperties = LinkedHashMap(known).apply { put(change.groupType, merged) },
+                        ),
+                )
+            }
             is RuntimeLocalStateChange.MarkBackgrounded -> {
                 require(!state.identity.optedOut) { "An opted-out runtime cannot background a session" }
                 val session = state.identity.session ?: return state
@@ -2343,6 +2380,9 @@ internal class RuntimeQueueOwner private constructor(
         private val OWNERSHIP_KEYS = mutableSetOf<String>()
         private const val MAX_RECONCILIATION_ATTEMPTS = 3
         private const val MAX_ID_GENERATION_ATTEMPTS = 8
+
+        /** The ceiling the persisted state codec enforces on flag-context group types. */
+        private const val MAX_FLAG_CONTEXT_GROUP_TYPES = 64
 
         /** Asynchronously opens an internal runtime on its dedicated storage worker. */
         internal fun open(

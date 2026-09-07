@@ -316,6 +316,8 @@ dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$MarkBackgrounded
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$RegisterSuperProperties
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$ResetGroups
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$ResetIdentity
+dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$SetFlagGroupProperties
+dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$SetFlagPersonProperties
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$SetOptedOut
 dev.elu.analytics.internal.runtime.RuntimeLocalStateChange$UnregisterSuperProperties
 dev.elu.analytics.internal.runtime.RuntimeMutationChange

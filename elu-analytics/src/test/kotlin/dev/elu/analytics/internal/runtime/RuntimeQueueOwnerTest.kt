@@ -345,6 +345,51 @@ class RuntimeQueueOwnerTest {
     }
 
     @Test
+    fun `flag context merges per call and advances the context revision`() {
+        val owner = open(FakeRuntimeQueueBacking())
+
+        owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("plan" to "free"), NOW)).await()
+        owner.applyLocal(
+            RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("role" to "owner", "plan" to "growth"), LATER),
+        ).await()
+        owner.applyLocal(
+            RuntimeLocalStateChange.SetFlagGroupProperties("organization", mapOf("tier" to "free"), LATER),
+        ).await()
+        val result =
+            owner.applyLocal(
+                RuntimeLocalStateChange.SetFlagGroupProperties("organization", mapOf("seats" to 12), LATER),
+            ).await() as RuntimeAppendResult.Accepted
+
+        val state = result.snapshot.state
+        assertEquals(mapOf("plan" to "growth", "role" to "owner"), state.flagContext.personProperties)
+        assertEquals(mapOf("organization" to mapOf("tier" to "free", "seats" to 12)), state.flagContext.groupProperties)
+        assertEquals(4L, state.identity.contextRevision)
+        assertEquals(0L, state.identity.revision)
+        assertEquals(0L, state.stream.nextSequence)
+        assertTrue(result.records.isEmpty())
+    }
+
+    @Test
+    fun `flag context rejects an unnamed group type and a sixty-fifth group type`() {
+        val owner = open(FakeRuntimeQueueBacking())
+
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.applyLocal(RuntimeLocalStateChange.SetFlagGroupProperties("", mapOf("tier" to "free"), NOW)).await()
+        }
+        repeat(64) { index ->
+            owner.applyLocal(
+                RuntimeLocalStateChange.SetFlagGroupProperties("group-$index", mapOf("tier" to "free"), NOW),
+            ).await()
+        }
+        assertFutureCause(IllegalArgumentException::class.java) {
+            owner.applyLocal(
+                RuntimeLocalStateChange.SetFlagGroupProperties("group-64", mapOf("tier" to "free"), NOW),
+            ).await()
+        }
+        assertEquals(64, owner.snapshot().await().state.flagContext.groupProperties.size)
+    }
+
+    @Test
     fun `corrupt counters fail closed and release ownership`() {
         val backing = FakeRuntimeQueueBacking()
         val validState = freshState()
