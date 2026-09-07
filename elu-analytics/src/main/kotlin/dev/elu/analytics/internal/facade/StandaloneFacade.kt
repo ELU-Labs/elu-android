@@ -79,9 +79,13 @@ internal sealed interface EluFacadeState {
 
 internal data class EluFacadeDiagnostics(
     val state: EluFacadeState,
+    /** State-changing calls held for the first configuration decision. */
     val buffered: Int,
+    /** Calls discarded since construction, by reason. */
     val dropped: Map<EluFacadeDropReason, Int>,
+    /** Flag listener invocations that threw; the error never reaches the caller. */
     val listenerErrors: Int,
+    val flagReloadInFlight: Boolean,
 )
 
 /**
@@ -125,7 +129,12 @@ internal class StandaloneFacade(
     private val listeners = mutableListOf<() -> Unit>()
     private val observedFlagKeys = LinkedHashSet<String>()
     private val exposures = HashSet<String>()
+    private val reloadCompletions = mutableListOf<() -> Unit>()
     private var exposureIdentityRevision: Long? = null
+    /** Identifies the loaded flags; a reset abandons the reload started for the previous one. */
+    private var flagGeneration = 0L
+    private var flagReloadGeneration: Long? = null
+    private var flagReloadAttempts = 0
     private var stack: StandaloneStack? = null
     private var configDocument: String? = null
     private var cachedPersonProperties: String? = null
@@ -193,6 +202,7 @@ internal class StandaloneFacade(
                 buffered = buffer.size,
                 dropped = synchronized(dropCounts) { EnumMap(dropCounts) },
                 listenerErrors = listenerErrors.get(),
+                flagReloadInFlight = flagReloadGeneration != null,
             )
         }
 
@@ -305,7 +315,7 @@ internal class StandaloneFacade(
             }
             cachedPersonProperties = null
             clearFlags()
-            if (state is EluFacadeState.Enabled) reloadFlags()
+            if (state is EluFacadeState.Enabled) startFlagReload()
         }
     }
 
@@ -378,7 +388,7 @@ internal class StandaloneFacade(
             // The group mutation also enters the flag evaluation context, so the reload below
             // evaluates against the group the caller just described.
             appendMutations(changes)
-            reloadFlags()
+            startFlagReload()
         }
     }
 
@@ -397,8 +407,10 @@ internal class StandaloneFacade(
                 countDrop(currentDropReason())
                 return@submit
             }
-            reloadFlags()
-            completion?.let { deliver(it) }
+            completion?.let { reloadCompletions += it }
+            startFlagReload()
+            // Without a flag client there is nothing to load, so the completion runs now.
+            if (flagReloadGeneration == null) finishFlagReload()
         }
     }
 
@@ -416,7 +428,7 @@ internal class StandaloneFacade(
         val set = properties.toMap()
         dispatch(OperationKind.ACTIVITY) {
             applyLocalChange(RuntimeLocalStateChange.SetFlagPersonProperties(set, now()))
-            reloadFlags()
+            startFlagReload()
         }
     }
 
@@ -431,7 +443,7 @@ internal class StandaloneFacade(
         val set = properties.toMap()
         dispatch(OperationKind.ACTIVITY) {
             applyLocalChange(RuntimeLocalStateChange.SetFlagGroupProperties(type, set, now()))
-            reloadFlags()
+            startFlagReload()
         }
     }
 
@@ -570,7 +582,7 @@ internal class StandaloneFacade(
                     EluFacadeState.Disabled(disabledReasonFor(result.authority.reason))
             }
         transition(next)
-        if (next is EluFacadeState.Enabled && !wasEnabled) reloadFlags()
+        if (next is EluFacadeState.Enabled && !wasEnabled) startFlagReload()
     }
 
     private fun disabledReasonFor(reason: RuntimeCaptureAuthorityTerminalReason): EluFacadeDisabledReason =
@@ -634,7 +646,7 @@ internal class StandaloneFacade(
         if (userId != persistedDistinctId()) {
             appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, emptyMap())))
             cachedPersonProperties = personPropertiesKey(userId, set)
-            reloadFlags()
+            startFlagReload()
             return
         }
         if (set.isNotEmpty()) appendPersonProperties(set, reloadFlags = true)
@@ -657,7 +669,7 @@ internal class StandaloneFacade(
             ),
         )
         cachedPersonProperties = key
-        if (reloadFlags) reloadFlags()
+        if (reloadFlags) startFlagReload()
     }
 
     private fun persistedDistinctId(): String {
@@ -734,37 +746,84 @@ internal class StandaloneFacade(
         }
     }
 
-    /** Runs one reload and republishes the flags this facade has been asked about. */
-    private fun reloadFlags() {
-        val client = stack?.flags ?: return
-        repeat(MAX_FLAG_RELOAD_ATTEMPTS) {
-            if (state !is EluFacadeState.Enabled || closed) return
-            val result =
-                try {
-                    client.reload().await()
-                } catch (error: Throwable) {
-                    countDrop(classify(error))
-                    return
+    /**
+     * Starts one reload. Concurrent requests join the reload already running, and the lane never
+     * waits for it: the request leaves the client on its own lane and the outcome comes back as
+     * another lane task, so captures behind it are not held for a network round trip.
+     */
+    private fun startFlagReload() {
+        if (state !is EluFacadeState.Enabled || closed) return
+        if (stack?.flags == null || flagReloadGeneration != null) return
+        flagReloadGeneration = flagGeneration
+        flagReloadAttempts = 0
+        beginFlagReloadAttempt()
+    }
+
+    private fun beginFlagReloadAttempt() {
+        val client = stack?.flags
+        val generation = flagReloadGeneration
+        if (client == null || generation == null) return
+        flagReloadAttempts += 1
+        val pending =
+            try {
+                client.reload()
+            } catch (error: Throwable) {
+                countDrop(classify(error))
+                finishFlagReload()
+                return
+            }
+        pending.whenComplete { result, error ->
+            submit { settleFlagReload(generation, result, error) }
+        }
+    }
+
+    private fun settleFlagReload(
+        generation: Long,
+        result: FlagReloadResult?,
+        error: Throwable?,
+    ) {
+        // A reload the identity outlived is discarded: its flags belong to the identity that ended.
+        if (generation != flagReloadGeneration) return
+        if (error != null) {
+            countDrop(classify(error))
+            finishFlagReload()
+            return
+        }
+        if (state !is EluFacadeState.Enabled || closed) {
+            finishFlagReload()
+            return
+        }
+        when (result) {
+            is FlagReloadResult.Updated -> {
+                observedFlagKeys.forEach { key -> resolveFlag(key) }
+                flagsLoaded = true
+                // Listeners see the new snapshot before the reload's own completion runs.
+                fireFlagListeners()
+                finishFlagReload()
+            }
+            // The reload was superseded by a context or configuration change; the next attempt
+            // evaluates the current witness.
+            FlagReloadResult.Stale ->
+                if (flagReloadAttempts < MAX_FLAG_RELOAD_ATTEMPTS) {
+                    beginFlagReloadAttempt()
+                } else {
+                    finishFlagReload()
                 }
-            when (result) {
-                is FlagReloadResult.Updated -> {
-                    observedFlagKeys.forEach { key -> resolveFlag(key) }
-                    flagsLoaded = true
-                    fireFlagListeners()
-                    return
-                }
-                // The reload was superseded by a context or configuration change; the next attempt
-                // evaluates the current witness.
-                FlagReloadResult.Stale -> Unit
-                else -> {
-                    // A load that failed still ends the "flags have not loaded" phase, so getters
-                    // report their documented defaults instead of blocking on a retry.
-                    flagsLoaded = true
-                    fireFlagListeners()
-                    return
-                }
+            else -> {
+                // A load that failed still ends the "flags have not loaded" phase, so getters
+                // report their documented defaults instead of waiting for a retry.
+                flagsLoaded = true
+                fireFlagListeners()
+                finishFlagReload()
             }
         }
+    }
+
+    private fun finishFlagReload() {
+        flagReloadGeneration = null
+        val completions = reloadCompletions.toList()
+        reloadCompletions.clear()
+        completions.forEach { completion -> deliver(completion) }
     }
 
     private fun resolveFlag(key: String) {
@@ -795,6 +854,9 @@ internal class StandaloneFacade(
         flagsLoaded = false
         observedFlagKeys.clear()
         exposures.clear()
+        flagGeneration += 1
+        flagReloadGeneration = null
+        flagReloadAttempts = 0
     }
 
     private fun fireFlagListeners() {

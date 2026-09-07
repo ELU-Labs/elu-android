@@ -31,6 +31,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
@@ -358,9 +359,13 @@ class StandaloneFacadeTest {
         val flagTransport: RespondingFlagTransport,
     ) {
         fun settle() {
-            // Flag reloads and identity writes queue further work on the same lane, so drain until
-            // the lane comes back empty twice in a row.
-            repeat(6) { facade.settled().get(10, TimeUnit.SECONDS) }
+            // A flag reload leaves the lane and comes back as another lane task, so drain until
+            // two consecutive drains find no reload in flight.
+            repeat(400) {
+                if (!diagnostics().flagReloadInFlight && !diagnostics().flagReloadInFlight) return
+                Thread.sleep(5)
+            }
+            fail("the facade did not settle")
         }
 
         fun diagnostics(): EluFacadeDiagnostics = facade.diagnostics().get(10, TimeUnit.SECONDS)
