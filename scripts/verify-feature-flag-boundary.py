@@ -14,7 +14,7 @@ import sys
 PINNED_FILES = {
     # Existing public/provider/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "1ec2f725db4d165d7ac0ed0d8fce9bac9c8fc5c648e013294b43a0953764a8fc",
+        "e8a9c176d0f159b0a0edb4e5163d3253918d84a9749799e35bde205f2a55378e",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluCore.kt":
         "9db1875e03a27bb98b33f647f212e29f4025e61839902d1aef3c298b2f92b945",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":

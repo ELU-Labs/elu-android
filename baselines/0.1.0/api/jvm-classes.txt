@@ -25,6 +25,8 @@ dev.elu.analytics.EluStatePolicy
 dev.elu.analytics.EluStatePolicy$Action
 dev.elu.analytics.EluStatePolicy$State
 dev.elu.analytics.EluVersion
+dev.elu.analytics.EmbeddedRuntime
+dev.elu.analytics.EmbeddedRuntimeCalls
 dev.elu.analytics.internal.compat.LegacyProbe
 dev.elu.analytics.internal.compat.LegacyQuarantineOutcome
 dev.elu.analytics.internal.compat.LegacyQueueDisposition
@@ -160,6 +162,10 @@ dev.elu.analytics.internal.core.SystemCoreFileOperations
 dev.elu.analytics.internal.core.UnsupportedCoreSchemaException
 dev.elu.analytics.internal.core.UnsupportedCoreSchemaExtensionException
 dev.elu.analytics.internal.core.UuidCoreIdentifierGenerator
+dev.elu.analytics.internal.facade.EluCoreLifecycleGate
+dev.elu.analytics.internal.facade.EluFacadeSink
+dev.elu.analytics.internal.facade.EluLifecycleGate
+dev.elu.analytics.internal.facade.EmbeddedRuntimeSink
 dev.elu.analytics.internal.flags.AndroidFeatureFlagClient
 dev.elu.analytics.internal.flags.FlagBeginResult
 dev.elu.analytics.internal.flags.FlagBeginResult$Begun
