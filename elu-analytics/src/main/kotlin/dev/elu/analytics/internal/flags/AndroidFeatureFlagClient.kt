@@ -2,6 +2,7 @@ package dev.elu.analytics.internal.flags
 
 import dev.elu.analytics.internal.config.V1FlagAuthorizationResolution
 import dev.elu.analytics.internal.config.V1FlagProjectionRejection
+import dev.elu.analytics.internal.facade.FacadeFlagClient
 import dev.elu.analytics.internal.runtime.RuntimeQueueOwner
 import dev.elu.analytics.internal.runtime.RuntimeVersions
 import java.net.URI
@@ -36,7 +37,8 @@ internal fun interface FlagOpaqueIdSource {
 
 /**
  * Internal, deliberately unwired serialized client. The existing runtime owner remains the only
- * SQLite authority; transport never executes inside its transactions.
+ * SQLite authority; transport never executes inside its transactions. Conforming to the facade's
+ * flag contract keeps that wiring one injected argument away without naming this class there.
  */
 internal class AndroidFeatureFlagClient(
     private val owner: RuntimeQueueOwner,
@@ -45,7 +47,7 @@ internal class AndroidFeatureFlagClient(
     private val clock: FlagClock,
     private val requestIds: FlagOpaqueIdSource,
     private val storeEpochs: FlagOpaqueIdSource,
-) : AutoCloseable {
+) : FacadeFlagClient {
     private val lane: ExecutorService =
         Executors.newSingleThreadExecutor(
             ThreadFactory { runnable ->
@@ -75,7 +77,7 @@ internal class AndroidFeatureFlagClient(
         }
     }
 
-    fun applyConfiguration(configBody: String?): CompletableFuture<V1FlagAuthorizationResolution> {
+    override fun applyConfiguration(configBody: String?): CompletableFuture<V1FlagAuthorizationResolution> {
         val result = CompletableFuture<V1FlagAuthorizationResolution>()
         execute(result) {
             if (closed) {
@@ -125,13 +127,13 @@ internal class AndroidFeatureFlagClient(
         return result
     }
 
-    fun reload(): CompletableFuture<FlagReloadResult> {
+    override fun reload(): CompletableFuture<FlagReloadResult> {
         val result = CompletableFuture<FlagReloadResult>()
         execute(result) { considerReload(result) }
         return result
     }
 
-    fun read(key: String): CompletableFuture<FlagReadResult> {
+    override fun read(key: String): CompletableFuture<FlagReadResult> {
         val result = CompletableFuture<FlagReadResult>()
         execute(result) {
             if (initializationFailure != null || closed || clockFailed) {
