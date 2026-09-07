@@ -21,6 +21,8 @@ dev.elu.analytics.EluReplayBudgetPolicy$Decision$Disabled
 dev.elu.analytics.EluReplayBudgetPolicy$Decision$Retry
 dev.elu.analytics.EluReplayBudgetPolicy$Decision$Schedule
 dev.elu.analytics.EluReplayBudgetPolicy$Decision$Stop
+dev.elu.analytics.EluRuntimeMode
+dev.elu.analytics.EluRuntimeSelector
 dev.elu.analytics.EluStatePolicy
 dev.elu.analytics.EluStatePolicy$Action
 dev.elu.analytics.EluStatePolicy$State
@@ -167,6 +169,8 @@ dev.elu.analytics.internal.facade.EluCoreLifecycleGate
 dev.elu.analytics.internal.facade.EluFacadeDiagnostics
 dev.elu.analytics.internal.facade.EluFacadeDisabledReason
 dev.elu.analytics.internal.facade.EluFacadeDropReason
+dev.elu.analytics.internal.facade.EluFacadeLane
+dev.elu.analytics.internal.facade.EluFacadeLaneKt
 dev.elu.analytics.internal.facade.EluFacadeSink
 dev.elu.analytics.internal.facade.EluFacadeState
 dev.elu.analytics.internal.facade.EluFacadeState$Closed

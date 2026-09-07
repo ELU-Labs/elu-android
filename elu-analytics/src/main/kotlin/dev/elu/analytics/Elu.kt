@@ -5,9 +5,12 @@ import android.content.pm.ApplicationInfo
 import android.util.Log
 import com.posthog.PostHog
 import com.posthog.PostHogOnFeatureFlags
+import dev.elu.analytics.internal.facade.AndroidStandaloneStack
 import dev.elu.analytics.internal.facade.EluCoreLifecycleGate
+import dev.elu.analytics.internal.facade.EluFacadeLane
 import dev.elu.analytics.internal.facade.EluFacadeSink
 import dev.elu.analytics.internal.facade.EmbeddedRuntimeSink
+import dev.elu.analytics.internal.facade.selectFacadeLane
 import java.util.Date
 
 /**
@@ -19,7 +22,9 @@ import java.util.Date
  * are buffered in memory and getters return defaults; while running they
  * delegate. Never throws, never blocks the caller.
  *
- * Methods carry no runtime detail: [setup] resolves one [EluFacadeSink] and every call goes to it.
+ * Methods carry no runtime detail: [setup] builds the lane [EluRuntimeSelector] names and every
+ * call goes to that one sink. The two runtimes keep separate identity storage, so the selection is
+ * fixed for the life of the process and no call is ever sent to both.
  */
 public object Elu {
     private const val TAG = "EluAnalytics"
@@ -65,9 +70,27 @@ public object Elu {
                     )
                     return
                 }
-                val core = EluCore(appContext, siteKey.trim(), configHost)
-                sink = EmbeddedRuntimeSink(EluCoreLifecycleGate(core), EmbeddedRuntime)
-                core.start()
+                val key = siteKey.trim()
+                val lane =
+                    selectFacadeLane(
+                        EluRuntimeSelector.mode(),
+                        wrapped = {
+                            val core = EluCore(appContext, key, configHost)
+                            EluFacadeLane(EmbeddedRuntimeSink(EluCoreLifecycleGate(core), EmbeddedRuntime)) {
+                                core.start()
+                            }
+                        },
+                        standalone = {
+                            // The standalone runtime resolves its own ELU endpoints from the
+                            // configuration document it is given, so configHost governs the
+                            // embedded lane only.
+                            val facade = AndroidStandaloneStack.facade(appContext, key)
+                            EluFacadeLane(facade) { facade.start() }
+                        },
+                    )
+                // Published before starting, so calls made during startup are held rather than lost.
+                sink = lane.sink
+                lane.start()
             } catch (t: Throwable) {
                 Log.w(TAG, "Elu.setup failed: $t")
                 sink = null
