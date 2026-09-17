@@ -221,6 +221,14 @@ internal sealed interface RuntimeLocalStateChange {
         override val occurredAt: String,
     ) : RuntimeLocalStateChange
 
+    /** Local group association and optional properties, without a collection mutation. */
+    data class SetFlagGroup(
+        val groupType: String,
+        val groupKey: String,
+        val properties: Map<String, Any?>?,
+        override val occurredAt: String,
+    ) : RuntimeLocalStateChange
+
     data class MarkBackgrounded(override val occurredAt: String) : RuntimeLocalStateChange
 }
 

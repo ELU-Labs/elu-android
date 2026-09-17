@@ -195,6 +195,14 @@ internal class V1ExactTimestamp private constructor(
     val fractionalDigits: String,
     val isLeapSecond: Boolean,
 ) : Comparable<V1ExactTimestamp> {
+    // Pure immutable fraction projection; long fractions retain exact BigInteger arithmetic.
+    private val nanosecondFraction: Long = if (fractionalDigits.length > 9) -1L else {
+        var value = 0L
+        for (index in 0 until 9) value = value * 10 +
+            if (index < fractionalDigits.length) (fractionalDigits[index] - '0').toLong() else 0L
+        value
+    }
+
     override fun compareTo(other: V1ExactTimestamp): Int {
         val seconds = epochWholeSecond.compareTo(other.epochWholeSecond)
         if (seconds != 0) return seconds
@@ -221,6 +229,18 @@ internal class V1ExactTimestamp private constructor(
      */
     fun elapsedNanosecondsFloorSince(earlier: V1ExactTimestamp): Long? {
         if (isLeapSecond || earlier.isLeapSecond || this < earlier) return null
+        // The native clock and persisted session timestamps use at most nanos.
+        // Keep arbitrary precision for longer fractions, without allocating large
+        // integers for every live capture/lease check in the common case.
+        if (nanosecondFraction >= 0 && earlier.nanosecondFraction >= 0) {
+            var seconds = try { Math.subtractExact(epochWholeSecond, earlier.epochWholeSecond) }
+                catch (_: ArithmeticException) { return Long.MAX_VALUE }
+            var fraction = nanosecondFraction - earlier.nanosecondFraction
+            if (fraction < 0) { seconds -= 1; fraction += 1_000_000_000L }
+            if (seconds > Long.MAX_VALUE / 1_000_000_000L) return Long.MAX_VALUE
+            val whole = seconds * 1_000_000_000L
+            return if (whole > Long.MAX_VALUE - fraction) Long.MAX_VALUE else whole + fraction
+        }
         val scale = maxOf(fractionalDigits.length, earlier.fractionalDigits.length, 9)
         val unit = BigInteger.TEN.pow(scale)
         fun scaled(timestamp: V1ExactTimestamp): BigInteger {
@@ -247,11 +267,21 @@ internal class V1ExactTimestamp private constructor(
             return V1ExactTimestamp(epochWholeSecond, fractionalDigits.trimEnd('0'), isLeapSecond)
         }
 
-        fun fromEpochMillis(epochMillis: Long): V1ExactTimestamp =
-            fromEpochSecondAndFraction(
+        private class MillisecondValue(val millis: Long, val timestamp: V1ExactTimestamp)
+        @Volatile private var lastMillisecondValue: MillisecondValue? = null
+
+        // One immutable value keyed by the actual argument. No clock or authority is cached.
+        // Concurrent replacements only miss the cache; each read uses one coherent key/value.
+        fun fromEpochMillis(epochMillis: Long): V1ExactTimestamp {
+            val cached = lastMillisecondValue
+            if (cached != null && cached.millis == epochMillis) return cached.timestamp
+            val timestamp = fromEpochSecondAndFraction(
                 epochWholeSecond = Math.floorDiv(epochMillis, 1_000L),
                 fractionalDigits = Math.floorMod(epochMillis, 1_000L).toString().padStart(3, '0'),
             )
+            lastMillisecondValue = MillisecondValue(epochMillis, timestamp)
+            return timestamp
+        }
     }
 }
 

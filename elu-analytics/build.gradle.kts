@@ -22,7 +22,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        // The resolved analytics runtime requires minSdk 23.
+        // Keep the public minimum Android version unchanged.
         minSdk = 23
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -35,6 +35,7 @@ android {
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -50,9 +51,12 @@ kotlin {
 }
 
 dependencies {
-    // Exact pin: update only with an API/behavior compatibility review.
-    implementation("com.posthog:posthog-android") {
-        version { strictly("3.58.0") }
+    // Backport the Java time and arithmetic APIs used by the runtime on API 23.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
+    // Owned replay networking needs per-client cookie/authentication isolation.
+    implementation("com.squareup.okhttp3:okhttp") {
+        version { strictly("4.12.0") }
     }
 
     testImplementation("junit:junit:4.13.2")

@@ -85,10 +85,43 @@ internal data class PersistedCoreState(
     val identity: IdentityState,
     val stream: StreamState,
     val flagContext: FlagContextState,
+    /** Internal aggregate-only checkpoint; never part of the closed public identity. */
+    val startupMigration: StartupMigrationCheckpoint? = null,
+    /** Permanent, bounded import receipt; current startup never reopens its old source. */
+    val startupHistory: StartupHistoryLedger? = null,
+)
+
+/** Removed atomically when identity.migration is completed; never retained as a source dependency. */
+internal data class StartupMigrationCheckpoint(
+    val sourceSchema: String,
+    val sourceFingerprint: String,
+    val publicToken: String,
 )
 
 internal data class AliasContext(
     val aliasId: String,
     val canonicalId: String,
     val contextRevision: Long,
+)
+
+/** UUID exceptions apply only to these exact initial stream rows, including retired ACKs. */
+internal data class StartupHistoryLedger(
+    val sourceSchema: String,
+    val sourceFingerprint: String,
+    val streamId: String,
+    val completedAt: String,
+    val records: List<StartupHistoryRecord>,
+)
+
+internal data class StartupHistoryRecord(
+    val sequence: Long,
+    val kind: String,
+    val recordId: String,
+    val payloadSha256: String,
+    val sourceFilename: String,
+    val sourceSha256: String,
+    val sourceModifiedAt: Long,
+    val occurredAt: String,
+    /** The legacy mutation envelope can carry a session absent from the current typed mutation. */
+    val sourceSessionId: String?,
 )

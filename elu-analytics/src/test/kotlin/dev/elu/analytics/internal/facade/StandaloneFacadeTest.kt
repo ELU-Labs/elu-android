@@ -21,8 +21,10 @@ import dev.elu.analytics.internal.runtime.delivery.BatchHTTPTransport
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.Date
-import java.util.concurrent.CompletableFuture
+import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.util.concurrent.Future
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
@@ -304,11 +306,75 @@ class StandaloneFacadeTest {
         assertEquals(0, harness.diagnostics().buffered)
     }
 
+    @Test
+    fun `held lane preserves API entry chronology for identity and context changes`() {
+        val cases = listOf<Pair<String, (StandaloneFacade) -> Unit>>(
+            "identify" to { it.identify("user_entry", mapOf("tier" to "test")) },
+            "alias" to { it.alias("alias_entry") },
+            "reset" to { it.reset() },
+            "register" to { it.register(mapOf("entry" to "yes")) },
+            "unregister" to { it.register(mapOf("entry" to "yes")); it.unregister("entry") },
+            "person" to { it.setPersonProperties(mapOf("entry" to "yes")) },
+            "group" to { it.group("company", "entry", mapOf("tier" to "test")) },
+            "flag-person" to { it.setPersonPropertiesForFlags(mapOf("entry" to "yes")) },
+            "flag-group" to { it.setGroupPropertiesForFlags("company", mapOf("entry" to "yes")) },
+        )
+        val failures = mutableListOf<String>()
+        for ((name, operation) in cases) {
+            val clock = AtomicLong(NOW_MS)
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val harness = harness(wall = clock::get, beforeOpen = {
+                entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+            })
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                harness.facade.applyConfiguration(config())
+                operation(harness.facade)
+                clock.addAndGet(5)
+                val callerDate = Date(clock.get())
+                harness.facade.capture("after-$name", null, callerDate)
+                callerDate.time = NOW_MS + 50_000 // Input was already snapshotted.
+                clock.set(NOW_MS + 100)
+                release.countDown(); harness.settle()
+                val records = harness.records()
+                val events = records.filterIsInstance<RuntimeQueuedRecord.Event>()
+                if (events.singleOrNull()?.record?.name != "after-$name") {
+                    failures += "$name: ${harness.queued()} drops=${harness.diagnostics().dropped}"
+                } else {
+                    assertEquals("2026-08-04T00:01:00.005Z", events.single().record.occurredAt)
+                    for (mutation in records.filterIsInstance<RuntimeQueuedRecord.Mutation>()) {
+                        assertEquals("2026-08-04T00:01:00.000Z", mutation.envelope.mutation.occurredAt)
+                    }
+                }
+            } finally { release.countDown(); harness.facade.close() }
+        }
+        assertEquals("No later lane timestamp may make the following caller capture appear stale", emptyList<String>(), failures)
+    }
+
+    @Test
+    fun `an explicitly stale event timestamp is still denied after an API entry mutation`() {
+        val clock = AtomicLong(NOW_MS)
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val harness = harness(wall = clock::get, beforeOpen = {
+            entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+        })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            harness.facade.applyConfiguration(config())
+            harness.facade.identify("entry-user", null)
+            harness.facade.capture("explicitly-stale", null, Date(NOW_MS - 1))
+            clock.set(NOW_MS + 100); release.countDown(); harness.settle()
+            assertEquals(listOf("mutation:identify"), harness.queued())
+        } finally { release.countDown() }
+    }
+
     // ---- harness -------------------------------------------------------------
 
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
+        wall: () -> Long = { NOW_MS },
+        beforeOpen: () -> Unit = {},
     ): Harness {
         val backing = FakeRuntimeQueueBacking()
         val owner =
@@ -318,7 +384,10 @@ class StandaloneFacadeTest {
                 databaseFactory = backing::connection,
                 legacyStateLoader = ::initialState,
                 trustedSiteKey = SITE_KEY,
-                captureClock = FixedCaptureClock,
+                captureClock = object : RuntimeCaptureClock {
+                    override fun wallNowEpochMillis() = wall()
+                    override fun elapsedRealtimeNanos() = 1_000L + (wall() - NOW_MS) * 1_000_000L
+                },
             ).get(10, TimeUnit.SECONDS)
         owners += owner
         val transport = RecordingBatchTransport()
@@ -326,7 +395,7 @@ class StandaloneFacadeTest {
             StandaloneRuntime(
                 owner = owner,
                 siteKey = SITE_KEY,
-                wallClock = { NOW_MS },
+                wallClock = wall,
                 transportFactory = { transport },
                 deviceInEuTimezone = { deviceInEu },
             )
@@ -342,9 +411,9 @@ class StandaloneFacadeTest {
             )
         val facade =
             StandaloneFacade(
-                open = { StandaloneStack(runtime, owner, flags) },
+                open = { beforeOpen(); StandaloneStack(runtime, owner, flags) },
                 deliverCallback = { callback -> callback.run() },
-                wallClock = { NOW_MS },
+                wallClock = wall,
                 bufferLimit = bufferLimit,
             )
         facades += facade
@@ -405,7 +474,7 @@ class StandaloneFacadeTest {
         val revisions = AtomicInteger()
 
         @Synchronized
-        override fun send(request: dev.elu.analytics.internal.flags.FlagTransportRequest): CompletableFuture<ByteArray> {
+        override fun send(request: dev.elu.analytics.internal.flags.FlagTransportRequest): SdkFuture<ByteArray> {
             val body = JSONObject(String(request.canonicalBody, StandardCharsets.UTF_8))
             requests += body
             val response =
@@ -424,7 +493,7 @@ class StandaloneFacadeTest {
                             .put("bool-false", false),
                     )
                     .put("payloads", JSONObject().put("variant", JSONObject().put("buttonColor", "violet")))
-            return CompletableFuture.completedFuture(response.toString().toByteArray(StandardCharsets.UTF_8))
+            return SdkFuture.completedFuture(response.toString().toByteArray(StandardCharsets.UTF_8))
         }
     }
 

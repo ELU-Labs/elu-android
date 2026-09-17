@@ -44,6 +44,8 @@ internal class V1ConfigManager(
         configBody: String?,
         nowEpochMillis: Long,
     ): V1ConfigUpdateResult {
+        val retainedCapture = activeConfig
+        val retainedFlags = activeFlagAuthorization.takeIf { pendingFlagConfiguration == null }
         invalidateFlagProjection()
         val parsed: V1ParsedConfig
         try {
@@ -54,7 +56,28 @@ internal class V1ConfigManager(
             return installInvalidDocument(configBody, nowEpochMillis, V1ConfigRejection.MALFORMED)
         }
 
-        return installAtBoundary(parsed.toBoundary(), parsed, nowEpochMillis, null)
+        val result = installAtBoundary(parsed.toBoundary(), parsed, nowEpochMillis, null)
+        // Capture re-evaluation of the already installed document does not replace Flags
+        // authority. Keep the exact original witness only after strict validation succeeds;
+        // this synchronized call exposes no intermediate allow state or new lease deadline.
+        if (result is V1ConfigUpdateResult.Enabled && !flagProjectionTerminal &&
+            retainedCapture != null && activeConfig === retainedCapture && retainedFlags != null &&
+            parsed.configSemanticHash == retainedCapture.config.configSemanticHash &&
+            parsed.status == V1ConfigStatus.ENABLED && parsed.features?.flags == true
+        ) {
+            val witness = retainedFlags.witness
+            if (witness.trustedSiteKey == trustedFlagSiteKey &&
+                witness.siteNamespaceDigest == trustedFlagNamespaceDigest &&
+                witness.siteId == parsed.siteId &&
+                witness.endpoint == retainedCapture.endpoints.flags &&
+                witness.endpoint.toString() == parsed.endpoints?.flags &&
+                witness.configRevision == parsed.revision &&
+                witness.configSemanticHash == parsed.configSemanticHash &&
+                witness.configIssuedAt == parsed.issuedAtInstant.toFlagInstant(parsed.issuedAt) &&
+                witness.configExpiresAt == parsed.expiresAtInstant.toFlagInstant(parsed.expiresAt)
+            ) activeFlagAuthorization = retainedFlags
+        }
+        return result
     }
 
     /** Resolves authority from the one active config without mutating its issuance boundary. */
@@ -124,6 +147,31 @@ internal class V1ConfigManager(
                 limits = checkNotNull(config.limits),
             ),
         )
+    }
+
+    /** Current permission for immutable sealed rows. This never grants recorder admission. */
+    @Synchronized
+    fun authorizeSealedReplayDelivery(
+        effectivePrivacyBody: String?,
+        identity: IdentityState,
+        nowEpochMillis: Long,
+    ): V1SealedReplayDelivery? {
+        val fresh = (authorize(effectivePrivacyBody, identity, nowEpochMillis) as? V1ConfigResolution.Authorized)?.config
+            ?: return null
+        val installed = activeConfig ?: return null
+        val config = installed.config
+        val generation = config.replayCapabilities?.replayProtocolGeneration ?: return null
+        if (config.schemaVersion != 2 || fresh.captureAuthorization.status != V1ChannelAuthorizationStatus.AUTHORIZED ||
+            fresh.replayAuthorization.status == V1ChannelAuthorizationStatus.INVALID ||
+            !fresh.features.replay || !fresh.privacy.replay.enabled) return null
+        val privacy = fresh.effectivePrivacy ?: return null
+        val selected = privacy.replayTransport ?: return null
+        val pair = V1ReplayTransport(selected.codec, selected.compression)
+        if (!selected.advertised || pair !in fresh.replayCapabilities.advertisedTransports ||
+            pair !in readbackProvenReplayTransports ||
+            !maskingIsEqualOrStricter(fresh.privacy.masking, privacy.effectiveMasking) ||
+            (androidPlatformFallbackRequired(fresh.privacy.masking) && !privacy.effectiveMasking.platformFallbackApplied)) return null
+        return V1SealedReplayDelivery(fresh, installed.endpoints.replay ?: return null, pair, generation)
     }
 
     /** Explicit lifecycle reset; ordinary failed/stale updates retain the anti-rollback boundary. */

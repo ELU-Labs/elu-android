@@ -4,4 +4,13 @@
     <!-- Remote configuration and analytics transport. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <application>
+        <!-- Lifecycle facts only. No analytics runtime, identity, storage or network starts here. -->
+        <provider
+            android:name="dev.elu.analytics.internal.runtime.EluLifecycleInitializer"
+            android:authorities="${applicationId}.elu-analytics-lifecycle"
+            android:exported="false"
+            android:initOrder="100" />
+    </application>
+
 </manifest>

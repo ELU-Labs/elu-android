@@ -9,13 +9,18 @@ is managed from your ELU dashboard and delivered as remote config. See
   key is required in the app.
 - Privacy controls (EU blocking, text/image masking, replay limits) are
   applied **client-side at capture time** and managed from the ELU dashboard.
-- `minSdk 23`; session replay activates on API 26+.
+- `minSdk 23` for the analytics runtime. Standalone session replay is still
+  undergoing qualification and is not enabled in this checkout.
 
-ELU Analytics 0.1.0 exposes an ELU-owned API and currently uses PostHog's
-Android runtime for managed capture and ingest. You do not need a PostHog
-account or key; application code should call only `Elu.*`. This disclosure is
-intentionally scoped to 0.1.0 and must be removed together with the provider
-runtime dependency before a standalone release.
+This source checkout contains the ELU-owned analytics runtime. Its standalone
+release is still undergoing qualification. The published 0.1.0 release uses
+the previous runtime; building this checkout does not change an already
+published Maven artifact. Application code continues to use `Elu.*`.
+
+The current standalone replay collector requires API 29 or later. API 26–28
+replay compatibility remains a release requirement; it is not established by
+the API 23 events and identity checks. Replay support will be documented with
+the qualified release.
 
 ## Install
 
@@ -38,16 +43,29 @@ includeBuild("path/to/elu-android") {
 }
 ```
 
-> **Already using `posthog-android` directly? Stop before installing ELU.** Do
-> not remove or reconfigure that integration as part of an automated install.
-> The two integrations can compete for a process-wide singleton: a second
-> `setup` may no-op, disable one integration, or route events to the wrong
-> project. Ask ELU to review coexistence and choose either the existing-provider
-> connection or a deliberate migration. Only remove an existing integration as
-> an explicit, reviewed migration step. Incompatible runtime versions fail
-> Gradle resolution instead of silently overriding one another. Other analytics
-> SDKs do not trigger this warning unless they bundle or configure the same
-> runtime themselves.
+When migrating from another analytics integration, review identity continuity
+and event ownership before removing it. The owned runtime has separate state;
+installing it alone does not migrate an existing integration's stored identity.
+
+For the owned source runtime, enable core library desugaring in your **app
+module** so its Java time and arithmetic APIs work on Android API 23. This
+configuration requires Android Gradle Plugin 8.0 or later:
+
+```kotlin
+android {
+    compileOptions {
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+}
+```
+
+See Android's [API desugaring documentation](https://developer.android.com/studio/write/java8-support).
 
 ## Setup
 
@@ -158,3 +176,7 @@ Library module: `elu-analytics` (namespace `dev.elu.analytics`), AGP 8.13.x,
 Kotlin 2.1.x, compileSdk 36, Java 11 bytecode (JDK 17 toolchain). The build
 uses strict Kotlin compiler settings and is verified in CI. R8/ProGuard:
 consumer rules ship in the AAR; the SDK facade uses no reflection.
+
+## SDK development
+
+[SDK development status](docs/sdk-development-status.md) tracks validation gaps and related work.

@@ -70,6 +70,62 @@ internal data class PrivacyProjectionInput(
 internal object PrivacyStateProjector {
     const val EU_TIMEZONE_EVALUATOR: String = "elu-eu-timezone-v1"
 
+    /** Actual durable native facts, bound to the original source; never constructs recorder authority. */
+    internal fun projectNative(
+        input: dev.elu.analytics.internal.replay.NativeReplayProjectionInput,
+        capabilities: dev.elu.analytics.internal.replay.NativeReplayCapabilities,
+        deviceInEuTimezone: Boolean,
+    ): dev.elu.analytics.internal.replay.NativeReplayPrivacyProjection? {
+        if (!input.isCurrent()) return null
+        val config = input.config
+        val policy = config.privacy ?: return null
+        val transport = capabilities.transport(config) ?: return null
+        val profile = dev.elu.analytics.internal.replay.NativeMaskingProfile.blanketMask()
+        if (profile.compatibility(policy.masking, V1PrivacyPlatform.ANDROID) !=
+            dev.elu.analytics.internal.replay.NativeMaskingCompatibility.COMPATIBLE) return null
+        val session = input.observation.session
+        val eligible = !session.clockDenied && !session.interrupted && session.activeEpoch == null &&
+            session.remainingWholeSeconds > 0
+        val state = project(PrivacyProjectionInput(policy, checkNotNull(config.features),
+            checkNotNull(config.replayCapabilities), input.identity, deviceInEuTimezone, input.evaluatedAt,
+            PrivacyReplayInput(input.observation.currentSelected, true, eligible, session.remainingWholeSeconds, transport)))
+        if (!state.replayAllowed || !input.isCurrent()) return null
+        return dev.elu.analytics.internal.replay.NativeReplayPrivacyProjection.issue(input, encode(state), transport,
+            checkNotNull(config.replayCapabilities.replayProtocolGeneration))
+    }
+
+    /**
+     * Sealed rows do not reacquire a recorder interval. This policy receives actual transaction
+     * facts from the queue, which alone consumes its original source witness at claim and I/O.
+     * Restrictive fresh fields deliberately cannot authorize sampling, a session or a budget.
+     */
+    internal fun nativeSealedDeliveryPolicy(
+        capabilities: dev.elu.analytics.internal.replay.NativeReplayCapabilities,
+        deviceInEuTimezone: () -> Boolean,
+    ): dev.elu.analytics.internal.replay.ReplayDeliveryPolicy =
+        dev.elu.analytics.internal.replay.ReplayDeliveryPolicy(
+            dev.elu.analytics.internal.replay.ReplayDeliveryPrivacy { config, identity, wall ->
+                val policy = config.privacy ?: return@ReplayDeliveryPrivacy null
+                val features = config.features ?: return@ReplayDeliveryPrivacy null
+                val advertised = config.replayCapabilities ?: return@ReplayDeliveryPrivacy null
+                val transport = capabilities.transport(config) ?: return@ReplayDeliveryPrivacy null
+                val profile = dev.elu.analytics.internal.replay.NativeMaskingProfile.blanketMask()
+                val compatible = profile.compatibility(policy.masking, V1PrivacyPlatform.ANDROID) ==
+                    dev.elu.analytics.internal.replay.NativeMaskingCompatibility.COMPATIBLE
+                if (!compatible) return@ReplayDeliveryPrivacy null
+                encode(project(PrivacyProjectionInput(policy, features, advertised, identity,
+                    deviceInEuTimezone(), RuntimeWallTimestamps.rfc3339(wall),
+                    PrivacyReplayInput(false, true, false, 0, transport))))
+            },
+            dev.elu.analytics.internal.replay.ReplayMaskingRetention { stored, required ->
+                // The queue calls this relation only under a validated current config; null
+                // masking is explicitly unavailable, never an inferred permission to retain.
+                dev.elu.analytics.internal.replay.NativeMaskingProfile.retention(stored.copyBytes(),
+                    required.privacy?.masking, V1PrivacyPlatform.ANDROID) ==
+                    dev.elu.analytics.internal.replay.NativeMaskingRetention.COMPATIBLE
+            },
+        )
+
     fun project(input: PrivacyProjectionInput): V1EffectivePrivacyState {
         val policy = input.policy
         val identity = input.identity

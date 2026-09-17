@@ -1,5 +1,14 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
+import dev.elu.analytics.internal.config.V2ConfigClock
+import dev.elu.analytics.internal.config.V2ConfigHttpResponse
+import dev.elu.analytics.internal.config.V2ConfigLifecycleDriver
+import dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler
+import dev.elu.analytics.internal.config.V2ConfigLifecycleTask
+import dev.elu.analytics.internal.config.V2ConfigLifecycleWorker
+import dev.elu.analytics.internal.config.V2ConfigSource
+import dev.elu.analytics.internal.config.V2ConfigTransport
 import dev.elu.analytics.internal.core.FlagContextState
 import dev.elu.analytics.internal.core.IdentityState
 import dev.elu.analytics.internal.core.PersistedCoreState
@@ -15,7 +24,9 @@ import dev.elu.analytics.internal.runtime.delivery.BatchRetryScheduler
 import dev.elu.analytics.internal.runtime.delivery.BatchScheduledTask
 import dev.elu.analytics.internal.runtime.delivery.BatchWallInstant
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
@@ -57,6 +68,7 @@ class StandaloneRuntimeTest {
         val activated = harness.runtime.applyConfiguration(config()).await()
         assertTrue(activated is RuntimeCaptureAuthorityUpdateResult.Activated)
         assertTrue(harness.runtime.hasDeliveryAuthorization())
+        settleDelivery(harness)
 
         val accepted = harness.runtime.capture("checkout", mapOf("amount" to 42)).await() as RuntimeCaptureResult.Accepted
         assertEquals(RuntimeEventKind.CAPTURE, accepted.record.record.kind)
@@ -114,6 +126,7 @@ class StandaloneRuntimeTest {
         val transport = ScriptedTransport()
         val harness = runtime(transport, FakeScheduler())
         harness.runtime.applyConfiguration(config()).await()
+        settleDelivery(harness)
 
         val newer =
             JSONObject(config()).apply {
@@ -123,6 +136,7 @@ class StandaloneRuntimeTest {
                 getJSONObject("limits").put("eventBatchCount", 1)
             }.toString()
         assertTrue(harness.runtime.applyConfiguration(newer).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
+        settleDelivery(harness)
         harness.runtime.capture("one").await() as RuntimeCaptureResult.Accepted
         harness.runtime.capture("two").await() as RuntimeCaptureResult.Accepted
         val pass = harness.runtime.flush().get(5, TimeUnit.SECONDS)
@@ -200,6 +214,7 @@ class StandaloneRuntimeTest {
         val scheduler = FakeScheduler()
         val harness = runtime(transport, scheduler)
         harness.runtime.applyConfiguration(config()).await()
+        settleDelivery(harness)
         harness.runtime.capture("retry-me").await() as RuntimeCaptureResult.Accepted
         scheduler.entries.clear()
         transport.nextResponses += { request -> transportError(503, request) }
@@ -238,10 +253,139 @@ class StandaloneRuntimeTest {
         runtimes.remove(harness.runtime)
     }
 
+    @Test
+    fun `quiet resume delivers retained events when refresh finishes after foreground flush`() {
+        ConfigRig().use { rig ->
+            val transport = ScriptedTransport()
+            val scheduler = FakeScheduler()
+            val harness = runtime(transport, scheduler, configurationGate = rig.gate, siteKey = V2_SITE_KEY)
+            queueAcrossHeldRefresh(rig, harness, scheduler, transport)
+
+            // Completing the real source fetch installs the same still-valid config. No capture,
+            // explicit flush or timer follows: configuration installation must wake delivery.
+            rig.worker.runNext()
+            assertEquals(rig.body, rig.gate.snapshot()?.body)
+            assertTrue(harness.runtime.applyConfiguration(rig.body).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
+            awaitCondition { harness.owner.snapshot().await().queuedCount == 0 }
+
+            val records = JSONObject(transport.requests.single().bodyBytes().decodeToString()).getJSONArray("records")
+            assertEquals(1, records.length())
+            assertEquals("retained-before-background", records.getJSONObject(0).getJSONObject("event").getString("name"))
+            assertEquals(0L, records.getJSONObject(0).getJSONObject("event").getLong("sequence"))
+            assertEquals(1L, harness.owner.snapshot().await().state.stream.nextSequence)
+            assertTrue(scheduler.entries.isEmpty())
+        }
+    }
+
+    @Test
+    fun `quiet resume with invalid refresh keeps retained events unsent`() {
+        for (mode in listOf("disabled", "revoked", "expired", "malformed")) {
+            ConfigRig().use { rig ->
+                val transport = ScriptedTransport()
+                val scheduler = FakeScheduler()
+                val harness = runtime(transport, scheduler, configurationGate = rig.gate, siteKey = V2_SITE_KEY)
+                queueAcrossHeldRefresh(rig, harness, scheduler, transport)
+                rig.body = if (mode == "malformed") "{" else JSONObject(rig.body).apply {
+                    put("revision", "refresh-$mode")
+                    if (mode == "expired") {
+                        put("issuedAt", "2026-08-04T00:00:30.000Z")
+                        put("expiresAt", NOW)
+                    } else {
+                        for (key in listOf("site", "endpoints", "privacy", "features", "capabilities", "session", "limits")) remove(key)
+                        put("issuedAt", "2026-08-04T00:00:30.000Z")
+                        put("status", mode)
+                        put("reason", "remote-kill-switch")
+                    }
+                }.toString()
+                rig.worker.runNext()
+                val result = harness.runtime.applyConfiguration(rig.gate.snapshot()?.body).await()
+                assertTrue(mode, result is RuntimeCaptureAuthorityUpdateResult.Terminated)
+                if (mode == "disabled" || mode == "revoked") {
+                    assertEquals(if (mode == "disabled") RuntimeCaptureAuthorityTerminalReason.DISABLED else RuntimeCaptureAuthorityTerminalReason.REVOKED,
+                        (result as RuntimeCaptureAuthorityUpdateResult.Terminated).authority.reason)
+                }
+                settleDelivery(harness)
+                assertFalse(mode, harness.runtime.hasDeliveryAuthorization())
+                assertTrue(mode, transport.requests.isEmpty())
+                assertEquals(mode, 1, harness.owner.snapshot().await().queuedCount)
+            }
+        }
+    }
+
+    @Test
+    fun `installed resume wake rechecks withdrawn source and current privacy before transport`() {
+        for (withdrawSource in listOf(true, false)) {
+            ConfigRig().use { rig ->
+                var deviceInEu = false
+                val transport = ScriptedTransport()
+                val scheduler = FakeScheduler()
+                val harness = runtime(transport, scheduler, configurationGate = rig.gate, siteKey = V2_SITE_KEY,
+                    deviceInEuTimezone = { deviceInEu })
+                queueAcrossHeldRefresh(rig, harness, scheduler, transport)
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val held = deliveryExecutor(harness).submit {
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                }
+                try {
+                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    rig.worker.runNext()
+                    assertTrue(harness.runtime.applyConfiguration(rig.body).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
+                    // Retire authority after installation but before the admitted pass can run.
+                    if (withdrawSource) rig.driver.onBackground() else deviceInEu = true
+                } finally {
+                    release.countDown()
+                    held.await()
+                }
+                settleDelivery(harness)
+                assertTrue(transport.requests.isEmpty())
+                assertEquals(1, harness.owner.snapshot().await().queuedCount)
+            }
+        }
+    }
+
+    private fun queueAcrossHeldRefresh(
+        rig: ConfigRig,
+        harness: Harness,
+        scheduler: FakeScheduler,
+        transport: ScriptedTransport,
+    ) {
+        rig.driver.start()
+        rig.worker.runNext()
+        assertTrue(harness.runtime.applyConfiguration(rig.body).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
+        settleDelivery(harness)
+        harness.runtime.capture("retained-before-background").await() as RuntimeCaptureResult.Accepted
+        assertEquals(1, scheduler.entries.size)
+        rig.driver.onBackground()
+        harness.runtime.configurationChanged()
+        // Exhaust the old capture timer while authority is withdrawn.
+        scheduler.runNext()
+        settleDelivery(harness)
+        rig.driver.onForeground()
+        assertEquals(1, rig.worker.tasks.size)
+        assertTrue(harness.runtime.markForegrounded())
+        settleDelivery(harness)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, harness.runtime.flush().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(1, harness.owner.snapshot().await().queuedCount)
+        assertTrue(transport.requests.isEmpty())
+        assertTrue(scheduler.entries.isEmpty())
+    }
+
+    /** Join already-submitted delivery work without introducing another delivery trigger. */
+    private fun settleDelivery(harness: Harness) { deliveryExecutor(harness).submit {}.await() }
+
+    private fun deliveryExecutor(harness: Harness): ExecutorService =
+        StandaloneRuntime::class.java.getDeclaredField("deliveryExecutor")
+            .also { it.isAccessible = true }.get(harness.runtime) as ExecutorService
+
     private fun runtime(
         transport: BatchHTTPTransport,
         scheduler: BatchRetryScheduler,
         deviceInEu: Boolean = false,
+        configurationGate: V2ConfigAuthorityGate? = null,
+        deviceInEuTimezone: () -> Boolean = { deviceInEu },
+        siteKey: String = SITE_KEY,
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -249,23 +393,25 @@ class StandaloneRuntimeTest {
                 limits = RuntimeQueueLimits(10_000, 16_777_216),
                 databaseFactory = FakeRuntimeQueueBacking()::connection,
                 legacyStateLoader = ::state,
-                trustedSiteKey = SITE_KEY,
+                trustedSiteKey = siteKey,
                 captureClock = FixedCaptureClock(NOW_MS),
             ).await()
+        if (configurationGate != null) owner.bindConfigurationGate(configurationGate).await()
         val executor = Executors.newSingleThreadScheduledExecutor()
         schedulers += executor
         val clock = FixedDeliveryClock(NOW_MS, NOW)
         val runtime =
             StandaloneRuntime(
                 owner = owner,
-                siteKey = SITE_KEY,
+                siteKey = siteKey,
                 wallClock = { NOW_MS },
                 deliveryClock = clock,
                 scheduler = executor,
                 retryScheduler = scheduler,
                 jitter = BatchJitterSource { 0.0 },
                 transportFactory = { transport },
-                deviceInEuTimezone = { deviceInEu },
+                deviceInEuTimezone = deviceInEuTimezone,
+                configurationGate = configurationGate,
             )
         runtimes += runtime
         return Harness(owner, runtime, clock)
@@ -315,6 +461,35 @@ class StandaloneRuntimeTest {
         val runtime: StandaloneRuntime,
         val clock: FixedDeliveryClock,
     )
+
+    private class ConfigRig : AutoCloseable {
+        val gate = V2ConfigAuthorityGate()
+        val worker = HeldConfigWorker()
+        var body = JSONObject(checkNotNull(javaClass.classLoader?.getResource("contracts/v2/fixtures/config-enabled.json")).readText()).apply {
+            put("issuedAt", ISSUED)
+            put("expiresAt", "2026-08-04T00:05:00.000Z")
+        }.toString()
+        private val clock = object : V2ConfigClock {
+            override fun wallNowEpochMillis() = NOW_MS
+            override fun monotonicNowNanos() = 1_000L
+        }
+        private val source = V2ConfigSource("https://elu.dev", V2_SITE_KEY,
+            V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+        val driver = V2ConfigLifecycleDriver(source, gate::update, clock,
+            object : V2ConfigLifecycleScheduler {
+                override fun schedule(delayNanos: Long, task: () -> Unit) = V2ConfigLifecycleTask { }
+                override fun close() = Unit
+            }, worker)
+        override fun close() { driver.close(); gate.close() }
+    }
+
+    private class HeldConfigWorker : V2ConfigLifecycleWorker {
+        val tasks = ArrayDeque<() -> Unit>()
+        override fun execute(task: () -> Unit) { tasks.add(task) }
+        override fun interruptCurrent() = Unit
+        override fun close() { tasks.clear() }
+        fun runNext() = tasks.removeFirst().invoke()
+    }
 
     /** Accepts every batch unless a scripted response is queued for the next request. */
     private class ScriptedTransport : BatchHTTPTransport {
@@ -373,6 +548,7 @@ class StandaloneRuntimeTest {
 
     private companion object {
         const val SITE_KEY = "elu_pk_test_runtime"
+        const val V2_SITE_KEY = "elu_pk_test_AAAAAAAAAAAAAAAAAAAAAAAAAA"
         const val ISSUED = "2026-08-04T00:00:00.000Z"
         const val NOW = "2026-08-04T00:01:00.000Z"
         const val LATER = "2026-08-04T00:02:00.000Z"

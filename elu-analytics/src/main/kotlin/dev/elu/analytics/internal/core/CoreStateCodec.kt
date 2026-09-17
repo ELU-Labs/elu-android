@@ -131,6 +131,14 @@ internal object CoreStateCodec {
                 .put("identity", encodeIdentity(state.identity))
                 .put("stream", encodeStream(state.stream))
                 .put("flagContext", encodeFlagContext(state.flagContext))
+        state.startupMigration?.let { checkpoint ->
+            requirePendingStartupState(state)
+            json.put("startupMigration", encodeStartupMigration(checkpoint))
+        }
+        state.startupHistory?.let { history ->
+            validateStartupHistory(state, history)
+            json.put("startupHistory", encodeStartupHistory(history))
+        }
         return encodeBounded(json)
     }
 
@@ -150,6 +158,42 @@ internal object CoreStateCodec {
         budgetStream(state.stream, budget)
         budget.addObjectEntry("flagContext")
         budgetFlagContext(state.flagContext, budget)
+        budgetStartupHistory(state, budget)
+        state.startupMigration?.let { checkpoint ->
+            requirePendingStartupState(state)
+            validateStartupMigration(checkpoint)
+            budget.addObjectEntry("startupMigration")
+            budget.addObjectNode()
+            budget.addObjectEntry("sourceSchema")
+            budget.addString(checkpoint.sourceSchema)
+            budget.addObjectEntry("sourceFingerprint")
+            budget.addString(checkpoint.sourceFingerprint)
+            budget.addObjectEntry("publicToken")
+            budget.addString(checkpoint.publicToken)
+        }
+    }
+
+    private fun budgetStartupHistory(state: PersistedCoreState, budget: PreEncodeBudget) {
+        val history = state.startupHistory ?: return
+        validateStartupHistory(state, history)
+        budget.addObjectEntry("startupHistory"); budget.addObjectNode()
+        for ((key, value) in listOf("sourceSchema" to history.sourceSchema, "sourceFingerprint" to history.sourceFingerprint,
+                "streamId" to history.streamId, "completedAt" to history.completedAt)) {
+            budget.addObjectEntry(key); budget.addString(value)
+        }
+        budget.addObjectEntry("records"); budget.addArrayNode()
+        for (record in history.records) {
+            budget.addArrayEntry(); budget.addObjectNode()
+            budget.addObjectEntry("sequence"); budget.addInteger(record.sequence)
+            budget.addObjectEntry("sourceModifiedAt"); budget.addInteger(record.sourceModifiedAt)
+            for ((key, value) in listOf("kind" to record.kind, "recordId" to record.recordId,
+                    "payloadSha256" to record.payloadSha256, "sourceFilename" to record.sourceFilename,
+                    "sourceSha256" to record.sourceSha256, "occurredAt" to record.occurredAt)) {
+                budget.addObjectEntry(key); budget.addString(value)
+            }
+            budget.addObjectEntry("sourceSessionId")
+            record.sourceSessionId?.let(budget::addString) ?: budget.addNull()
+        }
     }
 
     private fun budgetIdentity(
@@ -299,12 +343,127 @@ internal object CoreStateCodec {
     fun decode(bytes: ByteArray): PersistedCoreState {
         val root = parseObject(bytes)
         readSchemaVersion(root)
-        expectFields(root, aggregateFields, emptySet(), "core state")
+        expectFields(root, aggregateFields, setOf("startupMigration", "startupHistory"), "core state")
         return PersistedCoreState(
             identity = decodeIdentity(requiredObject(root, "identity")),
             stream = decodeStream(requiredObject(root, "stream")),
             flagContext = decodeFlagContext(requiredObject(root, "flagContext")),
+            startupMigration = if (root.has("startupMigration")) {
+                decodeStartupMigration(requiredObject(root, "startupMigration"))
+            } else null,
+            startupHistory = if (root.has("startupHistory")) decodeStartupHistory(requiredObject(root, "startupHistory")) else null,
+        ).also {
+            if (it.startupMigration != null) requirePendingStartupState(it)
+            it.startupHistory?.let { history -> validateStartupHistory(it, history) }
+        }
+    }
+
+    private fun requirePendingStartupState(state: PersistedCoreState) {
+        if (state.startupHistory != null) corrupt("Pending migration cannot carry imported history")
+        if (state.identity.migration != null) corrupt("Pending and completed migration cannot coexist")
+        if (state.identity.session != null) corrupt("Pending migration cannot carry an active session")
+        if (state.stream.nextSequence != INITIAL_SEQUENCE) corrupt("Pending migration cannot carry queued records")
+    }
+
+    private fun validateStartupHistory(state: PersistedCoreState, history: StartupHistoryLedger) {
+        if (state.startupMigration != null || history.sourceSchema != "elu-android-0.1.0/posthog-android-3.58.0" ||
+            !Regex("[a-f0-9]{64}").matches(history.sourceFingerprint) || history.streamId != state.stream.streamId ||
+            state.identity.migration != MigrationState(history.sourceSchema, history.completedAt) ||
+            history.records.size !in 1..1000 || state.stream.nextSequence < history.records.size ||
+            state.identity.revision < history.records.size || state.identity.contextRevision < history.records.size) {
+            corrupt("Invalid startup history ledger binding")
+        }
+        requireString(history.streamId, 1, 256, "startupHistory.streamId")
+        requireString(history.completedAt, 24, 24, "startupHistory.completedAt")
+        var previous = -1L
+        val ids = hashSetOf<String>()
+        for ((index, record) in history.records.withIndex()) {
+            if (record.sequence != index.toLong() || record.kind !in setOf("event", "mutation") ||
+                !Regex("[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(record.recordId) ||
+                !ids.add(record.recordId) || record.sourceFilename != record.recordId + ".event" ||
+                !Regex("[a-f0-9]{64}").matches(record.payloadSha256) || !Regex("[a-f0-9]{64}").matches(record.sourceSha256) ||
+                record.sourceModifiedAt <= 0 || record.sourceModifiedAt <= previous ||
+                !Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z").matches(record.occurredAt)) {
+                corrupt("Invalid startup history record")
+            }
+            requireRfc3339(record.occurredAt, "startupHistory.occurredAt")
+            if (record.occurredAt > history.completedAt) corrupt("Imported record timestamp exceeds completion")
+            record.sourceSessionId?.let {
+                if (!Regex("[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(it)) corrupt("Invalid source history session")
+            }
+            if (record.kind == "event" && record.sourceSessionId == null) corrupt("Imported event lacks source session")
+            previous = record.sourceModifiedAt
+        }
+    }
+
+    private fun encodeStartupHistory(history: StartupHistoryLedger): JSONObject {
+        val rows = JSONArray()
+        for (record in history.records) rows.put(JSONObject()
+            .put("sequence", record.sequence).put("kind", record.kind).put("recordId", record.recordId)
+            .put("payloadSha256", record.payloadSha256).put("sourceFilename", record.sourceFilename)
+            .put("sourceSha256", record.sourceSha256).put("sourceModifiedAt", record.sourceModifiedAt)
+            .put("occurredAt", record.occurredAt).put("sourceSessionId", record.sourceSessionId ?: JSONObject.NULL))
+        return JSONObject().put("sourceSchema", history.sourceSchema).put("sourceFingerprint", history.sourceFingerprint)
+            .put("streamId", history.streamId).put("completedAt", history.completedAt).put("records", rows)
+    }
+
+    private fun decodeStartupHistory(json: JSONObject): StartupHistoryLedger {
+        expectFields(json, setOf("sourceSchema", "sourceFingerprint", "streamId", "completedAt", "records"), emptySet(), "startupHistory")
+        val rows = json.opt("records") as? JSONArray ?: corrupt("Startup history records must be an array")
+        if (rows.length() !in 1..1000) corrupt("Startup history count is outside its bound")
+        val records = ArrayList<StartupHistoryRecord>(rows.length())
+        for (index in 0 until rows.length()) {
+            val row = rows.opt(index) as? JSONObject ?: corrupt("Startup history row must be an object")
+            expectFields(row, setOf("sequence", "kind", "recordId", "payloadSha256", "sourceFilename", "sourceSha256", "sourceModifiedAt", "occurredAt", "sourceSessionId"), emptySet(), "startupHistory.record")
+            records.add(StartupHistoryRecord(
+                requiredLong(row, "sequence", "startupHistory.record"),
+                requiredString(row, "kind", 1, 16, "startupHistory.record"),
+                requiredString(row, "recordId", 36, 36, "startupHistory.record"),
+                requiredString(row, "payloadSha256", 64, 64, "startupHistory.record"),
+                requiredString(row, "sourceFilename", 42, 42, "startupHistory.record"),
+                requiredString(row, "sourceSha256", 64, 64, "startupHistory.record"),
+                requiredLong(row, "sourceModifiedAt", "startupHistory.record"),
+                requiredString(row, "occurredAt", 24, 24, "startupHistory.record"),
+                if (row.isNull("sourceSessionId")) null else requiredString(row, "sourceSessionId", 36, 36, "startupHistory.record"),
+            ))
+        }
+        return StartupHistoryLedger(
+            requiredString(json, "sourceSchema", 1, 128, "startupHistory"),
+            requiredString(json, "sourceFingerprint", 64, 64, "startupHistory"),
+            requiredString(json, "streamId", 1, 256, "startupHistory"),
+            requiredString(json, "completedAt", 24, 24, "startupHistory"),
+            java.util.Collections.unmodifiableList(records),
         )
+    }
+
+    private fun validateStartupMigration(checkpoint: StartupMigrationCheckpoint) {
+        if (checkpoint.sourceSchema != "elu-android-0.1.0/posthog-android-3.58.0") {
+            corrupt("Unsupported startup migration source")
+        }
+        if (!Regex("[a-f0-9]{64}").matches(checkpoint.sourceFingerprint)) {
+            corrupt("Invalid startup migration fingerprint")
+        }
+        requireString(checkpoint.publicToken, 1, 512, "startupMigration.publicToken")
+        if (!Regex("[A-Za-z0-9_-]+").matches(checkpoint.publicToken)) {
+            corrupt("Unsafe startup migration token namespace")
+        }
+    }
+
+    private fun encodeStartupMigration(checkpoint: StartupMigrationCheckpoint): JSONObject {
+        validateStartupMigration(checkpoint)
+        return JSONObject()
+            .put("sourceSchema", checkpoint.sourceSchema)
+            .put("sourceFingerprint", checkpoint.sourceFingerprint)
+            .put("publicToken", checkpoint.publicToken)
+    }
+
+    private fun decodeStartupMigration(json: JSONObject): StartupMigrationCheckpoint {
+        expectFields(json, setOf("sourceSchema", "sourceFingerprint", "publicToken"), emptySet(), "startupMigration")
+        return StartupMigrationCheckpoint(
+            requiredString(json, "sourceSchema", 1, 128, "startupMigration"),
+            requiredString(json, "sourceFingerprint", 64, 64, "startupMigration"),
+            requiredString(json, "publicToken", 1, 512, "startupMigration"),
+        ).also(::validateStartupMigration)
     }
 
     /**
@@ -329,7 +488,10 @@ internal object CoreStateCodec {
                 // the aggregate marker is absent or malformed.
                 false
             }
-        if (hasValidAggregateSchema) {
+        // A pending startup checkpoint is an aggregate-wide publication barrier.
+        // Even a damaged aggregate marker must not recover children and drop it.
+        // Unsupported major versions were already refused above.
+        if (hasValidAggregateSchema || root.has("startupMigration") || root.has("startupHistory")) {
             rejectUnknownFields(root, aggregateFields, emptySet(), "core state")
         }
 

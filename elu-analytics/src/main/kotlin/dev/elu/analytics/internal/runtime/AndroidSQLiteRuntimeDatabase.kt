@@ -1,5 +1,8 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.replay.NativeReplayAccounting
+import dev.elu.analytics.internal.core.CoreStateCodec
+
 import android.content.ContentValues
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
@@ -30,52 +33,97 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val faults: AndroidRuntimeDatabaseFaults,
 ) : RuntimeQueueDatabase {
     override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) {
+        require(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
+        ensureAdditiveSchema(false, initialAuthority.key, initialAuthority.storageSchemaVersion, initialAuthority.payload)
+    }
+
+    override fun ensureReplaySchema(initialState: RuntimeReplayStoredRow) {
+        require(initialState.key == "state")
+        ensureAdditiveSchema(true, initialState.key, initialState.storageSchemaVersion, initialState.payload)
+    }
+
+    override fun ensureNativeReplaySchema(initialAuthority: RuntimeReplayStoredRow) {
         assertOwnerThread()
-        require(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY) { "Initial flag authority row has the wrong key" }
-        require(initialAuthority.storageSchemaVersion == 1L) { "Initial flag authority schema must be v1" }
-        require(initialAuthority.payload.isNotEmpty()) { "Initial flag authority payload must not be empty" }
-        require(initialAuthority.payload.size <= MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) {
-            "Initial flag authority payload exceeds the SQLite row limit"
-        }
+        val initial = NativeReplayAccounting.read(initialAuthority)
         val version = pragmaLong(sqlite, "PRAGMA user_version")
-        if (version == RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
-            validateSchemaObjects(sqlite, flagsPresent = true)
+        if (version !in 1L..6L) throw UnsupportedRuntimeStorageSchemaException(version)
+        validateSchemaObjects(sqlite, version)
+        check(version in 3L..6L) { "Native accounting requires explicit replay storage" }
+        if (version == 5L || version == 6L) {
+            transaction { tx ->
+                val current = NativeReplayAccounting.read(tx.readReplayRow(NativeReplayAccounting.KEY)
+                    ?: corrupt("Missing native replay accounting"))
+                if (current.namespaceHash != initial.namespaceHash || current.streamId != initial.streamId) {
+                    corrupt("Native accounting installation mismatch")
+                }
+            }
             return
         }
-        if (version != RUNTIME_STORAGE_SCHEMA_VERSION.toLong()) {
-            throw UnsupportedRuntimeStorageSchemaException(version)
-        }
+        val target = if (version == 3L) 5 else 6
         sqlite.beginTransaction()
         var markedSuccessful = false
         try {
-            sqlite.execSQL(CREATE_FLAG_CACHE)
-            val values =
-                ContentValues().apply {
-                    put("record_key", initialAuthority.key)
-                    put("storage_schema_version", initialAuthority.storageSchemaVersion)
-                    put("payload", initialAuthority.payload)
-                }
-            sqlite.insertOrThrow(FLAG_CACHE_TABLE, null, values)
-            executePragma(sqlite, "PRAGMA user_version = $RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS")
-            if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
-                corrupt("Runtime database could not persist its additive flag schema version")
+            val tx = SQLiteTransaction(sqlite)
+            val core = tx.readCore() ?: corrupt("Native accounting without runtime core")
+            if (CoreStateCodec.decode(core.stateJson).stream.streamId != initial.streamId) corrupt("Native accounting stream mismatch")
+            if (tx.readReplayRow(NativeReplayAccounting.KEY) != null) corrupt("Native metadata precedes its schema")
+            val values = ContentValues().apply {
+                put("record_key", NativeReplayAccounting.KEY)
+                put("storage_schema_version", 1L)
+                put("payload", initial.encoded())
             }
-            sqlite.setTransactionSuccessful()
-            markedSuccessful = true
+            sqlite.insertOrThrow(REPLAY_TABLE, null, values)
+            executePragma(sqlite, "PRAGMA user_version = $target")
+            if (pragmaLong(sqlite, "PRAGMA user_version") != target.toLong()) corrupt("Native schema version was not persisted")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
         } finally {
-            try {
-                sqlite.endTransaction()
-            } catch (error: Throwable) {
-                if (markedSuccessful) {
-                    throw AmbiguousRuntimeCommitException(
-                        "SQLite could not report a definitive flag-schema transaction outcome",
-                        error,
-                    )
-                }
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain native schema transaction", error)
                 throw error
             }
         }
-        validateSchemaObjects(sqlite, flagsPresent = true)
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain native schema durability", error) }
+        validateSchemaObjects(sqlite, target.toLong())
+    }
+
+    private fun ensureAdditiveSchema(replay: Boolean, key: String, rowVersion: Long, payload: ByteArray) {
+        assertOwnerThread()
+        require(rowVersion == 1L && payload.isNotEmpty())
+        require(payload.size <= if (replay) REPLAY_ROW_BYTES else MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES)
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        if (version !in 1L..6L) throw UnsupportedRuntimeStorageSchemaException(version)
+        validateSchemaObjects(sqlite, version)
+        val alreadyPresent = if (replay) version in setOf(3L, 4L, 5L, 6L) else version in setOf(2L, 4L, 6L)
+        if (alreadyPresent) return
+        val target = if (replay) { if (version == 1L) 3 else 4 } else { when (version) { 1L -> 2; 5L -> 6; else -> 4 } }
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            sqlite.execSQL(if (replay) CREATE_REPLAY else CREATE_FLAG_CACHE)
+            val values = ContentValues().apply {
+                put("record_key", key)
+                put("storage_schema_version", rowVersion)
+                put("payload", payload)
+            }
+            sqlite.insertOrThrow(if (replay) REPLAY_TABLE else FLAG_CACHE_TABLE, null, values)
+            executePragma(sqlite, "PRAGMA user_version = $target")
+            if (pragmaLong(sqlite, "PRAGMA user_version") != target.toLong()) corrupt("Additive schema version was not persisted")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful()
+            markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain additive schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain additive schema durability", error) }
+        validateSchemaObjects(sqlite, target.toLong())
     }
 
     override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T {
@@ -276,6 +324,83 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             return changed == 1
         }
 
+        override fun replaySchemaPresent(): Boolean {
+            requireTransaction()
+            return pragmaLong(sqlite, "PRAGMA user_version") in setOf(3L, 4L, 5L, 6L)
+        }
+
+        override fun nativeReplaySchemaPresent(): Boolean {
+            requireTransaction()
+            return pragmaLong(sqlite, "PRAGMA user_version") in setOf(5L, 6L)
+        }
+
+        override fun readReplayRow(key: String): RuntimeReplayStoredRow? {
+            requireTransaction()
+            requireReplayTable()
+            require(key.isNotEmpty()) { "Replay row key must not be empty" }
+            sqlite.query(
+                REPLAY_TABLE,
+                REPLAY_ROW_COLUMNS,
+                "record_key = ?",
+                arrayOf(key),
+                null,
+                null,
+                null,
+                "2",
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) return null
+                val row = cursor.replayRow()
+                if (cursor.moveToNext()) corrupt("Runtime database contains duplicate replay row keys")
+                return row
+            }
+        }
+
+        override fun scanReplayRows(prefix: String, visitor: (RuntimeReplayStoredRow) -> Unit) {
+            requireTransaction()
+            requireReplayTable()
+            sqlite.query(
+                REPLAY_TABLE,
+                REPLAY_ROW_COLUMNS,
+                "substr(record_key, 1, ?) = ?",
+                arrayOf(prefix.length.toString(), prefix),
+                null,
+                null,
+                "record_key ASC",
+                null,
+            ).use { cursor -> while (cursor.moveToNext()) visitor(cursor.replayRow()) }
+        }
+
+        override fun putReplayRow(row: RuntimeReplayStoredRow) {
+            requireTransaction()
+            requireReplayTable()
+            require(row.key.isNotEmpty() && row.key.length <= MAX_REPLAY_ROW_KEY_CHARS) {
+                "Replay row key is outside its bounds"
+            }
+            require(row.storageSchemaVersion >= 1L) { "Replay row schema version must be positive" }
+            require(row.payload.isNotEmpty() && row.payload.size <= REPLAY_ROW_BYTES) {
+                "Replay row payload is outside the Android SQLite row limit"
+            }
+            val values =
+                ContentValues().apply {
+                    put("record_key", row.key)
+                    put("storage_schema_version", row.storageSchemaVersion)
+                    put("payload", row.payload)
+                }
+            sqlite.insertWithOnConflict(REPLAY_TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE).also { inserted ->
+                if (inserted == -1L) corrupt("Replay row upsert failed")
+            }
+            mutated = true
+        }
+
+        override fun deleteReplayRow(key: String): Boolean {
+            requireTransaction()
+            requireReplayTable()
+            val changed = sqlite.delete(REPLAY_TABLE, "record_key = ?", arrayOf(key))
+            if (changed > 1) corrupt("Replay row deletion affected more than one key")
+            if (changed == 1) mutated = true
+            return changed == 1
+        }
+
         override fun readFlagRow(key: String): RuntimeFlagStoredRow? {
             requireTransaction()
             requireFlagTable()
@@ -355,10 +480,17 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         }
 
         private fun requireFlagTable() {
-            if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
+            if (pragmaLong(sqlite, "PRAGMA user_version") !in setOf(2L, 4L, 6L)) {
                 throw IllegalStateException("Flag storage schema has not been initialized")
             }
         }
+
+        private fun requireReplayTable() {
+            check(replaySchemaPresent()) { "Replay storage schema has not been initialized" }
+        }
+
+        private fun Cursor.replayRow(): RuntimeReplayStoredRow = RuntimeReplayStoredRow(
+            requiredString(0, "replay_queue.record_key"), getLong(1), requiredBlob(2, "replay_queue.payload"))
 
         private fun Cursor.storedRecord(): RuntimeStoredRecord =
             RuntimeStoredRecord(
@@ -381,6 +513,18 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     internal companion object {
         private const val CORE_TABLE = "core_state"
         private const val QUEUE_TABLE = "queue_records"
+        private const val REPLAY_TABLE = "replay_queue"
+        private const val MAX_REPLAY_ROW_KEY_CHARS = 128
+        // Conservative segment policy, not a universal device CursorWindow capacity assertion.
+        private const val REPLAY_ROW_BYTES = 262_144
+        private val REPLAY_ROW_COLUMNS = arrayOf("record_key", "storage_schema_version", "payload")
+        private val CREATE_REPLAY = """
+            CREATE TABLE replay_queue (
+                record_key TEXT NOT NULL PRIMARY KEY CHECK (length(record_key) BETWEEN 1 AND $MAX_REPLAY_ROW_KEY_CHARS),
+                storage_schema_version INTEGER NOT NULL CHECK (storage_schema_version >= 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND $REPLAY_ROW_BYTES)
+            )
+        """.trimIndent()
         private const val FLAG_CACHE_TABLE = "flag_cache"
         private const val SINGLETON_ID = 1
         private const val MAX_FLAG_ROW_KEY_CHARS = 512
@@ -550,30 +694,25 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version != RUNTIME_STORAGE_SCHEMA_VERSION.toLong() &&
-                    version != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong() ->
+                version !in 1L..6L ->
                     throw UnsupportedRuntimeStorageSchemaException(version)
             }
-            validateSchemaObjects(
-                sqlite,
-                flagsPresent = pragmaLong(sqlite, "PRAGMA user_version") == RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong(),
-            )
+            validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
         }
 
-        private fun validateSchemaObjects(sqlite: SQLiteDatabase, flagsPresent: Boolean) {
-            val expected =
-                if (flagsPresent) {
-                    setOf("table:$CORE_TABLE", "table:$QUEUE_TABLE", "table:$FLAG_CACHE_TABLE")
-                } else {
-                    setOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
-                }
+        private fun validateSchemaObjects(sqlite: SQLiteDatabase, version: Long) {
+            if (version !in 1L..6L) throw UnsupportedRuntimeStorageSchemaException(version)
+            val flagsPresent = version in setOf(2L, 4L, 6L)
+            val replayPresent = version in setOf(3L, 4L, 5L, 6L)
+            val expected = mutableSetOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
+            if (flagsPresent) expected += "table:$FLAG_CACHE_TABLE"
+            if (replayPresent) expected += "table:$REPLAY_TABLE"
             val objects = applicationSchemaObjects(sqlite)
-            if (objects != expected) {
-                corrupt("Runtime database schema object set is unsupported: ${objects.joinToString()}")
-            }
+            if (objects != expected) corrupt("Runtime database schema object set is unsupported: ${objects.joinToString()}")
             validateTableSql(sqlite, CORE_TABLE, CREATE_CORE)
             validateTableSql(sqlite, QUEUE_TABLE, CREATE_QUEUE)
             if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
+            if (replayPresent) validateTableSql(sqlite, REPLAY_TABLE, CREATE_REPLAY)
         }
 
         private const val SQLITE_SYNCHRONOUS_FULL = 2L
