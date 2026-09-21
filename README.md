@@ -9,8 +9,8 @@ is managed from your ELU dashboard and delivered as remote config. See
   key is required in the app.
 - Privacy controls (EU blocking, text/image masking, replay limits) are
   applied **client-side at capture time** and managed from the ELU dashboard.
-- `minSdk 23` for the analytics runtime. Standalone session replay is still
-  undergoing qualification and is not enabled in this checkout.
+- `minSdk 23` for events, identity and feature flags. Native session replay
+  requires API 29 or later and current server authorization.
 
 This source checkout contains the ELU-owned analytics runtime. Its standalone
 release is still undergoing qualification. The published 0.1.0 release uses
@@ -43,9 +43,11 @@ includeBuild("path/to/elu-android") {
 }
 ```
 
-When migrating from another analytics integration, review identity continuity
-and event ownership before removing it. The owned runtime has separate state;
-installing it alone does not migrate an existing integration's stored identity.
+When upgrading from 0.1.0, keep the same application ID, signing identity and
+application data. This source includes a bounded upgrade reader that preserves
+supported identity, consent and pending event state before collection starts.
+The standalone upgrade path is still being qualified; do not treat a source
+build as an approved replacement for a published release.
 
 For the owned source runtime, enable core library desugaring in your **app
 module** so its Java time and arithmetic APIs work on Android API 23. This
@@ -160,15 +162,72 @@ navController.addOnDestinationChangedListener { _, destination, _ ->
 ## Full surface
 
 `capture`, `identify`, `reset`, `alias`, `distinctId`, `screen`,
-`register`/`unregister` (super properties), `setPersonProperties`,
-`captureException`, `group`, `flush`, and feature flags: `getFeatureFlag`,
-`getFeatureFlagPayload`, `isFeatureEnabled`, `reloadFeatureFlags`,
+`register`/`registerOnce`/`unregister` (super properties), `setPersonProperties`,
+`captureException`, `group`/`getGroups`/`resetGroups`, `flush`, and feature flags: `getFeatureFlag`,
+`getFeatureFlagPayload`, `getFeatureFlagResult`, `isFeatureEnabled`, `reloadFeatureFlags`,
 `onFeatureFlagsLoaded`, `setPersonPropertiesForFlags`,
-`setGroupPropertiesForFlags`.
+`setGroupPropertiesForFlags`, `resetPersonPropertiesForFlags`, and
+`resetGroupPropertiesForFlags`.
 
 Every method is safe to call at any time — before setup, while config is
 loading, or when analytics is disabled — it never throws and never blocks.
 Behavioral details: [`CONTRACT.md`](./CONTRACT.md).
+
+## Consent and properties
+
+```kotlin
+Elu.optOut()                         // Stop collection and persist the choice.
+Elu.reset()                          // Clear user/group state; preserve consent.
+Elu.optIn()                          // Resume if server policy permits; capture $opt_in.
+Elu.optIn(captureEventName = null)    // Resume without an opt-in event.
+Elu.registerOnce(mapOf("first_source" to "invite"))
+Elu.identify("user-123", mapOf("plan" to "pro"), mapOf("first_plan" to "pro"))
+val result = Elu.getFeatureFlagResult("checkout")
+```
+
+`registerOnce` updates missing properties or values equal to its optional
+`defaultValue` (the string `"None"` by default). Identify and person-property
+calls also accept a separate set-once map. Flag results contain `key`, `enabled`,
+`variant` and `payload`; unavailable or expired results are null. Account/context
+changes invalidate prior flag results immediately.
+
+Opt-out takes effect for new work immediately and persists asynchronously.
+Already transmitted requests cannot be recalled. Pending replay is purged;
+previously queued events remain paused until explicit opt-in. A logout/reset
+never opts a visitor back in. `flush()` schedules delivery; it does not promise
+network completion before Android terminates the process.
+
+## Native replay privacy and supported UI
+
+Replay captures supported Android Views when the current server configuration
+authorizes replay. In sensitive-text mode, ordinary framework `TextView`,
+`Button`, `CheckBox`, `RadioButton`, `Switch` and `ToggleButton` text remains
+readable when it is plain, fully visible, and untransformed. Styled, transformed,
+clipped, transparent and custom text remain masked. Text is limited to 4096 UTF-8
+bytes per view; larger values become a placeholder. Input values, images,
+WebViews and unsupported/custom views stay hidden. All-text mode masks ordinary text too.
+Opaque native masking rules retain all-text masking; unresolved block rules
+prevent capture.
+
+Strengthen privacy before a view is displayed:
+
+```kotlin
+Elu.maskView(accountDetails)   // Mask this view's and its descendants' text.
+Elu.blockView(paymentPanel)   // Exclude content and descendants; keep a placeholder.
+```
+
+These restrictions last for the view's lifetime and cannot be weakened through
+the SDK. They also invalidate a capture already in progress. XML tags from
+other SDKs are not interpreted. A bounded registry retains up to 128 live view
+restrictions. If that bound is exceeded, replay fails closed for the process;
+requested restrictions are never discarded to continue recording.
+
+Compose semantics replay and readable text from custom/AppCompat view subclasses
+are not yet supported; keep manual `Elu.screen()` navigation events. Analytics
+works on API 23+, while replay currently requires API 29+. API 26–28 replay and
+Compose parity remain qualification gaps, so this source is not yet a complete
+standalone customer release. No Web Vitals or browser long-task metrics are
+reported as native performance data.
 
 ## Build notes
 

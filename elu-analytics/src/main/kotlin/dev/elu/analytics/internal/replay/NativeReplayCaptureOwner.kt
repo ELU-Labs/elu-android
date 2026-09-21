@@ -99,6 +99,8 @@ internal interface NativeReplayCapturePlatform {
     val apiLevel: Int
     fun createCollector(): NativeReplayCaptureCollector
     fun createCollector(profile: NativeCapturePassProfile): NativeReplayCaptureCollector = createCollector()
+    fun createCollector(masking: NativeMaskingProfile, profile: NativeCapturePassProfile?): NativeReplayCaptureCollector =
+        if (profile == null) createCollector() else createCollector(profile)
     fun awaitNext(withdrawn: CountDownLatch): Boolean
 }
 
@@ -118,6 +120,12 @@ internal object AndroidNativeReplayCapturePlatform : NativeReplayCapturePlatform
     }
     override fun createCollector(profile: NativeCapturePassProfile): NativeReplayCaptureCollector {
         val collector = AndroidViewReplayCollector(profile = profile)
+        return NativeReplayCaptureCollector { root, ordinal, timestamp, fence, current, unresolved ->
+            collector.collect(root as View, ordinal, timestamp, fence, current, unresolved)
+        }
+    }
+    override fun createCollector(masking: NativeMaskingProfile, profile: NativeCapturePassProfile?): NativeReplayCaptureCollector {
+        val collector = AndroidViewReplayCollector(profile = profile, maskingProfile = masking)
         return NativeReplayCaptureCollector { root, ordinal, timestamp, fence, current, unresolved ->
             collector.collect(root as View, ordinal, timestamp, fence, current, unresolved)
         }
@@ -293,7 +301,7 @@ private class NativeReplayCaptureRun(
                     }
                     requireCurrent(withinPass())
                     diagnosticStage = NativeCaptureStage.COLLECTOR
-                    val originalCollector = collector ?: (if (passProfile == null) platform.createCollector() else platform.createCollector(passProfile)).also { collector = it }
+                    val originalCollector = collector ?: platform.createCollector(admission.profile, passProfile).also { collector = it }
                     requireCurrent(withinPass())
                     passProfile?.configMaterialization()
                     val unresolvedBlockRules = admission.hasUnresolvedBlockRules

@@ -44,7 +44,7 @@ internal class NativeReplaySealer(
     private val originalVersions: Value
     private val protocolGeneration: String
     private val maximumRequestBytes: Int
-    private var encoder = NativeWireframeEncoder(limits)
+    private var encoder = NativeWireframeEncoder(limits, maskingProfile = profile)
 
     init {
         CoreStateCodec.encodeIdentity(identity)
@@ -67,7 +67,10 @@ internal class NativeReplaySealer(
             original.replaySampled && original.maskingValidated && original.replaySessionEligible && !original.identityOptedOut &&
             original.replayBudgetRemainingSeconds > 0 && original.replayTransport?.codec == CODEC &&
             original.replayTransport.compression == V1ReplayCompression.GZIP && original.replayTransport.advertised &&
-            original.effectiveMasking.secureInputsMasked && profile === NativeMaskingProfile.blanketMask() &&
+            original.effectiveMasking.secureInputsMasked &&
+            (profile === NativeMaskingProfile.blanketMask() ||
+                profile === NativeMaskingProfile.select(authorization.privacy.masking, V1PrivacyPlatform.ANDROID)) &&
+            original.effectiveMasking.text == profile.textMasking &&
             profile.compatibility(authorization.privacy.masking, V1PrivacyPlatform.ANDROID) == NativeMaskingCompatibility.COMPATIBLE)
         this.replayId = checkedString(replayId, 256)
         sessionId = checkedString(checkNotNull(session).id, 256)

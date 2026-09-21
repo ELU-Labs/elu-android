@@ -368,6 +368,112 @@ class StandaloneFacadeTest {
         } finally { release.countDown() }
     }
 
+    @Test
+    fun `register once preserves values and only replaces absent or explicit defaults`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.facade.register(mapOf("plan" to "paid", "placeholder" to "None", "zero" to 0))
+        harness.facade.registerOnce(mapOf("plan" to "free", "placeholder" to "ready", "new" to true), "None")
+        harness.facade.registerOnce(mapOf("zero" to 9), 0.0)
+        harness.facade.registerOnce(mapOf("new" to false), "None")
+        harness.settle()
+        assertEquals(mapOf("plan" to "paid", "placeholder" to "ready", "zero" to 9, "new" to true),
+            harness.owner.snapshot().get().state.identity.superProperties)
+    }
+
+    @Test
+    fun `opt out persists without configuration and reset preserves consent`() {
+        val harness = harness()
+        harness.facade.capture("before-consent", null, Date(NOW_MS))
+        harness.facade.optOut()
+        assertTrue(harness.facade.isOptedOut())
+        harness.settle()
+        assertTrue(harness.owner.snapshot().get().state.identity.optedOut)
+        harness.facade.applyConfiguration(config())
+        harness.facade.reset()
+        harness.facade.capture("after-reset", null, Date(NOW_MS))
+        harness.settle()
+        assertTrue(harness.owner.snapshot().get().state.identity.optedOut)
+        assertTrue(harness.facade.isOptedOut())
+        assertNull(harness.facade.distinctId())
+        assertTrue(harness.queued().isEmpty())
+        assertTrue(harness.transport.requests.isEmpty())
+    }
+
+    @Test
+    fun `opt in restores consent after durable storage and captures its event`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.facade.optOut()
+        harness.settle()
+        harness.facade.optIn("\$opt_in", mapOf("source" to "settings"))
+        harness.settle()
+        assertFalse(harness.facade.isOptedOut())
+        assertFalse(harness.owner.snapshot().get().state.identity.optedOut)
+        assertEquals(listOf("event:\$opt_in"), harness.queued())
+        harness.facade.capture("allowed", null, Date(NOW_MS))
+        harness.settle()
+        assertTrue(harness.queued().contains("event:allowed"))
+    }
+
+    @Test
+    fun `newer opt out prevents queued opt in from reopening collection`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val harness = harness(beforeOpen = { entered.countDown(); assertTrue(release.await(5, TimeUnit.SECONDS)) })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            harness.facade.applyConfiguration(config())
+            harness.facade.optIn("\$opt_in", null)
+            harness.facade.optOut()
+            harness.facade.capture("forbidden", null, Date(NOW_MS))
+            release.countDown()
+            harness.settle()
+            assertTrue(harness.facade.isOptedOut())
+            assertTrue(harness.owner.snapshot().get().state.identity.optedOut)
+            assertTrue(harness.queued().isEmpty())
+            assertTrue(harness.transport.requests.isEmpty())
+        } finally { release.countDown() }
+    }
+
+    @Test
+    fun `typed flag result preserves variant and payload and disappears on identity change`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.settle()
+        assertNull(harness.facade.getFeatureFlagResult("variant"))
+        harness.settle()
+        val result = harness.facade.getFeatureFlagResult("variant")!!
+        assertEquals("variant", result.key)
+        assertTrue(result.enabled)
+        assertEquals("variant-a", result.variant)
+        harness.facade.identify("next-account", null)
+        assertNull(harness.facade.getFeatureFlagResult("variant"))
+        harness.settle()
+    }
+
+    @Test
+    fun `set once and reset context APIs preserve and isolate durable evaluation state`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.facade.identify("account-a", mapOf("plan" to "paid"), mapOf("source" to "first"))
+        harness.facade.setPersonProperties(mapOf("plan" to "enterprise"), mapOf("source" to "second", "region" to "west"))
+        harness.facade.group("company", "company-a", mapOf("tier" to "paid"))
+        harness.settle()
+        assertEquals(mapOf("plan" to "enterprise", "source" to "first", "region" to "west"),
+            harness.owner.snapshot().get().state.flagContext.personProperties)
+        assertEquals(mapOf("company" to "company-a"), harness.facade.getGroups())
+        harness.facade.resetGroupPropertiesForFlags("company")
+        harness.facade.resetPersonPropertiesForFlags()
+        harness.settle()
+        assertTrue(harness.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+        assertTrue(harness.owner.snapshot().get().state.flagContext.groupProperties.isEmpty())
+        assertEquals(mapOf("company" to "company-a"), harness.facade.getGroups())
+        harness.facade.resetGroups()
+        harness.settle()
+        assertTrue(harness.facade.getGroups().isEmpty())
+    }
+
     // ---- harness -------------------------------------------------------------
 
     private fun harness(

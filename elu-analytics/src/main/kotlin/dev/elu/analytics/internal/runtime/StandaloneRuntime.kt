@@ -165,6 +165,7 @@ internal class StandaloneRuntime(
     private val deliveryLock = Any()
     private var coordinator: RuntimeBatchDeliveryCoordinator? = null
     private var closed = false
+    private val consentRestricted = AtomicBoolean(false)
     private val closeResult = object : SdkFuture<Unit>() {
         override fun cancel(mayInterruptIfRunning: Boolean) = false
     }
@@ -382,6 +383,15 @@ internal class StandaloneRuntime(
     /** Stop scheduling promptly; every composed send also checks its original source witness. */
     internal fun configurationChanged() { nativeReplay?.withdrawAll(); retireDelivery() }
 
+    internal fun restrictForConsent() {
+        consentRestricted.set(true)
+        nativeReplay?.withdrawAll()
+        retireDelivery()
+    }
+
+    /** Only the facade calls this after its durable opt-in and latest intent still agree. */
+    internal fun restoreConsent() { consentRestricted.set(false) }
+
     private fun installDelivery(
         authorization: V1BatchAuthorizationSnapshot,
         witness: V2ConfigAuthorityWitness?,
@@ -390,8 +400,9 @@ internal class StandaloneRuntime(
             RuntimeBatchDeliveryCoordinator(
                 authorization = authorization,
                 queue = deliveryQueue,
-                transport = if (configurationGate == null) transport else BatchHTTPTransport { request ->
-                    if (witness?.isCurrent() != true || !owner.authorizeCurrentDelivery(witness.body, deviceInEuTimezone).await() || !witness.isCurrent()) {
+                transport = BatchHTTPTransport { request ->
+                    if (consentRestricted.get()) throw java.io.IOException("Collection consent withdrawn")
+                    if (configurationGate != null && (witness?.isCurrent() != true || !owner.authorizeCurrentDelivery(witness.body, deviceInEuTimezone).await() || !witness.isCurrent())) {
                         throw java.io.IOException("Event configuration or privacy changed before dispatch")
                     }
                     transport.execute(request)
@@ -403,7 +414,7 @@ internal class StandaloneRuntime(
             )
         val previous =
             synchronized(deliveryLock) {
-                if (closed) {
+                if (closed || consentRestricted.get()) {
                     replacement.close()
                     return
                 }

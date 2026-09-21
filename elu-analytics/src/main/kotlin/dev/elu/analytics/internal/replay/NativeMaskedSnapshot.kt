@@ -7,7 +7,7 @@ import kotlin.math.abs
 internal enum class NativeEncodingFailure {
     INVALID_GEOMETRY, INVALID_VIEWPORT, INVALID_TIMESTAMP, FRAME_ORDER, DUPLICATE_IDENTITY,
     RETIRED_IDENTITY, NODE_LIMIT, REPRESENTATION_LIMIT, EVENT_LIMIT, BYTE_LIMIT,
-    COUNTER_EXHAUSTED, INVALID_LIMITS,
+    COUNTER_EXHAUSTED, INVALID_LIMITS, INVALID_TEXT,
 }
 
 internal class NativeEncodingException(val failure: NativeEncodingFailure) : IllegalArgumentException(failure.name)
@@ -47,9 +47,29 @@ internal data class NativeStyle(
     init { nativeRequire(fontSize == null || fontSize.isFinite() && fontSize in 1.0..256.0, NativeEncodingFailure.INVALID_GEOMETRY) }
 }
 
+/** Detached plain text accepted only after the collector has applied all inherited restrictions. */
+internal class NativeReplayText private constructor(val value: String) {
+    override fun equals(other: Any?): Boolean = other is NativeReplayText && value == other.value
+    override fun hashCode(): Int = value.hashCode()
+    companion object {
+        const val MAXIMUM_UTF8_BYTES = 4_096
+        fun read(value: String): NativeReplayText {
+            nativeRequire(value.length <= MAXIMUM_UTF8_BYTES, NativeEncodingFailure.INVALID_TEXT)
+            val encoder = Charsets.UTF_8.newEncoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            val bytes = try { encoder.encode(java.nio.CharBuffer.wrap(value)).remaining() }
+                catch (_: java.nio.charset.CharacterCodingException) { throw NativeEncodingException(NativeEncodingFailure.INVALID_TEXT) }
+            nativeRequire(bytes <= MAXIMUM_UTF8_BYTES, NativeEncodingFailure.INVALID_TEXT)
+            return NativeReplayText(value)
+        }
+    }
+}
+
 internal sealed interface NativeMaskedKind {
     data object Rectangle : NativeMaskedKind
     data object Text : NativeMaskedKind
+    data class ReadableText(val text: NativeReplayText) : NativeMaskedKind
     data class Input(val secure: Boolean) : NativeMaskedKind
     data object Placeholder : NativeMaskedKind
 }

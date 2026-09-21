@@ -81,6 +81,40 @@ class AndroidViewReplayCollectorTest {
         view.layout(x, y, x + width, y + height)
     }
 
+    @Test fun transformedOrdinaryViewNeverLeaksUnderlyingText() = main { root ->
+        val transformed = TextView(activity).apply {
+            text = "PRIVATE_TRANSFORMED_VALUE"
+            transformationMethod = object : android.text.method.TransformationMethod {
+                override fun getTransformation(source: CharSequence?, view: View?) = "Hidden"
+                override fun onFocusChanged(view: View?, source: CharSequence?, focused: Boolean, direction: Int, rectangle: Rect?) = Unit
+            }
+        }
+        add(root, transformed)
+        val snapshot = AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())
+            .collect(root, 0, 1000, NativeCollectionFence(), { true }, false)
+        assertTrue(snapshot.nodes.any { it.kind == NativeMaskedKind.Text })
+        assertFalse(snapshot.nodes.any { it.kind is NativeMaskedKind.ReadableText })
+    }
+
+    @Test fun sensitiveTextRemainsReadableWhileInputsAndBlockedDescendantsStayHidden() = main { root ->
+        val ordinary = TextView(activity).apply { text = "Readable ordinary text" }; add(root, ordinary, width = 500, height = 80)
+        val input = EditText(activity).apply { setText("PRIVATE_INPUT") }; add(root, input, y = 80)
+        val blocked = FrameLayout(activity); add(root, blocked, y = 140)
+        val trap = TrapText(activity); add(blocked, trap, 0, 0); trap.armed = true
+        dev.elu.analytics.Elu.blockView(blocked)
+        val collector = AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())
+        val first = collector.collect(root, 0, 1000, NativeCollectionFence(), { true }, false)
+        assertTrue(first.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value == "Readable ordinary text" })
+        assertTrue(first.nodes.any { it.kind is NativeMaskedKind.Input })
+        assertFalse(first.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value?.contains("PRIVATE") == true })
+        ordinary.text = "Updated ordinary text"
+        val second = collector.collect(root, 1, 1001, NativeCollectionFence(), { true }, false)
+        assertTrue(second.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value == "Updated ordinary text" })
+        dev.elu.analytics.Elu.maskView(root)
+        val masked = collector.collect(root, 2, 1002, NativeCollectionFence(), { true }, false)
+        assertFalse(masked.nodes.any { it.kind is NativeMaskedKind.ReadableText })
+    }
+
     @Test fun layoutUncertaintyRequiresExactOriginalBootDecorAndPropagatesThroughBlockedPlaceholder() = main { root ->
         if (Build.VERSION.SDK_INT < 29) return@main
         val decor = activity.window.decorView

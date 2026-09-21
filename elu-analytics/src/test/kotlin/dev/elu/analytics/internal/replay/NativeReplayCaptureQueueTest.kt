@@ -79,6 +79,36 @@ class NativeReplayCaptureQueueTest {
         }
     }
 
+    @Test fun `sensitive ordinary text survives current native authority sealing and durable delivery retention`() = Rig().use { rig ->
+        rig.configure { it.getJSONObject("privacy").getJSONObject("masking")
+            .put("text", "sensitive").put("platformRules", org.json.JSONArray()) }
+        rig.activate()
+        Session(rig).use { session ->
+            val permit = session.begin(); val admission = session.admission()
+            assertSame(NativeMaskingProfile.sensitiveMask(), admission.profile)
+            assertEquals(V1TextMasking.SENSITIVE,
+                V1ConfigJson.parseEffectivePrivacy(admission.privacy.toString(Charsets.UTF_8)).effectiveMasking.text)
+            val bounds = NativeRect(0.0, 0.0, 100.0, 20.0)
+            val frame = NativeMaskedSnapshot(0, rig.clock.wall, NativeViewport(320, 480), listOf(
+                NativeMaskedNode(UUID.randomUUID(), NativeMaskedKind.ReadableText(NativeReplayText.read("Welcome café")), bounds, bounds),
+                NativeMaskedNode(UUID.randomUUID(), NativeMaskedKind.Input(true), bounds, bounds)))
+            val request = NativeReplaySealer(permit.replayId, admission.identity, admission.authorization,
+                admission.privacy, admission.profile, StandaloneRuntime.defaultVersions()).seal(listOf(frame))
+            assertTrue(rig.owner.appendNativeReplay(request, admission, session.use).get() is NativeReplayAppendOutcome.Committed)
+            val envelope = JSONObject(request.copyBytes().toString(Charsets.UTF_8))
+            val chunk = envelope.getJSONObject("chunk")
+            val payload = java.util.Base64.getDecoder().decode(chunk.getString("payload"))
+            val wire = java.util.zip.GZIPInputStream(payload.inputStream()).use { it.readBytes().toString(Charsets.UTF_8) }
+            assertTrue(wire.contains("Welcome café")); assertTrue(wire.contains("[masked]"))
+        }
+        val delivery = rig.owner.openReplayDeliveryQueue(PrivacyStateProjector.nativeSealedDeliveryPolicy(
+            NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
+                setOf(ReplayFixtures.GENERATION))) { false }).get()
+        assertNotNull(delivery.claim())
+        rig.renew { it.getJSONObject("privacy").getJSONObject("masking").put("text", "all") }
+        assertNull(delivery.claim())
+    }
+
     @Test fun `native close receipt waits original physical and durable stop and cannot be canceled`() = Rig().use { rig ->
         rig.activate(); Session(rig).use { session ->
             val permit = session.begin()

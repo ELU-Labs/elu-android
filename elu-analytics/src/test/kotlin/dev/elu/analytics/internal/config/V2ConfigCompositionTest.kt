@@ -514,6 +514,8 @@ class V2ConfigCompositionTest {
         assertTrue(rig.runtime.capture("fresh-needs-reauthorization").get() is RuntimeCaptureResult.Rejected)
         assertTrue(rig.owner.authorizeCurrentDelivery(rig.body) { false }.get())
         rig.runtime.flush().get(2, TimeUnit.SECONDS)
+        // A coalesced trigger does not await the pass already admitted by configuration.
+        assertTrue(rig.firstNetworkCall.await(2, TimeUnit.SECONDS))
         assertEquals(1, rig.networkCalls)
         rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, "2026-08-05T00:01:00.000Z")).get()
         assertFalse(rig.owner.authorizeCurrentDelivery(rig.body) { false }.get())
@@ -564,7 +566,8 @@ class V2ConfigCompositionTest {
         @Volatile var onWrite: (() -> Unit)? = null
         @Volatile var ownerWall: Long? = null
         @Volatile var lastFlagRequest: JSONObject? = null
-        var networkCalls = 0
+        @Volatile var networkCalls = 0
+        val firstNetworkCall = java.util.concurrent.CountDownLatch(1)
         val sentEvents = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
         @Volatile var flagVariant = "a"
         val callbacks = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
@@ -602,6 +605,7 @@ class V2ConfigCompositionTest {
             },
             transportFactory = { BatchHTTPTransport { request ->
                 networkCalls++
+                firstNetworkCall.countDown()
                 if (!acknowledgeEvents) BatchHTTPResponse(503, ByteArray(0)) else {
                     val body = JSONObject(request.bodyBytes().decodeToString())
                     val records = body.getJSONArray("records")

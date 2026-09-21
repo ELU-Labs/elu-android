@@ -9,6 +9,11 @@ import android.view.ViewGroup
 import android.view.ViewOutlineProvider
 import android.webkit.WebView
 import android.widget.EditText
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.RadioButton
+import android.widget.Switch
+import android.widget.ToggleButton
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
@@ -132,10 +137,11 @@ private fun observeNativeReplayOutlineProfiled(
 }
 
 /**
- * One-shot blanket-masked geometry collector. It never reads content, drawable appearance or accessibility data.
+ * One-shot geometry collector. Authorized sensitive profiles read bounded text from known framework
+ * widgets after all inherited privacy restrictions; drawable appearance and accessibility data are never read.
  * Unknown rendering is an opaque placeholder. Continuous capture and permission belong to the owner.
  * Public transition-matrix/alpha observation is unavailable before API29; legacy framework transitions
- * remain a separate integration gate. This collector is not constructed by the public SDK yet.
+ * remain a separate integration gate. Construction requires the native recorder authority.
  */
 internal class AndroidViewReplayCollector(
     private val maximumNodes: Int = 9_999,
@@ -143,6 +149,7 @@ internal class AndroidViewReplayCollector(
     private val maximumProjectionIds: Int = 99_999,
     private val newProjection: () -> UUID = UUID::randomUUID,
     private val profile: NativeCapturePassProfile? = null,
+    private val maskingProfile: NativeMaskingProfile = NativeMaskingProfile.blanketMask(),
 ) {
     private data class Projection(val view: WeakReference<View>, val id: UUID)
     private data class Bounds(val x: Double, val y: Double, val width: Double, val height: Double) {
@@ -158,7 +165,7 @@ internal class AndroidViewReplayCollector(
     private data class Geometry(val bounds: Bounds, val explicitClip: Bounds?, val hidden: Boolean, val elevation: Float = 0f, val translationZ: Float = 0f, val kind: NativeGeometryKind = NativeGeometryKind.VISIBLE_CLIP)
     private data class GroupClip(val children: Boolean, val padding: Boolean, val left: Int, val top: Int, val right: Int, val bottom: Int)
     private data class Observation(val view: View, val parent: Any?, val geometry: Geometry, val groupClip: GroupClip?, val children: List<View>?)
-    private data class Work(val view: View, val parent: ViewGroup?, val clip: Bounds, val blocked: Boolean, val depth: Int, val geometry: NativeGeometryKind)
+    private data class Work(val view: View, val parent: ViewGroup?, val clip: Bounds, val blocked: Boolean, val masked: Boolean, val depth: Int, val geometry: NativeGeometryKind)
 
     private var projections = emptyList<Projection>()
     private var issued = emptySet<UUID>()
@@ -184,9 +191,11 @@ internal class AndroidViewReplayCollector(
             profile?.mark(NativeCollectorStage.ROOT_PRIME)
             require(ordinal >= 0 && timestamp in 1..9_007_199_254_740_991L && annotations.size <= 128)
             if (unresolvedBlockRules) fail(NativeCollectionFailure.UNRESOLVED_BLOCK_RULE)
-            val rules = annotations.toList()
+            val localPrivacy = NativeViewPrivacy.snapshot()
+            if (localPrivacy.overflow) fail(NativeCollectionFailure.UNRESOLVED_BLOCK_RULE)
+            val rules = annotations.toList() + localPrivacy.annotations
             fun check() {
-                if (!fence.isCurrent() || !isCurrent() || !fence.isCurrent()) fail(NativeCollectionFailure.WITHDRAWN)
+                if (!localPrivacy.isCurrent() || !fence.isCurrent() || !isCurrent() || !fence.isCurrent()) fail(NativeCollectionFailure.WITHDRAWN)
             }
             val readGuard: () -> Unit = ::check
             check()
@@ -298,6 +307,39 @@ internal class AndroidViewReplayCollector(
                     max(0.0, g.bounds.width - left - right), max(0.0, g.bounds.height - top - bottom)))
             }
             fun blocked(view: View) = rules.any { it.restriction == NativeViewRestriction.BLOCK && it.appliesTo(view) }
+            fun masked(view: View) = rules.any { it.restriction == NativeViewRestriction.MASK && it.appliesTo(view) }
+            fun textKind(view: TextView, hidden: Boolean): NativeMaskedKind {
+                val supported = view.javaClass in setOf(TextView::class.java, Button::class.java,
+                    CheckBox::class.java, RadioButton::class.java, Switch::class.java, ToggleButton::class.java)
+                if (!maskingProfile.readsText || hidden || !supported) return NativeMaskedKind.Text
+                // Input classification happens before the first text getter, including a password
+                // transformation installed on an otherwise ordinary framework TextView.
+                if (guardedNativeViewRead(profile, readGuard) { view.inputType } != InputType.TYPE_NULL ||
+                    guardedNativeViewRead(profile, readGuard) { view.transformationMethod } != null) return NativeMaskedKind.Text
+                if (android.graphics.Color.alpha(guardedNativeViewRead(profile, readGuard) { view.currentTextColor }) != 255 ||
+                    guardedNativeViewRead(profile, readGuard) { view.textSize } <= 0f ||
+                    guardedNativeViewRead(profile, readGuard) { view.scrollX } != 0 ||
+                    guardedNativeViewRead(profile, readGuard) { view.scrollY } != 0) return NativeMaskedKind.Text
+                val layout = guardedNativeViewRead(profile, readGuard) { view.layout } ?: return NativeMaskedKind.Text
+                val availableWidth = guardedNativeViewRead(profile, readGuard) { view.width - view.compoundPaddingLeft - view.compoundPaddingRight }
+                val availableHeight = guardedNativeViewRead(profile, readGuard) { view.height - view.compoundPaddingTop - view.compoundPaddingBottom }
+                if (guardedNativeViewRead(profile, readGuard) { layout.height } > availableHeight) return NativeMaskedKind.Text
+                val lines = guardedNativeViewRead(profile, readGuard) { layout.lineCount }
+                if (lines !in 1..NativeReplayText.MAXIMUM_UTF8_BYTES) return NativeMaskedKind.Text
+                for (line in 0 until lines) if (guardedNativeViewRead(profile, readGuard) {
+                        layout.getEllipsisCount(line) != 0 || layout.getLineWidth(line) > availableWidth
+                    }) return NativeMaskedKind.Text
+                val text = guardedNativeViewRead(profile, readGuard) { view.text } ?: return NativeMaskedKind.Text
+                // Spans may replace or hide their underlying string. Never invoke custom
+                // CharSequence methods, even on an exact framework TextView.
+                if (text.javaClass !== String::class.java) return NativeMaskedKind.Text
+                val length = guardedNativeViewRead(profile, readGuard) { text.length }
+                if (length > NativeReplayText.MAXIMUM_UTF8_BYTES) return NativeMaskedKind.Placeholder
+                if (guardedNativeViewRead(profile, readGuard) { layout.getLineEnd(lines - 1) } < length) return NativeMaskedKind.Text
+                val detached = guardedNativeViewRead(profile, readGuard) { text.toString() }
+                return try { NativeMaskedKind.ReadableText(NativeReplayText.read(detached)) }
+                    catch (_: NativeEncodingException) { NativeMaskedKind.Placeholder }
+            }
 
             // Inspect ancestry, not sibling contents. ViewRootImpl is a non-View terminal parent.
             profile?.mark(NativeCollectorStage.ANCESTOR_SCAN)
@@ -330,6 +372,7 @@ internal class AndroidViewReplayCollector(
             }
             var inherited = exactRoot
             var ancestorBlocked = false
+            var ancestorMasked = false
             // Framework decoration may paint above content. Observe actual layout coordinates and
             // every known clip, but never claim unobscured pixels or inspect ActionBar siblings.
             var inheritedGeometry = if (frameworkActionBar != null) NativeGeometryKind.LAYOUT_BOUNDS
@@ -341,6 +384,7 @@ internal class AndroidViewReplayCollector(
                 val g = geometry(view, NativeCollectorStage.ANCESTOR_GEOMETRY)
                 if (g.hidden) fail(NativeCollectionFailure.INVALID_ROOT)
                 ancestorBlocked = ancestorBlocked || blocked(view)
+                ancestorMasked = ancestorMasked || masked(view)
                 if (g.kind == NativeGeometryKind.LAYOUT_BOUNDS) inheritedGeometry = NativeGeometryKind.LAYOUT_BOUNDS
                 observations.add(Observation(view, parent, g, sampledClip, null))
                 if (parent !is View) inherited = inherited.intersect(g.bounds)
@@ -356,7 +400,7 @@ internal class AndroidViewReplayCollector(
             val nextIssued = HashSet(issued)
             val nodes = ArrayList<NativeMaskedNode>()
             val stack = ArrayList<Work>()
-            stack.add(Work(root, rootParent as? ViewGroup, inherited, ancestorBlocked, 1, inheritedGeometry))
+            stack.add(Work(root, rootParent as? ViewGroup, inherited, ancestorBlocked, ancestorMasked, 1, inheritedGeometry))
             var inspected = 0
             while (stack.isNotEmpty()) {
                 check()
@@ -383,11 +427,12 @@ internal class AndroidViewReplayCollector(
                     NativeGeometryKind.LAYOUT_BOUNDS else NativeGeometryKind.VISIBLE_CLIP
                 var clip = ownClip(work.parent, g, work.clip)
                 val localBlocked = work.blocked || blocked(view)
+                val localMasked = work.masked || masked(view)
                 val exactClass = view.javaClass
                 val kind = when {
                     localBlocked || view is ImageView || view is WebView -> NativeMaskedKind.Placeholder
                     view is EditText -> NativeMaskedKind.Input(secureInput(guardedNativeViewRead(profile, readGuard) { view.inputType }))
-                    view is TextView -> NativeMaskedKind.Text
+                    view is TextView -> textKind(view, localMasked || g.bounds != clip.intersect(g.bounds).intersect(exactRoot))
                     exactClass === View::class.java || knownContainer -> NativeMaskedKind.Rectangle
                     else -> NativeMaskedKind.Placeholder
                 }
@@ -415,7 +460,7 @@ internal class AndroidViewReplayCollector(
                     val count = ordered.size
                     if (count < 0 || count > maximumNodes - inspected - stack.size) fail(NativeCollectionFailure.NODE_LIMIT)
                     for (index in count - 1 downTo 0) {
-                        stack.add(Work(ordered[index], group, descendantsClip, false, work.depth + 1, geometryKind))
+                        stack.add(Work(ordered[index], group, descendantsClip, false, localMasked, work.depth + 1, geometryKind))
                     }
                 }
                 observations.add(Observation(view, sampledParent, g, sampledClip, observedChildren))

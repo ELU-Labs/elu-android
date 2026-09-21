@@ -80,15 +80,18 @@ internal object PrivacyStateProjector {
         val config = input.config
         val policy = config.privacy ?: return null
         val transport = capabilities.transport(config) ?: return null
-        val profile = dev.elu.analytics.internal.replay.NativeMaskingProfile.blanketMask()
+        val profile = dev.elu.analytics.internal.replay.NativeMaskingProfile.select(policy.masking, V1PrivacyPlatform.ANDROID)
         if (profile.compatibility(policy.masking, V1PrivacyPlatform.ANDROID) !=
             dev.elu.analytics.internal.replay.NativeMaskingCompatibility.COMPATIBLE) return null
         val session = input.observation.session
         val eligible = !session.clockDenied && !session.interrupted && session.activeEpoch == null &&
             session.remainingWholeSeconds > 0
-        val state = project(PrivacyProjectionInput(policy, checkNotNull(config.features),
+        val base = project(PrivacyProjectionInput(policy, checkNotNull(config.features),
             checkNotNull(config.replayCapabilities), input.identity, deviceInEuTimezone, input.evaluatedAt,
             PrivacyReplayInput(input.observation.currentSelected, true, eligible, session.remainingWholeSeconds, transport)))
+        val masked = base.copy(effectiveMasking = base.effectiveMasking.copy(
+            text = profile.textMasking, inputs = V1TextMasking.ALL, images = V1ImageMasking.BLOCK))
+        val state = masked.copy(effectivePolicyHash = hash(masked))
         if (!state.replayAllowed || !input.isCurrent()) return null
         return dev.elu.analytics.internal.replay.NativeReplayPrivacyProjection.issue(input, encode(state), transport,
             checkNotNull(config.replayCapabilities.replayProtocolGeneration))
@@ -109,7 +112,7 @@ internal object PrivacyStateProjector {
                 val features = config.features ?: return@ReplayDeliveryPrivacy null
                 val advertised = config.replayCapabilities ?: return@ReplayDeliveryPrivacy null
                 val transport = capabilities.transport(config) ?: return@ReplayDeliveryPrivacy null
-                val profile = dev.elu.analytics.internal.replay.NativeMaskingProfile.blanketMask()
+                val profile = dev.elu.analytics.internal.replay.NativeMaskingProfile.select(policy.masking, V1PrivacyPlatform.ANDROID)
                 val compatible = profile.compatibility(policy.masking, V1PrivacyPlatform.ANDROID) ==
                     dev.elu.analytics.internal.replay.NativeMaskingCompatibility.COMPATIBLE
                 if (!compatible) return@ReplayDeliveryPrivacy null

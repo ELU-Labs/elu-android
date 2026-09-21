@@ -109,7 +109,7 @@ internal class NativeReplayCaptureAdmission private constructor(
     internal val source get() = input.observation.source
     val identity get() = input.identity
     val privacy get() = permit.prepared.projection.privacy.body.toByteArray(Charsets.UTF_8)
-    val profile get() = NativeMaskingProfile.blanketMask()
+    val profile get() = NativeMaskingProfile.select(checkNotNull(input.config.privacy).masking, V1PrivacyPlatform.ANDROID)
     val minimumDurationSeconds get() = checkNotNull(input.config.privacy).replay.minimumDurationSeconds
     // Immutable description of this original input; isCurrent still checks every live authority.
     val hasUnresolvedBlockRules = checkNotNull(input.config.privacy).masking.platformRules.any {

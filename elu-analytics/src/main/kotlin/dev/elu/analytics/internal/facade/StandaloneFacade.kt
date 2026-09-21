@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluFeatureFlagResult
 import dev.elu.analytics.internal.runtime.NativeStartTrace
 import dev.elu.analytics.internal.runtime.NativeStartPhase
 
@@ -116,7 +117,7 @@ internal data class EluFacadeDiagnostics(
  * - `disabled`: the region policy blocks the device, the identity is opted out, or there is no
  *   executable capture authority. Activity calls are discarded with that reason. Feature flags
  *   use their independent current configuration/privacy authorization. `reset` still applies,
- *   because it is how a device leaves an opted-out identity.
+ *   while preserving the visitor's consent choice.
  *
  * Identity continuity with the embedded runtime is deliberately NOT implemented here. With this
  * runtime selected, a fresh install starts a fresh ELU identity: nothing in this file reads the
@@ -183,6 +184,8 @@ internal class StandaloneFacade(
     @Volatile private var state: EluFacadeState = EluFacadeState.Pending
 
     @Volatile private var closed = false
+    @Volatile private var requestedOptOut = false
+    private var consentIntentRevision = 0L // guarded by projectionLock
 
     @Volatile private var identity: IdentityState? = null
 
@@ -216,6 +219,7 @@ internal class StandaloneFacade(
                 val opened = open()
                 stack = opened
                 syncIdentity(opened.owner.snapshot().await().state.identity)
+                if (requestedOptOut) opened.runtime.restrictForConsent()
                 onOpened()
                 observeLane(RuntimeStartupPhase.OPEN_READY)
             } catch (error: Throwable) {
@@ -282,17 +286,19 @@ internal class StandaloneFacade(
     }
 
     internal fun nativeReplayIntakeAllowed(): Boolean = synchronized(projectionLock) {
-        !closeRequested.get() && !closed && pendingNativeOperations == 0 && nativeLifecycleEligible
+        !closeRequested.get() && !closed && !isOptedOut() && pendingNativeOperations == 0 && nativeLifecycleEligible
     }
 
-    fun state(): EluFacadeState = if (state is EluFacadeState.Enabled && !hasCurrentConfiguration()) {
+    fun state(): EluFacadeState = if (isOptedOut() && state !is EluFacadeState.Closed) {
+        EluFacadeState.Disabled(EluFacadeDisabledReason.OPTED_OUT)
+    } else if (state is EluFacadeState.Enabled && !hasCurrentConfiguration()) {
         EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED)
     } else state
 
     private fun hasCurrentConfiguration(): Boolean =
         !closeRequested.get() && (configurationGate == null || appliedConfiguration?.isCurrent() == true)
 
-    private fun hasCurrentFlags(): Boolean = !closeRequested.get() && flagsAuthorized &&
+    private fun hasCurrentFlags(): Boolean = !closeRequested.get() && !isOptedOut() && flagsAuthorized &&
         (configurationGate == null || flagConfiguration?.isCurrent() == true)
 
     /** Completes once every call submitted before it has run. */
@@ -390,18 +396,22 @@ internal class StandaloneFacade(
 
     // ---- identity ------------------------------------------------------------
 
+    override fun identify(distinctId: String, userProperties: Map<String, Any>?) = identify(distinctId, userProperties, null)
+
     override fun identify(
         distinctId: String,
         userProperties: Map<String, Any>?,
+        userPropertiesOnce: Map<String, Any>?,
     ) {
         if (!isUsableIdentifier(distinctId) || distinctId == "distinct_id") {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
         val set = userProperties?.toMap().orEmpty()
+        val setOnce = userPropertiesOnce?.toMap().orEmpty()
         val occurredAt = now()
         val projected = projectIdentity(ProjectedIdentity(distinctId))
-        dispatch(OperationKind.ACTIVITY, projected, affectsFlags = true) { identifyOnLane(distinctId, set, occurredAt) }
+        dispatch(OperationKind.ACTIVITY, projected, affectsFlags = true) { identifyOnLane(distinctId, set, occurredAt, setOnce) }
     }
 
     override fun alias(alias: String) {
@@ -428,17 +438,57 @@ internal class StandaloneFacade(
         val projected = projectIdentity(ProjectedIdentity(null))
         dispatch(OperationKind.RESET, projected, affectsFlags = true) {
             applyLocalChange(RuntimeLocalStateChange.ResetIdentity(occurredAt))
-            if (identity?.optedOut == true) {
-                applyLocalChange(RuntimeLocalStateChange.SetOptedOut(false, occurredAt))
-            }
             cachedPersonProperties = null
             clearFlags()
             if (state is EluFacadeState.Enabled) startFlagReload()
         }
     }
 
+    override fun optOut() {
+        synchronized(projectionLock) {
+            consentIntentRevision = Math.incrementExact(consentIntentRevision)
+            requestedOptOut = true
+        }
+        // Withdrawal is immediate; a queued config refresh cannot reinstall delivery while the
+        // consent transaction waits for the facade/storage lanes.
+        stack?.runtime?.restrictForConsent()
+        acceptNativeChange(restrictive = true)?.let { settleNativeChange(it, onLane = false) }
+        dispatch(OperationKind.CONSENT, affectsFlags = true) {
+            if (identity?.optedOut != true) applyLocalChange(RuntimeLocalStateChange.SetOptedOut(true, now()))
+            else renewAuthority()
+            clearFlags()
+        }
+    }
+
+    override fun optIn(captureEventName: String?, properties: Map<String, Any>?) {
+        if (captureEventName != null && !isUsableIdentifier(captureEventName)) {
+            countDrop(EluFacadeDropReason.INVALID_INPUT)
+            return
+        }
+        val eventProperties = withoutReservedKeys(properties)
+        val intent = synchronized(projectionLock) {
+            consentIntentRevision = Math.incrementExact(consentIntentRevision)
+            consentIntentRevision
+        }
+        dispatch(OperationKind.CONSENT, affectsFlags = true) {
+            if (identity?.optedOut == true) applyLocalChange(RuntimeLocalStateChange.SetOptedOut(false, now()))
+            if (identity?.optedOut == false) synchronized(projectionLock) {
+                if (consentIntentRevision == intent) {
+                    requestedOptOut = false
+                    stack?.runtime?.restoreConsent()
+                }
+            }
+            renewAuthority()
+            if (!isOptedOut() && state is EluFacadeState.Enabled && captureEventName != null) {
+                captureThrough { requireStack().runtime.capture(captureEventName, eventProperties, now()) }
+            }
+        }
+    }
+
+    override fun isOptedOut(): Boolean = requestedOptOut || identity?.optedOut == true
+
     override fun distinctId(): String? {
-        if (state !is EluFacadeState.Enabled || !hasCurrentConfiguration()) return null
+        if (isOptedOut() || state !is EluFacadeState.Enabled || !hasCurrentConfiguration()) return null
         projectedIdentity?.let { return it.distinctId }
         val current = identity ?: return null
         return current.userId ?: current.anonymousId
@@ -459,6 +509,19 @@ internal class StandaloneFacade(
         }
     }
 
+    override fun registerOnce(properties: Map<String, Any>, defaultValue: Any?) {
+        val selected = withoutReservedKeys(properties)
+        if (selected.isEmpty()) return
+        if (selected.keys.any { it.isEmpty() }) {
+            countDrop(EluFacadeDropReason.INVALID_INPUT)
+            return
+        }
+        val occurredAt = now()
+        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
+            applyLocalChange(RuntimeLocalStateChange.RegisterSuperPropertiesOnce(selected, defaultValue, occurredAt))
+        }
+    }
+
     override fun unregister(key: String) {
         if (key.isEmpty()) {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
@@ -473,13 +536,16 @@ internal class StandaloneFacade(
         }
     }
 
-    override fun setPersonProperties(properties: Map<String, Any>) {
-        if (properties.isEmpty()) return
+    override fun setPersonProperties(properties: Map<String, Any>) = setPersonProperties(properties, emptyMap())
+
+    override fun setPersonProperties(properties: Map<String, Any>, propertiesOnce: Map<String, Any>) {
+        if (properties.isEmpty() && propertiesOnce.isEmpty()) return
         val set = properties.toMap()
+        val setOnce = propertiesOnce.toMap()
         val occurredAt = now()
         dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
-            if (hasCurrentCapture()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt)
-            else applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(set, occurredAt))
+            if (hasCurrentCapture()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt, setOnce = setOnce)
+            else applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(set, occurredAt, setOnce))
         }
     }
 
@@ -521,9 +587,26 @@ internal class StandaloneFacade(
         }
     }
 
+    override fun getGroups(): Map<String, String> {
+        if (isOptedOut() || projectedIdentity != null || pendingFlagOperations != 0 || (!hasCurrentCapture() && !hasCurrentFlags())) return emptyMap()
+        return java.util.Collections.unmodifiableMap(LinkedHashMap(identity?.groups.orEmpty()))
+    }
+
+    override fun resetGroups() {
+        val occurredAt = now()
+        dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
+            val change = RuntimeLocalStateChange.ResetGroups(occurredAt)
+            if (hasCurrentCapture()) applyLocalChange(change) else applyFlagContext(change)
+        }
+    }
+
     // ---- feature flags -------------------------------------------------------
 
     override fun getFeatureFlag(key: String): Any? = readFlag(key, expose = true)?.value
+
+    override fun getFeatureFlagResult(key: String): EluFeatureFlagResult? = readFlag(key, expose = true)?.let {
+        EluFeatureFlagResult(key, isTruthyVariant(it.value), it.value as? String, it.payload)
+    }
 
     override fun getFeatureFlagPayload(key: String): Any? = readFlag(key, expose = false)?.payload
 
@@ -562,6 +645,21 @@ internal class StandaloneFacade(
         }
     }
 
+    override fun resetPersonPropertiesForFlags() {
+        val occurredAt = now()
+        dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
+            applyFlagContext(RuntimeLocalStateChange.ResetFlagPersonProperties(occurredAt))
+        }
+    }
+
+    override fun resetGroupPropertiesForFlags(type: String?) {
+        if (type != null && !isUsableIdentifier(type)) { countDrop(EluFacadeDropReason.INVALID_INPUT); return }
+        val occurredAt = now()
+        dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
+            applyFlagContext(RuntimeLocalStateChange.ResetFlagGroupProperties(type, occurredAt))
+        }
+    }
+
     override fun setGroupPropertiesForFlags(
         type: String,
         properties: Map<String, Any>,
@@ -582,7 +680,7 @@ internal class StandaloneFacade(
 
     override fun flush() {
         submit {
-            if (state !is EluFacadeState.Enabled) {
+            if (isOptedOut() || state !is EluFacadeState.Enabled) {
                 countDrop(currentDropReason())
                 return@submit
             }
@@ -595,6 +693,7 @@ internal class StandaloneFacade(
 
     private enum class OperationKind {
         ACTIVITY,
+        CONSENT,
         RESET,
         FLAG_CONTEXT,
         PERSON_GROUP_CONTEXT,
@@ -679,7 +778,7 @@ internal class StandaloneFacade(
                     discard(operation, EluFacadeDropReason.CLOSED)
                     return@submit
                 }
-                if (state is EluFacadeState.Pending) {
+                if (state is EluFacadeState.Pending && kind != OperationKind.CONSENT) {
                     if (buffer.size >= bufferLimit) {
                         // Drop the newest, never the oldest: the held calls are an ordered identity
                         // history, and a coherent prefix is worth more than a recent fragment.
@@ -710,8 +809,10 @@ internal class StandaloneFacade(
                 operation.kind == OperationKind.PERSON_GROUP_CONTEXT && !hasCurrentCapture() && !hasCurrentFlags() ->
                     discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
                 current is EluFacadeState.Closed -> discard(operation, EluFacadeDropReason.CLOSED, settle = false)
-                current is EluFacadeState.Pending ->
+                current is EluFacadeState.Pending && operation.kind != OperationKind.CONSENT ->
                     discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
+                isOptedOut() && operation.kind == OperationKind.ACTIVITY ->
+                    discard(operation, EluFacadeDropReason.OPTED_OUT, settle = false)
                 current is EluFacadeState.Disabled && operation.kind == OperationKind.ACTIVITY ->
                     discard(operation, current.reason.drop, settle = false)
                 else ->
@@ -924,29 +1025,31 @@ internal class StandaloneFacade(
         userId: String,
         set: Map<String, Any?>,
         occurredAt: String,
+        setOnce: Map<String, Any?> = emptyMap(),
     ) {
         if (userId != persistedDistinctId()) {
-            appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, emptyMap())), occurredAt)
-            cachedPersonProperties = personPropertiesKey(userId, set)
+            appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, setOnce)), occurredAt)
+            cachedPersonProperties = personPropertiesKey(userId, set, setOnce)
             startFlagReload()
             return
         }
-        if (set.isNotEmpty()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt)
+        if (set.isNotEmpty() || setOnce.isNotEmpty()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt, setOnce = setOnce)
     }
 
     private fun appendPersonProperties(
         set: Map<String, Any?>,
         reloadFlags: Boolean,
         occurredAt: String,
+        setOnce: Map<String, Any?> = emptyMap(),
     ) {
-        val key = personPropertiesKey(persistedDistinctId(), set)
+        val key = personPropertiesKey(persistedDistinctId(), set, setOnce)
         // Repeating exactly the previous person-property call for the same identity changes nothing.
         if (cachedPersonProperties == key) return
         appendMutations(
             listOf(
                 RuntimeMutationChange.SetPersonProperties(
                     set = set,
-                    setOnce = emptyMap(),
+                    setOnce = setOnce,
                     unset = emptyList(),
                 ),
             ),
@@ -964,7 +1067,8 @@ internal class StandaloneFacade(
     private fun personPropertiesKey(
         distinctId: String,
         set: Map<String, Any?>,
-    ): String = "$distinctId\u0000$set"
+        setOnce: Map<String, Any?> = emptyMap(),
+    ): String = "$distinctId\u0000$set\u0000$setOnce"
 
     private fun syncIdentity(next: IdentityState) {
         val previous = identity

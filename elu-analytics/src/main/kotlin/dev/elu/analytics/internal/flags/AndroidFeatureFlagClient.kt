@@ -54,6 +54,7 @@ internal class AndroidFeatureFlagClient(
     private val storeEpochs: FlagOpaqueIdSource,
     private val configurationGate: V2ConfigAuthorityGate? = null,
     private val diagnostic: FlagDiagnosticObserver = FlagDiagnosticObserver.NONE,
+    private val collectionAllowed: () -> Boolean = { true },
 ) : FacadeFlagClient {
     private val lane: ExecutorService =
         Executors.newSingleThreadExecutor(
@@ -70,7 +71,7 @@ internal class AndroidFeatureFlagClient(
     private var lastSample: ClockSample? = null
     private var observedClockFailure = false
     @Volatile private var sourceConfiguration: V2ConfigAuthorityWitness? = null
-    private fun sourceIsCurrent(): Boolean = configurationGate == null || sourceConfiguration?.isCurrent() == true
+    private fun sourceIsCurrent(): Boolean = collectionAllowed() && (configurationGate == null || sourceConfiguration?.isCurrent() == true)
     @Volatile private var configLease: ConfigLease? = null
     @Volatile private var cacheLease: CacheLease? = null
     private var inFlight: InFlight? = null

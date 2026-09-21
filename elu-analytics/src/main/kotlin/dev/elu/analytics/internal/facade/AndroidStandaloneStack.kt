@@ -96,6 +96,7 @@ internal object AndroidStandaloneStack {
                         FlagOpaqueIdSource { UUID.randomUUID().toString() },
                         FlagOpaqueIdSource { UUID.randomUUID().toString() },
                         configurationGate = gate,
+                        collectionAllowed = { !facade.isOptedOut() },
                     )
                     if (closing.get()) { flags.close(); runtime.close(); error("Standalone stack is closed") }
                     StandaloneStack(runtime, owner, flags)

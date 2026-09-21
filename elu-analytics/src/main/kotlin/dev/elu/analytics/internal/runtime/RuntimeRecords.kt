@@ -203,6 +203,12 @@ internal sealed interface RuntimeLocalStateChange {
         override val occurredAt: String,
     ) : RuntimeLocalStateChange
 
+    data class RegisterSuperPropertiesOnce(
+        val properties: Map<String, Any?>,
+        val defaultValue: Any?,
+        override val occurredAt: String,
+    ) : RuntimeLocalStateChange
+
     data class UnregisterSuperProperties(
         val keys: List<String>,
         override val occurredAt: String,
@@ -212,7 +218,12 @@ internal sealed interface RuntimeLocalStateChange {
     data class SetFlagPersonProperties(
         val properties: Map<String, Any?>,
         override val occurredAt: String,
+        val setOnce: Map<String, Any?> = emptyMap(),
     ) : RuntimeLocalStateChange
+
+    data class ResetFlagPersonProperties(override val occurredAt: String) : RuntimeLocalStateChange
+
+    data class ResetFlagGroupProperties(val groupType: String?, override val occurredAt: String) : RuntimeLocalStateChange
 
     /** Merges properties for one group type into the flag evaluation context. */
     data class SetFlagGroupProperties(

@@ -1,6 +1,9 @@
 package dev.elu.analytics
 
 import android.content.Context
+import android.view.View
+import dev.elu.analytics.internal.replay.NativeViewPrivacy
+import dev.elu.analytics.internal.replay.NativeViewRestriction
 import android.content.pm.ApplicationInfo
 import android.util.Log
 import dev.elu.analytics.internal.facade.AndroidStandaloneStack
@@ -98,6 +101,11 @@ public object Elu {
         sink?.identify(distinctId, userProperties)
     }
 
+    @JvmStatic
+    public fun identify(distinctId: String, userProperties: Map<String, Any>?, userPropertiesOnce: Map<String, Any>?) {
+        sink?.identify(distinctId, userProperties, userPropertiesOnce)
+    }
+
     /** Feeds `$screen`/`$screen_name` — call manually from Compose navigation. */
     @JvmStatic
     @JvmOverloads
@@ -127,12 +135,33 @@ public object Elu {
         sink?.captureException(error, properties)
     }
 
+    /** Stops collection and persists the choice. Resetting identity does not restore consent. */
+    @JvmStatic
+    public fun optOut() { sink?.optOut() }
+
+    /** Restores collection when remote policy permits it; null suppresses the opt-in event. */
+    @JvmStatic
+    @JvmOverloads
+    public fun optIn(captureEventName: String? = "\$opt_in", properties: Map<String, Any>? = null) {
+        sink?.optIn(captureEventName, properties)
+    }
+
+    @JvmStatic
+    public fun isOptedOut(): Boolean = sink?.isOptedOut() ?: false
+
     // ---- properties ----------------------------------------------------------
 
     /** Super properties: sent with every subsequent event. */
     @JvmStatic
     public fun register(properties: Map<String, Any>) {
         sink?.register(properties)
+    }
+
+    /** Sets missing super properties, or those equal to [defaultValue], atomically. */
+    @JvmStatic
+    @JvmOverloads
+    public fun registerOnce(properties: Map<String, Any>, defaultValue: Any? = "None") {
+        sink?.registerOnce(properties, defaultValue)
     }
 
     @JvmStatic
@@ -144,6 +173,17 @@ public object Elu {
     public fun setPersonProperties(properties: Map<String, Any>) {
         sink?.setPersonProperties(properties)
     }
+
+    @JvmStatic
+    public fun setPersonProperties(properties: Map<String, Any>, propertiesOnce: Map<String, Any>) {
+        sink?.setPersonProperties(properties, propertiesOnce)
+    }
+
+    @JvmStatic
+    public fun getGroups(): Map<String, String> = sink?.getGroups() ?: emptyMap()
+
+    @JvmStatic
+    public fun resetGroups() { sink?.resetGroups() }
 
     @JvmStatic
     @JvmOverloads
@@ -166,6 +206,9 @@ public object Elu {
     public fun getFeatureFlag(key: String): Any? {
         return sink?.getFeatureFlag(key)
     }
+
+    @JvmStatic
+    public fun getFeatureFlagResult(key: String): EluFeatureFlagResult? = sink?.getFeatureFlagResult(key)
 
     @JvmStatic
     public fun getFeatureFlagPayload(key: String): Any? {
@@ -202,12 +245,27 @@ public object Elu {
     }
 
     @JvmStatic
+    public fun resetPersonPropertiesForFlags() { sink?.resetPersonPropertiesForFlags() }
+
+    @JvmStatic
+    @JvmOverloads
+    public fun resetGroupPropertiesForFlags(type: String? = null) { sink?.resetGroupPropertiesForFlags(type) }
+
+    @JvmStatic
     public fun setGroupPropertiesForFlags(
         type: String,
         properties: Map<String, Any>,
     ) {
         sink?.setGroupPropertiesForFlags(type, properties)
     }
+
+    /** Hides text in this view and its descendants from future replay captures. */
+    @JvmStatic
+    public fun maskView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.MASK) }
+
+    /** Excludes this view's content and descendants; replay retains only a placeholder. */
+    @JvmStatic
+    public fun blockView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.BLOCK) }
 
     // ---- transport -----------------------------------------------------------
 

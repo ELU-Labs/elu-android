@@ -240,7 +240,9 @@ internal class RuntimeQueueOwner private constructor(
     /** Local flag context only, admitted against transaction-current flag/source authority. */
     internal fun applyFlagContext(change: RuntimeLocalStateChange): Future<RuntimeAppendResult> {
         require(change is RuntimeLocalStateChange.SetFlagPersonProperties ||
-            change is RuntimeLocalStateChange.SetFlagGroupProperties || change is RuntimeLocalStateChange.SetFlagGroup)
+            change is RuntimeLocalStateChange.SetFlagGroupProperties || change is RuntimeLocalStateChange.SetFlagGroup ||
+            change is RuntimeLocalStateChange.ResetGroups || change is RuntimeLocalStateChange.ResetFlagPersonProperties ||
+            change is RuntimeLocalStateChange.ResetFlagGroupProperties)
         return submit(revokeNative = true) {
             assertUsable()
             val witness = flagConfiguration
@@ -585,14 +587,14 @@ internal class RuntimeQueueOwner private constructor(
             projection.protocolGeneration !in supportedReplayProtocolGenerations ||
             projection.protocolGeneration != config.replayCapabilities?.replayProtocolGeneration ||
             projection.transport.codec != "elu-native-wireframe-v1" ||
-            NativeMaskingProfile.blanketMask().compatibility(config.privacy?.masking,
+            NativeMaskingProfile.select(checkNotNull(config.privacy).masking, dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID).compatibility(config.privacy?.masking,
                 dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) != NativeMaskingCompatibility.COMPATIBLE) return@submitNative null
         val privacy = try { V1ConfigJson.parseEffectivePrivacy(projection.body) } catch (_: Exception) { return@submitNative null }
         val session = observation.session
         if (!privacy.replayAllowed || !privacy.maskingValidated || !privacy.replaySessionEligible ||
             privacy.replaySampled != observation.currentSelected || privacy.replayBudgetRemainingSeconds != session.remainingWholeSeconds ||
             session.clockDenied || session.interrupted || session.activeEpoch != null || session.remainingWholeSeconds <= 0 ||
-            privacy.effectiveMasking.text != dev.elu.analytics.internal.config.V1TextMasking.ALL ||
+            privacy.effectiveMasking.text != NativeMaskingProfile.select(checkNotNull(config.privacy).masking, dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID).textMasking ||
             privacy.effectiveMasking.inputs != dev.elu.analytics.internal.config.V1TextMasking.ALL ||
             privacy.effectiveMasking.images != dev.elu.analytics.internal.config.V1ImageMasking.BLOCK) return@submitNative null
         if (!input.isCurrent()) return@submitNative null
@@ -915,7 +917,7 @@ internal class RuntimeQueueOwner private constructor(
         val source = input.observation.source
         val parsed = nativeCurrentConfig(requireLoaded(), source, input.observation.capture) ?: return@submitNative null
         val masking = parsed.privacy?.masking ?: return@submitNative null
-        if (NativeMaskingProfile.blanketMask().compatibility(masking, dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) != NativeMaskingCompatibility.COMPATIBLE) return@submitNative null
+        if (NativeMaskingProfile.select(masking, dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID).compatibility(masking, dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) != NativeMaskingCompatibility.COMPATIBLE) return@submitNative null
         val privacy = permit.prepared.projection.privacy.body
         val config = (configManager.authorize(privacy, input.identity, captureClock.wallNowEpochMillis()) as? V1ConfigResolution.Authorized)?.config
             ?: return@submitNative null
@@ -1021,8 +1023,8 @@ internal class RuntimeQueueOwner private constructor(
                 return@replayTransaction denied
             }
             fun profileCurrent() = if (nativeAdmission == null) replayMaskingAdmission.mayCapture(profile, config)
-                else profile.copyBytes().contentEquals(NativeMaskingProfile.blanketMask().canonicalBytes) &&
-                    NativeMaskingProfile.blanketMask().compatibility(config.privacy.masking,
+                else profile.copyBytes().contentEquals(nativeAdmission.profile.canonicalBytes) &&
+                    nativeAdmission.profile.compatibility(config.privacy.masking,
                         dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) == NativeMaskingCompatibility.COMPATIBLE
             if (!profileCurrent()) return@replayTransaction denied
             val state = ReplayQueueStore.state(tx) ?: return@replayTransaction denied
@@ -3450,6 +3452,19 @@ internal class RuntimeQueueOwner private constructor(
                         ),
                 )
             }
+            is RuntimeLocalStateChange.RegisterSuperPropertiesOnce -> {
+                val current = state.identity.superProperties
+                val selected = change.properties.filter { (key, _) ->
+                    !current.containsKey(key) || when (val fallback = change.defaultValue) {
+                        null -> current[key] == null
+                        is Number -> (current[key] as? Number)?.toDouble() == fallback.toDouble()
+                        is String, is Boolean -> current[key] == fallback
+                        else -> false
+                    }
+                }
+                if (selected.isEmpty()) state else applyLocalChange(state,
+                    RuntimeLocalStateChange.RegisterSuperProperties(selected, change.occurredAt))
+            }
             is RuntimeLocalStateChange.UnregisterSuperProperties -> {
                 require(change.keys.distinct().size == change.keys.size) {
                     "Super-property unregister keys must be unique"
@@ -3467,8 +3482,18 @@ internal class RuntimeQueueOwner private constructor(
                         ),
                 )
             }
+            is RuntimeLocalStateChange.ResetFlagPersonProperties -> state.copy(
+                identity = state.identity.copy(contextRevision = increment(state.identity.contextRevision, "identity context revision"),
+                    updatedAt = checkedLocalTimestamp(state, change)),
+                flagContext = state.flagContext.copy(personProperties = emptyMap()))
+            is RuntimeLocalStateChange.ResetFlagGroupProperties -> state.copy(
+                identity = state.identity.copy(contextRevision = increment(state.identity.contextRevision, "identity context revision"),
+                    updatedAt = checkedLocalTimestamp(state, change)),
+                flagContext = state.flagContext.copy(groupProperties = if (change.groupType == null) emptyMap()
+                    else state.flagContext.groupProperties.filterKeys { it != change.groupType }))
             is RuntimeLocalStateChange.SetFlagPersonProperties -> {
-                val normalized = JsonValues.objectValue(change.properties, "flagContext.personProperties")
+                val normalized = JsonValues.objectValue(applyProperties(state.flagContext.personProperties,
+                    change.properties, change.setOnce, emptyList()), "flagContext.personProperties")
                 state.copy(
                     identity =
                         state.identity.copy(

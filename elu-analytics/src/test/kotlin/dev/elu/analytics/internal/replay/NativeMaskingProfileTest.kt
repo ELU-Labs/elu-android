@@ -119,6 +119,23 @@ class NativeMaskingProfileTest {
             NativeMaskingProfile.retention("{}".toByteArray(), policy(), V1PrivacyPlatform.ANDROID))
     }
 
+    @Test fun `sensitive profile has canonical cross-platform bytes and is selected only without native rules`() {
+        val sensitive = NativeMaskingProfile.sensitiveMask()
+        assertEquals(387, sensitive.canonicalBytes.size)
+        assertEquals("sha256:54e0419b953cc0b9531247c4017f4ac7d0e1eff1a72eb24c926fca00f9bb2526", sensitive.hash)
+        assertSame(sensitive, NativeMaskingProfile.parse(sensitive.canonicalBytes))
+        val required = policy().copy(text = V1TextMasking.SENSITIVE)
+        assertSame(sensitive, NativeMaskingProfile.select(required, V1PrivacyPlatform.ANDROID))
+        assertEquals(NativeMaskingCompatibility.COMPATIBLE, sensitive.compatibility(required, V1PrivacyPlatform.ANDROID))
+        val withMask = required.copy(platformRules = listOf(rule(V1PrivacyPlatform.ANDROID, V1PlatformRuleAction.MASK)))
+        assertSame(profile, NativeMaskingProfile.select(withMask, V1PrivacyPlatform.ANDROID))
+        assertEquals(NativeMaskingCompatibility.RESTRICTIVE_POLICY, sensitive.compatibility(withMask, V1PrivacyPlatform.ANDROID))
+        assertEquals(NativeMaskingRetention.RESTRICTIVE_POLICY,
+            NativeMaskingProfile.retention(sensitive.canonicalBytes, policy(), V1PrivacyPlatform.ANDROID))
+        assertEquals(NativeMaskingRetention.COMPATIBLE,
+            NativeMaskingProfile.retention(profile.canonicalBytes, required, V1PrivacyPlatform.ANDROID))
+    }
+
     private fun objectValue() = V1StrictCanonicalJson.parse(profile.canonicalBytes.toString(Charsets.UTF_8)) as
         V1StrictCanonicalJson.Value.ObjectValue
     private fun rejects(bytes: ByteArray) { assertThrows(Exception::class.java) { NativeMaskingProfile.parse(bytes) } }

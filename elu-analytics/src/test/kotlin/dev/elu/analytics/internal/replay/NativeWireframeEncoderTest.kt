@@ -36,6 +36,31 @@ class NativeWireframeEncoderTest {
         assertArrayEquals(chunk.bytes, V1StrictCanonicalJson.canonicalBytes(V1StrictCanonicalJson.parse(text)))
     }
 
+    @Test fun `sensitive profile encodes ordinary initial changed and inserted text while retaining input masks`() {
+        val encoder = NativeWireframeEncoder(maskingProfile = NativeMaskingProfile.sensitiveMask())
+        fun readable(id: UUID, text: String) = node(id, NativeMaskedKind.ReadableText(NativeReplayText.read(text)))
+        val initial = decode(encoder.encode(listOf(frame(0, listOf(readable(first, "Welcome café 👋"),
+            node(second, NativeMaskedKind.Input(true)))))))
+        assertEquals("Welcome café 👋", leaves(initial.getJSONObject(1)).getJSONObject(0).getString("text"))
+        assertEquals("[masked]", leaves(initial.getJSONObject(1)).getJSONObject(1).getString("value"))
+        val changed = decode(encoder.encode(listOf(frame(1, listOf(readable(first, "Your order is ready"),
+            node(second, NativeMaskedKind.Input(true)))))))
+        assertEquals("Your order is ready", leaves(changed.getJSONObject(0)).getJSONObject(0).getString("text"))
+        val inserted = decode(encoder.encode(listOf(frame(2, listOf(readable(first, "Your order is ready"),
+            node(second, NativeMaskedKind.Input(true)), readable(third, "Continue"))))))
+        assertEquals("Continue", inserted.getJSONObject(0).getJSONObject("data").getJSONArray("adds")
+            .getJSONObject(0).getJSONObject("wireframe").getString("text"))
+    }
+
+    @Test fun `readable text is rejected by blanket encoder and strict UTF8 length boundary`() {
+        val text = node(first, NativeMaskedKind.ReadableText(NativeReplayText.read("Ordinary text")))
+        fails(NativeEncodingFailure.INVALID_TEXT) { NativeWireframeEncoder().encode(listOf(frame(0, listOf(text)))) }
+        assertEquals(4096, NativeReplayText.read("é".repeat(2048)).value.toByteArray(Charsets.UTF_8).size)
+        fails(NativeEncodingFailure.INVALID_TEXT) { NativeReplayText.read("é".repeat(2049)) }
+        fails(NativeEncodingFailure.INVALID_TEXT) { NativeReplayText.read("x".repeat(4097)) }
+        fails(NativeEncodingFailure.INVALID_TEXT) { NativeReplayText.read("\uD800") }
+    }
+
     @Test fun `duplicate frame failure rolls back earlier frames and same millisecond remains legal`() {
         val e = NativeWireframeEncoder(); val a = frame(0, listOf(node(first)))
         fails(NativeEncodingFailure.FRAME_ORDER) { e.encode(listOf(a, a)) }

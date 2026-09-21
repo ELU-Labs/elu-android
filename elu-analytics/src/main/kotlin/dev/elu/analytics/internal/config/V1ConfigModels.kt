@@ -156,6 +156,8 @@ internal data class V1ConfiguredEndpointSet(
     val assets: String?,
 )
 
+internal data class V1CapturePerformance(val memory: Boolean, val longTasks: Boolean, val sampleIntervalMillis: Int)
+
 internal data class V1ParsedConfig(
     val schemaVersion: Int,
     val revision: String,
@@ -175,6 +177,7 @@ internal data class V1ParsedConfig(
     val serialized: String,
     val configSemanticHash: String,
     val policySourceHash: String?,
+    val capturePerformance: V1CapturePerformance? = null,
 )
 
 /** Trusted ordering envelope retained even when the document body fails a nested policy check. */

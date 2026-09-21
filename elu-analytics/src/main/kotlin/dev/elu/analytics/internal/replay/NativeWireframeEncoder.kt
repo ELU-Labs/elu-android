@@ -9,6 +9,7 @@ import java.util.UUID
 internal class NativeWireframeEncoder(
     private val limits: Limits = Limits(),
     firstNodeId: Long = MINIMUM_NODE_ID,
+    private val maskingProfile: NativeMaskingProfile = NativeMaskingProfile.blanketMask(),
 ) {
     internal data class Limits(
         val liveNodes: Int = 10_000,
@@ -46,7 +47,7 @@ internal class NativeWireframeEncoder(
     }
 
     /** Independent transaction candidate for the outer sealer; no mutable collection is shared. */
-    internal fun fork(): NativeWireframeEncoder = NativeWireframeEncoder(limits, rootId).also { copy ->
+    internal fun fork(): NativeWireframeEncoder = NativeWireframeEncoder(limits, rootId, maskingProfile).also { copy ->
         // LiveNode, NativeMaskedNode/geometry/style/kind, UUID and viewport are immutable values.
         // encode replaces State and collections; copying both containers also prevents aliasing.
         copy.state = state.copy(live = state.live.toList(), retired = state.retired.toSet())
@@ -122,6 +123,7 @@ internal class NativeWireframeEncoder(
         nativeRequire(frame.nodes.size < limits.liveNodes, NativeEncodingFailure.NODE_LIMIT)
         val seen = HashSet<UUID>()
         for (node in frame.nodes) {
+            nativeRequire(node.kind !is NativeMaskedKind.ReadableText || maskingProfile.readsText, NativeEncodingFailure.INVALID_TEXT)
             nativeRequire(seen.add(node.identity), NativeEncodingFailure.DUPLICATE_IDENTITY)
             val c = node.clip
             val b = node.bounds
@@ -135,7 +137,7 @@ internal class NativeWireframeEncoder(
     }
 
     private fun generatedNodeCost(kind: NativeMaskedKind): Int = when (kind) {
-        NativeMaskedKind.Text, NativeMaskedKind.Placeholder -> 1
+        NativeMaskedKind.Text, is NativeMaskedKind.ReadableText, NativeMaskedKind.Placeholder -> 1
         NativeMaskedKind.Rectangle, is NativeMaskedKind.Input -> 0
     }
 
@@ -154,6 +156,7 @@ internal class NativeWireframeEncoder(
         when (val kind = n.kind) {
             NativeMaskedKind.Rectangle -> fields += "type" to string("rectangle")
             NativeMaskedKind.Text -> fields.addAll(listOf("type" to string("text"), "text" to string(MASK)))
+            is NativeMaskedKind.ReadableText -> fields.addAll(listOf("type" to string("text"), "text" to string(kind.text.value)))
             is NativeMaskedKind.Input -> fields.addAll(listOf("type" to string("input"),
                 "inputType" to string(if (kind.secure) "password" else "text"), "disabled" to Value.BooleanValue(true),
                 "value" to string(MASK)))
