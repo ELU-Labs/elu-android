@@ -20,6 +20,7 @@ jobs:
         run: >-
           ./gradlew
           :elu-analytics:testDebugUnitTest
+          :elu-analytics:lintRelease
           :elu-analytics:assembleRelease
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication
@@ -35,7 +36,7 @@ jobs:
           --stacktrace
       - name: Verify public API and ABI snapshot
         run: python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
-      - name: Reproduce published 0.1.0 consumer
+      - name: Compile immutable historical 0.1.0 consumer (no state-import claim)
         run: >-
           ./gradlew
           :sample:assembleDebug
@@ -67,8 +68,8 @@ jobs:
             elu-analytics/build/reports/sbom/
             build/reports/
 
-  upgrade-evidence:
-    name: Android 0.1.0 replacement continuity
+  owned-runtime:
+    name: Android owned runtime instrumentation
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -84,21 +85,19 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Execute published-to-candidate replacement assertions
+      - name: Verify clean setup, owned SQLite continuity, refusal and privacy
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           arch: x86_64
           disable-animations: true
-          script: |
-            ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
-            bash scripts/run-android-upgrade-evidence.sh
+          script: ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-upgrade-evidence-0.1.0
+          name: android-owned-runtime-instrumentation
           retention-days: 14
           if-no-files-found: warn
           path: |
-            build/reports/upgrade-evidence/0.1.0/manifest.json
-            build/reports/upgrade-evidence/0.1.0/manifest.sha256
+            elu-analytics/build/reports/androidTests/
+            elu-analytics/build/outputs/androidTest-results/

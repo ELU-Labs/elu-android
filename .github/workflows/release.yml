@@ -62,6 +62,7 @@ jobs:
         run: >-
           ./gradlew
           :elu-analytics:testDebugUnitTest
+          :elu-analytics:lintRelease
           :elu-analytics:assembleRelease
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication

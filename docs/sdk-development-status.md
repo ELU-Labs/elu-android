@@ -29,3 +29,10 @@ is historical evidence for that commit only. The clean candidate requires fresh
 exact-artifact Lab fault/privacy/resource checks, source review, release checks,
 publication and production verification. No final release claim follows from
 compilation, local collector tests or successful HTTP responses alone.
+
+The active instrumentation check covers clean setup, current owned SQLite
+reopen/schema upgrades, refusal of unsupported state, consent, native privacy
+and lifecycle behavior. The former preview replacement-continuity harness is
+retired; the immutable published consumer fixture remains historical API and
+artifact evidence only. Exact-distribution Lab upgrades and fault injection
+remain required for the final release.
