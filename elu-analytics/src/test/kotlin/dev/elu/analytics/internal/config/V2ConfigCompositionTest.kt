@@ -64,6 +64,11 @@ class V2ConfigCompositionTest {
         rig.facade.capture("before", null, Date(rig.clock.wall))
         rig.settle()
         assertEquals(1, rig.owner.snapshot().get().queuedCount)
+        // Configuration also schedules a delivery pass. Settle that lawful foreground pass
+        // before testing withdrawal, instead of racing its first network call.
+        rig.runtime.flush().get(2, TimeUnit.SECONDS)
+        assertTrue(rig.firstNetworkCall.await(2, TimeUnit.SECONDS))
+        val callsBeforeWithdrawal = rig.networkCalls
         rig.driver.onBackground() // listener updates the gate, deliberately does not drain the facade
         assertTrue(rig.facade.state() is EluFacadeState.Disabled)
         assertNull(rig.facade.distinctId())
@@ -72,7 +77,7 @@ class V2ConfigCompositionTest {
         rig.settle()
         assertEquals(1, rig.owner.snapshot().get().queuedCount)
         rig.runtime.flush().get(2, TimeUnit.SECONDS)
-        assertEquals(0, rig.networkCalls)
+        assertEquals(callsBeforeWithdrawal, rig.networkCalls)
     }
 
     @Test fun `withdrawal during SQLite activation prevents final authority publication`() = Rig().use { rig ->

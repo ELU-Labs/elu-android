@@ -98,7 +98,9 @@ class AndroidViewReplayCollectorTest {
 
     @Test fun sensitiveTextRemainsReadableWhileInputsAndBlockedDescendantsStayHidden() = main { root ->
         val ordinary = TextView(activity).apply { text = "Readable ordinary text" }; add(root, ordinary, width = 500, height = 80)
-        val input = EditText(activity).apply { setText("PRIVATE_INPUT") }; add(root, input, y = 80)
+        ordinary.measure(View.MeasureSpec.makeMeasureSpec(500, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
+        ordinary.layout(20, 20, 520, 100)
+        val input = EditText(activity).apply { setText("PRIVATE_INPUT") }; add(root, input, y = 110)
         val blocked = FrameLayout(activity); add(root, blocked, y = 140)
         val trap = TrapText(activity); add(blocked, trap, 0, 0); trap.armed = true
         try {
@@ -109,6 +111,8 @@ class AndroidViewReplayCollectorTest {
         assertTrue(first.nodes.any { it.kind is NativeMaskedKind.Input })
         assertFalse(first.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value?.contains("PRIVATE") == true })
         ordinary.text = "Updated ordinary text"
+        ordinary.measure(View.MeasureSpec.makeMeasureSpec(500, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
+        ordinary.layout(20, 20, 520, 100)
         val second = collector.collect(root, 1, 1001, NativeCollectionFence(), { true }, false)
         assertTrue(second.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value == "Updated ordinary text" })
         dev.elu.analytics.Elu.maskView(root)
