@@ -22,7 +22,8 @@ Config requests can continue while collection is disabled so authorization can
 recover. There is no customer override that bypasses remote privacy policy.
 
 Before the initial configuration decision, state-changing facade operations
-have a bounded in-memory FIFO of 100 entries; overflow drops the oldest entry.
+have a bounded in-memory FIFO of 100 entries; overflow drops the newest entry
+to preserve the already accepted identity history.
 This pre-initialization buffer is not a durable offline queue. Feature-flag
 reload commands are not replayed from that buffer. Invalid or unavailable
 operations return safe facade defaults.

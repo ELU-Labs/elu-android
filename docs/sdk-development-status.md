@@ -9,8 +9,15 @@ during an earlier denial. Fresh local host verification passes 818 JVM tests,
 117 release-guard tests, release lint, immutable public ABI compatibility, the
 658-class candidate inventory and strict package scans. The resulting AAR is
 `6a9bbc79833107e3072d3bf288315b7b8a2646d99c690d565ea3c122c9736176`.
-Its final device and exact-distribution Lab qualification remain pending; the
-older device and consumer results below do not qualify this changed artifact.
+The final instrumentation APK passes 63/63 tests on API 29 (including a small
+320-pixel display), 25/25 selected minimum-runtime tests on API 23, and 63/63 on
+API 36, all after clean installation with zero skips. A SystemUI OS crash dialog
+blocked focus in the first API 36 attempt; its failure evidence is retained,
+and the full unchanged APK passed after OS recovery and a new clean install.
+An independent Maven consumer builds debug and R8 release against this exact
+AAR. Exact-distribution Lab qualification, engine readback, customer-player
+rendering and resource overhead remain pending. Older results below are
+historical and do not substitute for these current artifact checks.
 
 The owned runtime now includes durable event delivery, identity and groups,
 properties, feature flags, persistent consent controls, explicit exception
