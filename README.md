@@ -128,6 +128,34 @@ which Android 9 and later block by default: add
 debug-only manifest (`src/debug/AndroidManifest.xml`), as the sample app does,
 or use a debug network security configuration.
 
+## Native performance (unreleased source)
+
+Performance sampling is disabled by default. Opt in explicitly during setup:
+
+```kotlin
+import dev.elu.analytics.EluOptions
+import dev.elu.analytics.EluPerformanceOptions
+
+Elu.setup(this, "YOUR_SITE_KEY", EluOptions(
+    performance = EluPerformanceOptions(enabled = true)
+))
+```
+
+The current server configuration must also authorize `capturePerformance`.
+It can disable memory or main-thread stall sampling and increase the interval.
+The default interval is 30 seconds, with a local minimum of 5 seconds. Sampling
+runs only while the app is foregrounded with a current authorized session.
+Consent, identity, configuration and lifecycle transitions discard old aggregates.
+Samples do not extend the session's idle timer.
+
+`$performance_sample` reports Android process proportional set size (PSS) in
+`$memory_process_pss_bytes`, omitting unavailable measurements. A single outstanding
+main-thread probe records sampled delays of at least 250 ms; count, total and
+maximum delay are emitted with the configured threshold. These are sampled native
+main-thread delays, not browser Web Vitals, complete frame/jank metrics or an ANR
+crash detector. No stacks or UI text are collected by this monitor. Resource
+overhead and customer artifact behavior still require release qualification.
+
 ## Identity
 
 ELU never auto-identifies. Identify users yourself when (and only when) you

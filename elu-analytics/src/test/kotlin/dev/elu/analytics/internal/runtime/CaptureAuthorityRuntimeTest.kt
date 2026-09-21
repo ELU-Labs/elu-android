@@ -498,6 +498,48 @@ class CaptureAuthorityRuntimeTest {
         assertEquals(legacy.flagContext, normalized.flagContext)
     }
 
+    @Test fun `passive samples preserve session activity across reopen and cannot revive timeout`() {
+        val backing = FakeRuntimeQueueBacking()
+        val clock = FakeCaptureClock(NOW_MS, 1_000L)
+        val owner = open(backing, clock)
+        val short = JSONObject(config()).apply { getJSONObject("session").put("idleTimeoutSeconds", 60) }.toString()
+        owner.submitCaptureAuthority(short, privacy(5)).await()
+        val first = owner.capture(command("activity", NOW)).await() as RuntimeCaptureResult.Accepted
+        val original = first.snapshot.state.identity
+        val expected = RuntimeCaptureExpectation(original.revision, original.contextRevision, original.session!!.id) { true }
+        clock.wallEpochMillis += 59_000
+        val sample = owner.capture(command("\$performance_sample", RuntimeWallTimestamps.rfc3339(clock.wallEpochMillis))
+            .copy(expectation = expected)).await() as RuntimeCaptureResult.Accepted
+        assertEquals(NOW, sample.snapshot.state.identity.session!!.lastActivityAt)
+        assertEquals(original.session!!.id, sample.record.record.sessionId)
+        owner.closeAsync().await()
+        val reopened = open(backing, clock)
+        assertEquals(NOW, reopened.snapshot().await().state.identity.session!!.lastActivityAt)
+        reopened.submitCaptureAuthority(short, privacy(5)).await()
+        clock.wallEpochMillis = NOW_MS + 61_000
+        val expired = reopened.capture(command("\$performance_sample", RuntimeWallTimestamps.rfc3339(clock.wallEpochMillis))
+            .copy(expectation = expected)).await()
+        assertTrue(expired is RuntimeCaptureResult.Rejected)
+        val user = reopened.capture(command("next activity", RuntimeWallTimestamps.rfc3339(clock.wallEpochMillis))).await() as RuntimeCaptureResult.Accepted
+        assertNotEquals(original.session!!.id, user.record.record.sessionId)
+        assertEquals(3, user.snapshot.queuedCount)
+    }
+
+    @Test fun `passive sample rejects changed context and withdrawal at final transaction boundary`() {
+        val owner = open()
+        owner.submitCaptureAuthority(config(), privacy(5)).await()
+        val first = owner.capture(command("activity", NOW)).await() as RuntimeCaptureResult.Accepted
+        val identity = first.snapshot.state.identity
+        val expected = RuntimeCaptureExpectation(identity.revision, identity.contextRevision, identity.session!!.id) { true }
+        val wrong = owner.capture(command("\$performance_sample", NOW).copy(expectation = expected.copy(contextRevision = 99))).await()
+        assertTrue(wrong is RuntimeCaptureResult.Rejected)
+        val calls = AtomicInteger()
+        val withdrawn = owner.capture(command("\$performance_sample", NOW).copy(expectation = expected.copy(isCurrent = { calls.incrementAndGet() < 3 }))).await()
+        assertTrue(withdrawn is RuntimeCaptureResult.Rejected)
+        assertEquals(1, owner.snapshot().await().queuedCount)
+        assertTrue(owner.capture(command("customer event", NOW).copy(expectation = expected)).await() is RuntimeCaptureResult.Rejected)
+    }
+
     private fun open(
         backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
         clock: RuntimeCaptureClock = FakeCaptureClock(NOW_MS, 1_000L),

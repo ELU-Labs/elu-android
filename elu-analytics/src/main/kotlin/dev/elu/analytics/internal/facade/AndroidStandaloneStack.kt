@@ -35,7 +35,8 @@ import java.util.concurrent.atomic.AtomicReference
 internal object AndroidStandaloneStack {
     private val LIMITS = RuntimeQueueLimits(maximumCount = 10_000, maximumBytes = 16_777_216)
 
-    fun facade(appContext: Context, siteKey: String, configHost: String = "https://elu.dev"): StandaloneFacade {
+    fun facade(appContext: Context, siteKey: String, configHost: String = "https://elu.dev",
+        performanceOptions: dev.elu.analytics.EluPerformanceOptions = dev.elu.analytics.EluPerformanceOptions()): StandaloneFacade {
         // Capture fresh identity chronology before Elu.setup can publish this facade.
         val freshIdentityStartedAt = SystemCoreEpochClock.nowEpochMillis()
         val mainThread = Handler(Looper.getMainLooper())
@@ -45,6 +46,7 @@ internal object AndroidStandaloneStack {
         val debuggable = (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         val source = V2ConfigSource(configHost, siteKey, debuggable = debuggable)
         val runtimeRef = AtomicReference<StandaloneRuntime?>()
+        val performanceRef = AtomicReference<dev.elu.analytics.internal.performance.AndroidPerformanceMonitor?>()
         val closing = AtomicBoolean(false)
         val notifications = Executors.newSingleThreadExecutor { task ->
             Thread(task, "elu-config-application").apply { isDaemon = true }
@@ -119,9 +121,18 @@ internal object AndroidStandaloneStack {
             },
             deliverCallback = { callback -> mainThread.post(callback) },
             configurationGate = gate,
-            onOpened = { lifecycle.ready() },
+            onOpened = {
+                if (performanceOptions.enabled && !closing.get()) {
+                    val monitor = dev.elu.analytics.internal.performance.AndroidPerformanceMonitor(
+                        performanceOptions, mainThread, facade::performanceContext, facade::capturePerformance)
+                    performanceRef.set(monitor)
+                    if (closing.get()) performanceRef.getAndSet(null)?.close()
+                }
+                lifecycle.ready()
+            },
             onCloseRequested = {
                 closing.set(true)
+                performanceRef.getAndSet(null)?.close()
                 runtimeRef.get()?.withdrawNativeReplay(restrictive = true)
                 driver.close()
                 gate.close()
@@ -136,6 +147,7 @@ internal object AndroidStandaloneStack {
         lifecycle = StandaloneLifecycleBinding(AndroidProcessLifecycle.observed, object : RuntimeLifecycleSink {
             override fun applicationForegrounded(occurredAt: String, fromBackground: Boolean) {
                 facade.nativeReplayLifecycleChanged(true)
+                performanceRef.get()?.foreground(true)
                 driver.onForeground()
                 runtimeRef.get()?.markForegrounded()
                 facade.capture(StandaloneRuntime.APPLICATION_OPENED_EVENT,
@@ -145,6 +157,7 @@ internal object AndroidStandaloneStack {
             override fun applicationBackgrounded(occurredAt: String) {
                 // Revoke synchronously before any queued storage or customer callback can run.
                 facade.nativeReplayLifecycleChanged(false)
+                performanceRef.get()?.foreground(false)
                 val runtime = runtimeRef.get()
                 if (runtime == null) driver.onBackground()
                 else runtime.applicationBackgrounded(driver, occurredAt)

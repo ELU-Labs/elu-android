@@ -67,7 +67,7 @@ public object Elu {
                     return
                 }
                 val key = siteKey.trim()
-                val facade = AndroidStandaloneStack.facade(appContext, key, configHost)
+                val facade = AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)
                 // Publish before starting so calls made during startup are held rather than lost.
                 sink = facade
                 facade.start()

@@ -519,6 +519,35 @@ class StandaloneFacadeTest {
         assertTrue(harness.facade.getGroups().isEmpty())
     }
 
+    @Test fun `performance requires current foreground session and drops stale consent identity and config aggregates`() {
+        val wall = AtomicLong(NOW_MS)
+        val h = harness(wall = wall::get)
+        val document = JSONObject(config()).put("capturePerformance", JSONObject().put("memory", true).put("long_tasks", true).put("sample_interval_ms", 5000)).toString()
+        h.facade.applyConfiguration(document)
+        h.facade.nativeReplayLifecycleChanged(true)
+        h.facade.capture("activity", null, Date(NOW_MS))
+        h.settle()
+        val original = checkNotNull(h.facade.performanceContext())
+        wall.addAndGet(5_000)
+        h.facade.capturePerformance(original, mapOf("\$memory_process_pss_bytes" to 42_000L))
+        h.settle()
+        assertEquals(1, h.records().filterIsInstance<RuntimeQueuedRecord.Event>().count { it.record.name == "\$performance_sample" })
+        assertEquals(Instant.ofEpochMilli(NOW_MS).toString(), Instant.parse(h.owner.snapshot().get().state.identity.session!!.lastActivityAt).toString())
+        h.facade.optOut()
+        assertNull(h.facade.performanceContext())
+        h.facade.capturePerformance(original, emptyMap()); h.settle()
+        h.facade.optIn(null, null); h.settle()
+        h.facade.capture("new activity", null, Date(wall.get())); h.settle()
+        h.facade.capturePerformance(original, emptyMap()); h.settle()
+        h.facade.identify("other", null); h.settle()
+        h.facade.capturePerformance(original, emptyMap()); h.settle()
+        val latest = checkNotNull(h.facade.performanceContext())
+        h.facade.nativeReplayLifecycleChanged(false)
+        h.facade.capturePerformance(latest, emptyMap()); h.settle()
+        assertNull(h.facade.performanceContext())
+        assertEquals(1, h.records().filterIsInstance<RuntimeQueuedRecord.Event>().count { it.record.name == "\$performance_sample" })
+    }
+
     // ---- harness -------------------------------------------------------------
 
     private fun harness(

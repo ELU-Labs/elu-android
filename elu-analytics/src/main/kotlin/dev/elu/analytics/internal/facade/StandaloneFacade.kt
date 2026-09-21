@@ -187,6 +187,7 @@ internal class StandaloneFacade(
     @Volatile private var closed = false
     @Volatile private var requestedOptOut = false
     private var consentIntentRevision = 0L // guarded by projectionLock
+    @Volatile private var performanceConfiguration: dev.elu.analytics.internal.config.V1CapturePerformance? = null
 
     @Volatile private var identity: IdentityState? = null
 
@@ -504,6 +505,39 @@ internal class StandaloneFacade(
         projectedIdentity?.let { return it.distinctId }
         val current = identity ?: return null
         return current.userId ?: current.anonymousId
+    }
+
+    /** Detached original context only; every sample is rechecked on the facade and storage lanes. */
+    internal fun performanceContext(): dev.elu.analytics.internal.performance.NativePerformanceContext? = synchronized(projectionLock) {
+        if (closed || closeRequested.get() || isOptedOut() || !nativeLifecycleEligible ||
+            pendingNativeOperations != 0 || pendingFlagOperations != 0 || pendingIdentityOperations != 0 ||
+            !hasCurrentCapture()) return null
+        val policy = performanceConfiguration ?: return null
+        if (!policy.memory && !policy.longTasks) return null
+        val current = identity ?: return null
+        val session = current.session ?: return null
+        if (session.lifecycle != dev.elu.analytics.internal.core.SessionLifecycle.ACTIVE || session.backgroundedAt != null) return null
+        val now = wallClock()
+        val lastActivity = java.time.Instant.parse(session.lastActivityAt).toEpochMilli()
+        val started = java.time.Instant.parse(session.startedAt).toEpochMilli()
+        if (now < lastActivity || now - lastActivity >= session.timeoutSeconds * 1_000L ||
+            now < started || now - started >= session.maximumDurationSeconds * 1_000L) return null
+        val source = if (configurationGate == null) configDocument ?: return null
+            else appliedConfiguration?.takeIf { it.isCurrent() }?.token ?: return null
+        dev.elu.analytics.internal.performance.NativePerformanceContext(source, current.revision, current.contextRevision,
+            session.id, flagIntentRevision, nativeIntentEpoch, policy)
+    }
+
+    internal fun capturePerformance(original: dev.elu.analytics.internal.performance.NativePerformanceContext, properties: Map<String, Any>) {
+        val detached = properties.toMap()
+        submit {
+            if (performanceContext() != original) return@submit
+            // Do not retry an old aggregate through a new identity, session, or configuration.
+            val result = requireStack().runtime.capturePerformance(detached,
+                dev.elu.analytics.internal.runtime.RuntimeCaptureExpectation(original.identityRevision,
+                    original.contextRevision, original.sessionId) { performanceContext() == original }).await()
+            if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
+        }
     }
 
     // ---- properties ----------------------------------------------------------
@@ -931,6 +965,8 @@ internal class StandaloneFacade(
         val result = open.runtime.applyConfiguration(document).await()
         val allowed = result is RuntimeCaptureAuthorityUpdateResult.Activated &&
             (configurationGate == null || witness?.isCurrent() == true)
+        performanceConfiguration = if (allowed && document != null)
+            runCatching { dev.elu.analytics.internal.config.V1ConfigJson.parseConfig(document).capturePerformance }.getOrNull() else null
         appliedConfiguration = if (allowed) witness else null
         if (appliedFlagConfigBody != document ||
             (configurationGate != null && flagConfiguration?.token !== witness?.token)) invalidateFlagProjection()

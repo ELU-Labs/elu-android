@@ -2337,6 +2337,15 @@ internal class RuntimeQueueOwner private constructor(
                         }
                         val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
                         val session = planCaptureSession(before.state, command.occurredAt, authority)
+                        fun originalContextMatches(): Boolean = command.expectation?.let { expected ->
+                            before.state.identity.revision == expected.identityRevision &&
+                                before.state.identity.contextRevision == expected.contextRevision &&
+                                before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
+                                before.state.identity.session?.backgroundedAt == null &&
+                                session.id == expected.sessionId && expected.isCurrent()
+                        } ?: true
+                        if (!originalContextMatches()) return@transaction CaptureCommit(
+                            RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
                         val mergedProperties =
                             LinkedHashMap(before.state.identity.superProperties).apply {
                                 putAll(captureProperties)
@@ -2354,8 +2363,10 @@ internal class RuntimeQueueOwner private constructor(
                             prepareAppend(
                                 before,
                                 AppendRequest.Events(
-                                    RuntimeEventSessionUpdate.Replace(before.state.identity.session?.id, session),
+                                    if (command.expectation == null) RuntimeEventSessionUpdate.Replace(before.state.identity.session?.id, session)
+                                    else RuntimeEventSessionUpdate.Preserve, // Internal sampling must not prolong user activity.
                                     listOf(draft),
+                                    passiveCaptureAt = command.expectation?.let { command.occurredAt },
                                 ),
                                 ReplayQueueStore.state(transaction),
                             )
@@ -2374,7 +2385,10 @@ internal class RuntimeQueueOwner private constructor(
                                 published = null,
                             )
                         }
+                        if (!originalContextMatches()) return@transaction CaptureCommit(
+                            RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
                         commitPreparedAppend(transaction, created)
+                        if (!originalContextMatches()) throw PassiveCaptureWithdrawn()
                         val record = created.publicRecords.single() as RuntimeQueuedRecord.Event
                         CaptureCommit(
                             RuntimeCaptureResult.Accepted(record, created.after.publicSnapshot),
@@ -2383,6 +2397,8 @@ internal class RuntimeQueueOwner private constructor(
                     }
                 outcome.published?.let { loaded = it }
                 return outcome.result
+            } catch (_: PassiveCaptureWithdrawn) {
+                return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, requireLoaded().publicSnapshot)
             } catch (invalid: IllegalArgumentException) {
                 return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
             } catch (proven: ProvenNotCommittedRuntimeTransactionException) {
@@ -2530,6 +2546,7 @@ internal class RuntimeQueueOwner private constructor(
     private fun isValidCaptureCommand(command: RuntimeCaptureCommand): Boolean {
         // Diagnostic events are runtime-internal and never admitted through a capture command.
         if (command.kind == RuntimeEventKind.DIAGNOSTIC) return false
+        if (command.expectation != null && (command.name != "\$performance_sample" || command.kind != RuntimeEventKind.CAPTURE)) return false
         val nameLength = command.name.codePointCount(0, command.name.length)
         if (nameLength !in 1..512) return false
         if (!hasWellFormedUnicode(command.name)) return false
@@ -2651,6 +2668,8 @@ internal class RuntimeQueueOwner private constructor(
             V1ConfigRejection.UNAUTHORIZED,
             -> RuntimeCaptureAuthorityTerminalReason.MALFORMED
         }
+
+    private class PassiveCaptureWithdrawn : IllegalStateException("Passive capture context withdrawn")
 
     private class FlagContextWithdrawn : IllegalStateException("Flag context authority withdrawn")
 
@@ -2798,6 +2817,7 @@ internal class RuntimeQueueOwner private constructor(
                     lowerBound = before.state.identity.updatedAt,
                     state = canonicalEventState,
                     drafts = request.drafts,
+                    passiveCaptureAt = request.passiveCaptureAt,
                 )
                 request.drafts.forEachIndexed { index, draft ->
                     val sequence = Math.addExact(before.state.stream.nextSequence, index.toLong())
@@ -3661,6 +3681,7 @@ internal class RuntimeQueueOwner private constructor(
         lowerBound: String,
         state: PersistedCoreState,
         drafts: List<RuntimeRecordDraft.Event>,
+        passiveCaptureAt: String? = null,
     ) {
         val session = state.identity.session
             ?: throw IllegalArgumentException("Events require a persisted post-transition session")
@@ -3668,9 +3689,9 @@ internal class RuntimeQueueOwner private constructor(
         drafts.forEach { draft ->
             requireTimestampNotBefore(draft.occurredAt, previousOccurredAt, "Event occurredAt")
             requireTimestampNotBefore(
-                session.lastActivityAt,
+                passiveCaptureAt ?: session.lastActivityAt,
                 draft.occurredAt,
-                "Session lastActivityAt",
+                "Session activity or internally authorized passive capture",
             )
             previousOccurredAt = draft.occurredAt
         }
@@ -3851,6 +3872,8 @@ internal class RuntimeQueueOwner private constructor(
         data class Events(
             val sessionUpdate: RuntimeEventSessionUpdate,
             val drafts: List<RuntimeRecordDraft.Event>,
+            // Only captureOnWorker supplies this after matching the original live session.
+            val passiveCaptureAt: String? = null,
         ) : AppendRequest {
             override val recordCount: Int = drafts.size
         }

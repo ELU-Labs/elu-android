@@ -70,12 +70,21 @@ internal sealed interface RuntimeCaptureAuthorityUpdateResult {
     data class Terminated(val authority: RuntimeCaptureAuthorityState.Terminal) : RuntimeCaptureAuthorityUpdateResult
 }
 
+/** Optional original aggregate context, checked inside the final queue transaction. */
+internal data class RuntimeCaptureExpectation(
+    val identityRevision: Long,
+    val contextRevision: Long,
+    val sessionId: String,
+    val isCurrent: () -> Boolean,
+)
+
 internal data class RuntimeCaptureCommand(
     val kind: RuntimeEventKind,
     val name: String,
     val occurredAt: String,
     val properties: Map<String, Any?>,
     val versions: RuntimeVersions,
+    val expectation: RuntimeCaptureExpectation? = null,
 )
 
 internal enum class RuntimeCaptureRejection {
