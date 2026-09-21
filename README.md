@@ -13,7 +13,8 @@ is managed from your ELU dashboard and delivered as remote config. See
   requires API 29 or later and current server authorization.
 
 This source checkout contains the ELU-owned analytics runtime. Its standalone
-release is still undergoing qualification. The published 0.1.0 release uses
+0.2.0 release is still undergoing qualification and is not published yet.
+The published 0.1.0 release uses
 the previous runtime; building this checkout does not change an already
 published Maven artifact. Application code continues to use `Elu.*`.
 
@@ -24,11 +25,12 @@ the qualified release.
 
 ## Install
 
-From Maven Central:
+For the qualified 0.2.0 release, use Maven Central. This version remains
+unpublished while the source candidate completes release checks:
 
 ```kotlin
 dependencies {
-    implementation("dev.elu:elu-analytics:0.1.0")
+    implementation("dev.elu:elu-analytics:0.2.0")
 }
 ```
 
@@ -156,8 +158,10 @@ Samples do not extend the session's idle timer.
 main-thread probe records sampled delays of at least 250 ms; count, total and
 maximum delay are emitted with the configured threshold. These are sampled native
 main-thread delays, not browser Web Vitals, complete frame/jank metrics or an ANR
-crash detector. No stacks or UI text are collected by this monitor. Resource
-overhead and customer artifact behavior still require release qualification.
+crash detector. The monitor adds no stacks or UI text, but these analytics events
+are linked to the current anonymous or identified user, session and applicable
+event properties. Include linked performance diagnostics in your app's privacy
+disclosures. Resource overhead and customer artifact behavior still require release qualification.
 
 ## Identity
 
@@ -238,7 +242,9 @@ clipped, transparent and custom text remain masked. Text is limited to 4096 UTF-
 bytes per view; larger values become a placeholder. Input values, images,
 WebViews and unsupported/custom views stay hidden. All-text mode masks ordinary text too.
 Opaque native masking rules retain all-text masking; unresolved block rules
-prevent capture.
+prevent capture. Ordinary display text can contain personal information: mask
+private labels before displaying them and disclose readable replay collection.
+Replay masking does not sanitize customer event properties or exception messages.
 
 Strengthen privacy before a view is displayed:
 

@@ -1,7 +1,7 @@
 # Android SDK development status
 
 This branch is an implementation checkpoint, not a released standalone SDK.
-The published Maven version remains 0.1.0.
+The source candidate is 0.2.0; the published Maven version remains 0.1.0.
 
 The owned runtime now includes durable event delivery, identity and groups,
 properties, feature flags, persistent consent controls, explicit exception
@@ -36,3 +36,8 @@ and lifecycle behavior. The former preview replacement-continuity harness is
 retired; the immutable published consumer fixture remains historical API and
 artifact evidence only. Exact-distribution Lab upgrades and fault injection
 remain required for the final release.
+
+The clean pre-version candidate passed 808 JVM tests, release lint, 116 active
+script tests and 62 API 36 device tests. Version 0.2.0 packages must be rebuilt
+and qualified by their exact hashes; those preceding results are not a
+publication or production verification claim.

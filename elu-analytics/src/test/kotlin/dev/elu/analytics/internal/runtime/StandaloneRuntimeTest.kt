@@ -250,6 +250,9 @@ class StandaloneRuntimeTest {
 
         harness.runtime.close()
         harness.runtime.close()
+        // close() starts asynchronous storage/native settlement. Await that exact
+        // completion before asserting the control executor has rejected new work.
+        harness.runtime.closeAndWait().await()
         assertFalse(harness.runtime.hasDeliveryAuthorization())
         assertThrows(IllegalStateException::class.java) { harness.runtime.applyConfiguration(config()) }
         runtimes.remove(harness.runtime)
