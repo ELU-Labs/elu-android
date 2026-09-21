@@ -35,6 +35,19 @@ class EluFacadeSafetyTest {
     }
 
     @Test
+    fun `public consent survives pre-setup calls and reset`() {
+        try {
+            Elu.optOut()
+            assertTrue(Elu.isOptedOut())
+            Elu.reset()
+            Elu.optIn(captureEventName = "")
+            assertTrue(Elu.isOptedOut())
+            Elu.optIn(captureEventName = null)
+            assertFalse(Elu.isOptedOut())
+        } finally { Elu.optIn(captureEventName = null) }
+    }
+
+    @Test
     fun `concurrent pre-setup calls never throw`() {
         val workers = 8
         val pool = Executors.newFixedThreadPool(workers)

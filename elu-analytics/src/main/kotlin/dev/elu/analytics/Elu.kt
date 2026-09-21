@@ -7,7 +7,7 @@ import dev.elu.analytics.internal.replay.NativeViewRestriction
 import android.content.pm.ApplicationInfo
 import android.util.Log
 import dev.elu.analytics.internal.facade.AndroidStandaloneStack
-import dev.elu.analytics.internal.facade.EluFacadeSink
+import dev.elu.analytics.internal.facade.EluConsentHandoff
 import java.util.Date
 
 /**
@@ -15,7 +15,7 @@ import java.util.Date
  * allowlist. Customer code interacts only with this stable public surface.
  *
  * Every method is safe in every state: before [setup] (idle) and while
- * disabled they no-op; while pending (no usable config yet) event-class calls
+ * disabled they no-op (consent choices are retained before setup); while pending (no usable config yet) event-class calls
  * are buffered in memory and getters return defaults; while running they
  * delegate. Never throws, never blocks the caller.
  *
@@ -29,7 +29,8 @@ public object Elu {
     // customer code locking on Elu could contend or deadlock with setup.
     private val setupLock = Any()
 
-    @Volatile private var sink: EluFacadeSink? = null
+    private val consent = EluConsentHandoff()
+    private val sink get() = consent.sink
 
     /**
      * Initializes the SDK with the ELU site key. Call once from
@@ -69,11 +70,9 @@ public object Elu {
                 val key = siteKey.trim()
                 val facade = AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)
                 // Publish before starting so calls made during startup are held rather than lost.
-                sink = facade
-                facade.start()
+                consent.install(facade, facade::start)
             } catch (t: Throwable) {
                 Log.w(TAG, "Elu.setup failed: $t")
-                sink = null
             }
         }
     }
@@ -135,19 +134,20 @@ public object Elu {
         sink?.captureException(error, properties)
     }
 
-    /** Stops collection and persists the choice. Resetting identity does not restore consent. */
+    /** Stops collection immediately. Before setup the choice is retained in memory, then persisted
+     * before startup can collect. Resetting identity does not restore consent. */
     @JvmStatic
-    public fun optOut() { sink?.optOut() }
+    public fun optOut() { consent.optOut() }
 
     /** Restores collection when remote policy permits it; null suppresses the opt-in event. */
     @JvmStatic
     @JvmOverloads
     public fun optIn(captureEventName: String? = "\$opt_in", properties: Map<String, Any>? = null) {
-        sink?.optIn(captureEventName, properties)
+        consent.optIn(captureEventName, properties)
     }
 
     @JvmStatic
-    public fun isOptedOut(): Boolean = sink?.isOptedOut() ?: false
+    public fun isOptedOut(): Boolean = consent.isOptedOut()
 
     // ---- properties ----------------------------------------------------------
 

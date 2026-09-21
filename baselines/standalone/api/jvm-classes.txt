@@ -166,6 +166,7 @@ dev.elu.analytics.internal.core.UuidCoreIdentifierGenerator
 dev.elu.analytics.internal.facade.AndroidStandaloneStack
 dev.elu.analytics.internal.facade.AndroidStandaloneStack$facade$1$flags$1
 dev.elu.analytics.internal.facade.AndroidStandaloneStack$facade$6
+dev.elu.analytics.internal.facade.EluConsentHandoff
 dev.elu.analytics.internal.facade.EluFacadeDiagnostics
 dev.elu.analytics.internal.facade.EluFacadeDisabledReason
 dev.elu.analytics.internal.facade.EluFacadeDropReason

@@ -213,7 +213,7 @@ Behavioral details: [`CONTRACT.md`](./CONTRACT.md).
 ```kotlin
 Elu.optOut()                         // Stop collection and persist the choice.
 Elu.reset()                          // Clear user/group state; preserve consent.
-Elu.optIn()                          // Resume if server policy permits; capture $opt_in.
+Elu.optIn()                          // Resume if permitted; attempt $opt_in when config allows.
 Elu.optIn(captureEventName = null)    // Resume without an opt-in event.
 Elu.registerOnce(mapOf("first_source" to "invite"))
 Elu.identify("user-123", mapOf("plan" to "pro"), mapOf("first_plan" to "pro"))
@@ -226,7 +226,15 @@ calls also accept a separate set-once map. Flag results contain `key`, `enabled`
 `variant` and `payload`; unavailable or expired results are null. Account/context
 changes invalidate prior flag results immediately.
 
-Opt-out takes effect for new work immediately and persists asynchronously.
+If consent is initially denied, call `Elu.optOut()` before `Elu.setup(...)`.
+Before setup, the latest valid `optOut()`/`optIn(...)` choice is retained in
+memory; setup commits it before lifecycle collection begins. A choice made
+before setup cannot survive process death until setup opens durable storage.
+`isOptedOut()` reports the pending choice. Invalid opt-in event names do not
+replace a pending denial. An opt-in event is attempted once under current
+configuration, not queued until a future configuration becomes available.
+
+After setup, opt-out takes effect for new work immediately and persists asynchronously.
 Already transmitted requests cannot be recalled. Pending replay is purged;
 previously queued events remain paused until explicit opt-in. A logout/reset
 never opts a visitor back in. `flush()` schedules delivery; it does not promise

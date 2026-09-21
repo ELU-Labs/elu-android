@@ -17,7 +17,7 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "cb539ed6b287be4329d24910b50510832bb14ccfa60f4a51b4ca38a0b45262ac",
+        "b64e17d6bc733540bf027ed60f6d0173e01dc259938dc6c4b9a81c6599480bd6",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
@@ -140,11 +140,19 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
         if platform_future.search(text):
             errors.append(f"API23 runtime must use the private completion primitive: {relative}")
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
-    if ("@Volatile private var sink: EluFacadeSink? = null" not in public or
+    if ("private val consent = EluConsentHandoff()" not in public or
+        "private val sink get() = consent.sink" not in public or
         public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
-    if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("sink = facade") < public.find("facade.start()")):
-        errors.append("public setup must publish the exact owned sink before starting")
+    if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
+        errors.append("public setup must publish the exact owned sink through the consent handoff")
+    handoff = sources.get(MAIN_KOTLIN / "dev/elu/analytics/internal/facade/EluConsentHandoff.kt", "")
+    if ("internal class EluConsentHandoff" not in handoff or
+        not (0 <= handoff.find("pending?.apply(target)") < handoff.find("sink = target") < handoff.find("start()"))):
+        errors.append("pending consent must precede sink publication and startup")
+    facade = sources.get(MAIN_KOTLIN / "dev/elu/analytics/internal/facade/StandaloneFacade.kt", "")
+    if not (0 <= facade.find("pendingConsent?.let") < facade.find("applyConsentOnLane(intent)") < facade.find("onOpened()")):
+        errors.append("startup must durably apply pending consent before lifecycle collection")
     build = load_text(root, "elu-analytics/build.gradle.kts")
     runtime_dependencies = re.findall(r'(?m)^\s*(?:implementation|api|runtimeOnly)\s*\(\s*"([^"]+)"', build)
     if runtime_dependencies != ["com.squareup.okhttp3:okhttp"]:

@@ -382,6 +382,114 @@ class StandaloneFacadeTest {
     }
 
     @Test
+    fun `pre-start denial commits before lifecycle starts and persists across reset and reopen`() {
+        val backing = FakeRuntimeQueueBacking()
+        val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+        val h = harness(backing = backing, autoStart = false, onOpened = { observed.set(it) })
+        val handoff = EluConsentHandoff()
+        handoff.optOut()
+        assertTrue(handoff.isOptedOut())
+        handoff.install(h.facade, h.facade::start)
+        h.facade.applyConfiguration(config())
+        h.facade.capture("forbidden-startup", null, Date(NOW_MS))
+        h.facade.reset()
+        h.settle()
+        assertEquals(true, observed.get())
+        assertTrue(h.owner.snapshot().get().state.identity.optedOut)
+        assertTrue(h.queued().isEmpty())
+        assertTrue(h.transport.requests.isEmpty())
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val reopened = harness(backing = backing)
+        reopened.facade.applyConfiguration(config()); reopened.settle()
+        assertTrue(reopened.facade.isOptedOut())
+        assertTrue(reopened.owner.snapshot().get().state.identity.optedOut)
+    }
+
+    @Test
+    fun `latest pre-start choice wins and an invalid opt in cannot erase denial`() {
+        for (denyLast in listOf(true, false)) {
+            val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+            val h = harness(autoStart = false, onOpened = { observed.set(it) })
+            val handoff = EluConsentHandoff()
+            handoff.optOut()
+            handoff.optIn("accepted", mapOf("source" to "settings"))
+            if (denyLast) { handoff.optOut(); handoff.optIn("", null) }
+            assertEquals(denyLast, handoff.isOptedOut())
+            handoff.install(h.facade, h.facade::start)
+            h.facade.applyConfiguration(config()); h.settle()
+            assertEquals(denyLast, observed.get())
+            assertEquals(denyLast, h.owner.snapshot().get().state.identity.optedOut)
+            // A pre-config opt-in attempt is not replayed when config later arrives.
+            assertFalse(h.queued().contains("event:accepted"))
+        }
+    }
+
+    @Test
+    fun `pre-start opt in durably clears existing denial before lifecycle starts`() {
+        val backing = FakeRuntimeQueueBacking()
+        val initial = harness(backing = backing)
+        initial.facade.optOut(); initial.settle(); initial.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+        val h = harness(backing = backing, autoStart = false, onOpened = { observed.set(it) })
+        h.facade.optIn(null, null)
+        h.settle() // Consent task can run before start; the pending intent must survive it.
+        h.facade.start(); h.settle()
+        assertEquals(false, observed.get())
+        assertFalse(h.facade.isOptedOut())
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val reopened = harness(backing = backing); reopened.settle()
+        assertFalse(reopened.owner.snapshot().get().state.identity.optedOut)
+    }
+
+    @Test
+    fun `denial received during open is committed before lifecycle startup`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+        val h = harness(beforeOpen = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) },
+            onOpened = { observed.set(it) })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            h.facade.optIn(null, null); h.facade.optOut()
+            assertTrue(h.facade.isOptedOut())
+        } finally { release.countDown() }
+        h.settle()
+        assertEquals(true, observed.get())
+        assertTrue(h.owner.snapshot().get().state.identity.optedOut)
+    }
+
+    @Test
+    fun `later opt in cannot backfill activity submitted while opening under denial`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val h = harness(beforeOpen = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            h.facade.optOut()
+            h.facade.capture("private-during-denial", null, Date(NOW_MS))
+            h.facade.screen("private-screen", null)
+            h.facade.captureException(IllegalStateException("private-error"), null)
+            h.facade.optIn(null, null)
+            h.facade.applyConfiguration(config())
+        } finally { release.countDown() }
+        h.settle()
+        assertFalse(h.facade.isOptedOut())
+        assertTrue(h.queued().isEmpty())
+        assertEquals(3, h.diagnostics().dropped[EluFacadeDropReason.OPTED_OUT])
+        h.facade.capture("permitted-after-grant", null, Date(NOW_MS)); h.settle()
+        assertEquals(listOf("event:permitted-after-grant"), h.queued())
+    }
+
+    @Test
+    fun `close before startup never opens or emits pending consent event`() {
+        val opened = java.util.concurrent.atomic.AtomicBoolean()
+        val h = harness(autoStart = false, onOpened = { opened.set(true) })
+        h.facade.optIn("never", null)
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        h.facade.start()
+        assertFalse(opened.get())
+        assertTrue(h.queued().isEmpty())
+    }
+
+    @Test
     fun `opt out persists without configuration and reset preserves consent`() {
         val harness = harness()
         harness.facade.capture("before-consent", null, Date(NOW_MS))
@@ -555,6 +663,8 @@ class StandaloneFacadeTest {
         deviceInEu: Boolean = false,
         wall: () -> Long = { NOW_MS },
         beforeOpen: () -> Unit = {},
+        autoStart: Boolean = true,
+        onOpened: (Boolean) -> Unit = {},
         backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
         facadeLane: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor(),
     ): Harness {
@@ -596,10 +706,11 @@ class StandaloneFacadeTest {
                 deliverCallback = { callback -> callback.run() },
                 wallClock = wall,
                 bufferLimit = bufferLimit,
+                onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
                 lane = facadeLane,
             )
         facades += facade
-        facade.start()
+        if (autoStart) facade.start()
         return Harness(owner, facade, transport, flagTransport)
     }
 

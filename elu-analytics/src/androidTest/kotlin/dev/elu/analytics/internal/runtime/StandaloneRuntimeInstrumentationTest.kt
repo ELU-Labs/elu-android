@@ -99,6 +99,53 @@ class StandaloneRuntimeInstrumentationTest {
         awaitCondition { runtime.flush().get(5, TimeUnit.SECONDS).stop == BatchDeliveryStop.IDLE }
     }
 
+    @Test
+    fun preSetupConsentIsDurableBeforeLifecycleAndSurvivesReopen() {
+        val file = databaseFile()
+        fun open(): RuntimeQueueOwner = AndroidRuntimeQueue.openForTesting(
+            databaseFile = file, limits = RuntimeQueueLimits(10_000, 16_777_216),
+            legacyStateLoader = ::freshState, trustedSiteKey = SITE_KEY,
+            captureClock = FixedCaptureClock(NOW_MS),
+        ).await()
+        for (deny in listOf(true, false, true)) {
+            val owner = open()
+            val retainedCount = owner.snapshot().await().queuedCount
+            val transport = RecordingTransport()
+            val runtime = StandaloneRuntime(owner = owner, siteKey = SITE_KEY, wallClock = { NOW_MS },
+                transportFactory = { transport }, deviceInEuTimezone = { false })
+            runtimes += runtime
+            val opened = java.util.concurrent.atomic.AtomicBoolean()
+            val facade = dev.elu.analytics.internal.facade.StandaloneFacade(
+                open = { dev.elu.analytics.internal.facade.StandaloneStack(runtime, owner, null) },
+                deliverCallback = { it.run() }, wallClock = { NOW_MS },
+                onOpened = {
+                    assertEquals(deny, owner.snapshot().await().state.identity.optedOut)
+                    opened.set(true)
+                },
+            )
+            try {
+                val handoff = dev.elu.analytics.internal.facade.EluConsentHandoff()
+                handoff.optOut()
+                if (!deny) handoff.optIn(null, null)
+                handoff.install(facade, facade::start)
+                facade.applyConfiguration(captureConfig())
+                facade.capture("initial", null, java.util.Date(NOW_MS))
+                facade.reset()
+                facade.diagnostics().await()
+                assertTrue(opened.get())
+                assertEquals(deny, owner.snapshot().await().state.identity.optedOut)
+                if (deny) {
+                    // Previously admitted events remain paused; denial must add none.
+                    assertEquals(retainedCount, owner.snapshot().await().queuedCount)
+                    assertTrue(transport.requests.isEmpty())
+                }
+            } finally { facade.closeAndWait().await() }
+            val reopened = open()
+            try { assertEquals(deny, reopened.snapshot().await().state.identity.optedOut) }
+            finally { reopened.closeAsync().await() }
+        }
+    }
+
     private fun databaseFile(): File {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val directory = File(context.cacheDir, "elu-standalone-runtime-tests/${UUID.randomUUID()}")

@@ -42,7 +42,13 @@ choice asynchronously. It purges pending replay. Previously queued events stay
 paused until explicit `optIn`; already transmitted requests cannot be recalled.
 `reset`, restart and a newly enabled server configuration never silently clear
 user opt-out. `optIn` resumes only when current server policy also permits it,
-and records `$opt_in` unless its event name is null.
+and attempts `$opt_in` under current configuration unless its event name is null.
+There is no separate delayed-until-config opt-in event queue.
+
+Before setup, the latest valid consent choice is held in memory and reported
+by `isOptedOut`. Setup persists that choice before lifecycle collection begins;
+call `optOut` before `setup` when consent is initially denied. The pre-setup
+choice cannot survive process death before durable storage has been opened.
 
 `registerOnce` fills missing values or values equal to its selected default
 (`"None"` by default). Identify and person-property calls accept independent

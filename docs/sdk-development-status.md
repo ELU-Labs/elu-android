@@ -3,6 +3,15 @@
 This branch is an implementation checkpoint, not a released standalone SDK.
 The source candidate is 0.2.0; the published Maven version remains 0.1.0.
 
+A subsequent consent fix retains the latest pre-setup choice, commits it before
+lifecycle startup, and prevents a later opt-in from admitting activity submitted
+during an earlier denial. Fresh local host verification passes 818 JVM tests,
+117 release-guard tests, release lint, immutable public ABI compatibility, the
+658-class candidate inventory and strict package scans. The resulting AAR is
+`6a9bbc79833107e3072d3bf288315b7b8a2646d99c690d565ea3c122c9736176`.
+Its final device and exact-distribution Lab qualification remain pending; the
+older device and consumer results below do not qualify this changed artifact.
+
 The owned runtime now includes durable event delivery, identity and groups,
 properties, feature flags, persistent consent controls, explicit exception
 capture, privacy-restricted native Views replay, and optional foreground native
@@ -10,7 +19,7 @@ performance sampling. Replay requires API 29 or later; API 26–28 replay and
 Compose replay are not qualified. Compose apps can use events and flags and
 must report navigation screens explicitly.
 
-Fresh local verification of the 0.2.0 source candidate `758e901` passed 808 JVM
+Earlier local verification of the 0.2.0 source candidate `758e901` passed 808 JVM
 tests, 116 release-guard tests, release lint, immutable API compatibility checks
 and strict artifact scans. Its exact instrumentation APK passed all 62 tests
 after a clean install on Android API 36. The ordinary stock-theme label was

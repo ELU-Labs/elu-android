@@ -144,6 +144,10 @@ internal class StandaloneFacade(
 ) : EluFacadeSink, AutoCloseable {
     // Serializes acceptance with queue insertion, never a storage wait.
     private val consentIntakeLock = Any()
+    private var startupConsent: ConsentIntent? = null // guarded by consentIntakeLock
+    private var appliedConsentRevision = 0L // facade lane only
+    private data class ConsentIntent(val revision: Long, val optedOut: Boolean,
+        val eventName: String? = null, val properties: Map<String, Any?> = emptyMap())
 
     // Lane-confined.
     private val buffer = ArrayDeque<Operation>()
@@ -219,9 +223,17 @@ internal class StandaloneFacade(
             try {
                 observeLane(RuntimeStartupPhase.OPEN_BEGIN)
                 val opened = open()
-                stack = opened
+                val pendingConsent = synchronized(consentIntakeLock) {
+                    stack = opened
+                    startupConsent.also { startupConsent = null }
+                }
                 syncIdentity(opened.owner.snapshot().await().state.identity)
                 if (requestedOptOut) opened.runtime.restrictForConsent()
+                pendingConsent?.let { intent ->
+                    applyConsentOnLane(intent)
+                    // A failed initial choice must not launch lifecycle/configuration work.
+                    check(!isCurrentConsent(intent) || identity?.optedOut == intent.optedOut)
+                }
                 onOpened()
                 observeLane(RuntimeStartupPhase.OPEN_READY)
             } catch (error: Throwable) {
@@ -450,18 +462,12 @@ internal class StandaloneFacade(
         val intent = synchronized(projectionLock) {
             consentIntentRevision = Math.incrementExact(consentIntentRevision)
             requestedOptOut = true
-            consentIntentRevision
+            ConsentIntent(consentIntentRevision, optedOut = true)
         }
-        // Withdrawal is immediate; a queued config refresh cannot reinstall delivery while the
-        // consent transaction waits for the facade/storage lanes.
+        // Withdrawal is immediate, including while open() is still running.
         stack?.runtime?.restrictForConsent()
         acceptNativeChange(restrictive = true)?.let { settleNativeChange(it, onLane = false) }
-        dispatch(OperationKind.CONSENT, affectsFlags = true) {
-            if (!synchronized(projectionLock) { consentIntentRevision == intent }) return@dispatch
-            if (identity?.optedOut != true) applyLocalChange(RuntimeLocalStateChange.SetOptedOut(true, now()))
-            else renewAuthority()
-            clearFlags()
-        }
+        enqueueConsent(intent)
     }
 
     override fun optIn(captureEventName: String?, properties: Map<String, Any>?) {
@@ -473,24 +479,45 @@ internal class StandaloneFacade(
         synchronized(consentIntakeLock) {
             val intent = synchronized(projectionLock) {
                 consentIntentRevision = Math.incrementExact(consentIntentRevision)
-                consentIntentRevision
+                ConsentIntent(consentIntentRevision, optedOut = false, captureEventName, eventProperties)
             }
-            dispatch(OperationKind.CONSENT, affectsFlags = true) {
-                if (!synchronized(projectionLock) { consentIntentRevision == intent }) return@dispatch
-                if (identity?.optedOut == true) applyLocalChange(RuntimeLocalStateChange.SetOptedOut(false, now()))
-                if (identity?.optedOut == false) synchronized(consentIntakeLock) {
-                    synchronized(projectionLock) {
-                        if (consentIntentRevision == intent) {
-                            requestedOptOut = false
-                            stack?.runtime?.restoreConsent()
-                        }
-                    }
-                }
-                renewAuthority()
-                if (!isOptedOut() && state is EluFacadeState.Enabled && captureEventName != null) {
-                    captureThrough { requireStack().runtime.capture(captureEventName, eventProperties, now()) }
+            enqueueConsent(intent)
+        }
+    }
+
+    /** Acceptance and enqueue stay ordered; only one latest pre-open choice is retained. */
+    private fun enqueueConsent(intent: ConsentIntent) {
+        if (stack == null) startupConsent = intent
+        dispatch(OperationKind.CONSENT, affectsFlags = true) { applyConsentOnLane(intent) }
+    }
+
+    private fun isCurrentConsent(intent: ConsentIntent): Boolean =
+        synchronized(projectionLock) { consentIntentRevision == intent.revision }
+
+    private fun applyConsentOnLane(intent: ConsentIntent) {
+        if (stack == null || appliedConsentRevision >= intent.revision || !isCurrentConsent(intent)) return
+        if (identity?.optedOut != intent.optedOut) {
+            applyLocalChange(RuntimeLocalStateChange.SetOptedOut(intent.optedOut, now()))
+        }
+        if (identity?.optedOut != intent.optedOut) return
+        appliedConsentRevision = intent.revision
+        if (intent.optedOut) {
+            renewAuthority()
+            clearFlags()
+            return
+        }
+        synchronized(consentIntakeLock) {
+            synchronized(projectionLock) {
+                if (consentIntentRevision == intent.revision) {
+                    requestedOptOut = false
+                    stack?.runtime?.restoreConsent()
                 }
             }
+        }
+        renewAuthority()
+        // This is one normal capture attempt, never a delayed-until-config opt-in event.
+        if (isCurrentConsent(intent) && !isOptedOut() && state is EluFacadeState.Enabled && intent.eventName != null) {
+            captureThrough { requireStack().runtime.capture(intent.eventName, intent.properties, now()) }
         }
     }
 
@@ -811,6 +838,8 @@ internal class StandaloneFacade(
         onDropped: (() -> Unit)? = null,
         run: () -> Unit,
     ) {
+        // A later opt-in must never backfill activity submitted during a denial.
+        val deniedAtCall = kind == OperationKind.ACTIVITY && isOptedOut()
         if (affectsFlags) synchronized(projectionLock) {
             pendingFlagOperations += 1
             flagIntentRevision = Math.incrementExact(flagIntentRevision)
@@ -822,6 +851,10 @@ internal class StandaloneFacade(
             submit {
                 if (closed) {
                     discard(operation, EluFacadeDropReason.CLOSED)
+                    return@submit
+                }
+                if (deniedAtCall) {
+                    discard(operation, EluFacadeDropReason.OPTED_OUT)
                     return@submit
                 }
                 if (state is EluFacadeState.Pending && kind != OperationKind.CONSENT) {

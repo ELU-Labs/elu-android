@@ -52,6 +52,22 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("must not supply replay proof", result.stderr)
 
+    def test_pending_consent_cannot_follow_runtime_startup(self) -> None:
+        cases = [
+            ("EluConsentHandoff.kt", "pending?.apply(target)", ""),
+            ("StandaloneFacade.kt", "applyConsentOnLane(intent)\n                    // A failed", "// A failed"),
+        ]
+        for filename, before, after in cases:
+            with self.subTest(filename=filename):
+                path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/facade" / filename
+                original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                result = self.run_guard()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("consent", result.stderr)
+                path.write_text(original)
+
     def test_owned_native_capability_selection_cannot_add_a_codec_or_generation(self) -> None:
         path = self.root / BOUNDARY.STACK
         original = path.read_text()
@@ -599,7 +615,7 @@ internal class WiredTransport : FlagTransport {
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
         for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
-                         ("sink = facade", "sink = null")]:
+                         ("consent.install(facade, facade::start)", "facade.start()")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))
                 self.assertIn("public setup must", self.run_guard().stderr)
