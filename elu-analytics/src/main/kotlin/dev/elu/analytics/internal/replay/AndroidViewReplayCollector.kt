@@ -316,7 +316,10 @@ internal class AndroidViewReplayCollector(
                 // transformation installed on an otherwise ordinary framework TextView.
                 if (guardedNativeViewRead(profile, readGuard) { view.inputType } != InputType.TYPE_NULL ||
                     guardedNativeViewRead(profile, readGuard) { view.transformationMethod } != null) return NativeMaskedKind.Text
-                if (android.graphics.Color.alpha(guardedNativeViewRead(profile, readGuard) { view.currentTextColor }) != 255 ||
+                // The stock Material theme draws readable secondary text at alpha 0x8a.
+                // Keep transparent/faint strings private while accepting at least half-opacity
+                // text; view/ancestor opacity and full glyph layout remain separately guarded.
+                if (android.graphics.Color.alpha(guardedNativeViewRead(profile, readGuard) { view.currentTextColor }) < 128 ||
                     guardedNativeViewRead(profile, readGuard) { view.textSize } <= 0f ||
                     guardedNativeViewRead(profile, readGuard) { view.scrollX } != 0 ||
                     guardedNativeViewRead(profile, readGuard) { view.scrollY } != 0) return NativeMaskedKind.Text

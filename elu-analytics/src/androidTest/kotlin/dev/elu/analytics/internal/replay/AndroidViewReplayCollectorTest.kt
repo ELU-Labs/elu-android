@@ -107,7 +107,8 @@ class AndroidViewReplayCollectorTest {
         dev.elu.analytics.Elu.blockView(blocked)
         val collector = AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())
         val first = collector.collect(root, 0, 1000, NativeCollectionFence(), { true }, false)
-        assertTrue(first.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value == "Readable ordinary text" })
+        assertTrue("ordinary text facts: color=${ordinary.currentTextColor.toUInt().toString(16)} input=${ordinary.inputType} transform=${ordinary.transformationMethod} textType=${ordinary.text.javaClass.name} layout=${ordinary.layout?.height}x${ordinary.layout?.width} bounds=${ordinary.width}x${ordinary.height} nodes=${first.nodes.map { it.kind }}",
+            first.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value == "Readable ordinary text" })
         assertTrue(first.nodes.any { it.kind is NativeMaskedKind.Input })
         assertFalse(first.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value?.contains("PRIVATE") == true })
         ordinary.text = "Updated ordinary text"

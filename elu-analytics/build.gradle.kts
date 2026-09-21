@@ -28,6 +28,9 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Library instrumentation host only; avoids obsolete-target OS dialogs.
+    testOptions { targetSdk = 36 }
+
     buildTypes {
         release {
             isMinifyEnabled = false
