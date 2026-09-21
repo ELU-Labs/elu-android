@@ -1,5 +1,8 @@
 package dev.elu.analytics.internal.runtime
 
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.SharedPreferences
 import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import android.os.Looper
@@ -61,6 +64,34 @@ class AndroidRuntimeQueueInstrumentationTest {
         )
         assertEquals("queue-v1.sqlite", first.name)
         assertNotEquals(first.parentFile?.name, other.parentFile?.name)
+    }
+
+    @Test
+    fun cleanSetupAndReopenNeverAccessUnrelatedAppStorage() {
+        val original = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(original.cacheDir, "clean-setup-${UUID.randomUUID()}").apply { mkdirs() }
+        testDirectories += root
+        val unrelated = File(root, "unrelated-application-data").apply { writeText("must remain byte-for-byte intact") }
+        val before = unrelated.readBytes()
+        val context = object : ContextWrapper(original) {
+            override fun getApplicationContext(): Context = this
+            override fun getNoBackupFilesDir(): File = File(root, "owned").apply { mkdirs() }
+            override fun getFilesDir(): File = error("Clean setup must not open aggregate or preview files")
+            override fun getCacheDir(): File = error("Clean setup must not open preview queues")
+            override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences =
+                error("Clean setup must not open preview preferences")
+        }
+        val owner = AndroidRuntimeQueue.open(context, "elu_pk_clean_setup", RuntimeQueueLimits(100, 1_000_000)).await()
+        owners += owner
+        val first = owner.snapshot().await()
+        assertEquals(null, first.state.identity.userId)
+        assertEquals(0, first.queuedCount)
+        owner.closeAsync().await()
+        owners.remove(owner)
+        val reopened = AndroidRuntimeQueue.open(context, "elu_pk_clean_setup", RuntimeQueueLimits(100, 1_000_000)).await()
+        owners += reopened
+        assertEquals(first.state, reopened.snapshot().await().state)
+        assertArrayEquals(before, unrelated.readBytes())
     }
 
     @Test

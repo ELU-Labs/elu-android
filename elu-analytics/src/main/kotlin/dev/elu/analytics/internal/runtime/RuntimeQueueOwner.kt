@@ -42,7 +42,6 @@ import dev.elu.analytics.internal.flags.FlagResponse
 import dev.elu.analytics.internal.flags.FlagRestrictionReason
 import dev.elu.analytics.internal.replay.*
 import dev.elu.analytics.internal.config.V1ReplayTransport
-import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
@@ -135,9 +134,7 @@ internal class RuntimeQueueOwner private constructor(
     private val readbackProvenReplayTransports: Set<V1ReplayTransport>,
     private val replayMaskingAdmission: ReplayMaskingAdmission,
     private val supportedReplayProtocolGenerations: Set<String>,
-    private val startupMigrationCompleter: ((PersistedCoreState) -> PersistedCoreState)?,
     private val assertStartupCurrent: () -> Unit,
-    private val startupHistoryLoader: ((PersistedCoreState) -> List<RuntimeStoredRecord>)?,
 ) {
     private var database: RuntimeQueueDatabase? = null
         set(value) { field = value; nativeCaptureResources?.updateDatabase(value) }
@@ -1892,7 +1889,6 @@ internal class RuntimeQueueOwner private constructor(
             }
         if (existing != null) {
             loaded = existing
-            completePendingStartupMigration()
             interruptNativeEpochOnOpen()
             return
         }
@@ -1929,96 +1925,9 @@ internal class RuntimeQueueOwner private constructor(
                 }
                 loaded = reopened
             }
-            // Completion has its own bounded commit reconciliation; the initial insertion
-            // loop must not retry a completion/source failure as though insertion were uncertain.
-            completePendingStartupMigration()
             assertStartupCurrent()
             check(!Thread.currentThread().isInterrupted) { "Runtime startup was interrupted" }
             return
-        }
-    }
-
-    /** A pending aggregate cannot escape initialization or be mistaken for fresh state. */
-    private fun completePendingStartupMigration() {
-        if (loaded?.state?.startupMigration == null) return
-        val complete = startupMigrationCompleter
-            ?: corrupt("Startup migration is pending without its source adapter")
-        repeat(MAX_RECONCILIATION_ATTEMPTS) { attempt ->
-            try {
-                val after = database().transaction { transaction ->
-                    val before = loadValidated(transaction, validatePayloads = true)
-                        ?: corrupt("Runtime core disappeared during startup migration")
-                    val checkpoint = before.state.startupMigration ?: return@transaction before
-                    if (before.queuedCount != 0 || before.queuedBytes != 0L) {
-                        corrupt("Pending startup migration contains queued history")
-                    }
-                    check(!Thread.currentThread().isInterrupted) { "Startup migration was interrupted" }
-                    assertStartupCurrent()
-                    // Bounded app-private source observation and conversion only. No network,
-                    // source writes or deletes. All imported rows and the completion ledger commit together.
-                    val completed = complete(before.state)
-                    val marker = completed.identity.migration
-                        ?: corrupt("Startup migration completion lacks its marker")
-                    val ledger = completed.startupHistory
-                    val importedCount = ledger?.records?.size ?: 0
-                    if (ledger != null && (ledger.sourceFingerprint != checkpoint.sourceFingerprint ||
-                            ledger.sourceSchema != checkpoint.sourceSchema || importedCount !in 1..1000)) {
-                        corrupt("Startup history ledger is not bound to its captured source")
-                    }
-                    val revision = if (ledger == null) before.state.identity.revision else importedCount.toLong()
-                    val contextRevision = if (ledger == null) before.state.identity.contextRevision else importedCount.toLong()
-                    if (marker.sourceSchema != checkpoint.sourceSchema || completed != before.state.copy(
-                            startupMigration = null, startupHistory = ledger,
-                            stream = before.state.stream.copy(nextSequence = importedCount.toLong()),
-                            identity = before.state.identity.copy(migration = marker,
-                                revision = revision, contextRevision = contextRevision),
-                        )) corrupt("Startup migration completion changed captured state")
-                    val canonical = canonicalState(completed)
-                    validateStateInvariants(canonical.first)
-                    val originals = if (ledger == null) emptyList() else {
-                        val loader = startupHistoryLoader ?: corrupt("Startup history is pending without its record adapter")
-                        loader(canonical.first)
-                    }
-                    if (originals.size != importedCount || originals.size > limits.maximumCount) {
-                        corrupt("Startup history count does not match its bounded ledger")
-                    }
-                    var bytes = 0L
-                    val records = originals.mapIndexed { index, row ->
-                        if (row.sequence != index.toLong() || row.internalPayload.size > MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) {
-                            corrupt("Startup history row exceeds its bounded initial sequence")
-                        }
-                        val copied = row.copy(internalPayload = row.internalPayload.copyOf())
-                        validateStoredRecord(copied, canonical.first)
-                        bytes = Math.addExact(bytes, copied.accountedBytes.toLong())
-                        if (bytes > limits.maximumBytes) corrupt("Startup history exceeds the bounded destination queue")
-                        copied
-                    }
-                    records.forEach { transaction.insertRecord(it) }
-                    val next = before.copy(state = canonical.first, stateJson = canonical.second,
-                        queuedCount = records.size, queuedBytes = bytes,
-                        headSequence = if (records.isEmpty()) canonical.first.stream.nextSequence else 0L)
-                    transaction.updateCore(next.storedCore())
-                    assertStartupCurrent()
-                    check(!Thread.currentThread().isInterrupted) { "Startup migration was interrupted" }
-                    next
-                }
-                // If cancellation raced the physical commit, startup still refuses publication.
-                // A later owner may use the committed completed destination without source lookup.
-                assertStartupCurrent()
-                check(!Thread.currentThread().isInterrupted) { "Startup migration was interrupted" }
-                loaded = after
-                return
-            } catch (ambiguous: AmbiguousRuntimeCommitException) {
-                val reopened = reopenValidated(ambiguous)
-                    ?: corrupt("Runtime core disappeared after ambiguous startup completion")
-                loaded = reopened
-                if (reopened.state.startupMigration == null) {
-                    assertStartupCurrent()
-                    check(!Thread.currentThread().isInterrupted) { "Startup migration was interrupted" }
-                    return
-                }
-                if (attempt == MAX_RECONCILIATION_ATTEMPTS - 1) throw ambiguous
-            }
         }
     }
 
@@ -3006,17 +2915,12 @@ internal class RuntimeQueueOwner private constructor(
                                 "Acknowledgement stream does not match this runtime namespace",
                             )
                         }
-                        // This runs before AlreadyApplied: even retired imported UUIDs must match
-                        // the permanent ledger; ordinary identities retain their original derivation.
+                        // Even retired acknowledgements must match the stream-derived identity.
                         references.forEach { reference ->
-                            val imported = before.state.startupHistory?.records?.let { entries ->
-                                if (reference.sequence < entries.size.toLong()) entries[reference.sequence.toInt()] else null
-                            }
-                            val expectedId = imported?.recordId ?: RuntimeRecordIdentity.recordId(
+                            val expectedId = RuntimeRecordIdentity.recordId(
                                 acknowledgement.streamId, reference.sequence, reference.kind)
-                            if (reference.recordId != expectedId || imported != null &&
-                                (imported.sequence != reference.sequence || imported.kind != reference.kind.wireValue)) {
-                                throw RuntimeAcknowledgementMismatchException("Acknowledgement identity does not match its immutable stream ledger")
+                            if (reference.recordId != expectedId) {
+                                throw RuntimeAcknowledgementMismatchException("Acknowledgement identity does not match its stream")
                             }
                         }
                         if (references.isEmpty()) {
@@ -3182,25 +3086,8 @@ internal class RuntimeQueueOwner private constructor(
         ) {
             corrupt("Queue row metadata does not match its payload")
         }
-        val imported = state.startupHistory?.records?.let { entries ->
-            if (row.sequence < entries.size.toLong()) entries[row.sequence.toInt()] else null
-        }
-        if (imported == null) {
-            val expectedRecordId = RuntimeRecordIdentity.recordId(row.streamId, row.sequence, row.kind)
-            if (row.recordId != expectedRecordId) corrupt("Queue row record identity is not stream/sequence derived")
-        } else {
-            if (imported.sequence != row.sequence || imported.recordId != row.recordId || imported.kind != row.kind.wireValue ||
-                imported.payloadSha256 != MessageDigest.getInstance("SHA-256").digest(row.internalPayload).joinToString("") { "%02x".format(it) }) {
-                corrupt("Imported queue row does not match its immutable migration ledger")
-            }
-            val occurredAt = when (decoded) {
-                is RuntimeQueuedRecord.Event -> decoded.record.occurredAt
-                is RuntimeQueuedRecord.Mutation -> decoded.envelope.mutation.occurredAt
-            }
-            if (occurredAt != imported.occurredAt || decoded is RuntimeQueuedRecord.Event && decoded.record.sessionId != imported.sourceSessionId) {
-                corrupt("Imported queue row lost its captured source time or session")
-            }
-        }
+        val expectedRecordId = RuntimeRecordIdentity.recordId(row.streamId, row.sequence, row.kind)
+        if (row.recordId != expectedRecordId) corrupt("Queue row record identity is not stream/sequence derived")
         when (decoded) {
             is RuntimeQueuedRecord.Event -> {
                 if (decoded.record.identity.revision > decoded.record.contextRevision) {
@@ -3987,9 +3874,7 @@ internal class RuntimeQueueOwner private constructor(
             readbackProvenReplayTransports: Set<V1ReplayTransport> = emptySet(),
             replayMaskingAdmission: ReplayMaskingAdmission = ReplayMaskingAdmission { _, _ -> false },
             supportedReplayProtocolGenerations: Set<String> = emptySet(),
-            startupMigrationCompleter: ((PersistedCoreState) -> PersistedCoreState)? = null,
             assertStartupCurrent: () -> Unit = {},
-            startupHistoryLoader: ((PersistedCoreState) -> List<RuntimeStoredRecord>)? = null,
         ): Future<RuntimeQueueOwner> {
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
             lateinit var worker: Thread
@@ -4030,9 +3915,7 @@ internal class RuntimeQueueOwner private constructor(
                                 Collections.unmodifiableSet(LinkedHashSet(readbackProvenReplayTransports)),
                                 replayMaskingAdmission,
                                 Collections.unmodifiableSet(LinkedHashSet(supportedReplayProtocolGenerations)),
-                                startupMigrationCompleter,
                                 assertStartupCurrent,
-                                startupHistoryLoader,
                             )
                         owner.initialize()
                         owner

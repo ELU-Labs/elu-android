@@ -2,15 +2,10 @@ package dev.elu.analytics.internal.runtime
 
 import android.content.Context
 import android.os.SystemClock
-import android.util.Xml
-import dev.elu.analytics.internal.compat.BoundedAndroidLegacyStartupSource
-import dev.elu.analytics.internal.compat.LegacyAndroidStartupMigration
 import dev.elu.analytics.internal.config.V1ReplayTransport
-import dev.elu.analytics.internal.core.AndroidCoreStateStore
 import dev.elu.analytics.internal.core.CoreEpochClock
 import dev.elu.analytics.internal.core.CoreIdentifierGenerator
 import dev.elu.analytics.internal.core.CoreStateStore
-import dev.elu.analytics.internal.core.CoreStateCorruptionException
 import dev.elu.analytics.internal.core.CoreStateWriteOutcome
 import dev.elu.analytics.internal.core.IdentityStateCore
 import dev.elu.analytics.internal.core.PersistedCoreState
@@ -45,34 +40,12 @@ internal object AndroidRuntimeQueue {
         val applicationContext = context.applicationContext ?: context
         val databaseFile = databaseFileFor(applicationContext, constructorSiteKey).canonicalFile
         val identifiers = UuidCoreIdentifierGenerator
-        // Lazy source construction is essential: committed current SQLite wins without
-        // reading or canonicalizing any old provider path on subsequent startup.
-        val legacyStore by lazy(LazyThreadSafetyMode.NONE) {
-            AndroidCoreStateStore.forProduction(
-                AndroidCoreStateStore.fileFor(applicationContext, constructorSiteKey).canonicalFile,
-            )
-        }
-        val startupMigration by lazy(LazyThreadSafetyMode.NONE) {
-            val roots = BoundedAndroidLegacyStartupSource.contextDirectories(
-                applicationContext.filesDir, applicationContext.cacheDir,
-            )
-            LegacyAndroidStartupMigration(
-                source = BoundedAndroidLegacyStartupSource(
-                    roots.data, roots.files, roots.cache,
-                    constructorSiteKey, Xml::newPullParser, assertStartupCurrent,
-                ),
-                identifiers = identifiers,
-                clock = SystemCoreEpochClock,
-                assertCurrent = assertStartupCurrent,
-            )
-        }
         return RuntimeQueueOwner.open(
             ownershipKey = databaseFile.path,
             limits = limits,
             databaseFactory = { AndroidSQLiteRuntimeDatabase.open(databaseFile) },
             legacyStateLoader = {
-                bootstrapBeforeQueue(legacyStore, { startupMigration.prepare() }, identifiers,
-                    SystemCoreEpochClock, freshIdentityStartedAt)
+                freshState(identifiers, SystemCoreEpochClock, freshIdentityStartedAt)
             },
             identifiers = identifiers,
             leaseFactory = { AndroidFileOwnershipLease.acquire(File(databaseFile.path + ".lock")) },
@@ -80,8 +53,6 @@ internal object AndroidRuntimeQueue {
             captureClock = AndroidRuntimeCaptureClock,
             readbackProvenReplayTransports = readbackProvenReplayTransports,
             supportedReplayProtocolGenerations = supportedReplayProtocolGenerations,
-            startupMigrationCompleter = { pending -> startupMigration.complete(pending) },
-            startupHistoryLoader = { completed -> startupMigration.recordsFor(completed) },
             assertStartupCurrent = assertStartupCurrent,
         )
     }
@@ -108,52 +79,24 @@ internal object AndroidRuntimeQueue {
         )
     }
 
-    /** Existing ELU aggregate precedes the bounded original-provider import. */
-    internal fun bootstrapBeforeQueue(
-        legacyStore: CoreStateStore,
-        migrationLoader: () -> PersistedCoreState?,
-        identifiers: CoreIdentifierGenerator,
-        clock: CoreEpochClock,
-        freshIdentityStartedAt: Long?,
-    ): PersistedCoreState {
-        // Read the previous ELU aggregate once. Its recovery remains the original core's
-        // responsibility; the provider source cannot replace a present or malformed value.
-        var readFailure: CoreStateCorruptionException? = null
-        val original = try { legacyStore.read()?.copyOf() }
-            catch (failure: CoreStateCorruptionException) { readFailure = failure; null }
-        val captured = object : CoreStateStore {
-            override fun read(): ByteArray? {
-                readFailure?.let { throw it }
-                return original?.copyOf()
-            }
-            override fun write(bytes: ByteArray): CoreStateWriteOutcome =
-                error("The bootstrap read snapshot cannot be written")
-        }
-        if (original == null && readFailure == null) migrationLoader()?.let { return it }
-        return bootstrapFromLegacy(captured, identifiers, clock, freshIdentityStartedAt)
-    }
-
-    internal fun bootstrapFromLegacy(
-        legacyStore: CoreStateStore,
+    /** A new owned SQLite installation never opens pre-release aggregate or provider files. */
+    internal fun freshState(
         identifiers: CoreIdentifierGenerator = UuidCoreIdentifierGenerator,
         clock: CoreEpochClock = SystemCoreEpochClock,
-    ): PersistedCoreState = bootstrapFromLegacy(legacyStore, identifiers, clock, null)
-
-    internal fun bootstrapFromLegacy(
-        legacyStore: CoreStateStore,
-        identifiers: CoreIdentifierGenerator,
-        clock: CoreEpochClock,
-        freshIdentityStartedAt: Long?,
+        freshIdentityStartedAt: Long? = null,
     ): PersistedCoreState {
-        val bootstrapStore = BootstrapCoreStateStore(legacyStore)
-        val bootstrapClock = if (freshIdentityStartedAt == null) clock else CoreEpochClock {
+        val bootstrapClock = CoreEpochClock {
             val current = clock.nowEpochMillis()
-            if (bootstrapStore.legacyWasAbsent) {
-                require(freshIdentityStartedAt <= current) { "Fresh identity setup clock moved backwards" }
-                freshIdentityStartedAt
-            } else current
+            require(freshIdentityStartedAt == null || freshIdentityStartedAt <= current) {
+                "Fresh identity setup clock moved backwards"
+            }
+            freshIdentityStartedAt ?: current
         }
-        return IdentityStateCore.forTesting(bootstrapStore, identifiers, bootstrapClock).snapshot()
+        val memoryStore = object : CoreStateStore {
+            override fun read(): ByteArray? = null
+            override fun write(bytes: ByteArray): CoreStateWriteOutcome = CoreStateWriteOutcome.Durable
+        }
+        return IdentityStateCore.forTesting(memoryStore, identifiers, bootstrapClock).snapshot()
     }
 
     internal fun databaseFileFor(
@@ -164,28 +107,6 @@ internal object AndroidRuntimeQueue {
         return File(File(File(context.noBackupFilesDir, "elu-analytics/runtime"), siteDirectory), "queue-v1.sqlite")
     }
 
-    /**
-     * Lets the existing core apply its bounded recovery rules while directing every recovery or
-     * fresh-state write to memory. The legacy file is an import source, never a second authority.
-     */
-    private class BootstrapCoreStateStore(private val legacyStore: CoreStateStore) : CoreStateStore {
-        private var memoryBytes: ByteArray? = null
-        private var hasMemoryValue: Boolean = false
-        var legacyWasAbsent: Boolean = false
-            private set
-
-        override fun read(): ByteArray? =
-            if (hasMemoryValue) memoryBytes?.copyOf() else legacyStore.read()?.copyOf().also {
-                // A thrown read or non-null malformed legacy value must keep recovery time live.
-                legacyWasAbsent = it == null
-            }
-
-        override fun write(bytes: ByteArray): CoreStateWriteOutcome {
-            memoryBytes = bytes.copyOf()
-            hasMemoryValue = true
-            return CoreStateWriteOutcome.Durable
-        }
-    }
 }
 
 private object AndroidRuntimeCaptureClock : RuntimeCaptureClock {

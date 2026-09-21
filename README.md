@@ -43,11 +43,14 @@ includeBuild("path/to/elu-android") {
 }
 ```
 
-When upgrading from 0.1.0, keep the same application ID, signing identity and
-application data. This source includes a bounded upgrade reader that preserves
-supported identity, consent and pending event state before collection starts.
-The standalone upgrade path is still being qualified; do not treat a source
-build as an approved replacement for a published release.
+The unused 0.1.0 preview has no supported persisted-data import into this
+owned release. Setup creates a fresh owned installation and leaves former
+preview files untouched. It does not transfer prior identity, consent, events,
+or replay, including from an unpublished aggregate-file build. Apply the user's
+current consent before capturing any data.
+Existing owned SQLite installations retain their identity, consent and pending
+queue on reopen and supported owned schema upgrades. Source qualification is
+still in progress; no new Maven release is being claimed here.
 
 For the owned source runtime, enable core library desugaring in your **app
 module** so its Java time and arithmetic APIs work on Android API 23. This
