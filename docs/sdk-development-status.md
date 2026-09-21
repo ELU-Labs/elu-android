@@ -10,12 +10,14 @@ performance sampling. Replay requires API 29 or later; API 26–28 replay and
 Compose replay are not qualified. Compose apps can use events and flags and
 must report navigation screens explicitly.
 
-Fresh local verification of commit `7cf916a` passed 832 JVM tests and 60
-instrumentation tests on Android API 36. The device tests used a clean install
-of the exact built test APK. The ordinary stock-theme label was visibly
-readable on the device, and its collected snapshot excluded private inputs,
-transparent/faint text and blocked content. This is collector validation;
-customer-player rendering and engine readback remain separate release gates.
+Fresh local verification of the 0.2.0 source candidate `758e901` passed 808 JVM
+tests, 116 release-guard tests, release lint, immutable API compatibility checks
+and strict artifact scans. Its exact instrumentation APK passed all 62 tests
+after a clean install on Android API 36. The ordinary stock-theme label was
+visibly readable on the device, and its collected snapshot excluded private
+inputs, transparent/faint text and blocked content. This is collector
+validation; customer-player rendering and engine readback remain separate
+release gates.
 
 On 2026-09-21 the repository owner confirmed that neither 0.1.0 mobile SDK
 has customers. The clean candidate therefore retires the unused preview import
@@ -24,11 +26,10 @@ installation with no persisted-data import from 0.1.0, and never deletes former
 files. Historical release source and the immutable 0.1.0 API baseline remain
 available. Current owned SQLite reopen and schema upgrades remain supported.
 
-The production source subsequently changed, so the 60-test device result above
-is historical evidence for that commit only. The clean candidate requires fresh
-exact-artifact Lab fault/privacy/resource checks, source review, release checks,
-publication and production verification. No final release claim follows from
-compilation, local collector tests or successful HTTP responses alone.
+The clean candidate still requires exact-artifact Lab fault/privacy/resource
+checks, final source review, publication and production verification. No final
+release claim follows from compilation, local collector tests or successful
+HTTP responses alone.
 
 The active instrumentation check covers clean setup, current owned SQLite
 reopen/schema upgrades, refusal of unsupported state, consent, native privacy
@@ -37,7 +38,9 @@ retired; the immutable published consumer fixture remains historical API and
 artifact evidence only. Exact-distribution Lab upgrades and fault injection
 remain required for the final release.
 
-The clean pre-version candidate passed 808 JVM tests, release lint, 116 active
-script tests and 62 API 36 device tests. Version 0.2.0 packages must be rebuilt
-and qualified by their exact hashes; those preceding results are not a
-publication or production verification claim.
+An independent application resolved the exact 0.2.0 AAR through a private Maven
+repository and compiled debug and R8-minified release variants. Both dependency
+classpaths verified AAR SHA-256
+`865fc25fbb865a566d80bcfd5e469e0e4eb705b65a550363aeef81bd118fdfa4`.
+This proves local package resolution and consumer compilation, not publication
+to Maven Central or customer runtime qualification.
