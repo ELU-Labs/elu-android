@@ -120,7 +120,7 @@ class ReplayDeliveryTest {
             ReplayDeliveryScheduler { _, _ -> ReplayDeliveryScheduledTask {} },{rig.clock.wall},{rig.clock.nanos/1_000_000},{0.5})
         val pass=co.flush();assertTrue(enrolled.await(3,TimeUnit.SECONDS));assertSame(pass,co.flush())
         rig.owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("plan" to "new"),"2026-08-05T00:01:06Z")).get(3,TimeUnit.SECONDS)
-        co.close();assertTrue(op.cancelled);assertFalse(pass.isDone);assertSame(pass,co.flush())
+        co.close();assertTrue(op.cancellation.await(3, TimeUnit.SECONDS));assertTrue(op.cancelled);assertFalse(pass.isDone);assertSame(pass,co.flush())
         op.settlement.completeExceptionally(IllegalStateException("settled"));pass.get(3,TimeUnit.SECONDS)
         assertEquals(1,rig.rows().size)
     }
@@ -483,7 +483,8 @@ class ReplayDeliveryTest {
     private class Op : ReplayTransportOperation {
         override val settlement=SdkFuture<ReplayTransportResponse>()
         @Volatile var cancelled=false
-        override fun cancel() { cancelled=true }
+        val cancellation = CountDownLatch(1)
+        override fun cancel() { cancelled=true; cancellation.countDown() }
     }
     private fun ack(request: PreparedReplayRequest)=JSONObject().put("schemaVersion",2).put("requestId",request.requestId)
         .put("replayId",request.replayId).put("chunkId",request.chunkId).put("sequence",request.sequence).put("result","accepted").toString().toByteArray()

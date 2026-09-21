@@ -97,9 +97,11 @@ class AndroidViewReplayCollectorTest {
     }
 
     @Test fun sensitiveTextRemainsReadableWhileInputsAndBlockedDescendantsStayHidden() = main { root ->
-        val ordinary = TextView(activity).apply { text = "Readable ordinary text" }; add(root, ordinary, width = 500, height = 80)
-        ordinary.measure(View.MeasureSpec.makeMeasureSpec(500, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
-        ordinary.layout(20, 20, 520, 100)
+        val visible = Rect(); assertTrue(root.getGlobalVisibleRect(visible))
+        val textWidth = minOf(500, visible.width() - 40)
+        val ordinary = TextView(activity).apply { text = "Readable ordinary text" }; add(root, ordinary, width = textWidth, height = 80)
+        ordinary.measure(View.MeasureSpec.makeMeasureSpec(textWidth, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
+        ordinary.layout(20, 20, 20 + textWidth, 100)
         val input = EditText(activity).apply { setText("PRIVATE_INPUT") }; add(root, input, y = 110)
         val blocked = FrameLayout(activity); add(root, blocked, y = 140)
         val trap = TrapText(activity); add(blocked, trap, 0, 0); trap.armed = true
@@ -112,8 +114,8 @@ class AndroidViewReplayCollectorTest {
         assertTrue(first.nodes.any { it.kind is NativeMaskedKind.Input })
         assertFalse(first.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value?.contains("PRIVATE") == true })
         ordinary.text = "Updated ordinary text"
-        ordinary.measure(View.MeasureSpec.makeMeasureSpec(500, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
-        ordinary.layout(20, 20, 520, 100)
+        ordinary.measure(View.MeasureSpec.makeMeasureSpec(textWidth, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
+        ordinary.layout(20, 20, 20 + textWidth, 100)
         val second = collector.collect(root, 1, 1001, NativeCollectionFence(), { true }, false)
         assertTrue(second.nodes.any { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value == "Updated ordinary text" })
         dev.elu.analytics.Elu.maskView(root)
@@ -243,13 +245,16 @@ class AndroidViewReplayCollectorTest {
     }
 
     @Test fun dpCoordinatesUseOneDensityAndUnroundedRootClip() = main { root ->
-        root.layout(0, 0, 503, 497)
+        val visible = Rect(); assertTrue(root.getGlobalVisibleRect(visible))
+        val rootWidth = minOf(503, visible.width() - 1)
+        val rootHeight = minOf(497, visible.height() - 1)
+        root.layout(0, 0, rootWidth, rootHeight)
         val child = View(activity); add(root, child, 13, 17, 73, 91)
         val density = root.resources.displayMetrics.density.toDouble()
         val captured = frame(root)
-        assertEquals(kotlin.math.ceil(503 / density).toInt(), captured.viewport.width)
-        assertEquals(kotlin.math.ceil(497 / density).toInt(), captured.viewport.height)
-        assertEquals(503 / density, captured.nodes.first().clip.width, 0.000000001)
+        assertEquals(kotlin.math.ceil(rootWidth / density).toInt(), captured.viewport.width)
+        assertEquals(kotlin.math.ceil(rootHeight / density).toInt(), captured.viewport.height)
+        assertEquals(rootWidth / density, captured.nodes.first().clip.width, 0.000000001)
         assertEquals(13 / density, captured.nodes[1].bounds.x, 0.000000001)
         assertEquals(73 / density, captured.nodes[1].bounds.width, 0.000000001)
         assertTrue(captured.viewport.width - captured.nodes.first().clip.width < 1.0)
