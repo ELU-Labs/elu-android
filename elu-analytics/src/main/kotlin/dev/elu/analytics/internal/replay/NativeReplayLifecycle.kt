@@ -232,11 +232,11 @@ internal class NativeReplaySelection private constructor(
      * The caller must retain this exact noncancelable completion until main work ends.
      * The existing watcher is borrowed; this method does not join watcher disposal.
      */
-    fun <T : Any> consumeOriginalRoot(
+    fun consumeOriginalRoot(
         current: () -> Boolean,
-        consume: (Any, () -> Boolean) -> T?,
-    ): SdkFuture<T?> {
-        val result = object : SdkFuture<T?>() {
+        consume: (Any, () -> Boolean) -> NativeReplayCollectionAttempt?,
+    ): SdkFuture<NativeReplayCollectionAttempt?> {
+        val result = object : SdkFuture<NativeReplayCollectionAttempt?>() {
             override fun cancel(mayInterruptIfRunning: Boolean) = false
         }
         try {

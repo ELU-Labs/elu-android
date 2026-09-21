@@ -200,7 +200,7 @@ private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>)
 }
 
 /** A deadline carries no frame; only the exact original collection callback can create it. */
-private sealed class NativeReplayCollectionAttempt {
+internal sealed class NativeReplayCollectionAttempt {
     class Captured(val frame: NativeMaskedSnapshot, val continuous: Long) : NativeReplayCollectionAttempt()
     object CollectorDeadline : NativeReplayCollectionAttempt()
 }
@@ -280,7 +280,7 @@ private class NativeReplayCaptureRun(
                 val ordinal = frames.nextFrameOrdinal
                 passFailure = null
                 diagnosticStage = NativeCaptureStage.ROOT_COLLECT
-                val captured = selection.consumeOriginalRoot<NativeReplayCollectionAttempt>({ current(permit, admission) }) { root, rootCurrent ->
+                val captured = selection.consumeOriginalRoot({ current(permit, admission) }) { root, rootCurrent ->
                     requireCurrent(current(permit, admission) && rootCurrent())
                     val continuous = clock.elapsedRealtimeNanos()
                     passProfile?.begin(continuous)

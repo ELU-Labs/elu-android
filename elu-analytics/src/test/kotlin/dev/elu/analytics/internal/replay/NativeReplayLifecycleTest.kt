@@ -130,7 +130,7 @@ class NativeReplayLifecycleTest {
         val type = NativeReplayCapturePhysicalUse::class.java
         assertTrue(type.declaredConstructors.filterNot { it.isSynthetic }.all { java.lang.reflect.Modifier.isPrivate(it.modifiers) })
     }
-    private fun detached(ordinal: Long = 0) = NativeMaskedSnapshot(ordinal, 1234, NativeViewport(100, 200), emptyList())
+    private fun detached(ordinal: Long = 0) = NativeReplayCollectionAttempt.Captured(NativeMaskedSnapshot(ordinal, 1234, NativeViewport(100, 200), emptyList()), 1000)
 
     @Test fun `consume original root publishes only detached snapshot after two main observations`() {
         val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
@@ -150,12 +150,12 @@ class NativeReplayLifecycleTest {
         val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
         val activity = Any(); val root = Any(); lifecycle.resumed(activity)
         val selection = checkNotNull(lifecycle.select(activity, root).get())
-        val initial = platform.observed; val deadline = Any()
+        val initial = platform.observed; val deadline = NativeReplayCollectionAttempt.CollectorDeadline
         assertSame(deadline, selection.consumeOriginalRoot({ true }) { original, current ->
             assertSame(root, original); assertTrue(current()); deadline
         }.get())
         assertEquals(initial + 2, platform.observed); assertTrue(selection.isCurrent())
-        assertNull(selection.consumeOriginalRoot<Any>({ true }) { _, _ -> null }.get())
+        assertNull(selection.consumeOriginalRoot({ true }) { _, _ -> null }.get())
         assertFalse(selection.isCurrent())
     }
 
@@ -164,7 +164,7 @@ class NativeReplayLifecycleTest {
             val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
             val activity = Any(); val root = Any(); lifecycle.resumed(activity)
             val selection = checkNotNull(lifecycle.select(activity, root).get()); var allowed = true
-            val error = IllegalStateException("Original callback failed"); val deadline = Any()
+            val error = IllegalStateException("Original callback failed"); val deadline = NativeReplayCollectionAttempt.CollectorDeadline
             val result = selection.consumeOriginalRoot({ allowed }) { _, _ ->
                 when (kind) {
                     0 -> platform.window = Any(); 1 -> platform.token = Any(); 2 -> platform.width++
