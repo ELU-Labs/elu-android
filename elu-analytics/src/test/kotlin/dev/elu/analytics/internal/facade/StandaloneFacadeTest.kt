@@ -437,6 +437,51 @@ class StandaloneFacadeTest {
     }
 
     @Test
+    fun `concurrent consent cannot invert durable enqueue order and survives reopen`() {
+        for (lastOptedOut in listOf(true, false)) {
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val target = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val delegate = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val lane = object : java.util.concurrent.ExecutorService by delegate {
+                override fun execute(command: Runnable) {
+                    if (Thread.currentThread() === target.get() && entered.count != 0L) {
+                        entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+                    }
+                    delegate.execute(command)
+                }
+            }
+            val backing = FakeRuntimeQueueBacking()
+            val harness = harness(backing = backing, facadeLane = lane)
+            harness.facade.applyConfiguration(config()); harness.settle()
+            if (lastOptedOut) { harness.facade.optOut(); harness.settle() }
+            val first = Thread {
+                if (lastOptedOut) harness.facade.optIn(null, null) else harness.facade.optOut()
+            }
+            target.set(first)
+            val secondDone = CountDownLatch(1)
+            val second = Thread {
+                try { if (lastOptedOut) harness.facade.optOut() else harness.facade.optIn(null, null) }
+                finally { secondDone.countDown() }
+            }
+            try {
+                first.start(); assertTrue(entered.await(5, TimeUnit.SECONDS)); second.start()
+                // Acceptance and queue insertion form one boundary: a later call cannot overtake it.
+                assertFalse(secondDone.await(100, TimeUnit.MILLISECONDS))
+            } finally { release.countDown() }
+            first.join(5_000); second.join(5_000)
+            assertFalse(first.isAlive); assertFalse(second.isAlive)
+            harness.settle()
+            assertEquals(lastOptedOut, harness.owner.snapshot().get().state.identity.optedOut)
+            assertEquals(lastOptedOut, harness.facade.isOptedOut())
+            harness.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+            val reopened = harness(backing = backing)
+            reopened.facade.applyConfiguration(config()); reopened.settle()
+            assertEquals(lastOptedOut, reopened.owner.snapshot().get().state.identity.optedOut)
+            assertEquals(lastOptedOut, reopened.facade.isOptedOut())
+        }
+    }
+
+    @Test
     fun `typed flag result preserves variant and payload and disappears on identity change`() {
         val harness = harness()
         harness.facade.applyConfiguration(config())
@@ -481,8 +526,9 @@ class StandaloneFacadeTest {
         deviceInEu: Boolean = false,
         wall: () -> Long = { NOW_MS },
         beforeOpen: () -> Unit = {},
+        backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
+        facadeLane: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor(),
     ): Harness {
-        val backing = FakeRuntimeQueueBacking()
         val owner =
             RuntimeQueueOwner.open(
                 ownershipKey = "facade-${keyCounter.incrementAndGet()}",
@@ -521,6 +567,7 @@ class StandaloneFacadeTest {
                 deliverCallback = { callback -> callback.run() },
                 wallClock = wall,
                 bufferLimit = bufferLimit,
+                lane = facadeLane,
             )
         facades += facade
         facade.start()

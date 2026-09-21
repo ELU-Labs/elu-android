@@ -97,6 +97,7 @@ internal data class NativeReplayCaptureCompletion(
 /** Synthetic implementations exercise ordering only; they cannot issue source or physical authority. */
 internal interface NativeReplayCapturePlatform {
     val apiLevel: Int
+    fun privacyWitness(): () -> Boolean = { true }
     fun createCollector(): NativeReplayCaptureCollector
     fun createCollector(profile: NativeCapturePassProfile): NativeReplayCaptureCollector = createCollector()
     fun createCollector(masking: NativeMaskingProfile, profile: NativeCapturePassProfile?): NativeReplayCaptureCollector =
@@ -111,6 +112,7 @@ internal fun interface NativeReplayCaptureCollector {
 
 internal object AndroidNativeReplayCapturePlatform : NativeReplayCapturePlatform {
     override val apiLevel get() = Build.VERSION.SDK_INT
+    override fun privacyWitness(): () -> Boolean = NativeViewPrivacy.snapshot()::isCurrent
     override fun createCollector(): NativeReplayCaptureCollector {
         // Called only inside the already-selected original main callback.
         val collector = AndroidViewReplayCollector()
@@ -218,8 +220,9 @@ private class NativeReplayCaptureRun(
 ) {
     private val selection = prepared.selection
     private val clock: RuntimeCaptureClock = queue.nativeReplayCaptureClock()
+    private val privacyCurrent = platform.privacyWitness()
 
-    private fun local(): Boolean = fence.isCurrent() && authority.belongsTo(queue, prepared) &&
+    private fun local(): Boolean = privacyCurrent() && fence.isCurrent() && authority.belongsTo(queue, prepared) &&
         selection.isCurrent() && fence.isCurrent()
     private fun current(permit: NativeReplayPermit, admission: NativeReplayCaptureAdmission): Boolean =
         local() && admission.permit === permit && admission.isCurrent() && local()

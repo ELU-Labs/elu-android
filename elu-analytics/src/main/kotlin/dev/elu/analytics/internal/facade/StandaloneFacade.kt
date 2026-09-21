@@ -138,11 +138,12 @@ internal class StandaloneFacade(
     private val onCloseRequested: () -> Unit = {},
     private val startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
     private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
+    private val lane: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "elu-facade").apply { isDaemon = true }
+    },
 ) : EluFacadeSink, AutoCloseable {
-    private val lane: ExecutorService =
-        Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "elu-facade").apply { isDaemon = true }
-        }
+    // Serializes acceptance with queue insertion, never a storage wait.
+    private val consentIntakeLock = Any()
 
     // Lane-confined.
     private val buffer = ArrayDeque<Operation>()
@@ -444,16 +445,18 @@ internal class StandaloneFacade(
         }
     }
 
-    override fun optOut() {
-        synchronized(projectionLock) {
+    override fun optOut() = synchronized(consentIntakeLock) {
+        val intent = synchronized(projectionLock) {
             consentIntentRevision = Math.incrementExact(consentIntentRevision)
             requestedOptOut = true
+            consentIntentRevision
         }
         // Withdrawal is immediate; a queued config refresh cannot reinstall delivery while the
         // consent transaction waits for the facade/storage lanes.
         stack?.runtime?.restrictForConsent()
         acceptNativeChange(restrictive = true)?.let { settleNativeChange(it, onLane = false) }
         dispatch(OperationKind.CONSENT, affectsFlags = true) {
+            if (!synchronized(projectionLock) { consentIntentRevision == intent }) return@dispatch
             if (identity?.optedOut != true) applyLocalChange(RuntimeLocalStateChange.SetOptedOut(true, now()))
             else renewAuthority()
             clearFlags()
@@ -466,23 +469,32 @@ internal class StandaloneFacade(
             return
         }
         val eventProperties = withoutReservedKeys(properties)
-        val intent = synchronized(projectionLock) {
-            consentIntentRevision = Math.incrementExact(consentIntentRevision)
-            consentIntentRevision
-        }
-        dispatch(OperationKind.CONSENT, affectsFlags = true) {
-            if (identity?.optedOut == true) applyLocalChange(RuntimeLocalStateChange.SetOptedOut(false, now()))
-            if (identity?.optedOut == false) synchronized(projectionLock) {
-                if (consentIntentRevision == intent) {
-                    requestedOptOut = false
-                    stack?.runtime?.restoreConsent()
+        synchronized(consentIntakeLock) {
+            val intent = synchronized(projectionLock) {
+                consentIntentRevision = Math.incrementExact(consentIntentRevision)
+                consentIntentRevision
+            }
+            dispatch(OperationKind.CONSENT, affectsFlags = true) {
+                if (!synchronized(projectionLock) { consentIntentRevision == intent }) return@dispatch
+                if (identity?.optedOut == true) applyLocalChange(RuntimeLocalStateChange.SetOptedOut(false, now()))
+                if (identity?.optedOut == false) synchronized(consentIntakeLock) {
+                    synchronized(projectionLock) {
+                        if (consentIntentRevision == intent) {
+                            requestedOptOut = false
+                            stack?.runtime?.restoreConsent()
+                        }
+                    }
+                }
+                renewAuthority()
+                if (!isOptedOut() && state is EluFacadeState.Enabled && captureEventName != null) {
+                    captureThrough { requireStack().runtime.capture(captureEventName, eventProperties, now()) }
                 }
             }
-            renewAuthority()
-            if (!isOptedOut() && state is EluFacadeState.Enabled && captureEventName != null) {
-                captureThrough { requireStack().runtime.capture(captureEventName, eventProperties, now()) }
-            }
         }
+    }
+
+    override fun viewPrivacyChanged() {
+        acceptNativeChange(restrictive = true)?.let { settleNativeChange(it, onLane = false) }
     }
 
     override fun isOptedOut(): Boolean = requestedOptOut || identity?.optedOut == true

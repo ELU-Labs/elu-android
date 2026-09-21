@@ -261,11 +261,11 @@ public object Elu {
 
     /** Hides text in this view and its descendants from future replay captures. */
     @JvmStatic
-    public fun maskView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.MASK) }
+    public fun maskView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.MASK); sink?.viewPrivacyChanged() }
 
     /** Excludes this view's content and descendants; replay retains only a placeholder. */
     @JvmStatic
-    public fun blockView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.BLOCK) }
+    public fun blockView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.BLOCK); sink?.viewPrivacyChanged() }
 
     // ---- transport -----------------------------------------------------------
 

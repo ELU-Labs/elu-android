@@ -104,6 +104,7 @@ internal class NativeReplayCaptureAdmission private constructor(
     internal val use: NativeReplayCapturePhysicalUse,
     val authorization: V1AuthorizedConfig,
 ) {
+    private val localPrivacy = NativeViewPrivacy.snapshot()
     internal val input get() = permit.prepared.projection.input
     internal val receipt get() = permit.started.receipt
     internal val source get() = input.observation.source
@@ -119,7 +120,8 @@ internal class NativeReplayCaptureAdmission private constructor(
     // authorization decision. Foreign or unproved pairs keep both live checks.
     private val inputGuardCovered = permit.started.guard.coversUnstartedInput(input.guard, receipt)
     fun belongsTo(value: Any) = owner === value
-    fun isCurrent() = use.isCurrent() && permit.isCurrent() && (inputGuardCovered || input.isCurrent()) && use.isCurrent()
+    fun isCurrent() = localPrivacy.isCurrent() && use.isCurrent() && permit.isCurrent() &&
+        (inputGuardCovered || input.isCurrent()) && use.isCurrent() && localPrivacy.isCurrent()
     companion object {
         fun issue(owner: Any, permit: NativeReplayPermit, use: NativeReplayCapturePhysicalUse, authorization: V1AuthorizedConfig) =
             NativeReplayCaptureAdmission(owner, permit, use, authorization)

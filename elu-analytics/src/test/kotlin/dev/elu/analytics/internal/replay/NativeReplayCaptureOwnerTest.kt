@@ -44,6 +44,8 @@ class NativeReplayCaptureOwnerTest {
     }
     private class Platform(val rig: Rig, val access: MainAccess, val maximumSamples: Int = 1) : NativeReplayCapturePlatform {
         override var apiLevel = 36
+        var privacyRevision = Any()
+        override fun privacyWitness(): () -> Boolean = privacyRevision.let { original -> { privacyRevision === original } }
         val collections = AtomicInteger(); val factories = AtomicInteger(); val profileFactories = AtomicInteger(); val pauses = AtomicInteger()
         val timestamps = CopyOnWriteArrayList<Long>(); val ordinals = CopyOnWriteArrayList<Long>()
         val worker = java.util.concurrent.atomic.AtomicReference<Thread>()
@@ -76,6 +78,22 @@ class NativeReplayCaptureOwnerTest {
     }
     private fun Rig.minimum(seconds: Int) = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", seconds) }
     private fun Rig.rows(): List<ReplayStoredChunk> = owner.storedPreparedReplayForTesting().get()
+
+    @Test fun `stronger local privacy discards buffered readable frames before seal`(): Unit = Rig().use { rig ->
+        rig.minimum(2)
+        rig.configure { it.getJSONObject("privacy").getJSONObject("masking").put("text", "sensitive")
+            .put("platformRules", org.json.JSONArray()) }
+        rig.activate(); Session(rig).use { session ->
+            val prepared = checkNotNull(session.prepare()); val platform = Platform(rig, session.access, maximumSamples = 3)
+            platform.transformFrame = { frame -> NativeMaskedSnapshot(frame.ordinal, frame.timestamp, frame.viewport, frame.nodes.map {
+                it.copy(kind = NativeMaskedKind.ReadableText(NativeReplayText.read("Previously readable")))
+            }) }
+            platform.onPause = { platform.privacyRevision = Any(); rig.advance(); true }
+            val owner = session.start(prepared, platform)
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(1, platform.collections.get()); assertTrue(rig.rows().isEmpty())
+        }
+    }
 
     @Test fun `zero minimum actual sealer and queue preserve original timestamp and immutable body`(): Unit = Rig().use { rig ->
         rig.minimum(0); rig.activate(); Session(rig).use { session ->

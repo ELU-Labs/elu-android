@@ -38,6 +38,8 @@ internal interface EluFacadeSink {
 
     fun optIn(captureEventName: String?, properties: Map<String, Any>?)
 
+    fun viewPrivacyChanged() = Unit
+
     fun isOptedOut(): Boolean
 
     fun captureException(

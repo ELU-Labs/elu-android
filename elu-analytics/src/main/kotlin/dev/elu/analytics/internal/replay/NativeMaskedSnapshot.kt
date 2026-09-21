@@ -48,7 +48,7 @@ internal data class NativeStyle(
 }
 
 /** Detached plain text accepted only after the collector has applied all inherited restrictions. */
-internal class NativeReplayText private constructor(val value: String) {
+internal class NativeReplayText private constructor(val value: String, val utf8Bytes: Int) {
     override fun equals(other: Any?): Boolean = other is NativeReplayText && value == other.value
     override fun hashCode(): Int = value.hashCode()
     companion object {
@@ -61,7 +61,7 @@ internal class NativeReplayText private constructor(val value: String) {
             val bytes = try { encoder.encode(java.nio.CharBuffer.wrap(value)).remaining() }
                 catch (_: java.nio.charset.CharacterCodingException) { throw NativeEncodingException(NativeEncodingFailure.INVALID_TEXT) }
             nativeRequire(bytes <= MAXIMUM_UTF8_BYTES, NativeEncodingFailure.INVALID_TEXT)
-            return NativeReplayText(value)
+            return NativeReplayText(value, bytes)
         }
     }
 }

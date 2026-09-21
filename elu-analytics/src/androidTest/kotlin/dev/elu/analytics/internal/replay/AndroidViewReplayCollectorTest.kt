@@ -101,6 +101,7 @@ class AndroidViewReplayCollectorTest {
         val input = EditText(activity).apply { setText("PRIVATE_INPUT") }; add(root, input, y = 80)
         val blocked = FrameLayout(activity); add(root, blocked, y = 140)
         val trap = TrapText(activity); add(blocked, trap, 0, 0); trap.armed = true
+        try {
         dev.elu.analytics.Elu.blockView(blocked)
         val collector = AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())
         val first = collector.collect(root, 0, 1000, NativeCollectionFence(), { true }, false)
@@ -113,6 +114,7 @@ class AndroidViewReplayCollectorTest {
         dev.elu.analytics.Elu.maskView(root)
         val masked = collector.collect(root, 2, 1002, NativeCollectionFence(), { true }, false)
         assertFalse(masked.nodes.any { it.kind is NativeMaskedKind.ReadableText })
+        } finally { trap.armed = false }
     }
 
     @Test fun layoutUncertaintyRequiresExactOriginalBootDecorAndPropagatesThroughBlockedPlaceholder() = main { root ->
