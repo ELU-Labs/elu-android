@@ -60,7 +60,7 @@ internal object LegacyAndroidPendingHistory {
         platform = RuntimePlatform.ANDROID,
         runtime = RuntimeVersionComponent("elu-android-legacy-import", "1.0.0"),
         facade = RuntimeVersionComponent("EluAnalytics", "0.1.0"),
-        build = "posthog-android-3.58.0/common-6.29.0",
+        build = "elu-android-0.1.0-migration",
     )
     private val topFields = setOf("event", "distinct_id", "properties", "timestamp", "uuid")
     private val mutationKeys = setOf(
