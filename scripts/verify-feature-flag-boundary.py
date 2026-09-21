@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the exact owned public runtime and closed native proof boundary."""
+"""Enforce the exact owned public runtime and owned native capability and authority boundaries."""
 
 from __future__ import annotations
 
@@ -17,13 +17,13 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "5594960ce9cfed899ec0601fcfeed96ca57bb4d0f6589d64f4a8d0428aab9e77",
+        "cb539ed6b287be4329d24910b50510832bb14ccfa60f4a51b4ca38a0b45262ac",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "9ddb19c0fc3ca1a6f255ad8c287f3dc46069d292264326587106b85cc4ea310f",
+        "b4a9d289d617e7abfb04c6eded0e742eebea728be0896e77c2dac7e535559757",
     "elu-analytics/build.gradle.kts":
-        "2c13cd9bfd128400cdab5c4d27fe3ed5d4fa9f323f46cfe45964ccb7e3e99dc2",
+        "0c904473c34759bc867e25db92e2b000787423fad5dbf3af73de232e112df553",
     "elu-analytics/consumer-rules.pro":
         "9142fe48201969d44ae8030c19d96987f678df7f9aa5b7a5ebddc1e8f233c03b",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/concurrent/SdkFuture.kt":
@@ -132,23 +132,23 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     for relative in REMOVED_RUNTIME_FILES:
         if (root / MAIN_KOTLIN / relative).exists():
             errors.append("removed provider/runtime wrapper must remain absent: " + relative)
-    provider = re.compile(r"\bcom\s*\.\s*posthog\b|\bPostHog(?:Android|Config|Interface)?\b")
     legacy = re.compile(r"\b(?:EluCore|EluReplayBudget|EluRuntimeMode|EluRuntimeSelector|EluFacadeLane|EmbeddedRuntimeSink)\b")
     platform_future = re.compile(r"\bjava\s*\.\s*util\s*\.\s*concurrent\s*\.\s*(?:CompletableFuture|CompletionStage|CompletionException)\b|\bimport\s+java\.util\.concurrent\.\*")
     for relative, text in sources.items():
-        if provider.search(text) or legacy.search(text):
-            errors.append(f"provider or runtime selector reintroduced into owned source: {relative}")
+        if legacy.search(text):
+            errors.append(f"retired runtime selector reintroduced into owned source: {relative}")
         if platform_future.search(text):
             errors.append(f"API23 runtime must use the private completion primitive: {relative}")
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("@Volatile private var sink: EluFacadeSink? = null" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("sink = facade") < public.find("facade.start()")):
         errors.append("public setup must publish the exact owned sink before starting")
     build = load_text(root, "elu-analytics/build.gradle.kts")
-    if re.search(r"(?i)com\.posthog|posthog-android", build):
-        errors.append("provider dependency must not return to the owned runtime")
+    runtime_dependencies = re.findall(r'(?m)^\s*(?:implementation|api|runtimeOnly)\s*\(\s*"([^"]+)"', build)
+    if runtime_dependencies != ["com.squareup.okhttp3:okhttp"]:
+        errors.append("runtime dependencies must remain the exact approved owned closure")
     if (not re.search(r"\bminSdk\s*=\s*23\b", build) or
         "isCoreLibraryDesugaringEnabled = true" not in build or
         'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")' not in build):
@@ -220,7 +220,7 @@ def verify_no_wiring(root: pathlib.Path, errors: list[str]) -> None:
         errors.append("required internal configuration-bound transport is missing or public")
     if len(re.findall(r"\bFlagTransport\b", router)) != 1 or router.count(ROUTER_NAME) != 1:
         errors.append("configuration-bound transport must contain one internal conformer only")
-    if router.count(TRANSPORT_NAME) != 3:
+    if router.count(TRANSPORT_NAME) != 4 or len(re.findall(r"\b" + TRANSPORT_NAME + r"\s*\(", router)) != 1:
         errors.append("native flag transport construction must remain inside the exact router factory")
     if not re.search(r"internal\s+object\s+AndroidStandaloneStack\b", stack):
         errors.append("required standalone composition must remain internal")
@@ -275,7 +275,7 @@ def verify_lifecycle_bootstrap(root: pathlib.Path, errors: list[str]) -> None:
         for name in ["EluLifecycleInitializer.kt", "ProcessActivityLifecycle.kt"]:
             text = load_text(root, MAIN_KOTLIN / "dev/elu/analytics/internal/runtime" / name)
             if re.search(r"\b(?:AndroidStandaloneStack|StandaloneRuntime|RuntimeQueueOwner|AndroidRuntimeQueue|"
-                         r"EluRuntimeSelector|EluCore|PostHog)\b|java\.net|okhttp|\bcapture\s*\(", text):
+                         r"EluRuntimeSelector|EluCore)\b|java\.net|okhttp|\bcapture\s*\(", text):
                 errors.append(f"lifecycle bootstrap must not start collection, storage or network: {name}")
     except (ValueError, ET.ParseError) as error:
         errors.append(str(error))
@@ -304,7 +304,9 @@ def verify_prepared_replay_boundary(root: pathlib.Path, errors: list[str]) -> No
             errors.append(f"prepared replay delivery binding must remain unconstructed: {relative}")
         if "ReplayDeliveryCoordinator" in text and relative not in {replay_package / "ReplayDeliveryCoordinator.kt", composition}:
             errors.append(f"prepared replay coordinator must remain unconstructed: {relative}")
-        if ("readbackProvenReplayTransports" in text or "replayMaskingAdmission" in text or "supportedReplayProtocolGenerations" in text) and relative != OWNER and relative.parent != config_package:
+        if "replayMaskingAdmission" in text and relative != OWNER and relative.parent != config_package:
+            errors.append(f"production composition must not supply masking admission: {relative}")
+        if ("readbackProvenReplayTransports" in text or "supportedReplayProtocolGenerations" in text) and relative not in {OWNER, STACK, MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/AndroidRuntimeQueue.kt"} and relative.parent != config_package:
             errors.append(f"production composition must not supply replay proof: {relative}")
         if "NativeReplaySealer" in text and relative not in {replay_package / "NativeReplaySealer.kt", replay_package / "NativeReplayCaptureOwner.kt"}:
             errors.append(f"native replay sealer must remain unconstructed: {relative}")
@@ -314,6 +316,36 @@ def verify_prepared_replay_boundary(root: pathlib.Path, errors: list[str]) -> No
         network_text = re.sub(r"\bOkHttpReplayTransport\b", "", text) if relative == composition else text
         if relative.parent == replay_package and relative != replay_package / "OkHttpReplayTransport.kt" and FORBIDDEN_EGRESS.search(network_text):
             errors.append(f"prepared replay storage must not contain network or HTTP code: {relative}")
+    stack = load_text(root, STACK)
+    for required, count in {
+        'val nativeReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP))': 1,
+        'val nativeReplayGenerations = setOf("protocol-generation-v1")': 1,
+        'readbackProvenReplayTransports = nativeReplayTransports': 1,
+        'supportedReplayProtocolGenerations = nativeReplayGenerations': 1,
+        'transports = nativeReplayTransports': 1, 'generations = nativeReplayGenerations': 1,
+    }.items():
+        if stack.count(required) != count:
+            errors.append("standalone must not supply replay proof outside exact owned native capability selection: " + required)
+    if stack.count("readbackProvenReplayTransports") != 1 or stack.count("supportedReplayProtocolGenerations") != 1:
+        errors.append("standalone must not supply replay proof outside exact owned native capability selection")
+    queue = load_text(root, MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/AndroidRuntimeQueue.kt")
+    for required in ["readbackProvenReplayTransports: Set<V1ReplayTransport> = emptySet()",
+                     "supportedReplayProtocolGenerations: Set<String> = emptySet()",
+                     "readbackProvenReplayTransports = readbackProvenReplayTransports",
+                     "supportedReplayProtocolGenerations = supportedReplayProtocolGenerations",
+                     "assertStartupCurrent = assertStartupCurrent"]:
+        if required not in queue:
+            errors.append("owned startup must retain exact capability forwarding: " + required)
+    if any((root / MAIN_KOTLIN / "dev/elu/analytics/internal/compat").glob("*.kt")):
+        errors.append("retired preview import readers must remain absent")
+    if any(token in queue for token in ("AndroidCoreStateStore", "getSharedPreferences", ".filesDir", ".cacheDir", "bootstrapFromLegacy", "startupMigration")):
+        errors.append("clean setup must not read or import preview storage")
+    if "freshState(identifiers, SystemCoreEpochClock, freshIdentityStartedAt)" not in queue:
+        errors.append("clean setup must create isolated owned state")
+    for relative in (OWNER, MAIN_KOTLIN / "dev/elu/analytics/internal/core/CoreState.kt"):
+        text = load_text(root, relative)
+        if re.search(r"\b(?:StartupHistoryLedger|StartupMigrationCheckpoint|startupHistoryLoader|startupMigrationCompleter)\b", text):
+            errors.append("retired preview import authority must remain absent: " + str(relative))
     sealer = load_text(root, replay_package / "NativeReplaySealer.kt")
     if not re.search(r"internal\s+class\s+NativeReplaySealer\s*\(", sealer) or sealer.count("NativeReplaySealer") != 1:
         errors.append("native replay sealer must have one internal declaration and no construction")
@@ -424,7 +456,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
                      "original = intent; useForce = forceRequested; forceRequested = false; requested = false",
                      "runEvaluation(result, original, useForce, acceptance)", "acceptance() && current(original) && acceptance()", "if (includeDelivery) deliveryEpoch.set(null)",
                      "original != null && deliveryEpoch.get() === original && authorizeIo()",
-                     "if (acceptance() && it.current(original) && acceptance()) it.reevaluate(originalAcceptance = acceptance)"]:
+                     "else if (acceptance() && it.current(original) && acceptance())", "it.reevaluate(originalAcceptance = acceptance)"]:
         if required not in composed:
             errors.append("native composition lost an original proof/intent/settlement fence: " + required)
     close_section = composed.split("fun closeAndWait(): SdkFuture<Unit>", 1)[-1]
@@ -447,8 +479,8 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
             if re.search(r"\b" + method + r"\b", text) and relative not in permitted:
                 errors.append("native public-private lifecycle bridge escaped exact assembly: " + method)
     stack_source = sources.get(STACK, "")
-    if len(re.findall(r"\bNativeReplayComposition\s*\(", stack_source)) != 1 or stack_source.count("NativeReplayCapabilities()") != 1:
-        errors.append("standalone must construct exactly one native composition with empty local proof")
+    if len(re.findall(r"\bNativeReplayComposition\s*\(", stack_source)) != 1 or stack_source.count("NativeReplayCapabilities(") != 1:
+        errors.append("standalone must construct exactly one native composition with the exact private local capability selection")
     ready = stack_source.find("native.ready().get()")
     construct = stack_source.find("val runtime = StandaloneRuntime(")
     if not (0 <= ready < construct) or "AndroidProcessLifecycle.nativeObserved" not in stack_source or "facade::nativeReplayIntakeAllowed" not in stack_source:
@@ -458,7 +490,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     close_queue = runtime_source.find("owner.closeAsync().awaitExact()")
     if not (0 <= close_native < close_queue) or "controlExecutor.execute" not in runtime_source:
         errors.append("native runtime close must join original physical settlement before queue on control worker")
-    if "nativeReplay?.reevaluate(force, originalAcceptance)" not in runtime_source:
+    if "nativeReplay.also { nativeStartTrace.mark(NativeStartPhase.NATIVE_PRESENT, it != null) }?.reevaluate(force, originalAcceptance)" not in runtime_source:
         errors.append("native runtime lost original caller acceptance")
     facade_source = sources.get(facade_file, "")
     for required in ["if (restrictive) nativeIntentEpoch = Any()", "pendingNativeOperations += 1",
@@ -495,7 +527,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         if len(re.findall(expression, sources.get(issuer, ""))) != 1:
             errors.append(f"native capture capability must have exactly one original issuer: {symbol}")
     for name, permitted in capture_methods.items():
-        if any(len(re.findall(r"\b" + name + r"\b", sources.get(path, ""))) != 1 for path in permitted):
+        if any(len(re.findall(r"(?<!@)\b" + name + r"\b", sources.get(path, ""))) != 1 for path in permitted):
             errors.append(f"native capture call must retain exactly its original declaration/call: {name}")
     if (len(re.findall(r"originalUse\s*===\s*use", account)) != 3 or
             "if (taken || physicalFinished || intakeClosed || released || quarantined)" not in account or
@@ -522,13 +554,14 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
             errors.append("native outline observation must remain within collector/selection")
     if (life.count("observeNativeReplayOutline(decor, decor)") != 1 or
             'observeNativeReplayOutline(decor, decor) { check(current())' not in life or
-            collector.count("observeNativeReplayOutline(view, originalWindowDecor, ::check)") != 1):
+            collector.count("observeNativeReplayOutlineProfiled(view, originalWindowDecor, ::check, profile)") != 1):
         errors.append("native outline observation must consume original selection/collection withdrawal checks")
-    if "fun <T> read(getter: () -> T): T { check(); val value = getter(); check(); return value }" not in collector:
+    guarded_read = collector.split("private inline fun <T> guardedNativeViewRead", 1)[-1].split("private fun observeNativeReplayOutlineProfiled", 1)[0]
+    if not re.search(r"check\(\).*?val value = getter\(\).*?check\(\).*?return value", guarded_read, re.DOTALL):
         errors.append("native outline getters must retain pre/post original withdrawal checks")
     for required in ["view === originalWindowDecor", 'view.javaClass.name == "com.android.internal.policy.DecorView"',
                      "view.javaClass.classLoader === View::class.java.classLoader", "background.javaClass === ColorDrawable::class.java",
-                     "val originalWindowDecor = read { root.rootView }", "read { root.rootView } !== originalWindowDecor"]:
+                     "val originalWindowDecor = guardedNativeViewRead(profile, readGuard) { root.rootView }", "guardedNativeViewRead(profile, readGuard) { root.rootView } !== originalWindowDecor"]:
         if required not in collector:
             errors.append("native layout uncertainty must bind exact original boot window and final root")
     buffer = sources.get(replay / "NativeReplayFrameBuffer.kt", "")
@@ -555,8 +588,16 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     closing = disposal.find("selection.closeAndWait()")
     if not (0 <= registered < closing) or "if (cleanupError == null) synchronized(monitor) { unsettledSelections.remove(selection) }" not in disposal:
         errors.append("native unpublished disposal must reserve before close and release only proven cleanup")
-    if not re.search(r"fun\s+consumeOriginalRoot\s*\(\s*current:\s*\(\)\s*->\s*Boolean,\s*consume:\s*\(Any,\s*\(\)\s*->\s*Boolean\)\s*->\s*NativeMaskedSnapshot\?,\s*\):\s*SdkFuture<NativeMaskedSnapshot\?>", life):
+    if not re.search(r"fun\s+consumeOriginalRoot\s*\(\s*current:\s*\(\)\s*->\s*Boolean,\s*consume:\s*\(Any,\s*\(\)\s*->\s*Boolean\)\s*->\s*NativeReplayCollectionAttempt\?,\s*\):\s*SdkFuture<NativeReplayCollectionAttempt\?>", life):
         errors.append("native root consumption must return only a detached masked snapshot")
+    for relative, source in sources.items():
+        if "NativeReplayCollectionAttempt" in source and relative not in {lifecycle, loop}:
+            errors.append("native detached collection outcome escaped exact physical owner and selection")
+    for required in ["internal sealed class NativeReplayCollectionAttempt",
+                     "class Captured(val frame: NativeMaskedSnapshot, val continuous: Long) : NativeReplayCollectionAttempt()",
+                     "object CollectorDeadline : NativeReplayCollectionAttempt()"]:
+        if required not in capture:
+            errors.append("native root consumption must return only a detached masked snapshot or closed deadline outcome")
     if "facts.apiLevel < 29" not in life or "Build.VERSION.SDK_INT < 29" not in life:
         errors.append("native selection must refuse API levels below 29")
     for callback in ["onActivityPrePaused", "onActivityPreStopped", "onActivityPreDestroyed", "onActivityPaused"]:

@@ -52,6 +52,44 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("must not supply replay proof", result.stderr)
 
+    def test_owned_native_capability_selection_cannot_add_a_codec_or_generation(self) -> None:
+        path = self.root / BOUNDARY.STACK
+        original = path.read_text()
+        for before, after in [('setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP))',
+                               'setOf(V1ReplayTransport("foreign-codec", V1ReplayCompression.GZIP))'),
+                              ('setOf("protocol-generation-v1")', 'setOf("protocol-generation-v1", "future")')]:
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                result = self.run_guard()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("exact owned native capability selection", result.stderr)
+        path.write_text(original)
+
+    def test_retired_preview_reader_cannot_return(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/compat/PreviewImport.kt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("internal class PreviewImport")
+        self.assertIn("retired preview import readers", self.run_guard().stderr)
+
+    def test_clean_setup_cannot_reopen_preview_storage(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/AndroidRuntimeQueue.kt"
+        original = path.read_text()
+        for injected in ["applicationContext.filesDir", "applicationContext.cacheDir", "AndroidCoreStateStore.forProduction(file)"]:
+            with self.subTest(injected=injected):
+                path.write_text(original + "\n" + injected)
+                self.assertIn("clean setup must not read or import", self.run_guard().stderr)
+        path.write_text(original)
+
+    def test_native_capability_forwarding_cannot_supply_masking_admission(self) -> None:
+        for relative in [BOUNDARY.STACK, BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/AndroidRuntimeQueue.kt"]:
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                original = path.read_text()
+                path.write_text(original + "\nval replayMaskingAdmission = allowEverything\n")
+                self.assertIn("must not supply masking admission", self.run_guard().stderr)
+                path.write_text(original)
+
     def test_native_accounting_must_remain_unconstructed(self) -> None:
         stack = self.root / BOUNDARY.STACK
         original = stack.read_text()
@@ -110,7 +148,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         original = path.read_text()
         for replacement in ["Any", "android.view.View", "T"]:
             with self.subTest(replacement=replacement):
-                changed = original.replace("NativeMaskedSnapshot?", replacement + "?")
+                changed = original.replace("NativeReplayCollectionAttempt?", replacement + "?")
                 self.assertNotEqual(original, changed)
                 path.write_text(changed)
                 result = self.run_guard()
@@ -212,8 +250,8 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         collector = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/AndroidViewReplayCollector.kt"
         for path, before, after in [
             (life, 'observeNativeReplayOutline(decor, decor) { check(current())', 'observeNativeReplayOutline(decor, decor) { check(true)'),
-            (collector, "observeNativeReplayOutline(view, originalWindowDecor, ::check)", "observeNativeReplayOutline(view) {}"),
-            (collector, "check(); val value = getter(); check(); return value", "check(); val value = getter(); return value"),
+            (collector, "observeNativeReplayOutlineProfiled(view, originalWindowDecor, ::check, profile)", "observeNativeReplayOutline(view, originalWindowDecor) {}"),
+            (collector, "profile?.returned(); profile?.position = 3\n    check()", "profile?.returned(); profile?.position = 3"),
         ]:
             original = path.read_text()
             with self.subTest(before=before):
@@ -229,7 +267,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         original = path.read_text()
         for before, after in [("view === originalWindowDecor", "true"),
                               ("background.javaClass === ColorDrawable::class.java", "background is ColorDrawable"),
-                              ("read { root.rootView } !== originalWindowDecor", "false")]:
+                              ("guardedNativeViewRead(profile, readGuard) { root.rootView } !== originalWindowDecor", "false")]:
             with self.subTest(before=before):
                 self.assertIn(before, original)
                 path.write_text(original.replace(before, after))
@@ -560,16 +598,15 @@ internal class WiredTransport : FlagTransport {
     def test_public_setup_cannot_bypass_owned_sink_or_validated_host(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
-        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
+        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
                          ("sink = facade", "sink = null")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))
                 self.assertIn("public setup must", self.run_guard().stderr)
 
-    def test_provider_import_dependency_and_private_future_regression_fail(self) -> None:
+    def test_unapproved_dependency_and_private_future_regression_fail(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/UnexpectedProvider.kt"
-        for source, diagnostic in [("import com.posthog.android.PostHogAndroid", "provider or runtime selector reintroduced"),
-                                   ("import java.util.concurrent.CompletableFuture", "API23 runtime must use"),
+        for source, diagnostic in [("import java.util.concurrent.CompletableFuture", "API23 runtime must use"),
                                    ("import java.util.concurrent.CompletionStage as HiddenStage", "API23 runtime must use"),
                                    ("import java.util.concurrent.*", "API23 runtime must use")]:
             with self.subTest(source=source):
@@ -577,8 +614,8 @@ internal class WiredTransport : FlagTransport {
                 self.assertIn(diagnostic, self.run_guard().stderr)
         path.unlink()
         build = self.root / "elu-analytics/build.gradle.kts"
-        build.write_text(build.read_text() + '\nimplementation("com.posthog:posthog-android:3.58.0")\n')
-        self.assertIn("provider dependency must not return", self.run_guard().stderr)
+        build.write_text(build.read_text() + '\nimplementation("com.example:unapproved-runtime:1.0.0")\n')
+        self.assertIn("runtime dependencies must remain", self.run_guard().stderr)
 
     def test_private_future_cannot_become_public(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/concurrent/SdkFuture.kt"
@@ -671,7 +708,7 @@ internal class WiredTransport : FlagTransport {
                        "original.settlement.whenComplete", "!closed.get() && !canceled.get() && authorizeIo()",
                        "runEvaluation(result, original, useForce, acceptance)", "acceptance() && current(original) && acceptance()", "if (includeDelivery) deliveryEpoch.set(null)",
                        "original != null && deliveryEpoch.get() === original && authorizeIo()",
-                       "if (acceptance() && it.current(original) && acceptance()) it.reevaluate(originalAcceptance = acceptance)"]:
+                       "else if (acceptance() && it.current(original) && acceptance())"]:
             with self.subTest(needle=needle):
                 self.assertIn(needle, original)
                 path.write_text(original.replace(needle, "removedFence"))
@@ -692,7 +729,7 @@ internal class WiredTransport : FlagTransport {
         path = self.root / BOUNDARY.STACK
         original = path.read_text()
         for old, new in [("native.ready().get()", "native.ready()"),
-                         ("NativeReplayCapabilities()", "NativeReplayCapabilities(setOf(pair), setOf(generation))")]:
+                         ("transports = nativeReplayTransports", "transports = setOf(pair)")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))
                 self.assertNotEqual(0, self.run_guard().returncode)
@@ -717,8 +754,8 @@ internal class WiredTransport : FlagTransport {
     def test_native_runtime_cannot_replace_original_caller_acceptance(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/StandaloneRuntime.kt"
         original = path.read_text()
-        self.assertIn("nativeReplay?.reevaluate(force, originalAcceptance)", original)
-        path.write_text(original.replace("nativeReplay?.reevaluate(force, originalAcceptance)", "nativeReplay?.reevaluate(force)"))
+        self.assertIn("nativeReplay.also { nativeStartTrace.mark(NativeStartPhase.NATIVE_PRESENT, it != null) }?.reevaluate(force, originalAcceptance)", original)
+        path.write_text(original.replace("nativeReplay.also { nativeStartTrace.mark(NativeStartPhase.NATIVE_PRESENT, it != null) }?.reevaluate(force, originalAcceptance)", "nativeReplay?.reevaluate(force)"))
         self.assertIn("lost original caller acceptance", self.run_guard().stderr)
 
     def test_native_runtime_cannot_close_queue_before_original_native_settlement(self) -> None:

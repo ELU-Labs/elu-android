@@ -29,6 +29,8 @@ class VerifyReleaseTagTest(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.email", "test@elu.dev")
         self.git("config", "user.name", "ELU Test")
+        # Fixture keys are OpenPGP regardless of the developer's global signing format.
+        self.git("config", "gpg.format", "openpgp")
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
 

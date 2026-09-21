@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """Compare the public JVM surface in an AAR with the reviewed snapshots.
 
-Two snapshots are checked:
-
-- ``public-api.txt``: the ``javap -public`` output of the customer-facing
-  facade classes, byte-for-byte against the published 0.1.0 release.
-- ``jvm-classes.txt``: every public, non-synthetic JVM class in the release
-  ``classes.jar``. The library is not minified, so Kotlin ``internal``
-  declarations compile to public JVM classes and any new one widens the
-  binary surface. Pass ``--update-classes`` to regenerate that inventory after
-  a deliberate change.
+The immutable published 0.1.0 facade is a required ABI subset. The separate
+standalone candidate snapshot and JVM class inventory record the reviewed current
+surface; additions never rewrite the published baseline. Internal JVM class
+inventory changes require explicit review, but are not customer API promises.
 """
 
 from __future__ import annotations
@@ -23,10 +18,12 @@ import tempfile
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-API_DIR = ROOT / "baselines" / "0.1.0" / "api"
+BASELINE = ROOT / "baselines" / "0.1.0" / "api" / "public-api.txt"
+API_DIR = ROOT / "baselines" / "standalone" / "api"
 SNAPSHOT = API_DIR / "public-api.txt"
 CLASS_INVENTORY = API_DIR / "jvm-classes.txt"
-PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions")
+PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions",
+                  "dev.elu.analytics.EluFeatureFlagResult", "dev.elu.analytics.EluPerformanceOptions")
 
 ACC_PUBLIC = 0x0001
 ACC_SYNTHETIC = 0x1000
@@ -109,6 +106,32 @@ def facade_signatures(classes_jar: pathlib.Path) -> str:
     ).stdout.strip()
 
 
+def class_members(snapshot: str) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    current = None
+    for line in snapshot.splitlines():
+        value = line.strip()
+        if value.startswith("public ") and value.endswith("{"):
+            current = value
+            result[current] = set()
+        elif value == "}":
+            current = None
+        elif current is not None:
+            result[current].add(value)
+    return result
+
+
+def missing_legacy_members(baseline: str, candidate: str) -> list[str]:
+    actual = class_members(candidate)
+    missing = []
+    for declaration, members in class_members(baseline).items():
+        if declaration not in actual:
+            missing.append(declaration)
+        else:
+            missing.extend(f"{declaration} {member}" for member in sorted(members - actual[declaration]))
+    return missing
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("aar", type=pathlib.Path)
@@ -128,6 +151,9 @@ def main() -> None:
         facade = facade_signatures(classes)
         inventory = public_jvm_classes(classes)
 
+    missing = missing_legacy_members(normalized_snapshot(BASELINE), facade)
+    if missing:
+        raise SystemExit("published 0.1.0 facade ABI was removed or changed:\n" + "\n".join(missing))
     expected_facade = normalized_snapshot(SNAPSHOT)
     if facade != expected_facade:
         raise SystemExit(
@@ -150,7 +176,7 @@ def main() -> None:
         lines.extend(f"+ {name}" for name in added)
         lines.extend(f"- {name}" for name in removed)
         raise SystemExit("\n".join(lines))
-    print(f"public API/ABI matches 0.1.0; {len(inventory)} public JVM classes match the inventory")
+    print(f"published 0.1.0 facade ABI preserved; standalone API and {len(inventory)} JVM classes match the reviewed candidate")
 
 
 if __name__ == "__main__":
