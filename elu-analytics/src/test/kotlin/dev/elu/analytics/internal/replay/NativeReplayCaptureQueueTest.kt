@@ -104,7 +104,8 @@ class NativeReplayCaptureQueueTest {
         val delivery = rig.owner.openReplayDeliveryQueue(PrivacyStateProjector.nativeSealedDeliveryPolicy(
             NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
                 setOf(ReplayFixtures.GENERATION))) { false }).get()
-        assertNotNull(delivery.claim())
+        val claim = checkNotNull(delivery.claim())
+        delivery.abandon(claim) // Release the lease so denial below must come from renewed privacy.
         rig.renew { it.getJSONObject("privacy").getJSONObject("masking").put("text", "all") }
         assertNull(delivery.claim())
     }
