@@ -13,13 +13,6 @@ on:
         description: Exact trusted signed semantic-version tag to publish
         required: true
         type: string
-      replayNetworkEvidence:
-        description: >-
-          Also require a replay upload request in the runtime-network evidence;
-          leave off until the SDK ships a replay transport
-        required: false
-        type: boolean
-        default: false
       dryRun:
         description: Run every release gate but skip the Maven Central publish step
         required: false
@@ -62,11 +55,12 @@ jobs:
         run: >-
           ./gradlew
           :elu-analytics:testDebugUnitTest
+          :elu-analytics:lintRelease
           :elu-analytics:assembleRelease
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication
           :elu-analytics:generateMetadataFileForMavenPublication
-          :elu-analytics:releaseSourcesJar
+          :elu-analytics:sourceReleaseJar
           :elu-analytics:javaDocReleaseJar
           :elu-analytics:cyclonedxDirectBom
           :sample:assembleDebug
@@ -86,23 +80,18 @@ jobs:
           python3 scripts/zero-brand-gate.py --mode strict --skip-tree \
             --network parser-smoke=scanner/fixtures/network-parser-smoke.json
       - name: Require generated Android runtime-network evidence
-        env:
-          REPLAY_EVIDENCE: ${{ inputs.replayNetworkEvidence }}
         run: |
-          expectations=(--expect config=1 --expect capture=1 --expect flags=1)
-          if [[ "$REPLAY_EVIDENCE" == "true" ]]; then
-            expectations+=(--expect replay=1)
-          fi
           python3 scripts/validate-runtime-network-evidence.py \
             build/reports/android-runtime-network-evidence.json \
-            "${expectations[@]}"
+            --expect config=1 --expect capture=1 --expect flags=1 --expect replay=1
       - name: Verify public API and legal-only artifact gate
         run: |
           python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
           scanner_inputs=(
             --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar
             --input publication=elu-analytics/build/publications/maven
-            --input archives=elu-analytics/build/libs
+            --input sources=elu-analytics/build/intermediates/source_jar/release/release-sources.jar
+            --input javadoc=elu-analytics/build/intermediates/java_doc_jar/release/release-javadoc.jar
             --input dependencies=build/reports/release-runtime-classpath.txt
           )
           sbom_index=0

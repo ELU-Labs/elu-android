@@ -1,167 +1,123 @@
-# ELU Mobile SDK — behavioral contract
+# ELU Android owned runtime contract
 
-The ELU mobile SDKs (iOS and Android) are driven entirely by ELU remote
-configuration. The design rules:
+This describes the current ELU-owned source candidate. It does not describe
+the unused published 0.1.0 preview, and is not evidence of package publication
+or production qualification. See [README.md](./README.md) for installation and
+public Kotlin APIs, and [development status](./docs/sdk-development-status.md)
+for outstanding release gates.
 
-1. The SDK is initialized with ONLY a site key — `Elu.setup` is the mobile
-   analog of ELU's one-line web script tag.
-2. It fetches per-site-key remote config from
-   `GET https://elu.dev/v1/<siteKey>/config` and caches it on disk.
-3. It ships **fail-closed compiled defaults** (EU-block ON, masking ON,
-   replay off-until-config) until the first usable config arrives. That
-   initial config may loosen the defaults. Once the runtime is running, fresh
-   config tightens immediately while loosening waits for the next launch;
-   captured frames cannot be retroactively re-masked.
-4. Customer code only ever touches the `Elu.*` facade — never the underlying
-   provider SDK.
+## Configuration and collection authority
 
-## 1. Config endpoint
+`Elu.setup(applicationContext, siteKey)` starts the owned runtime. Configuration
+comes from ELU's site-key config endpoint. The owned transport uses the current
+v2 configuration authority: capture, flags, replay and delivery require their
+corresponding current authorization. A successful HTTP response by itself does
+not authorize collection. Unsupported, malformed, expired, revoked or mismatched
+configuration cannot open a capture or delivery path.
 
-`GET /v1/<siteKey>/config` — unauthenticated, CDN-cached (~5-minute
-propagation). Always HTTP 200 with JSON.
+Configuration can independently restrict features, endpoints, privacy, session
+limits and replay formats. Refresh, foreground/background transitions and
+configuration withdrawal are checked again at capture and delivery boundaries.
+Config requests can continue while collection is disabled so authorization can
+recover. There is no customer override that bypasses remote privacy policy.
 
-Disabled (unknown / revoked / paused keys — not distinguished):
+Before the initial configuration decision, state-changing facade operations
+have a bounded in-memory FIFO of 100 entries; overflow drops the newest entry
+to preserve the already accepted identity history.
+This pre-initialization buffer is not a durable offline queue. Feature-flag
+reload commands are not replayed from that buffer. Invalid or unavailable
+operations return safe facade defaults.
 
-```json
-{ "v": 1, "enabled": false }
-```
+## Identity, properties and consent
 
-Enabled:
+The SDK creates an installation-specific anonymous identity. Customer code
+calls `identify` when the user is known and `reset` on logout. Group associations,
+super properties and flag-evaluation context belong to that identity context;
+reset clears customer identity, groups, super properties and flag context.
+Captured records retain their original identity and session through offline
+storage and retries. New account/context changes cannot expose a prior
+account's cached flag result.
 
-```json
-{
-  "v": 1,
-  "enabled": true,
-  "publicToken": "example-token",
-  "host": "<analytics-host-from-elu-config>",
-  "privacy": {
-    "blockEu": true,
-    "maskTextInputs": true,
-    "maskAllText": false,
-    "maskImages": false,
-    "replayNewUsersOnly": false,
-    "replayMaxMinutes": 0
-  }
-}
-```
+`optOut` immediately fences new collection and delivery work, then persists the
+choice asynchronously. It purges pending replay. Previously queued events stay
+paused until explicit `optIn`; already transmitted requests cannot be recalled.
+`reset`, restart and a newly enabled server configuration never silently clear
+user opt-out. `optIn` resumes only when current server policy also permits it,
+and attempts `$opt_in` under current configuration unless its event name is null.
+There is no separate delayed-until-config opt-in event queue.
 
-The host is supplied by ELU remote configuration; this example does not
-prescribe a production hostname.
+Before setup, the latest valid consent choice is held in memory and reported
+by `isOptedOut`. Setup persists that choice before lifecycle collection begins;
+call `optOut` before `setup` when consent is initially denied. The pre-setup
+choice cannot survive process death before durable storage has been opened.
 
-Defaults when a privacy field is missing or unparseable: `blockEu` and
-`maskTextInputs` true, everything else off, `replayMaxMinutes` 0 = unlimited
-(valid range 1–60; out-of-range means unlimited). Unknown fields are ignored.
-A malformed response body is a FETCH FAILURE (keep cached config / stay
-pending) — never `enabled:false`.
+`registerOnce` fills missing values or values equal to its selected default
+(`"None"` by default). Identify and person-property calls accept independent
+set-once values. Flag result getters return null when no currently valid result
+exists; a result contains its key, enabled state, variant and payload.
 
-Fetch policy: on every `setup()` (cold start), re-fetch on app-foreground if
-the last success is older than 15 minutes, 10s timeout, in-process backoff,
-cached config valid indefinitely.
+## Durable delivery and restarts
 
-## 2. Lifecycle state machine
+After admission, analytics and mutation records use an app-private, bounded
+SQLite queue scoped to the exact site key. Identity changes and their queued
+records commit together. Delivery uses stable stream/sequence-derived record
+identities, bounded batches and retries. A validated acknowledgement must match
+the submitted stream and records before local retirement. Lost acknowledgements
+can cause retransmission of the same identities; HTTP 200 alone is not enough
+to delete queued records.
 
-States: `idle` → `pending` (setup called, no usable config yet) → `running`
-(runtime initialized) / `disabled` (config said `enabled:false`, or
-EU-blocked).
+Process restart reopens the existing owned queue and current schema upgrades
+preserve it. `flush` schedules work; it cannot guarantee network completion
+before Android stops the process. Queue and age limits can prevent admission
+or retire expired records; the SDK does not promise unlimited offline retention.
 
-- `setup(siteKey)` is idempotent (second call warns and no-ops). It records
-  the first-launch marker (the `replayNewUsersOnly` probe), runs the EU
-  guard, then: cached-enabled config → initialize immediately; cached
-  disabled → `disabled` (keeps fetching so re-activation recovers); no cache
-  (first launch ever) → `pending`, facade calls buffer in memory (FIFO,
-  cap 100, drop-oldest, never persisted, never sent).
-- Device-in-EU AND `blockEu` (from cached config, or the compiled default
-  TRUE when no config exists yet) ⇒ blocked. Buffered ops held while the
-  decision is pending flush if the fetched config says `blockEu:false` and
-  are dropped if it says `blockEu:true`. Until the decision is made, the
-  analytics runtime stays uninitialized and emits no events or replay; the
-  ELU config request itself still occurs.
-- Facade methods are safe in EVERY state: `pending` buffers event-class
-  calls (getters return defaults), `disabled` no-ops, `running` delegates.
-  Never throws, never blocks the caller.
+The unused 0.1.0 preview and unpublished aggregate-file builds have no supported
+persisted-data import. Clean setup starts a fresh owned installation without
+opening or deleting their old data. Retired import checkpoints are refused,
+not rewritten as fresh state. This differs from the iOS owned-file recovery
+path; Android supports current owned SQLite reopen and schema upgrades.
 
-Mid-session rules for a FRESH config while `running` — tightening applies
-immediately, loosening waits for the next launch:
+## Native replay privacy
 
-| Change | Action now |
-|---|---|
-| `enabled` true→false | opt out + stop replay; state → `disabled` |
-| `enabled` false→true (runtime never initialized) | initialize now |
-| `blockEu` false→true and device is EU | opt out + stop replay; `disabled` |
-| any masking tightened | stop replay for the rest of the run |
-| `replayNewUsersOnly` turned on, device is returning | stop replay |
-| `replayMaxMinutes` reduced | recompute budget; stop replay if exceeded |
-| anything loosened | applies at next launch |
+Replay is an authorized native Views wireframe stream, not screenshots or
+browser DOM capture. The blanket profile masks ordinary text. The sensitive
+profile can retain plain, fully visible text from supported framework Views.
+Inputs stay masked in both profiles; images, WebViews and unsupported content
+are hidden. Text longer than 4096 UTF-8 bytes is not truncated into a partial
+capture. Unsupported rules fail closed through stronger masking or denial.
 
-## 3. Privacy semantics
+`maskView(view)` strengthens masking for that view and descendants.
+`blockView(view)` excludes their content and descendants while retaining a
+placeholder. Both apply for the view's lifetime and invalidate work in progress.
+They cannot weaken the server policy. Previously transmitted frames cannot be
+recalled. Applications should mark private display labels before showing them;
+ordinary labels may contain personal information even when they are not inputs.
+These replay restrictions do not sanitize customer-supplied event properties,
+identity values, or exception messages.
 
-All capture controls act CLIENT-SIDE — masked or blocked analytics content
-never leaves the device. ELU config requests still occur while capture is
-blocked so a re-enabled site can recover.
+Analytics requires API 23 with app-level core-library desugaring. Current Views
+replay requires API 29. API 26–28 replay, Compose semantics replay and readable
+custom/AppCompat text are not supported by this candidate. Compose applications
+can use the analytics APIs and explicit screen events. These differences remain
+explicit release-scope decisions, not silently completed parity claims.
 
-- **`blockEu`** (compiled default ON, fail-closed): IANA-timezone heuristic —
-  blocked when the zone is empty/unreadable, starts with `Europe/`, or is one
-  of: `Asia/Nicosia, Asia/Famagusta, Atlantic/Canary, Atlantic/Madeira,
-  Atlantic/Azores, Atlantic/Reykjavik, Atlantic/Faroe, Africa/Ceuta,
-  America/Cayenne, America/Guadeloupe, America/Martinique, Indian/Reunion,
-  Indian/Mayotte`. Blocked = the analytics runtime never initializes: no
-  runtime identity storage, analytics events, or replay. ELU config fetches
-  continue so re-activation can recover.
-- **`maskTextInputs`** (default ON): mask typed input in replay. Platform
-  note: the underlying mobile SDKs have a single text-masking knob that
-  masks ALL rendered text (labels included), not just inputs — tighter than
-  the web posture, accepted as the fail-closed direction.
-- **`maskAllText`** (opt-in): strongest text masking the platform offers;
-  also disables log capture into replay where the platform supports it
-  (log lines routinely echo the same user text).
-- **`maskImages`** (opt-in): mask all images in replay.
-- **`replayNewUsersOnly`** (opt-in): replay only for devices whose
-  first-launch marker was created by this install's first `setup()` call.
-  Returning device ⇒ replay disabled at init; events unaffected.
-- **`replayMaxMinutes`** (opt-in, 1–60, 0 = unlimited): per-session
-  visual-replay budget, resumed across relaunches within the same session,
-  enforced by a short poll (±5s granularity). Events keep flowing.
-- Passwords are always masked by the underlying SDK regardless of settings.
+## Exceptions and native performance
 
-## 4. Compiled defaults
+`captureException` is explicit reporting. This candidate does not install an
+automatic uncaught-exception/crash handler. Exception messages, stacks and
+customer properties can contain sensitive data; callers control what they send.
 
-The SDK owns its runtime configuration: token + host come from ELU config
-only; screen tracking and application
-lifecycle events ON; session replay ON in screenshot mode; element-
-interaction autocapture, surveys, and optional extras OFF.
-Replay on/off, sampling, and minimum duration remain governed server-side by
-the ELU-managed project. The SDK never calls opt-in/opt-out except on
-the ELU kill-switch path (and clears a persisted opt-out at init so a
-re-enabled workspace recovers).
+Native performance sampling is disabled by default and needs both local opt-in
+and current remote authorization. While a valid foreground session exists, it
+can sample process proportional set size (PSS) and main-looper probe delays.
+Unknown memory measurements are omitted. There is at most one outstanding
+main-thread probe. Identity, consent, configuration and lifecycle changes clear
+old aggregates; samples do not prolong the session idle timer.
 
-## 5. Super properties
-
-Registered at init AND re-registered after every `reset()` (the underlying
-`reset()` clears super properties along with identity):
-
-```
-elu_sdk: "ios" | "android"
-elu_sdk_version: "<sdk semver>"
-elu_facade_version: 1
-```
-
-## 6. Facade surface
-
-`setup`, `capture`, `identify`, `reset`, `alias`, `distinctId`, `screen`,
-`captureException`, `register`, `unregister`, `group`,
-`setPersonProperties`, `setPersonPropertiesForFlags`,
-`setGroupPropertiesForFlags`, `getFeatureFlag`, `getFeatureFlagPayload`,
-`isFeatureEnabled`, `reloadFeatureFlags`, `onFeatureFlagsLoaded`, `flush`.
-
-Identity is customer-supplied ONLY (`identify` from your auth flow, `reset`
-on logout) — the SDK never auto-identifies. The facade deliberately omits
-runtime configuration access, session-recording start/stop, surveys, and
-opt-in/out: exposing those would couple the public ELU API to implementation
-details.
-
-Buffered-op ordering: the pre-config buffer replays strictly FIFO once
-running — including `reset`, so a pre-config logout delivers pre-reset
-events under the pre-reset identity. `capture` events buffered on Android
-carry their call-time timestamps; other buffered ops (and all buffered iOS
-ops) are stamped at drain time, up to ~10s late on the first-ever launch
-only.
+`$performance_sample` is an analytics event linked to the current anonymous or
+identified user and session, with the normal applicable event context. The
+monitor adds process-memory and sampled delay metrics, not UI text or stack
+traces. These are native diagnostics, not Web Vitals, a complete frame/jank
+measurement, or an ANR/crash detector. Applications must account for linked
+performance diagnostics and readable replay text in their privacy disclosures.
+Resource overhead and exact distribution behavior require the final Lab gate.

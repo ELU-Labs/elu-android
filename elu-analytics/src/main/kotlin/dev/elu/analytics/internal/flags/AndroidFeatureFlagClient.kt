@@ -1,27 +1,32 @@
 package dev.elu.analytics.internal.flags
 
+import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
+import dev.elu.analytics.internal.config.V2ConfigAuthorityWitness
 import dev.elu.analytics.internal.config.V1FlagAuthorizationResolution
 import dev.elu.analytics.internal.config.V1FlagProjectionRejection
 import dev.elu.analytics.internal.facade.FacadeFlagClient
 import dev.elu.analytics.internal.runtime.RuntimeQueueOwner
 import dev.elu.analytics.internal.runtime.RuntimeVersions
 import java.net.URI
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CompletionStage
+import dev.elu.analytics.internal.concurrent.SdkFuture
+import dev.elu.analytics.internal.concurrent.SdkCompletionStage
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
 
-/** Raw-byte, asynchronous boundary. This internal runtime intentionally ships no concrete conformer. */
+/** Raw-byte, asynchronous boundary. Concrete adapters remain behind the internal standalone composition. */
 internal fun interface FlagTransport {
-    fun send(request: FlagTransportRequest): CompletionStage<ByteArray>
+    fun send(request: FlagTransportRequest): SdkCompletionStage<ByteArray>
 }
 
 internal data class FlagTransportRequest(
     val endpoint: URI,
     val canonicalBody: ByteArray,
+    val authorization: FlagAuthorizationSnapshot? = null,
+    /** Re-run after any transport worker queue, immediately before egress. */
+    val authorizeSend: () -> Boolean = { true },
 )
 
 internal interface FlagClock {
@@ -36,9 +41,9 @@ internal fun interface FlagOpaqueIdSource {
 }
 
 /**
- * Internal, deliberately unwired serialized client. The existing runtime owner remains the only
- * SQLite authority; transport never executes inside its transactions. Conforming to the facade's
- * flag contract keeps that wiring one injected argument away without naming this class there.
+ * Internal serialized client. The existing runtime owner remains the only
+ * SQLite authority; transport never executes inside its transactions. The facade receives only
+ * its internal operations and original cache-lease checks; composition owns the transport.
  */
 internal class AndroidFeatureFlagClient(
     private val owner: RuntimeQueueOwner,
@@ -47,6 +52,9 @@ internal class AndroidFeatureFlagClient(
     private val clock: FlagClock,
     private val requestIds: FlagOpaqueIdSource,
     private val storeEpochs: FlagOpaqueIdSource,
+    private val configurationGate: V2ConfigAuthorityGate? = null,
+    private val diagnostic: FlagDiagnosticObserver = FlagDiagnosticObserver.NONE,
+    private val collectionAllowed: () -> Boolean = { true },
 ) : FacadeFlagClient {
     private val lane: ExecutorService =
         Executors.newSingleThreadExecutor(
@@ -57,17 +65,20 @@ internal class AndroidFeatureFlagClient(
 
     /** Touched only on [lane]. */
     private var initializationFailure: Throwable? = null
-    private var closed: Boolean = false
-    private var clockFailed: Boolean = false
-    private var lastWallEpochMillis: Long? = null
-    private var lastMonotonicNanos: Long? = null
-    private var configLease: ConfigLease? = null
-    private var cacheLease: CacheLease? = null
+    @Volatile private var closed: Boolean = false
+    @Volatile private var clockFailed: Boolean = false
+    private val clockSampleLock = Any()
+    private var lastSample: ClockSample? = null
+    private var observedClockFailure = false
+    @Volatile private var sourceConfiguration: V2ConfigAuthorityWitness? = null
+    private fun sourceIsCurrent(): Boolean = collectionAllowed() && (configurationGate == null || sourceConfiguration?.isCurrent() == true)
+    @Volatile private var configLease: ConfigLease? = null
+    @Volatile private var cacheLease: CacheLease? = null
     private var inFlight: InFlight? = null
     private var pending: Pending? = null
 
     init {
-        // Construction is explicit and internal. Ordinary SDK startup never reaches this call.
+        // Storage initialization stays on the client lane behind the internal composition.
         lane.execute {
             try {
                 owner.ensureFeatureFlagRuntime().await()
@@ -77,8 +88,8 @@ internal class AndroidFeatureFlagClient(
         }
     }
 
-    override fun applyConfiguration(configBody: String?): CompletableFuture<V1FlagAuthorizationResolution> {
-        val result = CompletableFuture<V1FlagAuthorizationResolution>()
+    override fun applyConfiguration(configBody: String?): SdkFuture<V1FlagAuthorizationResolution> {
+        val result = SdkFuture<V1FlagAuthorizationResolution>()
         execute(result) {
             if (closed) {
                 result.complete(
@@ -99,7 +110,13 @@ internal class AndroidFeatureFlagClient(
                     )
                     return@execute
                 }
-            val resolution = owner.applyFeatureFlagConfiguration(configBody, sample.wallEpochMillis).await()
+            val sourceWitness = configurationGate?.snapshotFor(configBody)
+            val candidate = owner.applyFeatureFlagConfiguration(configBody, clock::wallNowEpochMillis).await()
+            val resolution = if (candidate is V1FlagAuthorizationResolution.Allowed &&
+                configurationGate != null && sourceWitness?.isCurrent() != true) {
+                V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.STALE)
+            } else candidate
+            sourceConfiguration = sourceWitness
             when (resolution) {
                 is V1FlagAuthorizationResolution.Allowed -> {
                     val retained = configLease
@@ -127,14 +144,20 @@ internal class AndroidFeatureFlagClient(
         return result
     }
 
-    override fun reload(): CompletableFuture<FlagReloadResult> {
-        val result = CompletableFuture<FlagReloadResult>()
+    override fun reload(): SdkFuture<FlagReloadResult> {
+        val result = SdkFuture<FlagReloadResult>()
+        observeFlag(diagnostic) { FlagDiagnosticRecord(FlagDiagnosticPhase.RELOAD_REQUESTED) }
+        result.whenComplete { value, error ->
+            observeFlag(diagnostic) { FlagDiagnosticRecord(FlagDiagnosticPhase.RELOAD_RESULT,
+                result = flagDiagnosticResult(value, error), failure = flagDiagnosticFailure(error),
+                restriction = (value as? FlagReloadResult.Restricted)?.reason) }
+        }
         execute(result) { considerReload(result) }
         return result
     }
 
-    override fun read(key: String): CompletableFuture<FlagReadResult> {
-        val result = CompletableFuture<FlagReadResult>()
+    override fun read(key: String): SdkFuture<FlagReadResult> {
+        val result = SdkFuture<FlagReadResult>()
         execute(result) {
             if (initializationFailure != null || closed || clockFailed) {
                 result.complete(FlagReadResult.Missing)
@@ -158,7 +181,7 @@ internal class AndroidFeatureFlagClient(
             }
             val read =
                 try {
-                    owner.readFeatureFlag(versions, key, sample.wallEpochMillis).await()
+                    owner.readFeatureFlag(versions, key, clock::wallNowEpochMillis).await()
                 } catch (_: Throwable) {
                     FlagReadResult.Missing
                 }
@@ -186,9 +209,30 @@ internal class AndroidFeatureFlagClient(
                 }
                 FlagReadResult.Missing -> Unit
             }
-            result.complete(read)
+            // The owner's storage hop may consume the remaining cache lifetime. Keep the
+            // original pre-hop deadline, then sample again before returning a projection.
+            val completion = try { sampleClock() } catch (_: Exception) { null }
+            val currentConfig = completion?.let(::usableConfigLease)
+            val currentCache = currentConfig != null && usableCacheLease(checkNotNull(completion), currentConfig)
+            result.complete(if (currentCache && (read !is FlagReadResult.Found ||
+                isCacheLeaseCurrent(read.cacheLeaseToken))) read else FlagReadResult.Missing)
         }
         return result
+    }
+
+    /** Read-only projection fence. It consumes the existing deadline; it never starts a new lease. */
+    override fun isCacheLeaseCurrent(token: FlagCacheLeaseToken): Boolean {
+        if (closed || clockFailed || !sourceIsCurrent()) return false
+        val config = configLease ?: return false
+        val cache = cacheLease ?: return false
+        if (cache.token != token) return false
+        val sample = try { observeClock() } catch (_: Exception) { return false }
+        val wall = sample.wallEpochMillis
+        val nanos = sample.monotonicNanos
+        val now = FlagExactInstant.fromEpochMillis(wall)
+        return nanos < cache.deadlineNanos && nanos < config.deadlineNanos &&
+            now < token.responseExpiresAt && now < config.authorization.witness.configExpiresAt &&
+            configLease === config && cacheLease === cache && !closed && !clockFailed && sourceIsCurrent()
     }
 
     override fun close() {
@@ -208,7 +252,7 @@ internal class AndroidFeatureFlagClient(
         }
     }
 
-    private fun considerReload(target: CompletableFuture<FlagReloadResult>) {
+    private fun considerReload(target: SdkFuture<FlagReloadResult>) {
         if (closed) {
             target.complete(FlagReloadResult.Failed("client-closed"))
             return
@@ -260,7 +304,7 @@ internal class AndroidFeatureFlagClient(
 
     private fun startReload(
         snapshotHint: FlagReloadWitnessSnapshot,
-        targets: MutableList<CompletableFuture<FlagReloadResult>>,
+        targets: MutableList<SdkFuture<FlagReloadResult>>,
     ) {
         val sample =
             try {
@@ -292,13 +336,19 @@ internal class AndroidFeatureFlagClient(
                     versions,
                     requestId,
                     storeEpoch,
-                    sample.wallEpochMillis,
+                    clock::wallNowEpochMillis,
                 ).await()
             } catch (_: Throwable) {
                 targets.complete(FlagReloadResult.Failed("storage-unavailable"))
                 startPendingIfPresent()
                 return
             }
+        observeFlag(diagnostic) { FlagDiagnosticRecord(FlagDiagnosticPhase.BEGIN_RESULT,
+            result = when (begun) {
+                is FlagBeginResult.Begun -> FlagDiagnosticResult.BEGUN
+                is FlagBeginResult.Restricted -> FlagDiagnosticResult.RESTRICTED
+                FlagBeginResult.Terminal -> FlagDiagnosticResult.TERMINAL
+            }, restriction = (begun as? FlagBeginResult.Restricted)?.reason) }
         when (begun) {
             is FlagBeginResult.Restricted -> {
                 if (begun.reason == FlagRestrictionReason.WALL_ROLLBACK) poisonClock()
@@ -338,11 +388,19 @@ internal class AndroidFeatureFlagClient(
                         owner.authorizeFeatureFlagSend(
                             begun.request,
                             versions,
-                            preSendSample.wallEpochMillis,
+                            clock::wallNowEpochMillis,
                         ).await()
                     } catch (_: Throwable) {
                         null
                     }
+                observeFlag(diagnostic) { FlagDiagnosticRecord(FlagDiagnosticPhase.PRE_SEND_RESULT,
+                    result = when (preSend) {
+                        FlagPreSendResult.Current -> FlagDiagnosticResult.CURRENT
+                        is FlagPreSendResult.Restricted -> FlagDiagnosticResult.RESTRICTED
+                        FlagPreSendResult.Stale -> FlagDiagnosticResult.STALE
+                        FlagPreSendResult.Terminal -> FlagDiagnosticResult.TERMINAL
+                        null -> FlagDiagnosticResult.ABSENT
+                    }, restriction = (preSend as? FlagPreSendResult.Restricted)?.reason) }
                 when (preSend) {
                     FlagPreSendResult.Current -> Unit
                     is FlagPreSendResult.Restricted -> {
@@ -371,13 +429,30 @@ internal class AndroidFeatureFlagClient(
                 inFlight = running
                 val stage =
                     try {
+                        observeFlag(diagnostic) { FlagDiagnosticRecord(FlagDiagnosticPhase.CLIENT_TRANSPORT_SEND) }
                         transport.send(
                             FlagTransportRequest(
                                 begun.request.authorization.witness.endpoint,
                                 begun.request.request.canonicalBytes.copyOf(),
+                                authorization = begun.request.authorization,
+                                authorizeSend = {
+                                    owner.authorizeFeatureFlagSend(
+                                        begun.request, versions, clock::wallNowEpochMillis,
+                                    ).await().also { outcome ->
+                                        observeFlag(diagnostic) { FlagDiagnosticRecord(FlagDiagnosticPhase.WORKER_OWNER_RESULT,
+                                            result = when (outcome) {
+                                                FlagPreSendResult.Current -> FlagDiagnosticResult.CURRENT
+                                                is FlagPreSendResult.Restricted -> FlagDiagnosticResult.RESTRICTED
+                                                FlagPreSendResult.Stale -> FlagDiagnosticResult.STALE
+                                                FlagPreSendResult.Terminal -> FlagDiagnosticResult.TERMINAL
+                                            }, restriction = (outcome as? FlagPreSendResult.Restricted)?.reason) }
+                                    } == FlagPreSendResult.Current
+                                },
                             ),
                         )
-                    } catch (_: Throwable) {
+                    } catch (error: Throwable) {
+                        observeFlag(diagnostic) { FlagDiagnosticRecord(FlagDiagnosticPhase.HTTP_FAILURE,
+                            failure = flagDiagnosticFailure(error)) }
                         null
                     }
                 if (stage == null) {
@@ -442,7 +517,7 @@ internal class AndroidFeatureFlagClient(
                     running.begun,
                     versions,
                     response,
-                    commitSample.wallEpochMillis,
+                    clock::wallNowEpochMillis,
                 ).await()
             } catch (_: Throwable) {
                 FlagReloadResult.Failed("storage-unavailable")
@@ -481,7 +556,7 @@ internal class AndroidFeatureFlagClient(
                     running.begun,
                     versions,
                     response,
-                    finalSample.wallEpochMillis,
+                    clock::wallNowEpochMillis,
                 ).await()
             } catch (_: Throwable) {
                 FlagReloadResult.Failed("storage-unavailable")
@@ -512,7 +587,8 @@ internal class AndroidFeatureFlagClient(
     private fun finish(running: InFlight, result: FlagReloadResult) {
         if (inFlight !== running) return
         inFlight = null
-        running.complete(result)
+        running.complete(if (result is FlagReloadResult.Updated &&
+            (result.cacheLeaseToken?.let(::isCacheLeaseCurrent) != true)) FlagReloadResult.Stale else result)
         startPendingIfPresent()
     }
 
@@ -536,29 +612,25 @@ internal class AndroidFeatureFlagClient(
 
     private fun sampleClock(): ClockSample {
         if (clockFailed) throw IllegalStateException("Flag clock is permanently unavailable")
-        val wall: Long
-        val monotonic: Long
+        return try { observeClock() } catch (error: Throwable) { poisonClock(); throw error }
+    }
+
+    /** One clock floor serves lane operations and synchronous facade projection checks. */
+    private fun observeClock(): ClockSample = synchronized(clockSampleLock) {
+        check(!observedClockFailure) { "Flag clock is permanently unavailable" }
         try {
-            wall = clock.wallNowEpochMillis()
-            monotonic = clock.monotonicNowNanos()
+            val wall = clock.wallNowEpochMillis()
+            val monotonic = clock.monotonicNowNanos()
+            val previous = lastSample
+            check(wall in -FLAG_MAX_SAFE_INTEGER..FLAG_MAX_SAFE_INTEGER && monotonic >= 0L &&
+                (previous == null || (wall >= previous.wallEpochMillis && monotonic >= previous.monotonicNanos))) {
+                "Flag clock regressed or left its supported domain"
+            }
+            ClockSample(wall, monotonic).also { lastSample = it }
         } catch (error: Throwable) {
-            poisonClock()
+            observedClockFailure = true
             throw error
         }
-        val previousWall = lastWallEpochMillis
-        val previousMonotonic = lastMonotonicNanos
-        if (
-            wall !in -FLAG_MAX_SAFE_INTEGER..FLAG_MAX_SAFE_INTEGER ||
-            monotonic < 0L ||
-            (previousWall != null && wall < previousWall) ||
-            (previousMonotonic != null && monotonic < previousMonotonic)
-        ) {
-            poisonClock()
-            throw IllegalStateException("Flag clock regressed or left its supported domain")
-        }
-        lastWallEpochMillis = wall
-        lastMonotonicNanos = monotonic
-        return ClockSample(wall, monotonic)
     }
 
     /**
@@ -567,10 +639,11 @@ internal class AndroidFeatureFlagClient(
      */
     private fun usableConfigLease(sample: ClockSample): ConfigLease? {
         val lease = configLease ?: return null
+        if (!sourceIsCurrent()) return null
         if (sample.monotonicNanos < lease.deadlineNanos) return lease
         val restriction =
             try {
-                owner.expireFeatureFlagAuthorization(lease.authorization, sample.wallEpochMillis).await()
+                owner.expireFeatureFlagAuthorization(lease.authorization, clock::wallNowEpochMillis).await()
             } catch (_: Throwable) {
                 // Fail closed for this call, but retain the expired lease so a later call retries
                 // the required durable transition rather than treating an uncommitted observation
@@ -607,7 +680,7 @@ internal class AndroidFeatureFlagClient(
                     authorization.authorization,
                     versions,
                     token,
-                    sample.wallEpochMillis,
+                    clock::wallNowEpochMillis,
                 ).await()
             } catch (_: Throwable) {
                 // Retain the expired token so a later call retries the durable transition.
@@ -670,7 +743,7 @@ internal class AndroidFeatureFlagClient(
     }
 
     private fun <T> execute(
-        result: CompletableFuture<T>,
+        result: SdkFuture<T>,
         block: () -> Unit,
     ) {
         try {
@@ -706,7 +779,7 @@ internal class AndroidFeatureFlagClient(
     private class InFlight(
         val snapshot: FlagReloadWitnessSnapshot,
         val begun: FlagBegunRequest,
-        val targets: MutableList<CompletableFuture<FlagReloadResult>>,
+        val targets: MutableList<SdkFuture<FlagReloadResult>>,
     ) {
         var invalidated: Boolean = false
             private set
@@ -724,7 +797,7 @@ internal class AndroidFeatureFlagClient(
 
     private class Pending(
         val snapshot: FlagReloadWitnessSnapshot,
-        val targets: MutableList<CompletableFuture<FlagReloadResult>>,
+        val targets: MutableList<SdkFuture<FlagReloadResult>>,
     ) {
         fun complete(result: FlagReloadResult) {
             targets.forEach { it.complete(result) }
@@ -732,7 +805,7 @@ internal class AndroidFeatureFlagClient(
         }
     }
 
-    private fun MutableList<CompletableFuture<FlagReloadResult>>.complete(result: FlagReloadResult) {
+    private fun MutableList<SdkFuture<FlagReloadResult>>.complete(result: FlagReloadResult) {
         forEach { it.complete(result) }
         clear()
     }

@@ -15,4 +15,13 @@ public class EluOptions
     @JvmOverloads
     constructor(
         public val configHost: String = "https://elu.dev",
-    )
+    ) {
+    private var performanceOptions = EluPerformanceOptions()
+    public val performance: EluPerformanceOptions get() = performanceOptions
+
+    /** Keeps the original setup constructors available to existing compiled callers. */
+    @JvmOverloads
+    public constructor(performance: EluPerformanceOptions, configHost: String = "https://elu.dev") : this(configHost) {
+        performanceOptions = performance
+    }
+}

@@ -93,3 +93,25 @@ be copied into source, generated metadata, fixtures, or artifacts outside a
 <!-- zero-brand-token-start -->
 PostHog
 <!-- zero-brand-token-end -->
+
+
+## Owned replay HTTP dependency
+
+The internal ELU replay transport directly declares `com.squareup.okhttp3:okhttp:4.12.0`.
+It does not rely on another analytics runtime to own this dependency. OkHttp and
+its `com.squareup.okio:okio:3.6.0` dependency (JVM artifact `okio-jvm:3.6.0`)
+are published by Square, Inc. under the Apache License, Version 2.0, according
+to their Maven POMs. License: <https://www.apache.org/licenses/LICENSE-2.0>.
+No third-party source or classes are copied into the SDK AAR by this change;
+Maven resolves these separate artifacts and their transitive dependencies.
+
+OkHttp's artifact includes this additional public-suffix-list notice:
+
+> Note that publicsuffixes.gz is compiled from The Public Suffix List:
+> https://publicsuffix.org/list/public_suffix_list.dat
+>
+> It is subject to the terms of the Mozilla Public License, v. 2.0:
+> https://mozilla.org/MPL/2.0/
+
+The final resolved dependency/license closure must be included in release
+artifact verification; this declaration alone is not a complete closure audit.

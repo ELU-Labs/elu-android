@@ -24,7 +24,7 @@ import java.math.BigDecimal
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.Base64
-import java.util.concurrent.CompletableFuture
+import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
@@ -178,7 +178,7 @@ class FeatureFlagActivityVectorTest {
         val sent = AtomicInteger()
         val request = AtomicReference<FlagTransportRequest>()
         val entered = CountDownLatch(1)
-        val response = CompletableFuture<ByteArray>()
+        val response = SdkFuture<ByteArray>()
         val client =
             AndroidFeatureFlagClient(
                 owner,
@@ -221,7 +221,7 @@ class FeatureFlagActivityVectorTest {
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
-                FlagTransport { CompletableFuture() },
+                FlagTransport { SdkFuture() },
                 clock,
                 FlagOpaqueIdSource { "unused_closed_request" },
                 FlagOpaqueIdSource { "unused_closed_epoch" },
@@ -278,7 +278,7 @@ class FeatureFlagActivityVectorTest {
         val owner = open(backing)
         val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val transportEntered = CountDownLatch(1)
-        val transportResponse = CompletableFuture<ByteArray>()
+        val transportResponse = SdkFuture<ByteArray>()
         val client =
             AndroidFeatureFlagClient(
                 owner,
@@ -327,7 +327,7 @@ class FeatureFlagActivityVectorTest {
         val owner = open(backing)
         val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val entered = CountDownLatch(1)
-        val transportResponse = CompletableFuture<ByteArray>()
+        val transportResponse = SdkFuture<ByteArray>()
         val client =
             AndroidFeatureFlagClient(
                 owner,
@@ -676,45 +676,46 @@ class FeatureFlagActivityVectorTest {
     fun `pre-send authorization observes a core mutation and suppresses transport`() {
         val owner = open(FakeRuntimeQueueBacking())
         val sent = AtomicInteger()
-        val calls = AtomicInteger()
-        val clock =
-            object : FlagClock {
-                override fun wallNowEpochMillis(): Long {
-                    if (calls.incrementAndGet() == 4) {
-                        owner.appendMutations(
-                            listOf(
-                                RuntimeRecordDraft.Mutation(
-                                    "2026-08-04T00:01:01.000Z",
-                                    RuntimeMutationChange.SetPersonProperties(
-                                        mapOf("plan" to "enterprise"),
-                                        emptyMap(),
-                                        emptyList(),
-                                    ),
-                                    browserVersions(),
-                                ),
-                            ),
-                        ).await()
-                    }
-                    return millis("2026-08-04T00:01:00.000Z")
-                }
-
-                override fun monotonicNowNanos(): Long = calls.get().toLong() * 1_000_000_000L
-            }
+        val mutations = AtomicInteger()
+        val phases = mutableListOf<FlagDiagnosticRecord>()
+        val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val client =
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
                 FlagTransport {
                     sent.incrementAndGet()
-                    CompletableFuture.completedFuture(responseMixed())
+                    SdkFuture.completedFuture(responseMixed())
                 },
                 clock,
                 FlagOpaqueIdSource { "pre_send_request" },
                 FlagOpaqueIdSource { "pre_send_epoch" },
+                diagnostic = FlagDiagnosticObserver { record ->
+                    phases += record
+                    if (record.phase == FlagDiagnosticPhase.BEGIN_RESULT && record.result == FlagDiagnosticResult.BEGUN) {
+                        // Begin's durable request witness exists; the client's pre-send check has not run.
+                        owner.appendMutations(
+                            listOf(
+                                RuntimeRecordDraft.Mutation(
+                                    "2026-08-04T00:01:01.000Z",
+                                    RuntimeMutationChange.SetPersonProperties(
+                                        mapOf("plan" to "enterprise"), emptyMap(), emptyList(),
+                                    ),
+                                    browserVersions(),
+                                ),
+                            ),
+                        ).await()
+                        mutations.incrementAndGet()
+                    }
+                },
             )
         try {
             assertTrue(client.applyConfiguration(configAllowed()).await() is V1FlagAuthorizationResolution.Allowed)
             assertTrue(client.reload().await() is FlagReloadResult.Stale)
+            assertEquals(1, mutations.get())
+            val begin = phases.indexOfFirst { it.phase == FlagDiagnosticPhase.BEGIN_RESULT && it.result == FlagDiagnosticResult.BEGUN }
+            val preSend = phases.indexOfFirst { it.phase == FlagDiagnosticPhase.PRE_SEND_RESULT && it.result == FlagDiagnosticResult.STALE }
+            assertTrue(begin >= 0 && preSend > begin)
             assertEquals(0, sent.get())
         } finally {
             client.close()
@@ -726,7 +727,7 @@ class FeatureFlagActivityVectorTest {
         val owner = open(FakeRuntimeQueueBacking())
         val entered = CountDownLatch(1)
         val sent = AtomicInteger()
-        val never = CompletableFuture<ByteArray>()
+        val never = SdkFuture<ByteArray>()
         val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val client =
             AndroidFeatureFlagClient(
@@ -773,7 +774,7 @@ class FeatureFlagActivityVectorTest {
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
-                FlagTransport { CompletableFuture() },
+                FlagTransport { SdkFuture() },
                 clock,
                 FlagOpaqueIdSource { "unused_request" },
                 FlagOpaqueIdSource { "unused_epoch" },
@@ -800,7 +801,7 @@ class FeatureFlagActivityVectorTest {
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
-                FlagTransport { CompletableFuture() },
+                FlagTransport { SdkFuture() },
                 clock,
                 FlagOpaqueIdSource { "unused_request" },
                 FlagOpaqueIdSource { "unused_epoch" },

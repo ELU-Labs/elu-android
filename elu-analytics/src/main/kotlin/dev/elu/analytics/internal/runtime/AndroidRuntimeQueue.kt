@@ -2,7 +2,7 @@ package dev.elu.analytics.internal.runtime
 
 import android.content.Context
 import android.os.SystemClock
-import dev.elu.analytics.internal.core.AndroidCoreStateStore
+import dev.elu.analytics.internal.config.V1ReplayTransport
 import dev.elu.analytics.internal.core.CoreEpochClock
 import dev.elu.analytics.internal.core.CoreIdentifierGenerator
 import dev.elu.analytics.internal.core.CoreStateStore
@@ -25,23 +25,35 @@ internal object AndroidRuntimeQueue {
         context: Context,
         constructorSiteKey: String,
         limits: RuntimeQueueLimits,
+    ): Future<RuntimeQueueOwner> = open(context, constructorSiteKey, limits, null)
+
+    /** The original overload retains its behavior; only the facade supplies a setup anchor. */
+    internal fun open(
+        context: Context,
+        constructorSiteKey: String,
+        limits: RuntimeQueueLimits,
+        freshIdentityStartedAt: Long?,
+        readbackProvenReplayTransports: Set<V1ReplayTransport> = emptySet(),
+        supportedReplayProtocolGenerations: Set<String> = emptySet(),
+        assertStartupCurrent: () -> Unit = {},
     ): Future<RuntimeQueueOwner> {
         val applicationContext = context.applicationContext ?: context
         val databaseFile = databaseFileFor(applicationContext, constructorSiteKey).canonicalFile
-        val legacyFile = AndroidCoreStateStore.fileFor(applicationContext, constructorSiteKey).canonicalFile
-        val legacyStore = AndroidCoreStateStore.forProduction(legacyFile)
         val identifiers = UuidCoreIdentifierGenerator
         return RuntimeQueueOwner.open(
             ownershipKey = databaseFile.path,
             limits = limits,
             databaseFactory = { AndroidSQLiteRuntimeDatabase.open(databaseFile) },
             legacyStateLoader = {
-                bootstrapFromLegacy(legacyStore, identifiers, SystemCoreEpochClock)
+                freshState(identifiers, SystemCoreEpochClock, freshIdentityStartedAt)
             },
             identifiers = identifiers,
             leaseFactory = { AndroidFileOwnershipLease.acquire(File(databaseFile.path + ".lock")) },
             trustedSiteKey = constructorSiteKey,
             captureClock = AndroidRuntimeCaptureClock,
+            readbackProvenReplayTransports = readbackProvenReplayTransports,
+            supportedReplayProtocolGenerations = supportedReplayProtocolGenerations,
+            assertStartupCurrent = assertStartupCurrent,
         )
     }
 
@@ -67,13 +79,24 @@ internal object AndroidRuntimeQueue {
         )
     }
 
-    internal fun bootstrapFromLegacy(
-        legacyStore: CoreStateStore,
+    /** A new owned SQLite installation never opens pre-release aggregate or provider files. */
+    internal fun freshState(
         identifiers: CoreIdentifierGenerator = UuidCoreIdentifierGenerator,
         clock: CoreEpochClock = SystemCoreEpochClock,
+        freshIdentityStartedAt: Long? = null,
     ): PersistedCoreState {
-        val bootstrapStore = BootstrapCoreStateStore(legacyStore)
-        return IdentityStateCore.forTesting(bootstrapStore, identifiers, clock).snapshot()
+        val bootstrapClock = CoreEpochClock {
+            val current = clock.nowEpochMillis()
+            require(freshIdentityStartedAt == null || freshIdentityStartedAt <= current) {
+                "Fresh identity setup clock moved backwards"
+            }
+            freshIdentityStartedAt ?: current
+        }
+        val memoryStore = object : CoreStateStore {
+            override fun read(): ByteArray? = null
+            override fun write(bytes: ByteArray): CoreStateWriteOutcome = CoreStateWriteOutcome.Durable
+        }
+        return IdentityStateCore.forTesting(memoryStore, identifiers, bootstrapClock).snapshot()
     }
 
     internal fun databaseFileFor(
@@ -84,23 +107,6 @@ internal object AndroidRuntimeQueue {
         return File(File(File(context.noBackupFilesDir, "elu-analytics/runtime"), siteDirectory), "queue-v1.sqlite")
     }
 
-    /**
-     * Lets the existing core apply its bounded recovery rules while directing every recovery or
-     * fresh-state write to memory. The legacy file is an import source, never a second authority.
-     */
-    private class BootstrapCoreStateStore(private val legacyStore: CoreStateStore) : CoreStateStore {
-        private var memoryBytes: ByteArray? = null
-        private var hasMemoryValue: Boolean = false
-
-        override fun read(): ByteArray? =
-            if (hasMemoryValue) memoryBytes?.copyOf() else legacyStore.read()?.copyOf()
-
-        override fun write(bytes: ByteArray): CoreStateWriteOutcome {
-            memoryBytes = bytes.copyOf()
-            hasMemoryValue = true
-            return CoreStateWriteOutcome.Durable
-        }
-    }
 }
 
 private object AndroidRuntimeCaptureClock : RuntimeCaptureClock {

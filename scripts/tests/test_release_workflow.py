@@ -31,17 +31,21 @@ class ReleaseWorkflowTest(unittest.TestCase):
         scan = text.index("-iname '*sbom*'")
         self.assertLess(generate, scan)
 
-    def test_runtime_network_evidence_is_required_and_replay_is_opt_in(self) -> None:
+    def test_runtime_network_evidence_requires_native_replay_before_publish(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn("runtimeNetworkEvidence", text)
-        self.assertIn("replayNetworkEvidence:", text)
+        self.assertNotIn("replayNetworkEvidence", text)
         require = text.index("name: Require generated Android runtime-network evidence")
         verify = text.index("name: Verify public API and legal-only artifact gate")
         self.assertNotIn("if:", text[require:verify])
-        self.assertIn('if [[ "$REPLAY_EVIDENCE" == "true" ]]; then', text)
+        self.assertNotIn("REPLAY_EVIDENCE", text)
+        self.assertNotIn("if ", text[require:verify])
+        self.assertIn(
+            "--expect config=1 --expect capture=1 --expect flags=1 --expect replay=1",
+            text[require:verify],
+        )
         self.assertIn("scanner_inputs+=(--network runtime=build/reports/android-runtime-network-evidence.json)", text)
         self.assertNotIn('if [[ "$RUNTIME_EVIDENCE" == "true" ]]', text)
-        self.assertNotIn("--expect replay=1 \\", text)
 
     def test_dry_run_skips_only_the_publish_step(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

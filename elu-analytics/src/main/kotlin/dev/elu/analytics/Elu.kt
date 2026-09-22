@@ -1,16 +1,13 @@
 package dev.elu.analytics
 
 import android.content.Context
+import android.view.View
+import dev.elu.analytics.internal.replay.NativeViewPrivacy
+import dev.elu.analytics.internal.replay.NativeViewRestriction
 import android.content.pm.ApplicationInfo
 import android.util.Log
-import com.posthog.PostHog
-import com.posthog.PostHogOnFeatureFlags
 import dev.elu.analytics.internal.facade.AndroidStandaloneStack
-import dev.elu.analytics.internal.facade.EluCoreLifecycleGate
-import dev.elu.analytics.internal.facade.EluFacadeLane
-import dev.elu.analytics.internal.facade.EluFacadeSink
-import dev.elu.analytics.internal.facade.EmbeddedRuntimeSink
-import dev.elu.analytics.internal.facade.selectFacadeLane
+import dev.elu.analytics.internal.facade.EluConsentHandoff
 import java.util.Date
 
 /**
@@ -18,13 +15,12 @@ import java.util.Date
  * allowlist. Customer code interacts only with this stable public surface.
  *
  * Every method is safe in every state: before [setup] (idle) and while
- * disabled they no-op; while pending (no usable config yet) event-class calls
+ * disabled they no-op (consent choices are retained before setup); while pending (no usable config yet) event-class calls
  * are buffered in memory and getters return defaults; while running they
  * delegate. Never throws, never blocks the caller.
  *
- * Methods carry no runtime detail: [setup] builds the lane [EluRuntimeSelector] names and every
- * call goes to that one sink. The two runtimes keep separate identity storage, so the selection is
- * fixed for the life of the process and no call is ever sent to both.
+ * [setup] creates one ELU-owned runtime. Calls share its serialized identity, durable storage,
+ * configuration, feature flags and delivery lifecycle.
  */
 public object Elu {
     private const val TAG = "EluAnalytics"
@@ -33,7 +29,8 @@ public object Elu {
     // customer code locking on Elu could contend or deadlock with setup.
     private val setupLock = Any()
 
-    @Volatile private var sink: EluFacadeSink? = null
+    private val consent = EluConsentHandoff()
+    private val sink get() = consent.sink
 
     /**
      * Initializes the SDK with the ELU site key. Call once from
@@ -71,29 +68,11 @@ public object Elu {
                     return
                 }
                 val key = siteKey.trim()
-                val lane =
-                    selectFacadeLane(
-                        EluRuntimeSelector.mode(),
-                        wrapped = {
-                            val core = EluCore(appContext, key, configHost)
-                            EluFacadeLane(EmbeddedRuntimeSink(EluCoreLifecycleGate(core), EmbeddedRuntime)) {
-                                core.start()
-                            }
-                        },
-                        standalone = {
-                            // The standalone runtime resolves its own ELU endpoints from the
-                            // configuration document it is given, so configHost governs the
-                            // embedded lane only.
-                            val facade = AndroidStandaloneStack.facade(appContext, key)
-                            EluFacadeLane(facade) { facade.start() }
-                        },
-                    )
-                // Published before starting, so calls made during startup are held rather than lost.
-                sink = lane.sink
-                lane.start()
+                val facade = AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)
+                // Publish before starting so calls made during startup are held rather than lost.
+                consent.install(facade, facade::start)
             } catch (t: Throwable) {
                 Log.w(TAG, "Elu.setup failed: $t")
-                sink = null
             }
         }
     }
@@ -119,6 +98,11 @@ public object Elu {
         userProperties: Map<String, Any>? = null,
     ) {
         sink?.identify(distinctId, userProperties)
+    }
+
+    @JvmStatic
+    public fun identify(distinctId: String, userProperties: Map<String, Any>?, userPropertiesOnce: Map<String, Any>?) {
+        sink?.identify(distinctId, userProperties, userPropertiesOnce)
     }
 
     /** Feeds `$screen`/`$screen_name` — call manually from Compose navigation. */
@@ -150,12 +134,34 @@ public object Elu {
         sink?.captureException(error, properties)
     }
 
+    /** Stops collection immediately. Before setup the choice is retained in memory, then persisted
+     * before startup can collect. Resetting identity does not restore consent. */
+    @JvmStatic
+    public fun optOut() { consent.optOut() }
+
+    /** Restores collection when remote policy permits it; null suppresses the opt-in event. */
+    @JvmStatic
+    @JvmOverloads
+    public fun optIn(captureEventName: String? = "\$opt_in", properties: Map<String, Any>? = null) {
+        consent.optIn(captureEventName, properties)
+    }
+
+    @JvmStatic
+    public fun isOptedOut(): Boolean = consent.isOptedOut()
+
     // ---- properties ----------------------------------------------------------
 
     /** Super properties: sent with every subsequent event. */
     @JvmStatic
     public fun register(properties: Map<String, Any>) {
         sink?.register(properties)
+    }
+
+    /** Sets missing super properties, or those equal to [defaultValue], atomically. */
+    @JvmStatic
+    @JvmOverloads
+    public fun registerOnce(properties: Map<String, Any>, defaultValue: Any? = "None") {
+        sink?.registerOnce(properties, defaultValue)
     }
 
     @JvmStatic
@@ -167,6 +173,17 @@ public object Elu {
     public fun setPersonProperties(properties: Map<String, Any>) {
         sink?.setPersonProperties(properties)
     }
+
+    @JvmStatic
+    public fun setPersonProperties(properties: Map<String, Any>, propertiesOnce: Map<String, Any>) {
+        sink?.setPersonProperties(properties, propertiesOnce)
+    }
+
+    @JvmStatic
+    public fun getGroups(): Map<String, String> = sink?.getGroups() ?: emptyMap()
+
+    @JvmStatic
+    public fun resetGroups() { sink?.resetGroups() }
 
     @JvmStatic
     @JvmOverloads
@@ -189,6 +206,9 @@ public object Elu {
     public fun getFeatureFlag(key: String): Any? {
         return sink?.getFeatureFlag(key)
     }
+
+    @JvmStatic
+    public fun getFeatureFlagResult(key: String): EluFeatureFlagResult? = sink?.getFeatureFlagResult(key)
 
     @JvmStatic
     public fun getFeatureFlagPayload(key: String): Any? {
@@ -225,6 +245,13 @@ public object Elu {
     }
 
     @JvmStatic
+    public fun resetPersonPropertiesForFlags() { sink?.resetPersonPropertiesForFlags() }
+
+    @JvmStatic
+    @JvmOverloads
+    public fun resetGroupPropertiesForFlags(type: String? = null) { sink?.resetGroupPropertiesForFlags(type) }
+
+    @JvmStatic
     public fun setGroupPropertiesForFlags(
         type: String,
         properties: Map<String, Any>,
@@ -232,164 +259,18 @@ public object Elu {
         sink?.setGroupPropertiesForFlags(type, properties)
     }
 
+    /** Hides text in this view and its descendants from future replay captures. */
+    @JvmStatic
+    public fun maskView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.MASK); sink?.viewPrivacyChanged() }
+
+    /** Excludes this view's content and descendants; replay retains only a placeholder. */
+    @JvmStatic
+    public fun blockView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.BLOCK); sink?.viewPrivacyChanged() }
+
     // ---- transport -----------------------------------------------------------
 
     @JvmStatic
     public fun flush() {
         sink?.flush()
-    }
-}
-
-/**
- * Every call the facade makes into the embedded analytics runtime, in facade terms. The interface
- * exists so the mapping can be exercised without that runtime, and so one file holds every symbol
- * the embedded dependency contributes to the facade path.
- */
-internal interface EmbeddedRuntimeCalls {
-    fun capture(
-        event: String,
-        properties: Map<String, Any>?,
-        timestamp: Date,
-    )
-
-    fun identify(
-        distinctId: String,
-        userProperties: Map<String, Any>?,
-    )
-
-    fun screen(
-        name: String,
-        properties: Map<String, Any>?,
-    )
-
-    fun alias(alias: String)
-
-    fun reset()
-
-    fun captureException(
-        error: Throwable,
-        properties: Map<String, Any>?,
-    )
-
-    fun register(properties: Map<String, Any>)
-
-    fun unregister(key: String)
-
-    fun setPersonProperties(properties: Map<String, Any>)
-
-    fun group(
-        type: String,
-        key: String,
-        properties: Map<String, Any>?,
-    )
-
-    fun distinctId(): String?
-
-    fun getFeatureFlag(key: String): Any?
-
-    fun getFeatureFlagPayload(key: String): Any?
-
-    fun isFeatureEnabled(key: String): Boolean
-
-    fun reloadFeatureFlags(completion: (() -> Unit)?)
-
-    fun setPersonPropertiesForFlags(properties: Map<String, Any>)
-
-    fun setGroupPropertiesForFlags(
-        type: String,
-        properties: Map<String, Any>,
-    )
-
-    fun flush()
-}
-
-/** The embedded runtime as a process-wide singleton, matching the one-instance-per-app web model. */
-internal object EmbeddedRuntime : EmbeddedRuntimeCalls {
-    override fun capture(
-        event: String,
-        properties: Map<String, Any>?,
-        timestamp: Date,
-    ) {
-        PostHog.capture(event, properties = properties, timestamp = timestamp)
-    }
-
-    override fun identify(
-        distinctId: String,
-        userProperties: Map<String, Any>?,
-    ) {
-        PostHog.identify(distinctId, userProperties = userProperties)
-    }
-
-    override fun screen(
-        name: String,
-        properties: Map<String, Any>?,
-    ) {
-        PostHog.screen(name, properties)
-    }
-
-    override fun alias(alias: String) {
-        PostHog.alias(alias)
-    }
-
-    override fun reset() {
-        PostHog.reset()
-    }
-
-    override fun captureException(
-        error: Throwable,
-        properties: Map<String, Any>?,
-    ) {
-        PostHog.captureException(error, properties)
-    }
-
-    /** The native API is per-key. */
-    override fun register(properties: Map<String, Any>) {
-        properties.forEach { (key, value) -> PostHog.register(key, value) }
-    }
-
-    override fun unregister(key: String) {
-        PostHog.unregister(key)
-    }
-
-    override fun setPersonProperties(properties: Map<String, Any>) {
-        PostHog.setPersonProperties(userPropertiesToSet = properties)
-    }
-
-    override fun group(
-        type: String,
-        key: String,
-        properties: Map<String, Any>?,
-    ) {
-        PostHog.group(type, key, properties)
-    }
-
-    override fun distinctId(): String? = PostHog.distinctId().ifBlank { null }
-
-    override fun getFeatureFlag(key: String): Any? = PostHog.getFeatureFlag(key)
-
-    // Web-parity method; native marks it deprecated in favor of
-    // getFeatureFlagResult, which would send $feature_flag_called.
-    @Suppress("DEPRECATION")
-    override fun getFeatureFlagPayload(key: String): Any? = PostHog.getFeatureFlagPayload(key)
-
-    override fun isFeatureEnabled(key: String): Boolean = PostHog.isFeatureEnabled(key)
-
-    override fun reloadFeatureFlags(completion: (() -> Unit)?) {
-        PostHog.reloadFeatureFlags(completion?.let { callback -> PostHogOnFeatureFlags { callback() } })
-    }
-
-    override fun setPersonPropertiesForFlags(properties: Map<String, Any>) {
-        PostHog.setPersonPropertiesForFlags(properties)
-    }
-
-    override fun setGroupPropertiesForFlags(
-        type: String,
-        properties: Map<String, Any>,
-    ) {
-        PostHog.setGroupPropertiesForFlags(type, properties)
-    }
-
-    override fun flush() {
-        PostHog.flush()
     }
 }

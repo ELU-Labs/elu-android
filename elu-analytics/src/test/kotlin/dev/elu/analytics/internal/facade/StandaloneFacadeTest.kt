@@ -21,8 +21,10 @@ import dev.elu.analytics.internal.runtime.delivery.BatchHTTPTransport
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.Date
-import java.util.concurrent.CompletableFuture
+import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.util.concurrent.Future
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
@@ -304,13 +306,368 @@ class StandaloneFacadeTest {
         assertEquals(0, harness.diagnostics().buffered)
     }
 
+    @Test
+    fun `held lane preserves API entry chronology for identity and context changes`() {
+        val cases = listOf<Pair<String, (StandaloneFacade) -> Unit>>(
+            "identify" to { it.identify("user_entry", mapOf("tier" to "test")) },
+            "alias" to { it.alias("alias_entry") },
+            "reset" to { it.reset() },
+            "register" to { it.register(mapOf("entry" to "yes")) },
+            "unregister" to { it.register(mapOf("entry" to "yes")); it.unregister("entry") },
+            "person" to { it.setPersonProperties(mapOf("entry" to "yes")) },
+            "group" to { it.group("company", "entry", mapOf("tier" to "test")) },
+            "flag-person" to { it.setPersonPropertiesForFlags(mapOf("entry" to "yes")) },
+            "flag-group" to { it.setGroupPropertiesForFlags("company", mapOf("entry" to "yes")) },
+        )
+        val failures = mutableListOf<String>()
+        for ((name, operation) in cases) {
+            val clock = AtomicLong(NOW_MS)
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val harness = harness(wall = clock::get, beforeOpen = {
+                entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+            })
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                harness.facade.applyConfiguration(config())
+                operation(harness.facade)
+                clock.addAndGet(5)
+                val callerDate = Date(clock.get())
+                harness.facade.capture("after-$name", null, callerDate)
+                callerDate.time = NOW_MS + 50_000 // Input was already snapshotted.
+                clock.set(NOW_MS + 100)
+                release.countDown(); harness.settle()
+                val records = harness.records()
+                val events = records.filterIsInstance<RuntimeQueuedRecord.Event>()
+                if (events.singleOrNull()?.record?.name != "after-$name") {
+                    failures += "$name: ${harness.queued()} drops=${harness.diagnostics().dropped}"
+                } else {
+                    assertEquals("2026-08-04T00:01:00.005Z", events.single().record.occurredAt)
+                    for (mutation in records.filterIsInstance<RuntimeQueuedRecord.Mutation>()) {
+                        assertEquals("2026-08-04T00:01:00.000Z", mutation.envelope.mutation.occurredAt)
+                    }
+                }
+            } finally { release.countDown(); harness.facade.close() }
+        }
+        assertEquals("No later lane timestamp may make the following caller capture appear stale", emptyList<String>(), failures)
+    }
+
+    @Test
+    fun `an explicitly stale event timestamp is still denied after an API entry mutation`() {
+        val clock = AtomicLong(NOW_MS)
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val harness = harness(wall = clock::get, beforeOpen = {
+            entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+        })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            harness.facade.applyConfiguration(config())
+            harness.facade.identify("entry-user", null)
+            harness.facade.capture("explicitly-stale", null, Date(NOW_MS - 1))
+            clock.set(NOW_MS + 100); release.countDown(); harness.settle()
+            assertEquals(listOf("mutation:identify"), harness.queued())
+        } finally { release.countDown() }
+    }
+
+    @Test
+    fun `register once preserves values and only replaces absent or explicit defaults`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.facade.register(mapOf("plan" to "paid", "placeholder" to "None", "zero" to 0))
+        harness.facade.registerOnce(mapOf("plan" to "free", "placeholder" to "ready", "new" to true), "None")
+        harness.facade.registerOnce(mapOf("zero" to 9), 0.0)
+        harness.facade.registerOnce(mapOf("new" to false), "None")
+        harness.settle()
+        assertEquals(mapOf("plan" to "paid", "placeholder" to "ready", "zero" to 9, "new" to true),
+            harness.owner.snapshot().get().state.identity.superProperties)
+    }
+
+    @Test
+    fun `pre-start denial commits before lifecycle starts and persists across reset and reopen`() {
+        val backing = FakeRuntimeQueueBacking()
+        val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+        val h = harness(backing = backing, autoStart = false, onOpened = { observed.set(it) })
+        val handoff = EluConsentHandoff()
+        handoff.optOut()
+        assertTrue(handoff.isOptedOut())
+        handoff.install(h.facade, h.facade::start)
+        h.facade.applyConfiguration(config())
+        h.facade.capture("forbidden-startup", null, Date(NOW_MS))
+        h.facade.reset()
+        h.settle()
+        assertEquals(true, observed.get())
+        assertTrue(h.owner.snapshot().get().state.identity.optedOut)
+        assertTrue(h.queued().isEmpty())
+        assertTrue(h.transport.requests.isEmpty())
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val reopened = harness(backing = backing)
+        reopened.facade.applyConfiguration(config()); reopened.settle()
+        assertTrue(reopened.facade.isOptedOut())
+        assertTrue(reopened.owner.snapshot().get().state.identity.optedOut)
+    }
+
+    @Test
+    fun `latest pre-start choice wins and an invalid opt in cannot erase denial`() {
+        for (denyLast in listOf(true, false)) {
+            val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+            val h = harness(autoStart = false, onOpened = { observed.set(it) })
+            val handoff = EluConsentHandoff()
+            handoff.optOut()
+            handoff.optIn("accepted", mapOf("source" to "settings"))
+            if (denyLast) { handoff.optOut(); handoff.optIn("", null) }
+            assertEquals(denyLast, handoff.isOptedOut())
+            handoff.install(h.facade, h.facade::start)
+            h.facade.applyConfiguration(config()); h.settle()
+            assertEquals(denyLast, observed.get())
+            assertEquals(denyLast, h.owner.snapshot().get().state.identity.optedOut)
+            // A pre-config opt-in attempt is not replayed when config later arrives.
+            assertFalse(h.queued().contains("event:accepted"))
+        }
+    }
+
+    @Test
+    fun `pre-start opt in durably clears existing denial before lifecycle starts`() {
+        val backing = FakeRuntimeQueueBacking()
+        val initial = harness(backing = backing)
+        initial.facade.optOut(); initial.settle(); initial.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+        val h = harness(backing = backing, autoStart = false, onOpened = { observed.set(it) })
+        h.facade.optIn(null, null)
+        h.settle() // Consent task can run before start; the pending intent must survive it.
+        h.facade.start(); h.settle()
+        assertEquals(false, observed.get())
+        assertFalse(h.facade.isOptedOut())
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val reopened = harness(backing = backing); reopened.settle()
+        assertFalse(reopened.owner.snapshot().get().state.identity.optedOut)
+    }
+
+    @Test
+    fun `denial received during open is committed before lifecycle startup`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val observed = java.util.concurrent.atomic.AtomicReference<Boolean>()
+        val h = harness(beforeOpen = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) },
+            onOpened = { observed.set(it) })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            h.facade.optIn(null, null); h.facade.optOut()
+            assertTrue(h.facade.isOptedOut())
+        } finally { release.countDown() }
+        h.settle()
+        assertEquals(true, observed.get())
+        assertTrue(h.owner.snapshot().get().state.identity.optedOut)
+    }
+
+    @Test
+    fun `later opt in cannot backfill activity submitted while opening under denial`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val h = harness(beforeOpen = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            h.facade.optOut()
+            h.facade.capture("private-during-denial", null, Date(NOW_MS))
+            h.facade.screen("private-screen", null)
+            h.facade.captureException(IllegalStateException("private-error"), null)
+            h.facade.optIn(null, null)
+            h.facade.applyConfiguration(config())
+        } finally { release.countDown() }
+        h.settle()
+        assertFalse(h.facade.isOptedOut())
+        assertTrue(h.queued().isEmpty())
+        assertEquals(3, h.diagnostics().dropped[EluFacadeDropReason.OPTED_OUT])
+        h.facade.capture("permitted-after-grant", null, Date(NOW_MS)); h.settle()
+        assertEquals(listOf("event:permitted-after-grant"), h.queued())
+    }
+
+    @Test
+    fun `close before startup never opens or emits pending consent event`() {
+        val opened = java.util.concurrent.atomic.AtomicBoolean()
+        val h = harness(autoStart = false, onOpened = { opened.set(true) })
+        h.facade.optIn("never", null)
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        h.facade.start()
+        assertFalse(opened.get())
+        assertTrue(h.queued().isEmpty())
+    }
+
+    @Test
+    fun `opt out persists without configuration and reset preserves consent`() {
+        val harness = harness()
+        harness.facade.capture("before-consent", null, Date(NOW_MS))
+        harness.facade.optOut()
+        assertTrue(harness.facade.isOptedOut())
+        harness.settle()
+        assertTrue(harness.owner.snapshot().get().state.identity.optedOut)
+        harness.facade.applyConfiguration(config())
+        harness.facade.reset()
+        harness.facade.capture("after-reset", null, Date(NOW_MS))
+        harness.settle()
+        assertTrue(harness.owner.snapshot().get().state.identity.optedOut)
+        assertTrue(harness.facade.isOptedOut())
+        assertNull(harness.facade.distinctId())
+        assertTrue(harness.queued().isEmpty())
+        assertTrue(harness.transport.requests.isEmpty())
+    }
+
+    @Test
+    fun `opt in restores consent after durable storage and captures its event`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.facade.optOut()
+        harness.settle()
+        harness.facade.optIn("\$opt_in", mapOf("source" to "settings"))
+        harness.settle()
+        assertFalse(harness.facade.isOptedOut())
+        assertFalse(harness.owner.snapshot().get().state.identity.optedOut)
+        assertEquals(listOf("event:\$opt_in"), harness.queued())
+        harness.facade.capture("allowed", null, Date(NOW_MS))
+        harness.settle()
+        assertTrue(harness.queued().contains("event:allowed"))
+    }
+
+    @Test
+    fun `newer opt out prevents queued opt in from reopening collection`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val harness = harness(beforeOpen = { entered.countDown(); assertTrue(release.await(5, TimeUnit.SECONDS)) })
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            harness.facade.applyConfiguration(config())
+            harness.facade.optIn("\$opt_in", null)
+            harness.facade.optOut()
+            harness.facade.capture("forbidden", null, Date(NOW_MS))
+            release.countDown()
+            harness.settle()
+            assertTrue(harness.facade.isOptedOut())
+            assertTrue(harness.owner.snapshot().get().state.identity.optedOut)
+            assertTrue(harness.queued().isEmpty())
+            assertTrue(harness.transport.requests.isEmpty())
+        } finally { release.countDown() }
+    }
+
+    @Test
+    fun `concurrent consent cannot invert durable enqueue order and survives reopen`() {
+        for (lastOptedOut in listOf(true, false)) {
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val target = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val delegate = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val lane = object : java.util.concurrent.ExecutorService by delegate {
+                override fun execute(command: Runnable) {
+                    if (Thread.currentThread() === target.get() && entered.count != 0L) {
+                        entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+                    }
+                    delegate.execute(command)
+                }
+            }
+            val backing = FakeRuntimeQueueBacking()
+            val harness = harness(backing = backing, facadeLane = lane)
+            harness.facade.applyConfiguration(config()); harness.settle()
+            if (lastOptedOut) { harness.facade.optOut(); harness.settle() }
+            val first = Thread {
+                if (lastOptedOut) harness.facade.optIn(null, null) else harness.facade.optOut()
+            }
+            target.set(first)
+            val secondDone = CountDownLatch(1)
+            val second = Thread {
+                try { if (lastOptedOut) harness.facade.optOut() else harness.facade.optIn(null, null) }
+                finally { secondDone.countDown() }
+            }
+            try {
+                first.start(); assertTrue(entered.await(5, TimeUnit.SECONDS)); second.start()
+                // Acceptance and queue insertion form one boundary: a later call cannot overtake it.
+                assertFalse(secondDone.await(100, TimeUnit.MILLISECONDS))
+            } finally { release.countDown() }
+            first.join(5_000); second.join(5_000)
+            assertFalse(first.isAlive); assertFalse(second.isAlive)
+            harness.settle()
+            assertEquals(lastOptedOut, harness.owner.snapshot().get().state.identity.optedOut)
+            assertEquals(lastOptedOut, harness.facade.isOptedOut())
+            harness.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+            val reopened = harness(backing = backing)
+            reopened.facade.applyConfiguration(config()); reopened.settle()
+            assertEquals(lastOptedOut, reopened.owner.snapshot().get().state.identity.optedOut)
+            assertEquals(lastOptedOut, reopened.facade.isOptedOut())
+        }
+    }
+
+    @Test
+    fun `typed flag result preserves variant and payload and disappears on identity change`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.settle()
+        assertNull(harness.facade.getFeatureFlagResult("variant"))
+        harness.settle()
+        val result = harness.facade.getFeatureFlagResult("variant")!!
+        assertEquals("variant", result.key)
+        assertTrue(result.enabled)
+        assertEquals("variant-a", result.variant)
+        harness.facade.identify("next-account", null)
+        assertNull(harness.facade.getFeatureFlagResult("variant"))
+        harness.settle()
+    }
+
+    @Test
+    fun `set once and reset context APIs preserve and isolate durable evaluation state`() {
+        val harness = harness()
+        harness.facade.applyConfiguration(config())
+        harness.facade.identify("account-a", mapOf("plan" to "paid"), mapOf("source" to "first"))
+        harness.facade.setPersonProperties(mapOf("plan" to "enterprise"), mapOf("source" to "second", "region" to "west"))
+        harness.facade.group("company", "company-a", mapOf("tier" to "paid"))
+        harness.settle()
+        assertEquals(mapOf("plan" to "enterprise", "source" to "first", "region" to "west"),
+            harness.owner.snapshot().get().state.flagContext.personProperties)
+        assertEquals(mapOf("company" to "company-a"), harness.facade.getGroups())
+        harness.facade.resetGroupPropertiesForFlags("company")
+        harness.facade.resetPersonPropertiesForFlags()
+        harness.settle()
+        assertTrue(harness.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+        assertTrue(harness.owner.snapshot().get().state.flagContext.groupProperties.isEmpty())
+        assertEquals(mapOf("company" to "company-a"), harness.facade.getGroups())
+        harness.facade.resetGroups()
+        harness.settle()
+        assertTrue(harness.facade.getGroups().isEmpty())
+    }
+
+    @Test fun `performance requires current foreground session and drops stale consent identity and config aggregates`() {
+        val wall = AtomicLong(NOW_MS)
+        val h = harness(wall = wall::get)
+        val document = JSONObject(config()).put("capturePerformance", JSONObject().put("memory", true).put("long_tasks", true).put("sample_interval_ms", 5000)).toString()
+        h.facade.applyConfiguration(document)
+        h.facade.nativeReplayLifecycleChanged(true)
+        h.facade.capture("activity", null, Date(NOW_MS))
+        h.settle()
+        val original = checkNotNull(h.facade.performanceContext())
+        wall.addAndGet(5_000)
+        h.facade.capturePerformance(original, mapOf("\$memory_process_pss_bytes" to 42_000L))
+        h.settle()
+        assertEquals(1, h.records().filterIsInstance<RuntimeQueuedRecord.Event>().count { it.record.name == "\$performance_sample" })
+        assertEquals(Instant.ofEpochMilli(NOW_MS).toString(), Instant.parse(h.owner.snapshot().get().state.identity.session!!.lastActivityAt).toString())
+        h.facade.optOut()
+        assertNull(h.facade.performanceContext())
+        h.facade.capturePerformance(original, emptyMap()); h.settle()
+        h.facade.optIn(null, null); h.settle()
+        h.facade.capture("new activity", null, Date(wall.get())); h.settle()
+        h.facade.capturePerformance(original, emptyMap()); h.settle()
+        h.facade.identify("other", null); h.settle()
+        h.facade.capturePerformance(original, emptyMap()); h.settle()
+        val latest = checkNotNull(h.facade.performanceContext())
+        h.facade.nativeReplayLifecycleChanged(false)
+        h.facade.capturePerformance(latest, emptyMap()); h.settle()
+        assertNull(h.facade.performanceContext())
+        assertEquals(1, h.records().filterIsInstance<RuntimeQueuedRecord.Event>().count { it.record.name == "\$performance_sample" })
+    }
+
     // ---- harness -------------------------------------------------------------
 
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
+        wall: () -> Long = { NOW_MS },
+        beforeOpen: () -> Unit = {},
+        autoStart: Boolean = true,
+        onOpened: (Boolean) -> Unit = {},
+        backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
+        facadeLane: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor(),
     ): Harness {
-        val backing = FakeRuntimeQueueBacking()
         val owner =
             RuntimeQueueOwner.open(
                 ownershipKey = "facade-${keyCounter.incrementAndGet()}",
@@ -318,7 +675,10 @@ class StandaloneFacadeTest {
                 databaseFactory = backing::connection,
                 legacyStateLoader = ::initialState,
                 trustedSiteKey = SITE_KEY,
-                captureClock = FixedCaptureClock,
+                captureClock = object : RuntimeCaptureClock {
+                    override fun wallNowEpochMillis() = wall()
+                    override fun elapsedRealtimeNanos() = 1_000L + (wall() - NOW_MS) * 1_000_000L
+                },
             ).get(10, TimeUnit.SECONDS)
         owners += owner
         val transport = RecordingBatchTransport()
@@ -326,7 +686,7 @@ class StandaloneFacadeTest {
             StandaloneRuntime(
                 owner = owner,
                 siteKey = SITE_KEY,
-                wallClock = { NOW_MS },
+                wallClock = wall,
                 transportFactory = { transport },
                 deviceInEuTimezone = { deviceInEu },
             )
@@ -342,13 +702,15 @@ class StandaloneFacadeTest {
             )
         val facade =
             StandaloneFacade(
-                open = { StandaloneStack(runtime, owner, flags) },
+                open = { beforeOpen(); StandaloneStack(runtime, owner, flags) },
                 deliverCallback = { callback -> callback.run() },
-                wallClock = { NOW_MS },
+                wallClock = wall,
                 bufferLimit = bufferLimit,
+                onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
+                lane = facadeLane,
             )
         facades += facade
-        facade.start()
+        if (autoStart) facade.start()
         return Harness(owner, facade, transport, flagTransport)
     }
 
@@ -405,7 +767,7 @@ class StandaloneFacadeTest {
         val revisions = AtomicInteger()
 
         @Synchronized
-        override fun send(request: dev.elu.analytics.internal.flags.FlagTransportRequest): CompletableFuture<ByteArray> {
+        override fun send(request: dev.elu.analytics.internal.flags.FlagTransportRequest): SdkFuture<ByteArray> {
             val body = JSONObject(String(request.canonicalBody, StandardCharsets.UTF_8))
             requests += body
             val response =
@@ -424,7 +786,7 @@ class StandaloneFacadeTest {
                             .put("bool-false", false),
                     )
                     .put("payloads", JSONObject().put("variant", JSONObject().put("buttonColor", "violet")))
-            return CompletableFuture.completedFuture(response.toString().toByteArray(StandardCharsets.UTF_8))
+            return SdkFuture.completedFuture(response.toString().toByteArray(StandardCharsets.UTF_8))
         }
     }
 

@@ -311,6 +311,22 @@ internal object FlagDurableStore {
         }
     }
 
+    /** Uses the existing durable flag authority; no request, cache or queued event is created. */
+    fun contextChangeRestriction(
+        transaction: RuntimeQueueTransaction,
+        authorization: V1FlagAuthorizationSnapshot,
+        state: PersistedCoreState,
+        wallNowEpochMillis: Long,
+    ): V1FlagProjectionRejection? {
+        if (state.identity.optedOut) return V1FlagProjectionRejection.UNAUTHORIZED
+        if (hasFutureCacheStorage(transaction)) return V1FlagProjectionRejection.TERMINAL
+        return when (val result = validateAuthorityForUse(transaction, authorization, wallNowEpochMillis)) {
+            is AuthorityUse.Allowed -> null
+            is AuthorityUse.Restricted -> result.reason
+            AuthorityUse.Terminal -> V1FlagProjectionRejection.TERMINAL
+        }
+    }
+
     fun begin(
         transaction: RuntimeQueueTransaction,
         authorization: V1FlagAuthorizationSnapshot?,

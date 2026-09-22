@@ -26,6 +26,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -210,6 +211,40 @@ class PrivacyStateProjectorTest {
         val stale = PrivacyStateProjector.encode(PrivacyStateProjector.project(input(config(), deviceInEu = false, contextRevision = 4)))
         val result = owner.submitCaptureAuthority(configBody(), stale).await() as RuntimeCaptureAuthorityUpdateResult.Terminated
         assertEquals(RuntimeCaptureAuthorityTerminalReason.STALE, result.authority.reason)
+    }
+
+    @Test fun `native sealed policy supplies no fresh facts and works without any current session`() {
+        val json = JSONObject(checkNotNull(javaClass.classLoader?.getResource("contracts/v2/fixtures/config-enabled.json")).readText())
+        val pair = V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)
+        json.getJSONObject("capabilities").getJSONObject("replay").getJSONArray("transports")
+            .put(JSONObject().put("codec", pair.codec).put("compression", "gzip"))
+        val parsed = V1ConfigJson.parseConfig(json.toString()); val now = Instant.parse("2026-08-05T00:01:06Z").toEpochMilli()
+        val caps = dev.elu.analytics.internal.replay.NativeReplayCapabilities(setOf(pair), setOf(checkNotNull(parsed.replayCapabilities?.replayProtocolGeneration)))
+        val policy = PrivacyStateProjector.nativeSealedDeliveryPolicy(caps) { false }
+        val identity = state().identity; assertNull(identity.session)
+        val body = checkNotNull(policy.privacy.current(parsed, identity, now)); val privacy = V1ConfigJson.parseEffectivePrivacy(body)
+        assertFalse(privacy.replayAllowed); assertFalse(privacy.replaySampled); assertFalse(privacy.replaySessionEligible)
+        assertEquals(0, privacy.replayBudgetRemainingSeconds); assertTrue(privacy.maskingValidated)
+        val manager = dev.elu.analytics.internal.config.V1ConfigManager(setOf(pair)); manager.install(json.toString(), now)
+        assertNotNull(manager.authorizeSealedReplayDelivery(body, identity, now))
+        assertNull(PrivacyStateProjector.nativeSealedDeliveryPolicy(dev.elu.analytics.internal.replay.NativeReplayCapabilities()) { false }
+            .privacy.current(parsed, identity, now))
+        assertNull(manager.authorizeSealedReplayDelivery(policy.privacy.current(parsed, identity.copy(optedOut = true), now), identity.copy(optedOut = true), now))
+        assertNull(manager.authorizeSealedReplayDelivery(PrivacyStateProjector.nativeSealedDeliveryPolicy(caps) { true }
+            .privacy.current(parsed, identity, now), identity, now))
+    }
+
+    @Test fun `native retention requires exact stored profile and current compatible masking`() {
+        val parsed = config()
+        val policy = PrivacyStateProjector.nativeSealedDeliveryPolicy(dev.elu.analytics.internal.replay.NativeReplayCapabilities()) { false }
+        val profile = dev.elu.analytics.internal.replay.ReplayMaskingProfile.parse(dev.elu.analytics.internal.replay.NativeMaskingProfile.blanketMask().canonicalBytes)
+        assertTrue(policy.retention.mayRetain(profile, parsed))
+        assertFalse(policy.retention.mayRetain(dev.elu.analytics.internal.replay.ReplayMaskingProfile.parse("{}".toByteArray()), parsed))
+        assertFalse(policy.retention.mayRetain(profile, parsed.copy(privacy = null)))
+        val old = checkNotNull(parsed.privacy)
+        val blocked = old.masking.copy(platformRules = old.masking.platformRules +
+            V1PlatformMaskingRule(V1PrivacyPlatform.ANDROID, V1PlatformRuleAction.BLOCK, "unknown", "private"))
+        assertFalse(policy.retention.mayRetain(profile, parsed.copy(privacy = old.copy(masking = blocked))))
     }
 
     private fun input(

@@ -25,7 +25,7 @@ internal object V1ConfigJson {
 
     private val configRequired = setOf("schemaVersion", "revision", "issuedAt", "expiresAt", "status")
     private val configOptional =
-        setOf("site", "endpoints", "privacy", "features", "capabilities", "session", "limits", "reason")
+        setOf("site", "endpoints", "privacy", "features", "capabilities", "session", "limits", "reason", "capturePerformance")
     private val siteRequired = setOf("id")
     private val endpointsRequired = setOf("events", "flags")
     private val endpointsOptional = setOf("replay", "assets")
@@ -126,6 +126,7 @@ internal object V1ConfigJson {
 
         return V1ParsedConfig(
             schemaVersion = boundary.schemaVersion,
+            capturePerformance = optionalObject(root, "capturePerformance")?.let(::parseCapturePerformance),
             revision = revision,
             issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
@@ -203,6 +204,7 @@ internal object V1ConfigJson {
     ): V1ParsedConfigBoundary {
         expectFields(root, configRequired, configOptional, "config")
         val schemaVersion = readConfigSchemaVersion(root)
+        optionalObject(root, "capturePerformance")?.let(::parseCapturePerformance)
         val revision = requiredString(root, "revision", 1, 128, "config")
         val issuedAt = requiredString(root, "issuedAt", 1, Int.MAX_VALUE, "config")
         val issuedAtInstant = parseRfc3339(issuedAt, "config.issuedAt")
@@ -378,6 +380,13 @@ internal object V1ConfigJson {
             idleTimeoutSeconds = requiredInt(json, "idleTimeoutSeconds", 60, 36_000, "config.session"),
             maximumDurationSeconds = requiredInt(json, "maximumDurationSeconds", 86_400, 86_400, "config.session"),
         )
+    }
+
+    private fun parseCapturePerformance(json: JSONObject): V1CapturePerformance {
+        val path = "config.capturePerformance"
+        expectFields(json, setOf("memory", "long_tasks", "sample_interval_ms"), emptySet(), path)
+        return V1CapturePerformance(requiredBoolean(json, "memory", path),
+            requiredBoolean(json, "long_tasks", path), requiredInt(json, "sample_interval_ms", 5_000, Int.MAX_VALUE, path))
     }
 
     private fun parseLimits(json: JSONObject): V1ConfigLimits {
