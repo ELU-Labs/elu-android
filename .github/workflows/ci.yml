@@ -25,7 +25,7 @@ jobs:
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication
           :elu-analytics:generateMetadataFileForMavenPublication
-          :elu-analytics:releaseSourcesJar
+          :elu-analytics:sourceReleaseJar
           :elu-analytics:javaDocReleaseJar
           :elu-analytics:cyclonedxDirectBom
           :sample:assembleDebug
@@ -52,7 +52,8 @@ jobs:
           python3 scripts/zero-brand-gate.py --mode report --skip-tree \
             --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar \
             --input publication=elu-analytics/build/publications/maven \
-            --input archives=elu-analytics/build/libs \
+            --input sources=elu-analytics/build/intermediates/source_jar/release/release-sources.jar \
+            --input javadoc=elu-analytics/build/intermediates/java_doc_jar/release/release-javadoc.jar \
             --input dependencies=build/reports/release-runtime-classpath.txt \
             --input sbom=elu-analytics/build/reports/sbom/elu-analytics-release-sbom.json \
             | tee build/reports/zero-brand-artifacts.txt

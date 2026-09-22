@@ -60,7 +60,7 @@ jobs:
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication
           :elu-analytics:generateMetadataFileForMavenPublication
-          :elu-analytics:releaseSourcesJar
+          :elu-analytics:sourceReleaseJar
           :elu-analytics:javaDocReleaseJar
           :elu-analytics:cyclonedxDirectBom
           :sample:assembleDebug
@@ -90,7 +90,8 @@ jobs:
           scanner_inputs=(
             --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar
             --input publication=elu-analytics/build/publications/maven
-            --input archives=elu-analytics/build/libs
+            --input sources=elu-analytics/build/intermediates/source_jar/release/release-sources.jar
+            --input javadoc=elu-analytics/build/intermediates/java_doc_jar/release/release-javadoc.jar
             --input dependencies=build/reports/release-runtime-classpath.txt
           )
           sbom_index=0
