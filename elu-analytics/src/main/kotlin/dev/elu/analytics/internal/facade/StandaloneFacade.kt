@@ -136,6 +136,7 @@ internal class StandaloneFacade(
     private val configurationGate: V2ConfigAuthorityGate? = null,
     private val onOpened: () -> Unit = {},
     private val onCloseRequested: () -> Unit = {},
+    private val onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
     private val startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
     private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
     private val networkConfigHost: String? = null,
@@ -349,12 +350,15 @@ internal class StandaloneFacade(
                 val opened = stack
                 var flagFailure: Throwable? = null
                 try { opened?.flags?.close() } catch (error: Throwable) { flagFailure = error }
-                val originalClose = opened?.runtime?.closeAndWait()
-                if (originalClose == null) {
-                    if (flagFailure == null) closeResult.complete(Unit) else closeResult.completeExceptionally(checkNotNull(flagFailure))
-                } else originalClose.whenComplete { _, error ->
-                    if (error == null && flagFailure == null) closeResult.complete(Unit)
-                    else closeResult.completeExceptionally(error ?: checkNotNull(flagFailure))
+                val originalClose = opened?.runtime?.closeAndWait() ?: SdkFuture.completedFuture(Unit)
+                val additionalClose = try { onCloseSettled() } catch (error: Throwable) {
+                    SdkFuture<Unit>().also { it.completeExceptionally(error) }
+                }
+                originalClose.whenComplete { _, runtimeError ->
+                    additionalClose.whenComplete { _, cleanupError ->
+                        val error = runtimeError ?: flagFailure ?: cleanupError
+                        if (error == null) closeResult.complete(Unit) else closeResult.completeExceptionally(error)
+                    }
                 }
             }
         } catch (error: RejectedExecutionException) { closeResult.completeExceptionally(error) }

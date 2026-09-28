@@ -622,10 +622,48 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     if "facts.apiLevel < 29" not in life or "Build.VERSION.SDK_INT < 29" not in life:
         errors.append("native selection must refuse API levels below 29")
     for callback in ["onActivityPrePaused", "onActivityPreStopped", "onActivityPreDestroyed", "onActivityPaused"]:
-        if not re.search(r"override\s+fun\s+" + callback + r"\(activity:\s*Activity\)\s*=\s*nativeObserved\.withdrawing\(activity\)", initial):
+        if not re.search(r"override\s+fun\s+" + callback + r"\(activity:\s*Activity\)\s*=\s*withdrawing\(activity\)", initial):
             errors.append(f"native lifecycle withdrawal must be synchronous at {callback}")
+    if not re.search(r"private\s+fun\s+withdrawing\(activity:\s*Activity\)\s*\{\s*performanceObserved\.withdrawing\(activity\)\s*nativeObserved\.withdrawing\(activity\)\s*\}", initial):
+        errors.append("native lifecycle withdrawal must synchronously retire replay and performance facts")
     if auth.count("stopNativeReplayAccounting") != 1:
         errors.append("native authority must retain its single original accounting settlement call")
+
+
+def verify_frame_observer_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    """Keep optional scalar frame observation within original public Window ownership."""
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    options = load_text(root, base / "EluFrameMetricsOptions.kt")
+    access = load_text(root, base / "internal/performance/AndroidFrameMetricsAccess.kt")
+    monitor = load_text(root, base / "internal/performance/AndroidPerformanceMonitor.kt")
+    owner = load_text(root, base / "internal/performance/NativeFrameMetricsOwner.kt")
+    aggregate = load_text(root, base / "internal/performance/NativeFrameMetrics.kt")
+    facade = load_text(root, base / "internal/facade/StandaloneFacade.kt")
+    if "val enabled: Boolean = false" not in options or "val processAgeAtFirstObservedFrame: Boolean = false" not in options:
+        errors.append("frame observation must require explicit local options")
+    if ("options.frameMetrics && Build.VERSION.SDK_INT >= 26" not in monitor or
+            "if (Build.VERSION.SDK_INT >= 26 && frames != null)" not in monitor or
+            "metrics.getMetric(FrameMetrics.INTENDED_VSYNC_TIMESTAMP)" not in access or
+            "if (Build.VERSION.SDK_INT >= 31) metrics.getMetric(FrameMetrics.DEADLINE) else null" not in access):
+        errors.append("frame observation requires supported timestamps and versioned metric availability")
+    fields = set(re.findall(r"metrics\.getMetric\(FrameMetrics\.([A-Z_]+)\)", access))
+    if (fields != {"TOTAL_DURATION", "INTENDED_VSYNC_TIMESTAMP", "FIRST_DRAW_FRAME", "DEADLINE"} or
+            re.search(r"\b(?:PixelCopy|Bitmap|ViewTreeObserver|Window\.Callback|setOnTouchListener)\b|\.(?:text|contentDescription|rootView|decorView)\b", access) or
+            access.count("originalWindow.addOnFrameMetricsAvailableListener(listener, main)") != 1 or
+            access.count("originalWindow.removeOnFrameMetricsAvailableListener(listener)") != 1):
+        errors.append("frame observation must retain numeric fields and one original public listener")
+    for required in ["lifecycle.isCurrent(original.selection) && context() == original.context",
+                     "if (!current(acquired)) aggregate.clear()", "original.watcher?.close()",
+                     "else if (lease == null) closeResult.complete(Unit)"]:
+        if required not in owner:
+            errors.append("frame observation must retain original context and physical close settlement")
+    if ("frameStartedAtNanos < registeredAtNanos" not in aggregate or
+            "durationNanos > observedAtNanos - frameStartedAtNanos" not in aggregate or
+            "count >= MAXIMUM_FRAMES" not in aggregate or
+            "if (includeProcessAge && !processAgeObserved)" not in aggregate):
+        errors.append("frame observation must reject stale timestamps and bound aggregate admission")
+    if "onCloseSettled()" not in facade or "frameClose.whenComplete" not in monitor or "worker.awaitTermination" not in monitor:
+        errors.append("frame observation close must join original listener and worker settlement")
 
 
 def verify_network_observer_boundary(root: pathlib.Path, errors: list[str]) -> None:
@@ -684,6 +722,7 @@ def verify(root: pathlib.Path) -> list[str]:
     verify_lifecycle_bootstrap(root, errors)
     verify_prepared_replay_boundary(root, errors)
     verify_native_authority_boundary(root, errors)
+    verify_frame_observer_boundary(root, errors)
     verify_network_observer_boundary(root, errors)
     return errors
 

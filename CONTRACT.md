@@ -155,10 +155,33 @@ Unknown memory measurements are omitted. There is at most one outstanding
 main-thread probe. Identity, consent, configuration and lifecycle changes clear
 old aggregates; samples do not prolong the session idle timer.
 
+`EluFrameMetricsOptions` separately enables public Window frame timing on API 26+
+under the same remote `capturePerformance.long_tasks` permission. The original
+sole resumed Activity, Window, registration timestamp and authorized session
+remain bound through aggregate emission. Frame reports predating registration,
+unavailable/impossible timings and withdrawn contexts are discarded. There is
+one listener, no per-frame worker queue, and at most 1,000,000 accepted reports
+per sample interval; each retained duration is capped at 60 seconds. Listener
+removal and performance-worker settlement join SDK close completion; an
+unproven cleanup fails that completion rather than claiming disposal.
+
+Count and total/maximum duration include first-draw frames; slow-frame and
+deadline-miss counts exclude them. The slow threshold is fixed at 16.666667 ms,
+not display-specific jank. API 31+ exposes actual frame deadlines; earlier
+versions omit that metric. API 24–25 lacks the needed original frame timestamp,
+so this SDK does not collect frames below API 26. Software-rendered Windows,
+separate SurfaceView buffers, multiple resumed Activities and other processes
+are not covered. These scalar metrics do not enable Compose replay.
+
+Optional process age at the first eligible observed frame is one attempt per
+monitor/process lifetime and can be discarded on withdrawal. It is not an app
+startup/TTID metric; actual startup diagnostics remain unsupported in this slice.
+Both frame timing and this additional process-age field default off.
+
 `$performance_sample` is an analytics event linked to the current anonymous or
 identified user and session, with the normal applicable event context. The
-monitor adds process-memory and sampled delay metrics, not UI text or stack
-traces. These are native diagnostics, not Web Vitals, a complete frame/jank
+monitor adds process-memory, sampled delay and optional frame metrics, not UI
+text or stack traces. These are native diagnostics, not Web Vitals, complete frame/jank
 measurement, or an ANR/crash detector. Applications must account for linked
 performance diagnostics and readable replay text in their privacy disclosures.
 Resource overhead and exact distribution behavior require the final Lab gate.

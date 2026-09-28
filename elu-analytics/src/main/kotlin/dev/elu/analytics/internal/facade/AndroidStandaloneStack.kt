@@ -47,6 +47,10 @@ internal object AndroidStandaloneStack {
         val source = V2ConfigSource(configHost, siteKey, debuggable = debuggable)
         val runtimeRef = AtomicReference<StandaloneRuntime?>()
         val performanceRef = AtomicReference<dev.elu.analytics.internal.performance.AndroidPerformanceMonitor?>()
+        val performanceClose = AtomicReference(dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(Unit))
+        fun closePerformance() {
+            performanceRef.getAndSet(null)?.let { performanceClose.set(it.closeAndWait()) }
+        }
         val closing = AtomicBoolean(false)
         val notifications = Executors.newSingleThreadExecutor { task ->
             Thread(task, "elu-config-application").apply { isDaemon = true }
@@ -125,15 +129,16 @@ internal object AndroidStandaloneStack {
             onOpened = {
                 if (performanceOptions.enabled && !closing.get()) {
                     val monitor = dev.elu.analytics.internal.performance.AndroidPerformanceMonitor(
-                        performanceOptions, mainThread, facade::performanceContext, facade::capturePerformance)
+                        performanceOptions, mainThread, facade::performanceContext, facade::capturePerformance,
+                        AndroidProcessLifecycle.performanceObserved)
                     performanceRef.set(monitor)
-                    if (closing.get()) performanceRef.getAndSet(null)?.close()
+                    if (closing.get()) closePerformance()
                 }
                 lifecycle.ready()
             },
             onCloseRequested = {
                 closing.set(true)
-                performanceRef.getAndSet(null)?.close()
+                closePerformance()
                 runtimeRef.get()?.withdrawNativeReplay(restrictive = true)
                 driver.close()
                 gate.close()
@@ -141,6 +146,7 @@ internal object AndroidStandaloneStack {
                 flagTransport.close()
                 notifications.shutdownNow()
             },
+            onCloseSettled = { performanceClose.get() },
         )
         // The manifest initializer normally installs before the first Activity. If customers
         // remove it, installing here can observe future starts/resumes but cannot invent past ones.

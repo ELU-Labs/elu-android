@@ -32,6 +32,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -704,6 +705,20 @@ class StandaloneFacadeTest {
         assertEquals(listOf("event:other activity", "event:\$network_request"), h.queued())
     }
 
+    @Test fun `close waits for original platform listener cleanup and propagates failure`() {
+        for (failed in listOf(false, true)) {
+            val cleanup = SdkFuture<Unit>()
+            val h = harness(onCloseSettled = { cleanup })
+            h.settle()
+            val closed = h.facade.closeAndWait()
+            assertFalse(closed.isDone)
+            if (failed) cleanup.completeExceptionally(IllegalStateException("listener removal failed"))
+            else cleanup.complete(Unit)
+            if (failed) assertThrows(java.util.concurrent.ExecutionException::class.java) { closed.get(5, TimeUnit.SECONDS) }
+            else closed.get(5, TimeUnit.SECONDS)
+        }
+    }
+
     // ---- harness -------------------------------------------------------------
 
     private fun harness(
@@ -716,6 +731,7 @@ class StandaloneFacadeTest {
         backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
         facadeLane: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor(),
         networkConfigHost: String? = null,
+        onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -758,6 +774,7 @@ class StandaloneFacadeTest {
                 onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
                 lane = facadeLane,
                 networkConfigHost = networkConfigHost,
+                onCloseSettled = onCloseSettled,
             )
         facades += facade
         if (autoStart) facade.start()

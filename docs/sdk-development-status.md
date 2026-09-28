@@ -26,6 +26,15 @@ including idle-session preservation across a durable reopen.
 The ABI ledger and exact artifact/consumer qualification are still pending and
 remain separate from the historical results below.
 
+The current frame source slice adds explicitly enabled public Window frame
+metrics on API 26+, sharing the existing authorized, passive performance sample.
+Focused JVM aggregate, listener lifecycle, sampler and facade checks provide
+component evidence only. Frame metrics remain unavailable below API 26; the optional process
+age at the first observed frame is not startup/TTID. Fresh Android listener
+delivery, API 26/31+ availability, optimized consumer/ABI checks and emulator
+resource overhead remain untested; the previous AAR/device receipts below do not
+qualify this source. No distribution artifact has been rebuilt for this slice.
+
 The prior consent candidate retains the latest pre-setup choice, commits it before
 lifecycle startup, and prevents a later opt-in from admitting activity submitted
 during an earlier denial. Its local host verification passed 818 JVM tests,

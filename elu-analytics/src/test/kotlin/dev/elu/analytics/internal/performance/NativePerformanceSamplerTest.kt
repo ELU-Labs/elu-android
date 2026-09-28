@@ -1,6 +1,7 @@
 package dev.elu.analytics.internal.performance
 
 import dev.elu.analytics.EluPerformanceOptions
+import dev.elu.analytics.EluFrameMetricsOptions
 import dev.elu.analytics.internal.config.V1CapturePerformance
 import org.junit.Assert.*
 import org.junit.Test
@@ -12,10 +13,13 @@ class NativePerformanceSamplerTest {
             V1CapturePerformance(true, true, 5_000))
         var memory: Long? = 42_000L
         var onMemory: (() -> Unit)? = null
+        var frames: Map<String, Any> = emptyMap()
+        var frameReads = 0
         val main = ArrayList<Runnable>()
         val samples = ArrayList<Pair<NativePerformanceContext, Map<String, Any>>>()
         val sampler = NativePerformanceSampler(options, { current }, { nanos }, { main.add(it); true },
-            { main.remove(it) }, { onMemory?.invoke(); memory }, { c, p -> samples.add(c to p) })
+            { main.remove(it) }, { onMemory?.invoke(); memory }, { c, p -> samples.add(c to p) },
+            { frameReads++; frames.also { frames = emptyMap() } }, { frames = emptyMap() })
         fun advance(millis: Long) { nanos += millis * 1_000_000 }
         fun respond() { main.removeAt(0).run() }
         fun tick() = sampler.tick()
@@ -96,5 +100,31 @@ class NativePerformanceSamplerTest {
         val rig = Rig(); rig.tick(); rig.advance(2_000); rig.respond(); rig.nanos = 0; rig.tick()
         rig.advance(5_000); rig.tick()
         assertEquals(0L, rig.samples.single().second["\$main_thread_stall_count"])
+    }
+
+    @Test fun `frames join the same cadence without empty events or disabled reads`() {
+        val rig = Rig(EluPerformanceOptions(EluFrameMetricsOptions(enabled = true), enabled = true,
+            memory = false, mainThreadStalls = false, sampleIntervalMillis = 5_000))
+        rig.tick(); rig.advance(5_000); rig.tick()
+        assertTrue(rig.samples.isEmpty()); assertTrue(rig.main.isEmpty())
+        rig.frames = mapOf("\$frame_count" to 7L)
+        rig.advance(5_000); rig.tick()
+        assertEquals(7L, rig.samples.single().second["\$frame_count"])
+        assertEquals(5_000L, rig.samples.single().second["\$performance_sample_interval_ms"])
+        rig.current = rig.current!!.copy(policy = V1CapturePerformance(false, false, 5_000))
+        rig.tick(); val reads = rig.frameReads
+        rig.advance(5_000); rig.tick(); assertEquals(reads, rig.frameReads)
+        val disabled = Rig(); disabled.tick(); disabled.advance(5_000); disabled.tick()
+        assertEquals(0, disabled.frameReads)
+    }
+
+    @Test fun `frame source reset and close abandon unsent aggregates`() {
+        val rig = Rig(EluPerformanceOptions(EluFrameMetricsOptions(enabled = true), enabled = true,
+            memory = false, mainThreadStalls = false, sampleIntervalMillis = 5_000))
+        rig.tick(); rig.frames = mapOf("\$frame_count" to 7L)
+        rig.current = rig.current!!.copy(lifecycleEpoch = Any()); rig.tick()
+        rig.advance(5_000); rig.tick(); assertTrue(rig.samples.isEmpty())
+        rig.frames = mapOf("\$frame_count" to 9L); rig.sampler.close()
+        assertTrue(rig.frames.isEmpty())
     }
 }

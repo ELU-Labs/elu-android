@@ -26,6 +26,7 @@ internal class EluLifecycleInitializer : ContentProvider() {
 internal object AndroidProcessLifecycle {
     val observed = ProcessActivityLifecycle()
     val nativeObserved = dev.elu.analytics.internal.replay.NativeReplayLifecycle()
+    val performanceObserved = dev.elu.analytics.internal.performance.NativePerformanceActivityLifecycle()
     private var installed = false
 
     @Synchronized fun install(application: Application) {
@@ -35,24 +36,30 @@ internal object AndroidProcessLifecycle {
                 observed.activityStarted(activity, ActivityLifecycleEmitter.screenNameOf(activity))
             override fun onActivityResumed(activity: Activity) {
                 // A resume is also direct proof of a started Activity if initialization was late.
+                performanceObserved.resumed(activity)
                 nativeObserved.resumed(activity)
                 observed.activityResumed(activity, ActivityLifecycleEmitter.screenNameOf(activity))
             }
             override fun onActivityStopped(activity: Activity) {
-                nativeObserved.withdrawing(activity)
+                withdrawing(activity)
                 observed.activityStopped(activity, activity.isChangingConfigurations)
             }
             override fun onActivityDestroyed(activity: Activity) {
-                nativeObserved.withdrawing(activity)
+                withdrawing(activity)
                 observed.activityStopped(activity, false)
             }
-            override fun onActivityPrePaused(activity: Activity) = nativeObserved.withdrawing(activity)
-            override fun onActivityPreStopped(activity: Activity) = nativeObserved.withdrawing(activity)
-            override fun onActivityPreDestroyed(activity: Activity) = nativeObserved.withdrawing(activity)
+            override fun onActivityPrePaused(activity: Activity) = withdrawing(activity)
+            override fun onActivityPreStopped(activity: Activity) = withdrawing(activity)
+            override fun onActivityPreDestroyed(activity: Activity) = withdrawing(activity)
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-            override fun onActivityPaused(activity: Activity) = nativeObserved.withdrawing(activity)
+            override fun onActivityPaused(activity: Activity) = withdrawing(activity)
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
         })
         installed = true
+    }
+
+    private fun withdrawing(activity: Activity) {
+        performanceObserved.withdrawing(activity)
+        nativeObserved.withdrawing(activity)
     }
 }

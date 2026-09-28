@@ -23,6 +23,8 @@ internal class NativePerformanceSampler(
     private val cancelMain: (Runnable) -> Unit,
     private val processPssBytes: () -> Long?,
     private val emit: (NativePerformanceContext, Map<String, Any>) -> Unit,
+    private val frameMetrics: (NativePerformanceContext) -> Map<String, Any> = { emptyMap() },
+    private val clearFrameMetrics: () -> Unit = {},
 ) : AutoCloseable {
     private val lock = Any()
     private var closed = false
@@ -52,7 +54,8 @@ internal class NativePerformanceSampler(
             val active = current ?: return
             val memory = options.memory && active.policy.memory
             val stalls = options.mainThreadStalls && active.policy.longTasks
-            if (!memory && !stalls) return
+            val frames = options.frameMetrics && active.policy.longTasks
+            if (!memory && !stalls && !frames) return
             val interval = maxOf(options.sampleIntervalMillis, active.policy.sampleIntervalMillis.toLong())
             if (now - windowStart >= interval * NANOS_PER_MILLI) {
                 val values = linkedMapOf<String, Any>(
@@ -95,16 +98,19 @@ internal class NativePerformanceSampler(
             }
         }
         sample?.let { (original, values) ->
+            if (options.frameMetrics && original.policy.longTasks) values.putAll(frameMetrics(original))
             if (options.memory && original.policy.memory) {
                 runCatching { processPssBytes() }.getOrNull()?.takeIf { it > 0 }?.let { values["\$memory_process_pss_bytes"] = it }
             }
-            val hasMetric = values.containsKey("\$main_thread_stall_count") || values.containsKey("\$memory_process_pss_bytes")
+            val hasMetric = values.containsKey("\$main_thread_stall_count") || values.containsKey("\$memory_process_pss_bytes") ||
+                values.containsKey("\$frame_count")
             if (hasMetric && context() == original) emit(original, values.toMap())
         }
     }
 
     private fun clearLocked() {
         pending?.let(cancelMain)
+        clearFrameMetrics()
         pending = null; current = null; count = 0; totalMillis = 0; maximumMillis = 0
         sampleIndex = 0
     }

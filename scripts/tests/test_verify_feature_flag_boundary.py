@@ -45,6 +45,49 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_frame_observer_rejects_default_on_and_unsupported_timestamp_floor(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        for relative, before, after in [
+            ("EluFrameMetricsOptions.kt", "val enabled: Boolean = false", "val enabled: Boolean = true"),
+            ("internal/performance/AndroidPerformanceMonitor.kt", "Build.VERSION.SDK_INT >= 26", "Build.VERSION.SDK_INT >= 24"),
+            ("internal/performance/AndroidFrameMetricsAccess.kt", "Build.VERSION.SDK_INT >= 31", "true"),
+        ]:
+            with self.subTest(relative=relative):
+                path = base / relative; original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("frame observation", self.run_guard().stderr)
+                path.write_text(original)
+
+    def test_frame_observer_rejects_content_read_and_lost_listener_removal(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/performance/AndroidFrameMetricsAccess.kt"
+        original = path.read_text()
+        for before, after in [
+            ("val originalWindow = originalActivity.window", "val originalWindow = originalActivity.window; originalWindow.decorView"),
+            ("originalWindow.removeOnFrameMetricsAvailableListener(listener)", "Unit"),
+            ("metrics.getMetric(FrameMetrics.TOTAL_DURATION)", "metrics.getMetric(FrameMetrics.DRAW_DURATION)"),
+        ]:
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("frame observation", self.run_guard().stderr)
+        path.write_text(original)
+
+    def test_frame_observer_rejects_context_or_stale_timestamp_bypass(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/performance"
+        for relative, before in [
+            ("NativeFrameMetricsOwner.kt", "lifecycle.isCurrent(original.selection) && context() == original.context"),
+            ("NativeFrameMetricsOwner.kt", "original.watcher?.close()"),
+            ("NativeFrameMetrics.kt", "frameStartedAtNanos < registeredAtNanos"),
+            ("NativeFrameMetrics.kt", "count >= MAXIMUM_FRAMES"),
+        ]:
+            with self.subTest(before=before):
+                path = base / relative; original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, "false"))
+                self.assertIn("frame observation", self.run_guard().stderr)
+                path.write_text(original)
+
     def test_network_observer_cannot_expand_content_or_repeat_the_request(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/network/NativeNetworkInterceptor.kt"
         original = path.read_text()
@@ -475,12 +518,22 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_native_pause_cannot_wait_for_queued_owner_work(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/EluLifecycleInitializer.kt"
         original = path.read_text()
-        old = "override fun onActivityPrePaused(activity: Activity) = nativeObserved.withdrawing(activity)"
+        old = "override fun onActivityPrePaused(activity: Activity) = withdrawing(activity)"
         self.assertIn(old, original)
-        path.write_text(original.replace(old, "override fun onActivityPrePaused(activity: Activity) = worker.execute { nativeObserved.withdrawing(activity) }"))
+        path.write_text(original.replace(old, "override fun onActivityPrePaused(activity: Activity) = worker.execute { withdrawing(activity) }"))
         result = self.run_guard()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("withdrawal must be synchronous", result.stderr)
+
+    def test_native_withdrawal_cannot_defer_either_observer(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/EluLifecycleInitializer.kt"
+        original = path.read_text()
+        for call in ["performanceObserved.withdrawing(activity)", "nativeObserved.withdrawing(activity)"]:
+            with self.subTest(call=call):
+                self.assertIn(call, original)
+                path.write_text(original.replace(call, "worker.execute { " + call + " }"))
+                self.assertIn("withdrawal must synchronously retire", self.run_guard().stderr)
+        path.write_text(original)
 
     def test_native_second_application_callback_source_is_rejected(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/EluLifecycleInitializer.kt"

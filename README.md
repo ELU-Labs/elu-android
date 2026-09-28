@@ -195,11 +195,48 @@ Samples do not extend the session's idle timer.
 `$memory_process_pss_bytes`, omitting unavailable measurements. A single outstanding
 main-thread probe records sampled delays of at least 250 ms; count, total and
 maximum delay are emitted with the configured threshold. These are sampled native
-main-thread delays, not browser Web Vitals, complete frame/jank metrics or an ANR
-crash detector. The monitor adds no stacks or UI text, but these analytics events
+main-thread delays, not browser Web Vitals or an ANR/crash detector.
+
+Optional frame timing needs a second explicit choice:
+
+```kotlin
+import dev.elu.analytics.EluFrameMetricsOptions
+
+val performance = EluPerformanceOptions(
+    frameMetrics = EluFrameMetricsOptions(enabled = true),
+    enabled = true
+)
+// Pass performance in EluOptions during the existing Application setup.
+```
+
+On API 26+, one listener observes the current resumed Activity's hardware-rendered
+Window through Android's public `FrameMetrics` API. It contributes numeric frame
+count, total/maximum duration, first-draw count and dropped-report count to the
+same `$performance_sample` interval. `$frame_slow_count` counts non-first-draw
+frames longer than the explicit 16.666667 ms threshold; this fixed threshold is
+not a display-specific jank classification. API 31+ also reports observed frame
+deadlines and missed-deadline count. Unavailable measurements are omitted.
+The server's `capturePerformance.long_tasks` setting also controls frame timing.
+
+Frame collection is unavailable on API 23–25: API 24–25 does not expose the
+timestamp needed to exclude reports from before the original permission and
+listener registration. Software-rendered Windows, other Activities when more
+than one is resumed, separate SurfaceView buffers and other processes are outside
+this coverage. These metrics do not provide complete app rendering coverage or
+make Compose UI content readable in replay. Background, consent, identity,
+configuration and session changes discard pending aggregates and listeners.
+
+Setting `processAgeAtFirstObservedFrame = true` in `EluFrameMetricsOptions` adds
+one optional `$process_age_at_first_observed_frame_ms` value. This is the process
+age at the first eligible observed frame, which can occur long after launch;
+it is not startup time or time to initial display. Unknown values are omitted,
+and an invalidated observation is not retried for a later identity.
+
+The monitor adds no stacks or UI text, but these analytics events
 are linked to the current anonymous or identified user, session and applicable
 event properties. Include linked performance diagnostics in your app's privacy
-disclosures. Resource overhead and customer artifact behavior still require release qualification.
+disclosures. Resource overhead, actual frame delivery and customer artifact
+behavior still require release qualification.
 
 ## Identity
 
