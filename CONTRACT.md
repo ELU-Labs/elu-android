@@ -77,6 +77,25 @@ opening or deleting their old data. Retired import checkpoints are refused,
 not rewritten as fresh state. This differs from the iOS owned-file recovery
 path; Android supports current owned SQLite reopen and schema upgrades.
 
+## Replay audience
+
+The optional top-level configuration-v2 `replayAudience` accepts only `"new-devices"`
+on an enabled document. Its absence leaves all-device eligibility unchanged;
+explicit null or other values are rejected. This restriction affects replay only.
+
+Fresh installations remember the first accepted session-bearing event in the same
+SQLite transaction as that event and its session. Manual captures, screens,
+exceptions and authorized automatic events count; setup, mutations and rejected
+captures do not. Failed or rolled-back transactions cannot consume eligibility.
+The first session identifier and start time remain installation-scoped across
+identity changes, reset, consent transitions and process restart. Replay never
+claims a session before analytics commits it, and cannot promote a later session.
+
+Existing owned databases without audience history upgrade with an unknown-history
+marker, which denies only new-device replay. Queued analytics and identity remain
+intact. The new additive database versions are rejected by older owned binaries;
+a store downgrade is unsupported. No preview/aggregate import is introduced.
+
 ## Native replay privacy
 
 Replay is an authorized native Views wireframe stream, not screenshots or

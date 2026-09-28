@@ -3,9 +3,16 @@
 This branch is an implementation checkpoint, not a released standalone SDK.
 The source candidate is 0.2.0; the published Maven version remains 0.1.0.
 
-A subsequent consent fix retains the latest pre-setup choice, commits it before
+The current source also implements configuration-v2 `replayAudience: "new-devices"`
+using first committed capture-session history that survives restart, identity,
+consent and reset. Existing owned stores without history are conservatively
+ineligible for that replay restriction. Its new source tests and additive SQLite
+upgrade require fresh artifact/device qualification; the artifact results below
+predate this change and must not qualify the current source.
+
+The prior consent candidate retains the latest pre-setup choice, commits it before
 lifecycle startup, and prevents a later opt-in from admitting activity submitted
-during an earlier denial. Fresh local host verification passes 818 JVM tests,
+during an earlier denial. Its local host verification passed 818 JVM tests,
 117 release-guard tests, release lint, immutable public ABI compatibility, the
 658-class candidate inventory and strict package scans. The resulting AAR is
 `6a9bbc79833107e3072d3bf288315b7b8a2646d99c690d565ea3c122c9736176`.
@@ -17,7 +24,7 @@ and the full unchanged APK passed after OS recovery and a new clean install.
 An independent Maven consumer builds debug and R8 release against this exact
 AAR. Exact-distribution Lab qualification, engine readback, customer-player
 rendering and resource overhead remain pending. Older results below are
-historical and do not substitute for these current artifact checks.
+historical and do not substitute for fresh checks on the current source.
 
 The owned runtime now includes durable event delivery, identity and groups,
 properties, feature flags, persistent consent controls, explicit exception

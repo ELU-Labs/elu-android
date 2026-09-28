@@ -801,6 +801,8 @@ internal class RuntimeQueueOwner private constructor(
             config.siteId != capture.configSiteId || config.features?.capture != true || config.features?.replay != true ||
             config.privacy?.capture?.enabled != true || config.privacy.replay.enabled != true ||
             !replaySessionIsCurrent(current.state.identity, checkNotNull(config.session), captureClock.wallNowEpochMillis())) return null
+        if (config.replayAudience == dev.elu.analytics.internal.config.V1ReplayAudience.NEW_DEVICES &&
+            !current.replayAudience.permits(current.state.identity.session)) return null
         return config
     }
 
@@ -1889,6 +1891,7 @@ internal class RuntimeQueueOwner private constructor(
             }
         if (existing != null) {
             loaded = existing
+            database().ensureReplayAudienceSchema()
             interruptNativeEpochOnOpen()
             return
         }
@@ -1903,6 +1906,7 @@ internal class RuntimeQueueOwner private constructor(
                 queuedCount = 0,
                 queuedBytes = 0,
                 headSequence = imported.first.stream.nextSequence,
+                replayAudience = database().initialReplayAudienceState(),
             )
         repeat(MAX_RECONCILIATION_ATTEMPTS) { attempt ->
             try {
@@ -2760,6 +2764,7 @@ internal class RuntimeQueueOwner private constructor(
                 queuedCount = countAfter.toInt(),
                 queuedBytes = bytesAfter,
                 headSequence = if (before.queuedCount == 0 && records.isNotEmpty()) records.first().sequence else before.headSequence,
+                replayAudience = if (request is AppendRequest.Events) before.replayAudience.observe(checkNotNull(committedState.identity.session)) else before.replayAudience,
             )
         return PreparedAppend(before, after, records, rejection = null)
     }
@@ -3037,7 +3042,7 @@ internal class RuntimeQueueOwner private constructor(
             corrupt("Stored queue count exceeds the allocated sequence range")
         }
         val head = Math.subtractExact(state.stream.nextSequence, core.queueCount)
-        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head)
+        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience)
         if (validatePayloads) {
             validateAllRecords(transaction, loaded)
             ReplayQueueStore.validate(transaction, ownerNamespaceHash)
@@ -3673,7 +3678,7 @@ internal class RuntimeQueueOwner private constructor(
         left.queuedCount == right.queuedCount &&
             left.queuedBytes == right.queuedBytes &&
             left.headSequence == right.headSequence &&
-            left.stateJson.contentEquals(right.stateJson)
+            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience
 
     private fun storedRecordsEqual(
         left: RuntimeStoredRecord,
@@ -3780,11 +3785,12 @@ internal class RuntimeQueueOwner private constructor(
         val queuedCount: Int,
         val queuedBytes: Long,
         val headSequence: Long,
+        val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
     ) {
         val publicSnapshot: RuntimeQueueSnapshot
             get() = RuntimeQueueSnapshot(state, queuedCount, queuedBytes, headSequence)
 
-        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes)
+        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience)
     }
 
     private data class PreparedAppend(

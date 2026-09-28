@@ -25,7 +25,7 @@ internal object V1ConfigJson {
 
     private val configRequired = setOf("schemaVersion", "revision", "issuedAt", "expiresAt", "status")
     private val configOptional =
-        setOf("site", "endpoints", "privacy", "features", "capabilities", "session", "limits", "reason", "capturePerformance")
+        setOf("site", "endpoints", "privacy", "features", "capabilities", "session", "limits", "reason", "capturePerformance", "replayAudience")
     private val siteRequired = setOf("id")
     private val endpointsRequired = setOf("events", "flags")
     private val endpointsOptional = setOf("replay", "assets")
@@ -127,6 +127,7 @@ internal object V1ConfigJson {
         return V1ParsedConfig(
             schemaVersion = boundary.schemaVersion,
             capturePerformance = optionalObject(root, "capturePerformance")?.let(::parseCapturePerformance),
+            replayAudience = if (root.has("replayAudience")) V1ReplayAudience.NEW_DEVICES else null,
             revision = revision,
             issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
@@ -204,6 +205,11 @@ internal object V1ConfigJson {
     ): V1ParsedConfigBoundary {
         expectFields(root, configRequired, configOptional, "config")
         val schemaVersion = readConfigSchemaVersion(root)
+        if (root.has("replayAudience") &&
+            (schemaVersion != V2_CONFIG_SCHEMA_VERSION || root.opt("status") != "enabled" ||
+                root.opt("replayAudience") != "new-devices")) {
+            malformed("config.replayAudience requires enabled configuration v2 and new-devices")
+        }
         optionalObject(root, "capturePerformance")?.let(::parseCapturePerformance)
         val revision = requiredString(root, "revision", 1, 128, "config")
         val issuedAt = requiredString(root, "issuedAt", 1, Int.MAX_VALUE, "config")

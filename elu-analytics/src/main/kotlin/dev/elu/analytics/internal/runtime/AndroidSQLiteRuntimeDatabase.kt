@@ -32,6 +32,41 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val ownerThread: Thread,
     private val faults: AndroidRuntimeDatabaseFaults,
 ) : RuntimeQueueDatabase {
+    override fun initialReplayAudienceState(): RuntimeReplayAudienceState {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        runtimeBaseDatabaseVersion(version)
+        return if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unseen else RuntimeReplayAudienceState.Unknown
+    }
+
+    override fun ensureReplayAudienceSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) return
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            // The owner has already validated every existing core/queue/replay payload.
+            check(SQLiteTransaction(sqlite).readCore() != null) { "Audience upgrade requires an owned core" }
+            sqlite.execSQL(CREATE_AUDIENCE)
+            writeAudience(sqlite, RuntimeReplayAudienceState.Unknown, insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${version + RUNTIME_AUDIENCE_SCHEMA_OFFSET}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain audience schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain audience schema durability", error) }
+        validateSchemaObjects(sqlite, version + RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+    }
+
     override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) {
         require(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
         ensureAdditiveSchema(false, initialAuthority.key, initialAuthority.storageSchemaVersion, initialAuthority.payload)
@@ -46,10 +81,10 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         assertOwnerThread()
         val initial = NativeReplayAccounting.read(initialAuthority)
         val version = pragmaLong(sqlite, "PRAGMA user_version")
-        if (version !in 1L..6L) throw UnsupportedRuntimeStorageSchemaException(version)
+        val baseVersion = runtimeBaseDatabaseVersion(version)
         validateSchemaObjects(sqlite, version)
-        check(version in 3L..6L) { "Native accounting requires explicit replay storage" }
-        if (version == 5L || version == 6L) {
+        check(baseVersion in 3L..6L) { "Native accounting requires explicit replay storage" }
+        if (baseVersion == 5L || baseVersion == 6L) {
             transaction { tx ->
                 val current = NativeReplayAccounting.read(tx.readReplayRow(NativeReplayAccounting.KEY)
                     ?: corrupt("Missing native replay accounting"))
@@ -59,7 +94,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             }
             return
         }
-        val target = if (version == 3L) 5 else 6
+        val target = (if (baseVersion == 3L) 5 else 6) + if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
         sqlite.beginTransaction()
         var markedSuccessful = false
         try {
@@ -94,11 +129,12 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         require(rowVersion == 1L && payload.isNotEmpty())
         require(payload.size <= if (replay) REPLAY_ROW_BYTES else MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES)
         val version = pragmaLong(sqlite, "PRAGMA user_version")
-        if (version !in 1L..6L) throw UnsupportedRuntimeStorageSchemaException(version)
+        val baseVersion = runtimeBaseDatabaseVersion(version)
         validateSchemaObjects(sqlite, version)
-        val alreadyPresent = if (replay) version in setOf(3L, 4L, 5L, 6L) else version in setOf(2L, 4L, 6L)
+        val alreadyPresent = if (replay) baseVersion in setOf(3L, 4L, 5L, 6L) else baseVersion in setOf(2L, 4L, 6L)
         if (alreadyPresent) return
-        val target = if (replay) { if (version == 1L) 3 else 4 } else { when (version) { 1L -> 2; 5L -> 6; else -> 4 } }
+        val target = (if (replay) { if (baseVersion == 1L) 3 else 4 } else { when (baseVersion) { 1L -> 2; 5L -> 6; else -> 4 } }) +
+            if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
         sqlite.beginTransaction()
         var markedSuccessful = false
         try {
@@ -212,12 +248,19 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                 null,
                 "2",
             ).use { cursor ->
-                if (!cursor.moveToFirst()) return null
+                if (!cursor.moveToFirst()) {
+                    if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_AUDIENCE_SCHEMA_OFFSET && readAudience(sqlite) != null)
+                        corrupt("Audience history exists without an owned core")
+                    return null
+                }
                 val core =
                     RuntimeStoredCore(
                         stateJson = cursor.requiredBlob(0, "core_state.state_json"),
                         queueCount = cursor.getLong(1),
                         queueBytes = cursor.getLong(2),
+                        replayAudience = if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+                            readAudience(sqlite) ?: corrupt("Missing installation audience history")
+                            else RuntimeReplayAudienceState.Unknown,
                     )
                 if (cursor.moveToNext()) corrupt("Runtime database contains duplicate core rows")
                 return core
@@ -226,6 +269,12 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
 
         override fun insertCore(core: RuntimeStoredCore) {
             requireTransaction()
+            val version = pragmaLong(sqlite, "PRAGMA user_version")
+            if (version <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+                check(core.replayAudience === RuntimeReplayAudienceState.Unknown)
+                sqlite.execSQL(CREATE_AUDIENCE)
+                executePragma(sqlite, "PRAGMA user_version = ${version + RUNTIME_AUDIENCE_SCHEMA_OFFSET}")
+            }
             val values =
                 ContentValues().apply {
                     put("singleton_id", SINGLETON_ID)
@@ -234,6 +283,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     put("queue_bytes", core.queueBytes)
                 }
             sqlite.insertOrThrow(CORE_TABLE, null, values)
+            writeAudience(sqlite, core.replayAudience, insert = true)
             mutated = true
         }
 
@@ -253,6 +303,15 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     arrayOf(SINGLETON_ID.toString()),
                 )
             if (changed != 1) corrupt("Runtime core update did not affect exactly one row")
+            if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+                val previous = readAudience(sqlite) ?: corrupt("Missing installation audience history")
+                if (previous != core.replayAudience) {
+                    check(previous === RuntimeReplayAudienceState.Unseen && core.replayAudience is RuntimeReplayAudienceState.FirstSession) {
+                        "Installation audience history cannot be reset or replaced"
+                    }
+                    writeAudience(sqlite, core.replayAudience, insert = false)
+                }
+            } else check(core.replayAudience === RuntimeReplayAudienceState.Unknown)
             mutated = true
         }
 
@@ -326,12 +385,12 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
 
         override fun replaySchemaPresent(): Boolean {
             requireTransaction()
-            return pragmaLong(sqlite, "PRAGMA user_version") in setOf(3L, 4L, 5L, 6L)
+            return runtimeBaseDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) in setOf(3L, 4L, 5L, 6L)
         }
 
         override fun nativeReplaySchemaPresent(): Boolean {
             requireTransaction()
-            return pragmaLong(sqlite, "PRAGMA user_version") in setOf(5L, 6L)
+            return runtimeBaseDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) in setOf(5L, 6L)
         }
 
         override fun readReplayRow(key: String): RuntimeReplayStoredRow? {
@@ -480,7 +539,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         }
 
         private fun requireFlagTable() {
-            if (pragmaLong(sqlite, "PRAGMA user_version") !in setOf(2L, 4L, 6L)) {
+            if (runtimeBaseDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) !in setOf(2L, 4L, 6L)) {
                 throw IllegalStateException("Flag storage schema has not been initialized")
             }
         }
@@ -511,6 +570,56 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     }
 
     internal companion object {
+        private const val AUDIENCE_TABLE = "replay_audience"
+        private val CREATE_AUDIENCE = """
+            CREATE TABLE replay_audience (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                status TEXT NOT NULL CHECK (status IN ('unknown', 'unseen', 'first-session')),
+                session_id TEXT,
+                session_started_at TEXT,
+                CHECK ((status = 'first-session' AND session_id IS NOT NULL AND session_started_at IS NOT NULL AND length(session_id) BETWEEN 1 AND 256 AND length(session_started_at) BETWEEN 1 AND 128)
+                    OR (status IN ('unknown', 'unseen') AND session_id IS NULL AND session_started_at IS NULL))
+            )
+        """.trimIndent()
+
+        private fun readAudience(sqlite: SQLiteDatabase): RuntimeReplayAudienceState? =
+            sqlite.query(AUDIENCE_TABLE, arrayOf("status", "session_id", "session_started_at"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val status = cursor.getString(0)
+                val id = if (cursor.isNull(1)) null else cursor.getString(1)
+                val start = if (cursor.isNull(2)) null else cursor.getString(2)
+                val result = when (status) {
+                    "unknown", "unseen" -> {
+                        if (id != null || start != null) corrupt("Non-session audience contains a session")
+                        if (status == "unknown") RuntimeReplayAudienceState.Unknown else RuntimeReplayAudienceState.Unseen
+                    }
+                    "first-session" -> {
+                        if (id == null || start == null || start.length > 128) corrupt("Incomplete audience session")
+                        try { RuntimeReplayAudienceState.FirstSession(id, start) }
+                        catch (error: IllegalArgumentException) { throw RuntimeQueueCorruptionException("Invalid audience session", error) }
+                    }
+                    else -> corrupt("Unsupported audience status")
+                }
+                if (cursor.moveToNext()) corrupt("Duplicate audience history")
+                result
+            }
+
+        private fun writeAudience(sqlite: SQLiteDatabase, state: RuntimeReplayAudienceState, insert: Boolean) {
+            val values = ContentValues().apply {
+                put("singleton_id", SINGLETON_ID)
+                put("status", when (state) {
+                    RuntimeReplayAudienceState.Unknown -> "unknown"
+                    RuntimeReplayAudienceState.Unseen -> "unseen"
+                    is RuntimeReplayAudienceState.FirstSession -> "first-session"
+                })
+                put("session_id", (state as? RuntimeReplayAudienceState.FirstSession)?.sessionId)
+                put("session_started_at", (state as? RuntimeReplayAudienceState.FirstSession)?.startedAt)
+            }
+            if (insert) sqlite.insertOrThrow(AUDIENCE_TABLE, null, values)
+            else if (sqlite.update(AUDIENCE_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Audience update did not affect exactly one row")
+        }
+
         private const val CORE_TABLE = "core_state"
         private const val QUEUE_TABLE = "queue_records"
         private const val REPLAY_TABLE = "replay_queue"
@@ -671,11 +780,12 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     try {
                         sqlite.execSQL(CREATE_CORE)
                         sqlite.execSQL(CREATE_QUEUE)
+                        sqlite.execSQL(CREATE_AUDIENCE)
                         executePragma(
                             sqlite,
-                            "PRAGMA user_version = $RUNTIME_STORAGE_SCHEMA_VERSION",
+                            "PRAGMA user_version = $RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE",
                         )
-                        if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_STORAGE_SCHEMA_VERSION.toLong()) {
+                        if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE.toLong()) {
                             corrupt("Runtime database could not persist its schema version")
                         }
                         sqlite.setTransactionSuccessful()
@@ -694,23 +804,25 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version !in 1L..6L ->
+                version !in 1L..12L ->
                     throw UnsupportedRuntimeStorageSchemaException(version)
             }
             validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
         }
 
         private fun validateSchemaObjects(sqlite: SQLiteDatabase, version: Long) {
-            if (version !in 1L..6L) throw UnsupportedRuntimeStorageSchemaException(version)
-            val flagsPresent = version in setOf(2L, 4L, 6L)
-            val replayPresent = version in setOf(3L, 4L, 5L, 6L)
+            val baseVersion = runtimeBaseDatabaseVersion(version)
+            val flagsPresent = baseVersion in setOf(2L, 4L, 6L)
+            val replayPresent = baseVersion in setOf(3L, 4L, 5L, 6L)
             val expected = mutableSetOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
+            if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) expected += "table:$AUDIENCE_TABLE"
             if (flagsPresent) expected += "table:$FLAG_CACHE_TABLE"
             if (replayPresent) expected += "table:$REPLAY_TABLE"
             val objects = applicationSchemaObjects(sqlite)
             if (objects != expected) corrupt("Runtime database schema object set is unsupported: ${objects.joinToString()}")
             validateTableSql(sqlite, CORE_TABLE, CREATE_CORE)
             validateTableSql(sqlite, QUEUE_TABLE, CREATE_QUEUE)
+            if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) validateTableSql(sqlite, AUDIENCE_TABLE, CREATE_AUDIENCE)
             if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
             if (replayPresent) validateTableSql(sqlite, REPLAY_TABLE, CREATE_REPLAY)
         }

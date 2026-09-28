@@ -51,6 +51,7 @@ internal data class RuntimeStoredCore(
     val stateJson: ByteArray,
     val queueCount: Long,
     val queueBytes: Long,
+    val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
 )
 
 internal data class RuntimeStoredRecord(
@@ -121,6 +122,12 @@ internal interface RuntimeQueueTransaction {
 }
 
 internal interface RuntimeQueueDatabase : Closeable {
+    /** Existing payloads must be validated before this conservative history upgrade. */
+    fun ensureReplayAudienceSchema()
+
+    /** Only used after a complete read establishes that no runtime core exists. */
+    fun initialReplayAudienceState(): RuntimeReplayAudienceState
+
     /** Explicit, internal-only lazy v1→v2 migration. Ordinary open never invokes this. */
     fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow)
 

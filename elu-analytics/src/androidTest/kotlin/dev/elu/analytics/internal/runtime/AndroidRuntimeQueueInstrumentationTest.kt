@@ -231,14 +231,14 @@ class AndroidRuntimeQueueInstrumentationTest {
         owners.remove(owner)
 
         SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(1, sqlite.version)
+            assertEquals(7, sqlite.version)
             sqlite.rawQuery(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
                 null,
             ).use { cursor ->
                 val tables = mutableListOf<String>()
                 while (cursor.moveToNext()) tables += cursor.getString(0)
-                assertEquals(listOf("core_state", "queue_records"), tables)
+                assertEquals(listOf("core_state", "queue_records", "replay_audience"), tables)
             }
         }
     }
@@ -261,7 +261,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         val beforeCore: ByteArray
         val beforeQueue: List<ByteArray>
         SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(1L, pragmaLong(sqlite, "PRAGMA user_version"))
+            assertEquals(7L, pragmaLong(sqlite, "PRAGMA user_version"))
             beforeCore = singleBlob(sqlite, "SELECT state_json FROM core_state WHERE singleton_id = 1")
             beforeQueue = orderedBlobs(sqlite, "SELECT internal_payload FROM queue_records ORDER BY sequence")
             assertEquals(1, JSONObject(String(beforeCore, Charsets.UTF_8)).getInt("schemaVersion"))
@@ -280,7 +280,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         owners.remove(migrated)
 
         SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(2L, pragmaLong(sqlite, "PRAGMA user_version"))
+            assertEquals(8L, pragmaLong(sqlite, "PRAGMA user_version"))
             assertArrayEquals(beforeCore, singleBlob(sqlite, "SELECT state_json FROM core_state WHERE singleton_id = 1"))
             val afterQueue = orderedBlobs(sqlite, "SELECT internal_payload FROM queue_records ORDER BY sequence")
             assertEquals(beforeQueue.size, afterQueue.size)
@@ -298,7 +298,7 @@ class AndroidRuntimeQueueInstrumentationTest {
     }
 
     @Test
-    fun ordinaryV2ReopenBytePreservesCurrentAndFutureFlagRows() {
+    fun ordinaryFlagEnabledReopenBytePreservesCurrentAndFutureFlagRows() {
         val file = databaseFile()
         val owner =
             open(
@@ -342,7 +342,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         owners.remove(reopened)
 
         SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(2L, pragmaLong(sqlite, "PRAGMA user_version"))
+            assertEquals(8L, pragmaLong(sqlite, "PRAGMA user_version"))
             assertArrayEquals(
                 current,
                 keyedFlagPayload(sqlite, "cache-body:preserved:0000", expectedSchema = 1L),
@@ -457,7 +457,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         SQLiteDatabase.openOrCreateDatabase(unsupportedFile, null).use { sqlite ->
             sqlite.execSQL("CREATE TABLE preserved_marker (value TEXT NOT NULL)")
             sqlite.execSQL("INSERT INTO preserved_marker(value) VALUES ('keep')")
-            executePragma(sqlite, "PRAGMA user_version = 7")
+            executePragma(sqlite, "PRAGMA user_version = 13")
         }
 
         assertFutureCause(UnsupportedRuntimeStorageSchemaException::class.java) {
@@ -468,7 +468,7 @@ class AndroidRuntimeQueueInstrumentationTest {
             ).await()
         }
         SQLiteDatabase.openDatabase(unsupportedFile.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(7L, pragmaLong(sqlite, "PRAGMA user_version"))
+            assertEquals(13L, pragmaLong(sqlite, "PRAGMA user_version"))
             sqlite.rawQuery("SELECT value FROM preserved_marker", null).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals("keep", cursor.getString(0))
@@ -492,6 +492,72 @@ class AndroidRuntimeQueueInstrumentationTest {
             assertEquals(1L, pragmaLong(sqlite, "PRAGMA user_version"))
             sqlite.rawQuery("PRAGMA table_info(core_state)", null).use { cursor ->
                 assertEquals(1, cursor.count)
+            }
+        }
+    }
+
+    @Test
+    fun existingOwnedSchemaFamiliesUpgradeUnknownAudienceWithoutChangingCoreOrQueue() {
+        for (version in 1..6) {
+            val file = databaseFile()
+            val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
+                trustedSiteKey = "elu_pk_test_capture")
+            appendEvents(original, event("historical-session"))
+            if (version in listOf(2, 4, 6)) original.ensureFeatureFlagRuntime().await()
+            if (version in 3..6) original.ensurePreparedReplayStorage().await()
+            if (version in 5..6) original.ensureNativeReplayAccounting().await()
+            original.closeAsync().await(); owners.remove(original)
+            val beforeCore: ByteArray
+            val beforeQueue: List<ByteArray>
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sqlite ->
+                // Reconstruct the exact original table family, retaining its canonical runtime rows.
+                sqlite.execSQL("DROP TABLE replay_audience")
+                executePragma(sqlite, "PRAGMA user_version = $version")
+                beforeCore = singleBlob(sqlite, "SELECT state_json FROM core_state WHERE singleton_id = 1")
+                beforeQueue = orderedBlobs(sqlite, "SELECT internal_payload FROM queue_records ORDER BY sequence")
+            }
+            val upgraded = open(file, CountingIdentifiers(), RecordingFaults(), { error("Owned SQLite must remain authoritative") },
+                trustedSiteKey = "elu_pk_test_capture")
+            assertEquals(1, upgraded.snapshot().await().queuedCount)
+            upgraded.closeAsync().await(); owners.remove(upgraded)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+                assertEquals((version + 6).toLong(), pragmaLong(sqlite, "PRAGMA user_version"))
+                assertArrayEquals(beforeCore, singleBlob(sqlite, "SELECT state_json FROM core_state WHERE singleton_id = 1"))
+                val afterQueue = orderedBlobs(sqlite, "SELECT internal_payload FROM queue_records ORDER BY sequence")
+                assertEquals(beforeQueue.size, afterQueue.size)
+                beforeQueue.zip(afterQueue).forEach { (before, after) -> assertArrayEquals(before, after) }
+                sqlite.rawQuery("SELECT status, session_id, session_started_at FROM replay_audience", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst()); assertEquals("unknown", cursor.getString(0))
+                    assertTrue(cursor.isNull(1)); assertTrue(cursor.isNull(2)); assertFalse(cursor.moveToNext())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun firstSessionMarkerRollsBackWithEventAndSurvivesAmbiguousCommitAndReset() {
+        val file = databaseFile()
+        val faults = RecordingFaults()
+        val owner = open(file, CountingIdentifiers(), faults, ::freshState)
+        faults.failBeforeCommit.set(true)
+        assertFutureCause(IOException::class.java) { appendEvents(owner, event("failed-first-session")) }
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            sqlite.rawQuery("SELECT status FROM replay_audience", null).use { cursor ->
+                assertTrue(cursor.moveToFirst()); assertEquals("unseen", cursor.getString(0))
+            }
+        }
+        faults.failAfterCommit.set(true)
+        val accepted = appendEvents(owner, event("first-session")) as RuntimeAppendResult.Accepted
+        val session = accepted.snapshot.state.identity.session!!
+        owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(NOW)).await()
+        owner.closeAsync().await(); owners.remove(owner)
+        val reopened = open(file, CountingIdentifiers(), faults, { error("Must reopen existing SQLite") })
+        assertEquals(1, reopened.snapshot().await().queuedCount)
+        reopened.closeAsync().await(); owners.remove(reopened)
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            sqlite.rawQuery("SELECT status, session_id, session_started_at FROM replay_audience", null).use { cursor ->
+                assertTrue(cursor.moveToFirst()); assertEquals("first-session", cursor.getString(0))
+                assertEquals(session.id, cursor.getString(1)); assertEquals(session.startedAt, cursor.getString(2))
             }
         }
     }

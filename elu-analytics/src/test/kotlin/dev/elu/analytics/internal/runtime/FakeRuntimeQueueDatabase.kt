@@ -14,7 +14,7 @@ internal enum class FakeAmbiguousOutcome {
 internal class FakeRuntimeQueueBacking {
     var core: RuntimeStoredCore? = null
     val records: TreeMap<Long, RuntimeStoredRecord> = TreeMap()
-    var databaseSchemaVersion: Int = RUNTIME_STORAGE_SCHEMA_VERSION
+    var databaseSchemaVersion: Int = RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE
     val replayRows: TreeMap<String, RuntimeReplayStoredRow> = TreeMap()
     val flagRows: TreeMap<String, RuntimeFlagStoredRow> = TreeMap()
     var failNextKnownCommit: Throwable? = null
@@ -39,14 +39,28 @@ private class FakeRuntimeQueueDatabase(
 ) : RuntimeQueueDatabase {
     private var closed = false
 
+    override fun initialReplayAudienceState(): RuntimeReplayAudienceState =
+        if (backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unseen else RuntimeReplayAudienceState.Unknown
+
+    override fun ensureReplayAudienceSchema() = synchronized(backing) {
+        check(!closed)
+        runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
+        if (backing.databaseSchemaVersion <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+            backing.databaseSchemaVersion += RUNTIME_AUDIENCE_SCHEMA_OFFSET
+            backing.core = checkNotNull(backing.core).copy(replayAudience = RuntimeReplayAudienceState.Unknown)
+            backing.advanceCommittedMutationGeneration()
+        }
+    }
+
     override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) =
         synchronized(backing) {
             check(!closed) { "Fake database is closed" }
-            when (backing.databaseSchemaVersion) {
+            when (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt()) {
                 RUNTIME_STORAGE_SCHEMA_VERSION, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_REPLAY, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_NATIVE_REPLAY -> {
                     check(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
                     backing.flagRows[initialAuthority.key] = initialAuthority.deepCopy()
-                    backing.databaseSchemaVersion = when (backing.databaseSchemaVersion) { 1 -> 2; 5 -> 6; else -> 4 }
+                    backing.databaseSchemaVersion = (when (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt()) { 1 -> 2; 5 -> 6; else -> 4 }) +
+                        if (backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
                     backing.advanceCommittedMutationGeneration()
                 }
                 RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_REPLAY, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_NATIVE_REPLAY -> Unit
@@ -56,11 +70,12 @@ private class FakeRuntimeQueueDatabase(
 
     override fun ensureReplaySchema(initialState: RuntimeReplayStoredRow) = synchronized(backing) {
         check(!closed)
-        when (backing.databaseSchemaVersion) {
+        when (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt()) {
             1, 2 -> {
                 check(initialState.key == "state")
                 backing.replayRows[initialState.key] = initialState.deepCopy()
-                backing.databaseSchemaVersion = if (backing.databaseSchemaVersion == 1) 3 else 4
+                backing.databaseSchemaVersion = (if (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()) == 1L) 3 else 4) +
+                    if (backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
                 backing.advanceCommittedMutationGeneration()
             }
             3, 4, 5, 6 -> Unit
@@ -79,7 +94,8 @@ private class FakeRuntimeQueueDatabase(
                 check(tx.readReplayRow(NativeReplayAccounting.KEY) == null)
                 check(CoreStateCodec.decode(checkNotNull(tx.readCore()).stateJson).stream.streamId == initial.streamId)
                 tx.putReplayRow(initialAuthority)
-                (tx as FakeTransaction).schemaVersion = if (tx.schemaVersion == 3) 5 else 6
+                (tx as FakeTransaction).schemaVersion = (if (runtimeBaseDatabaseVersion(tx.schemaVersion.toLong()) == 3L) 5 else 6) +
+                    if (tx.schemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
             }
         }
     }
@@ -186,17 +202,25 @@ private class FakeRuntimeQueueDatabase(
                 backing.failNextCoreRead = null
                 throw failure
             }
-            return core?.copy(stateJson = core!!.stateJson.copyOf())
+            return core?.copy(stateJson = core!!.stateJson.copyOf(), replayAudience =
+                if (schemaVersion <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unknown else core!!.replayAudience)
         }
 
         override fun insertCore(core: RuntimeStoredCore) {
             check(this.core == null) { "Duplicate fake core row" }
+            if (schemaVersion <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+                check(core.replayAudience === RuntimeReplayAudienceState.Unknown)
+                schemaVersion += RUNTIME_AUDIENCE_SCHEMA_OFFSET
+            }
             this.core = core.copy(stateJson = core.stateJson.copyOf())
             mutated = true
         }
 
         override fun updateCore(core: RuntimeStoredCore) {
             check(this.core != null) { "Missing fake core row" }
+            if (schemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET && this.core!!.replayAudience != core.replayAudience) {
+                check(this.core!!.replayAudience === RuntimeReplayAudienceState.Unseen && core.replayAudience is RuntimeReplayAudienceState.FirstSession)
+            }
             this.core = core.copy(stateJson = core.stateJson.copyOf())
             mutated = true
         }
@@ -221,8 +245,8 @@ private class FakeRuntimeQueueDatabase(
             return removed
         }
 
-        override fun replaySchemaPresent(): Boolean = schemaVersion in setOf(3, 4, 5, 6)
-        override fun nativeReplaySchemaPresent(): Boolean = schemaVersion in setOf(5, 6)
+        override fun replaySchemaPresent(): Boolean = runtimeBaseDatabaseVersion(schemaVersion.toLong()).toInt() in setOf(3, 4, 5, 6)
+        override fun nativeReplaySchemaPresent(): Boolean = runtimeBaseDatabaseVersion(schemaVersion.toLong()).toInt() in setOf(5, 6)
         private fun requireReplaySchema() { check(replaySchemaPresent()) }
 
         override fun readReplayRow(key: String): RuntimeReplayStoredRow? {
@@ -277,7 +301,7 @@ private class FakeRuntimeQueueDatabase(
         }
 
         private fun requireFlagSchema() {
-            check(schemaVersion in setOf(2, 4, 6)) {
+            check(runtimeBaseDatabaseVersion(schemaVersion.toLong()).toInt() in setOf(2, 4, 6)) {
                 "Fake flag schema has not been initialized"
             }
         }

@@ -540,11 +540,108 @@ class CaptureAuthorityRuntimeTest {
         assertTrue(owner.capture(command("customer event", NOW).copy(expectation = expected)).await() is RuntimeCaptureResult.Rejected)
     }
 
+    @Test fun `only an accepted session-bearing event claims first session without replay authority`() {
+        for (kind in listOf(RuntimeEventKind.CAPTURE, RuntimeEventKind.SCREEN, RuntimeEventKind.EXCEPTION)) {
+            val backing = FakeRuntimeQueueBacking()
+            val owner = open(backing)
+            assertEquals(RuntimeReplayAudienceState.Unseen, backing.core!!.replayAudience)
+            owner.appendMutations(listOf(RuntimeRecordDraft.Mutation(NOW,
+                RuntimeMutationChange.Identify("identified-before-capture", emptyMap(), emptyMap()), command("x", NOW).versions))).await()
+            assertEquals(RuntimeReplayAudienceState.Unseen, backing.core!!.replayAudience)
+            val context = owner.snapshot().await().state.identity.contextRevision
+            owner.submitCaptureAuthority(config(), privacy(context)).await()
+            assertTrue(owner.capture(command("invalid", NOW, mapOf("value" to Any()))).await() is RuntimeCaptureResult.Rejected)
+            assertEquals(RuntimeReplayAudienceState.Unseen, backing.core!!.replayAudience)
+            val accepted = owner.capture(command(if (kind == RuntimeEventKind.EXCEPTION) "\$exception" else "activity", NOW, kind = kind)).await() as RuntimeCaptureResult.Accepted
+            val session = accepted.snapshot.state.identity.session!!
+            assertEquals(RuntimeReplayAudienceState.FirstSession(session.id, session.startedAt), backing.core!!.replayAudience)
+        }
+    }
+
+    @Test fun `first capture marker survives consent reset identify and restart without granting a later session`() {
+        val backing = FakeRuntimeQueueBacking()
+        val identifiers = CountingIdentifiers()
+        var owner = open(backing, identifiers = identifiers)
+        owner.submitCaptureAuthority(config(), privacy(5)).await()
+        val first = owner.capture(command("unrecorded-first-session", NOW)).await() as RuntimeCaptureResult.Accepted
+        val marker = backing.core!!.replayAudience
+        assertTrue(marker.permits(first.snapshot.state.identity.session))
+        owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, NOW)).await()
+        assertTrue(owner.capture(command("denied", NOW)).await() is RuntimeCaptureResult.Rejected)
+        owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(NOW)).await()
+        owner.closeAsync().await()
+        owner = open(backing, identifiers = identifiers)
+        assertEquals(marker, backing.core!!.replayAudience)
+        assertTrue(owner.snapshot().await().state.identity.optedOut)
+        owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(false, NOW)).await()
+        owner.appendMutations(listOf(RuntimeRecordDraft.Mutation(NOW,
+            RuntimeMutationChange.Identify("next-user", emptyMap(), emptyMap()), command("x", NOW).versions))).await()
+        owner.submitCaptureAuthority(config(), privacy(owner.snapshot().await().state.identity.contextRevision)).await()
+        val next = owner.capture(command("next-session", NOW)).await() as RuntimeCaptureResult.Accepted
+        assertEquals(marker, backing.core!!.replayAudience)
+        org.junit.Assert.assertFalse(marker.permits(next.snapshot.state.identity.session))
+    }
+
+    @Test fun `failed writes and full queue cannot consume first audience eligibility`() {
+        val backing = FakeRuntimeQueueBacking()
+        val owner = open(backing)
+        owner.submitCaptureAuthority(config(), privacy(5)).await()
+        backing.failNextKnownCommit = IOException("explicit rollback")
+        assertThrows(ExecutionException::class.java) { owner.capture(command("rolled-back", NOW)).await() }
+        assertEquals(RuntimeReplayAudienceState.Unseen, backing.core!!.replayAudience)
+        assertEquals(0, owner.snapshot().await().queuedCount)
+        val accepted = owner.capture(command("committed", NOW)).await() as RuntimeCaptureResult.Accepted
+        assertTrue(backing.core!!.replayAudience.permits(accepted.snapshot.state.identity.session))
+        val bounded = FakeRuntimeQueueBacking()
+        val full = open(bounded, limits = RuntimeQueueLimits(1, 1))
+        full.submitCaptureAuthority(config(), privacy(5)).await()
+        assertTrue(full.capture(command("too-large", NOW)).await() is RuntimeCaptureResult.Rejected)
+        assertEquals(RuntimeReplayAudienceState.Unseen, bounded.core!!.replayAudience)
+    }
+
+    @Test fun `ambiguous event commits reconcile marker atomically and concurrent captures select one session`() {
+        for (outcome in listOf(FakeAmbiguousOutcome.COMMIT, FakeAmbiguousOutcome.ROLLBACK)) {
+            val backing = FakeRuntimeQueueBacking()
+            val owner = open(backing)
+            owner.submitCaptureAuthority(config(), privacy(5)).await()
+            backing.ambiguousNextCommit = outcome
+            val one = owner.capture(command("first", NOW))
+            val two = owner.capture(command("second", NOW))
+            val first = one.await() as RuntimeCaptureResult.Accepted
+            val second = two.await() as RuntimeCaptureResult.Accepted
+            assertEquals(first.record.record.sessionId, second.record.record.sessionId)
+            assertTrue(backing.core!!.replayAudience.permits(second.snapshot.state.identity.session))
+            assertEquals(2, second.snapshot.queuedCount)
+            owner.closeAsync().await()
+            val reopened = open(backing)
+            assertTrue(backing.core!!.replayAudience.permits(reopened.snapshot().await().state.identity.session))
+        }
+    }
+
+    @Test fun `all legacy schema combinations retain unknown audience even with no surviving session or events`() {
+        for (version in 1..6) {
+            val backing = FakeRuntimeQueueBacking()
+            val owner = open(backing)
+            if (version in listOf(2, 4, 6)) owner.ensureFeatureFlagRuntime().await()
+            if (version in 3..6) owner.ensurePreparedReplayStorage().await()
+            if (version in 5..6) owner.ensureNativeReplayAccounting().await()
+            owner.closeAsync().await()
+            backing.databaseSchemaVersion = version // Exact pre-audience table combination.
+            val reopened = open(backing)
+            assertEquals(version + RUNTIME_AUDIENCE_SCHEMA_OFFSET, backing.databaseSchemaVersion)
+            assertEquals(RuntimeReplayAudienceState.Unknown, backing.core!!.replayAudience)
+            reopened.submitCaptureAuthority(config(), privacy(5)).await()
+            assertTrue(reopened.capture(command("analytics-still-works", NOW)).await() is RuntimeCaptureResult.Accepted)
+            assertEquals(RuntimeReplayAudienceState.Unknown, backing.core!!.replayAudience)
+        }
+    }
+
     private fun open(
         backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
         clock: RuntimeCaptureClock = FakeCaptureClock(NOW_MS, 1_000L),
         state: PersistedCoreState = state(),
         limits: RuntimeQueueLimits = RuntimeQueueLimits(10_000, 16_777_216),
+        identifiers: CoreIdentifierGenerator = CountingIdentifiers(),
     ): RuntimeQueueOwner {
         val owner =
             RuntimeQueueOwner.open(
@@ -552,7 +649,7 @@ class CaptureAuthorityRuntimeTest {
                 limits = limits,
                 databaseFactory = backing::connection,
                 legacyStateLoader = { state },
-                identifiers = CountingIdentifiers(),
+                identifiers = identifiers,
                 trustedSiteKey = "elu_pk_test_capture",
                 captureClock = clock,
             ).await()

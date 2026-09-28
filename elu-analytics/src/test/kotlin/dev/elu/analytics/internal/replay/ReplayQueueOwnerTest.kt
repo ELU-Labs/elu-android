@@ -35,9 +35,9 @@ class ReplayQueueOwnerTest {
             // Rig only initializes core; migration order remains explicit.
             if (flagsFirst) rig.owner.ensureFeatureFlagRuntime().get()
             rig.owner.ensurePreparedReplayStorage().get()
-            assertEquals(if (flagsFirst) 4 else 3, rig.backing.databaseSchemaVersion)
+            assertEquals(if (flagsFirst) 10 else 9, rig.backing.databaseSchemaVersion)
             if (!flagsFirst) rig.owner.ensureFeatureFlagRuntime().get()
-            assertEquals(4, rig.backing.databaseSchemaVersion)
+            assertEquals(10, rig.backing.databaseSchemaVersion)
             assertTrue(rig.backing.flagRows.containsKey(RUNTIME_FLAG_AUTHORITY_KEY))
             val before = rig.backing.flagRows[RUNTIME_FLAG_AUTHORITY_KEY]!!.payload.copyOf()
             rig.owner.ensurePreparedReplayStorage().get(); rig.owner.ensureFeatureFlagRuntime().get()

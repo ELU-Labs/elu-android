@@ -254,6 +254,20 @@ prevent capture. Ordinary display text can contain personal information: mask
 private labels before displaying them and disclose readable replay collection.
 Replay masking does not sanitize customer event properties or exception messages.
 
+Configuration v2 can restrict replay to `replayAudience: "new-devices"`.
+This records only the installation's first successfully captured analytics session,
+including its continuation after a process restart. Setup and identity changes do
+not start that history. Events, screens and handled exceptions can start it even
+when replay is disabled. Reset, sign-in changes and opt-out/opt-in do not make a
+later session eligible. Ordinary analytics keeps its existing consent and authority
+rules. An absent audience setting permits every otherwise authorized session.
+
+Owned SQLite stores created before this history was recorded upgrade conservatively:
+their earlier session history is unknown, so `new-devices` replay is declined while
+ordinary analytics and all-device replay remain available. The additive database
+upgrade preserves identity, consent and queued records. Older SDK binaries cannot
+reopen the upgraded schema; downgrading the owned store is unsupported.
+
 Strengthen privacy before a view is displayed:
 
 ```kotlin

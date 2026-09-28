@@ -156,6 +156,8 @@ internal data class V1ConfiguredEndpointSet(
     val assets: String?,
 )
 
+internal enum class V1ReplayAudience { NEW_DEVICES }
+
 internal data class V1CapturePerformance(val memory: Boolean, val longTasks: Boolean, val sampleIntervalMillis: Int)
 
 internal data class V1ParsedConfig(
@@ -178,6 +180,7 @@ internal data class V1ParsedConfig(
     val configSemanticHash: String,
     val policySourceHash: String?,
     val capturePerformance: V1CapturePerformance? = null,
+    val replayAudience: V1ReplayAudience? = null,
 )
 
 /** Trusted ordering envelope retained even when the document body fails a nested policy check. */

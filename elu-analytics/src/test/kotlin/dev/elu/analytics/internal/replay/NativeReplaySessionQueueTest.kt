@@ -18,10 +18,10 @@ class NativeReplaySessionQueueTest {
             if (flagsFirst) rig.owner.ensureFeatureFlagRuntime().get()
             rig.owner.ensurePreparedReplayStorage().get()
             rig.owner.ensureNativeReplayAccounting().get()
-            assertEquals(if (flagsFirst) 6 else 5, rig.backing.databaseSchemaVersion)
+            assertEquals(if (flagsFirst) 12 else 11, rig.backing.databaseSchemaVersion)
             val native = rig.row().payload.copyOf()
             rig.owner.ensureFeatureFlagRuntime().get()
-            assertEquals(6, rig.backing.databaseSchemaVersion)
+            assertEquals(12, rig.backing.databaseSchemaVersion)
             assertArrayEquals(native, rig.row().payload)
             assertTrue(rig.backing.flagRows.containsKey(RUNTIME_FLAG_AUTHORITY_KEY))
             rig.owner.ensureNativeReplayAccounting().get()
@@ -32,7 +32,7 @@ class NativeReplaySessionQueueTest {
     }
     @Test fun `native storage requires replay and does not silently initialize it`() = Rig().use { rig ->
         failure { rig.owner.ensureNativeReplayAccounting().get() }
-        assertEquals(1, rig.backing.databaseSchemaVersion)
+        assertEquals(7, rig.backing.databaseSchemaVersion)
         assertTrue(rig.backing.replayRows.isEmpty())
     }
     @Test fun `missing native metadata future schema and unexpected metadata never reseed`() {
@@ -59,7 +59,7 @@ class NativeReplaySessionQueueTest {
             rig.owner.ensurePreparedReplayStorage().get()
             rig.backing.ambiguousNextCommit = outcome
             rig.owner.ensureNativeReplayAccounting().get()
-            assertEquals(5, rig.backing.databaseSchemaVersion)
+            assertEquals(11, rig.backing.databaseSchemaVersion)
             assertEquals(0L, rig.state().nextReplayOrdinal)
             assertNull(rig.state().session)
         }
@@ -290,6 +290,46 @@ class NativeReplaySessionQueueTest {
             assertFalse(rig.owner.stopNativeReplayAccounting(receipt).get()); rig.clock.throwOnRead = false
             assertArrayEquals(before, rig.row().payload)
         }
+    }
+
+    @Test fun `new devices replay cannot precede committed capture and only resumes that first session`() = Rig().use { rig ->
+        rig.configure { it.put("replayAudience", "new-devices") }
+        rig.activate()
+        assertNull(rig.owner.observeNativeReplaySession().get())
+        assertEquals(RuntimeReplayAudienceState.Unseen, rig.backing.core!!.replayAudience)
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        assertNotNull(rig.owner.observeNativeReplaySession().get())
+        val marker = rig.backing.core!!.replayAudience
+        rig.reopen(); rig.publish()
+        assertNotNull(rig.owner.observeNativeReplaySession().get())
+        rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get()
+        rig.publish()
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        assertNull(rig.owner.observeNativeReplaySession().get())
+        assertEquals(marker, rig.backing.core!!.replayAudience)
+    }
+
+    @Test fun `late audience policy cannot turn an unrecorded consent-return session into a new device`() = Rig().use { rig ->
+        rig.activate()
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        val marker = rig.backing.core!!.replayAudience
+        rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, rig.now())).get()
+        rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(false, rig.now())).get()
+        rig.renew { it.put("replayAudience", "new-devices") }
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        assertNull(rig.owner.observeNativeReplaySession().get())
+        assertEquals(marker, rig.backing.core!!.replayAudience)
+    }
+
+    @Test fun `unknown audience restricts new-devices only and never prevents ordinary capture`() = Rig().use { rig ->
+        rig.activate(); rig.reopen()
+        rig.backing.core = rig.backing.core!!.copy(replayAudience = RuntimeReplayAudienceState.Unknown)
+        rig.reopen(); rig.publish()
+        assertNotNull(rig.owner.observeNativeReplaySession().get())
+        rig.renew { it.put("replayAudience", "new-devices") }
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        assertNull(rig.owner.observeNativeReplaySession().get())
+        assertEquals(RuntimeReplayAudienceState.Unknown, rig.backing.core!!.replayAudience)
     }
 
     private class Rig : AutoCloseable {
