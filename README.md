@@ -102,6 +102,26 @@ HTTP or HTTPS, on any port). Any other value makes `Elu.setup` log a warning
 and leave the SDK idle, so a release build cannot be pointed at a third-party
 endpoint.
 
+### Self-hosted ELU instance
+
+An app that sends to a self-hosted ELU instance declares that instance as its
+`apiHost` and points `configHost` at the same origin:
+
+```kotlin
+Elu.setup(
+    this,
+    "YOUR_SITE_KEY",
+    EluOptions(configHost = "https://analytics.example.com", apiHost = "https://analytics.example.com"),
+)
+```
+
+A `configHost` outside `elu.dev` is accepted only when it is exactly the
+declared `apiHost`: both HTTPS, the same host, the default port, and no
+credentials, path, query or fragment. Anything else (plain HTTP, another port,
+a subdomain, a trailing-dot host) makes `Elu.setup` log a warning and leave the
+SDK idle, as for any unapproved override. The instance serves the same
+`/v1/<siteKey>/config` document as ELU Cloud.
+
 An `http://` loopback origin also needs the app to permit cleartext traffic,
 which Android 9 and later block by default: add
 `android:usesCleartextTraffic="true"` to the `<application>` element of a

@@ -48,6 +48,14 @@ Enabled:
 The host is supplied by ELU remote configuration; this example does not
 prescribe a production hostname.
 
+A self-hosted ELU instance serves the same endpoint with the same contract.
+An app using one declares the instance as its API host and sets the config
+host to the same origin. The SDK accepts a config host outside `elu.dev` only
+when it is exactly that declared API host: HTTPS on both, the same host, the
+default port, and no credentials, path, query, fragment or trailing-dot host.
+Without a declared API host, only `elu.dev` origins (and loopback origins in
+debug builds) are accepted.
+
 Defaults when a privacy field is missing or unparseable: `blockEu` and
 `maskTextInputs` true, everything else off, `replayMaxMinutes` 0 = unlimited
 (valid range 1–60; out-of-range means unlimited). Unknown fields are ignored.

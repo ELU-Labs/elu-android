@@ -23,6 +23,10 @@ configuration protocol.
 ## Contents
 
 - `api/public-api.txt`: `javap -public` output from the published AAR.
+  It never changes: `scripts/check-api-snapshot.py` requires every line of it
+  in the built facade, and compares the whole facade with the reviewed next
+  surface in [`../current/api/public-api.txt`](../current/api/public-api.txt),
+  so the published API can only grow, by a deliberate edit there.
 - `api/jvm-classes.txt`: every public, non-synthetic JVM class in the
   release `classes.jar` built from this tree. The library is not minified, so
   Kotlin `internal` declarations are public at the JVM level; the inventory
