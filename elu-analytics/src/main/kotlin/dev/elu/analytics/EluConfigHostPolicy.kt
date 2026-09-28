@@ -21,6 +21,9 @@ internal object EluConfigHostPolicy {
 
     private val LOOPBACK_HOSTS = setOf("localhost", "127.0.0.1", "[::1]", "10.0.2.2")
 
+    // Loopback names the self-hosted rule never accepts: the debug-only loopback rule governs them.
+    private val SELF_HOSTED_EXCLUDED_HOSTS = setOf("localhost", "127.0.0.1", "::1", "[::1]", "10.0.2.2")
+
     /**
      * Returns the normalized origin (`scheme://host[:port]`) when [configHost]
      * is approved for an application whose debuggable flag is [debuggable] and
@@ -49,12 +52,13 @@ internal object EluConfigHostPolicy {
         return null
     }
 
-    /** `https://host` for an HTTPS origin on the default port with a plain host name, else null. */
+    /** `https://host` for an HTTPS origin on the default port with a plain, non-loopback host, else null. */
     private fun selfHostedOrigin(value: String): String? {
         val uri = parseOrigin(value) ?: return null
         val host = uri.host.lowercase()
         if (uri.scheme.lowercase() != "https" || uri.port != -1) return null
         if (host.isEmpty() || host.endsWith(".") || host.startsWith(".")) return null
+        if (host in SELF_HOSTED_EXCLUDED_HOSTS) return null
         return "https://$host"
     }
 

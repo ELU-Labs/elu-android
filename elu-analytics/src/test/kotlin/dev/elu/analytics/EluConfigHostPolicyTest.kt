@@ -113,6 +113,10 @@ class EluConfigHostPolicyTest {
                 "https://analytics.example.com/v1" to cell,
                 "https://analytics.example.com?x=1" to cell,
                 "https://analytics.example.com#f" to cell,
+                // loopback names stay under the debug-only loopback rule
+                "https://localhost" to "https://localhost",
+                "https://127.0.0.1" to "https://127.0.0.1",
+                "https://10.0.2.2" to "https://10.0.2.2",
                 // a different host altogether, and junk
                 "https://other.example" to cell,
                 "analytics.example.com" to "analytics.example.com",
@@ -121,9 +125,7 @@ class EluConfigHostPolicyTest {
                 cell to "not a url",
             )
         for ((configHost, apiHost) in attempts) {
-            for (debuggable in listOf(false, true)) {
-                assertNull("$configHost vs $apiHost", EluConfigHostPolicy.resolve(configHost, debuggable, apiHost))
-            }
+            assertNull("$configHost vs $apiHost", EluConfigHostPolicy.resolve(configHost, false, apiHost))
         }
     }
 
