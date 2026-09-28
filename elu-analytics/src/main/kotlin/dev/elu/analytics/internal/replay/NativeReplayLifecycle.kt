@@ -7,7 +7,6 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewTreeObserver
 import java.lang.ref.WeakReference
-import java.util.WeakHashMap
 import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -32,7 +31,8 @@ internal data class NativeReplayRootFacts(
 /** Weak native facts are independent of process screen/foreground event semantics. */
 internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAccess = AndroidNativeReplaySelectionAccess) {
     private val monitor = Any()
-    private val resumed = WeakHashMap<Any, Boolean>()
+    // Activity equality is customer code; only the exact original object is a fact.
+    private val resumed = ArrayList<WeakReference<Any>>()
     private var generation: Any = Any()
     private val listeners = LinkedHashMap<Any, () -> Unit>()
     // Unpublished failed acquisitions have no caller to retain their physical cleanup.
@@ -41,13 +41,16 @@ internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAc
 
     fun resumed(activity: Any) {
         val callbacks = synchronized(monitor) {
-            resumed[activity] = true; generation = Any(); listeners.values.toList()
+            removeCollectedActivities()
+            if (resumed.none { it.get() === activity }) resumed += WeakReference(activity)
+            generation = Any(); listeners.values.toList()
         }
         callbacks.forEach { runCatching { it() } }
     }
     fun withdrawing(activity: Any) {
         val callbacks = synchronized(monitor) {
-            if (resumed.remove(activity) == null) emptyList()
+            removeCollectedActivities()
+            if (!resumed.removeAll { it.get() === activity }) emptyList()
             else { generation = Any(); listeners.values.toList() }
         }
         callbacks.forEach { runCatching { it() } }
@@ -61,7 +64,13 @@ internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAc
     }
 
     private fun current(activity: Any, token: Any): Boolean = synchronized(monitor) {
-        unsettledSelections.isEmpty() && generation === token && resumed.size == 1 && resumed.containsKey(activity)
+        removeCollectedActivities()
+        unsettledSelections.isEmpty() && generation === token && resumed.size == 1 && resumed.single().get() === activity
+    }
+
+    /** Called only while holding monitor; collection invalidates prior selections. */
+    private fun removeCollectedActivities() {
+        if (resumed.removeAll { it.get() == null }) generation = Any()
     }
 
     /** Discover only the sole actually resumed Activity's existing content root on main. */
@@ -70,7 +79,8 @@ internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAc
             override fun cancel(mayInterruptIfRunning: Boolean) = false
         }
         val original = synchronized(monitor) {
-            if (unsettledSelections.isNotEmpty()) null else resumed.keys.singleOrNull()?.let { WeakReference(it) to generation }
+            removeCollectedActivities()
+            if (unsettledSelections.isNotEmpty()) null else resumed.singleOrNull()?.get()?.let { WeakReference(it) to generation }
         } ?: return result.also { it.complete(null) }
         try {
             access.onMain {
@@ -106,7 +116,8 @@ internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAc
     fun select(activity: Any, root: Any): SdkFuture<NativeReplaySelection?> {
         val result = SdkFuture<NativeReplaySelection?>()
         val original = synchronized(monitor) {
-            if (unsettledSelections.isNotEmpty() || resumed.size != 1 || !resumed.containsKey(activity)) null else generation
+            removeCollectedActivities()
+            if (unsettledSelections.isNotEmpty() || resumed.size != 1 || resumed.single().get() !== activity) null else generation
         } ?: return result.also { it.complete(null) }
         selectOriginal(WeakReference(activity), WeakReference(root), original, result)
         return result

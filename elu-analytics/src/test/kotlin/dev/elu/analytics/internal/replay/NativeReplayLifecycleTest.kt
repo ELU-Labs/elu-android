@@ -50,6 +50,53 @@ internal class TestSelectionAccess : NativeReplaySelectionAccess {
 }
 
 class NativeReplayLifecycleTest {
+    private class EqualActivity {
+        override fun equals(other: Any?) = other is EqualActivity
+        override fun hashCode() = 1
+    }
+
+    @Test fun `distinct equal activities remain ambiguous and revoke the original selection`() {
+        val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
+        val first = EqualActivity(); val second = EqualActivity(); val root = Any()
+        platform.discoveredRoot = root; lifecycle.resumed(first)
+        val original = checkNotNull(lifecycle.selectCurrent().get())
+        lifecycle.resumed(second)
+        assertFalse(original.isCurrent())
+        val reads = platform.rootReads; val observed = platform.observed
+        assertNull(lifecycle.selectCurrent().get())
+        assertNull(lifecycle.select(first, root).get()); assertNull(lifecycle.select(second, root).get())
+        assertEquals(reads, platform.rootReads); assertEquals(observed, platform.observed)
+        original.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
+        lifecycle.withdrawing(second)
+        val next = checkNotNull(lifecycle.selectCurrent().get())
+        assertSame(first, platform.lastActivity); assertFalse(original.isCurrent())
+        next.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(2, platform.watcherClosed)
+    }
+
+    @Test fun `equal never-resumed impostor cannot select or withdraw the original activity`() {
+        val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
+        val originalActivity = EqualActivity(); val impostor = EqualActivity(); val root = Any()
+        lifecycle.resumed(originalActivity)
+        val original = checkNotNull(lifecycle.select(originalActivity, root).get())
+        assertNull(lifecycle.select(impostor, root).get())
+        lifecycle.withdrawing(impostor)
+        assertTrue(original.isCurrent())
+        original.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
+    }
+
+    @Test fun `lifecycle never invokes customer equality or hashing under its lock`() {
+        val activity = object {
+            override fun equals(other: Any?): Boolean = error("Customer equality must not run")
+            override fun hashCode(): Int = error("Customer hashing must not run")
+        }
+        val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
+        lifecycle.resumed(activity)
+        val selected = checkNotNull(lifecycle.select(activity, Any()).get())
+        assertTrue(selected.isCurrent())
+        lifecycle.withdrawing(activity); assertFalse(selected.isCurrent())
+        selected.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
+    }
+
     @Test fun `same resumed Activity can be freshly observed after unavailable root or focus facts`() {
         val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
         val activity = Any(); lifecycle.resumed(activity)
