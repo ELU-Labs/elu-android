@@ -155,6 +155,10 @@ def main() -> None:
     missing = missing_legacy_members(normalized_snapshot(BASELINE), facade)
     if missing:
         raise SystemExit("published 0.1.0 facade ABI was removed or changed:\n" + "\n".join(missing))
+    main_snapshot = ROOT / "baselines/current/api/public-api.txt"
+    missing_main = missing_legacy_members(normalized_snapshot(main_snapshot), facade)
+    if missing_main:
+        raise SystemExit("reviewed main facade ABI was removed or changed:\n" + "\n".join(missing_main))
     expected_facade = normalized_snapshot(SNAPSHOT)
     if facade != expected_facade:
         raise SystemExit(

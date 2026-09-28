@@ -20,11 +20,11 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "5e9cf975a5c7115cabf2da4a1ba0d35c2583f2816ebe6d1ad3bd278463d6886b",
+        "7b42b0d8cd38bb14d3e61c3e4c68d4e3fa890bc27bb3f6440613b8a343ed95ba",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "b4a9d289d617e7abfb04c6eded0e742eebea728be0896e77c2dac7e535559757",
+        "d2bff82c922c920fb9a698a9d63f926b9ac1c8104f3fa987853665497c5fe280",
     "elu-analytics/build.gradle.kts":
         "5078f447f6432ce825a48366df0b02086029db510037cd8c2c9fb2e48feebbe5",
     "elu-analytics/consumer-rules.pro":

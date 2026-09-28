@@ -67,4 +67,72 @@ class EluConfigHostPolicyTest {
         assertNull(EluConfigHostPolicy.resolve("http://localhost:8080/config", debuggable = true))
         assertNull(EluConfigHostPolicy.resolve("http://localhost:8080?x=1", debuggable = true))
     }
+
+    private val cell = "https://analytics.example.com"
+
+    @Test
+    fun `a self-hosted config host is approved when it is exactly the declared api host`() {
+        for (debuggable in listOf(false, true)) {
+            assertEquals(cell, EluConfigHostPolicy.resolve(cell, debuggable, apiHost = cell))
+            // Case and a bare trailing slash are normalization, not a different origin.
+            assertEquals(cell, EluConfigHostPolicy.resolve(" HTTPS://Analytics.Example.com/ ", debuggable, apiHost = "$cell/"))
+        }
+        assertEquals(cell, EluOptions(cell, cell).let { EluConfigHostPolicy.resolve(it.configHost, false, it.apiHost) })
+    }
+
+    @Test
+    fun `a self-hosted config host is refused without a declared api host`() {
+        assertNull(EluConfigHostPolicy.resolve(cell, debuggable = false))
+        assertNull(EluConfigHostPolicy.resolve(cell, debuggable = true))
+        assertNull(EluOptions(cell).apiHost)
+        assertNull(EluOptions().apiHost)
+    }
+
+    @Test
+    fun `a self-hosted config host is refused when it differs from the api host in any way`() {
+        val attempts =
+            listOf(
+                // plain http, on either side
+                "http://analytics.example.com" to cell,
+                cell to "http://analytics.example.com",
+                "http://analytics.example.com" to "http://analytics.example.com",
+                // a different or explicit port, even the https default
+                "https://analytics.example.com:8443" to cell,
+                "https://analytics.example.com:8443" to "https://analytics.example.com:8443",
+                "https://analytics.example.com:443" to "https://analytics.example.com:443",
+                // a subdomain or parent of the declared host
+                "https://evil.analytics.example.com" to cell,
+                "https://example.com" to cell,
+                // userinfo that makes the real host another
+                "https://analytics.example.com@evil.example" to cell,
+                "https://user:pw@analytics.example.com" to "https://user:pw@analytics.example.com",
+                // a trailing-dot host
+                "https://analytics.example.com." to cell,
+                "https://analytics.example.com." to "https://analytics.example.com.",
+                // paths, queries and fragments
+                "https://analytics.example.com/v1" to cell,
+                "https://analytics.example.com?x=1" to cell,
+                "https://analytics.example.com#f" to cell,
+                // loopback names stay under the debug-only loopback rule
+                "https://localhost" to "https://localhost",
+                "https://127.0.0.1" to "https://127.0.0.1",
+                "https://10.0.2.2" to "https://10.0.2.2",
+                // a different host altogether, and junk
+                "https://other.example" to cell,
+                "analytics.example.com" to "analytics.example.com",
+                "" to "",
+                cell to "",
+                cell to "not a url",
+            )
+        for ((configHost, apiHost) in attempts) {
+            assertNull("$configHost vs $apiHost", EluConfigHostPolicy.resolve(configHost, false, apiHost))
+        }
+    }
+
+    @Test
+    fun `declaring an api host leaves the elu and loopback rules unchanged`() {
+        assertEquals("https://elu.dev", EluConfigHostPolicy.resolve("https://elu.dev", false, apiHost = cell))
+        assertNull(EluConfigHostPolicy.resolve("http://localhost:8080", false, apiHost = "http://localhost:8080"))
+        assertEquals("http://localhost:8080", EluConfigHostPolicy.resolve("http://localhost:8080", true, apiHost = cell))
+    }
 }

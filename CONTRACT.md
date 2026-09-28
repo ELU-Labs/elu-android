@@ -15,6 +15,12 @@ corresponding current authorization. A successful HTTP response by itself does
 not authorize collection. Unsupported, malformed, expired, revoked or mismatched
 configuration cannot open a capture or delivery path.
 
+The public `apiHost` declaration permits an exactly matching self-hosted config
+origin: HTTPS with no explicit port, credentials, path beyond `/`, query, fragment
+or trailing-dot hostname. Undeclared origins are refused before runtime setup.
+This origin declaration does not itself authorize configuration or ingestion;
+the owned runtime's endpoint and configuration authority checks still apply.
+
 Configuration can independently restrict features, endpoints, privacy, session
 limits and replay formats. Refresh, foreground/background transitions and
 configuration withdrawal are checked again at capture and delivery boundaries.

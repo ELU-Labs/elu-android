@@ -65,6 +65,9 @@ public final class dev.elu.analytics.EluOptions {
   public final dev.elu.analytics.EluPerformanceOptions getPerformance();
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public final java.lang.String getApiHost();
+  public dev.elu.analytics.EluOptions(java.lang.String, java.lang.String);
   public dev.elu.analytics.EluOptions();
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions);
 }

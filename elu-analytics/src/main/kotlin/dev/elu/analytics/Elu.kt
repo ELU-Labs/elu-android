@@ -58,12 +58,12 @@ public object Elu {
                 val appContext = context.applicationContext
                 val debuggable =
                     (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-                val configHost = EluConfigHostPolicy.resolve(options.configHost, debuggable)
+                val configHost = EluConfigHostPolicy.resolve(options.configHost, debuggable, options.apiHost)
                 if (configHost == null) {
                     Log.w(
                         TAG,
-                        "Elu.setup called with a configHost that is not an approved ELU origin " +
-                            "(or a loopback origin in a debuggable app); ignoring.",
+                        "Elu.setup called with a configHost that is not an approved ELU origin, " +
+                            "the app's self-hosted apiHost, or a loopback origin in a debuggable app; ignoring.",
                     )
                     return
                 }
