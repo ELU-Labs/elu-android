@@ -261,6 +261,23 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("outline observation must remain", result.stderr)
 
+    def test_readable_text_cannot_wait_for_appcompat_future_or_publish_changed_layout(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/AndroidViewReplayCollector.kt"
+        original = path.read_text()
+        for before, after in [
+            ("{ layout.text }", "{ view.text }"),
+            ("observed.view.layout } !== observed.layout", "observed.view.layout } == null"),
+            ("observed.layout.text } !== observed.text", "observed.layout.text } == null"),
+            ("textKind(observed.view, false, false) != observed.kind", "false"),
+        ]:
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after, 1))
+                result = self.run_guard()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("native readable text", result.stderr)
+        path.write_text(original)
+
     def test_native_outline_observation_cannot_drop_original_withdrawal_checks(self) -> None:
         life = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayLifecycle.kt"
         collector = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/AndroidViewReplayCollector.kt"

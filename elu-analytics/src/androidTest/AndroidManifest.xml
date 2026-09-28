@@ -4,5 +4,7 @@
             android:exported="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
         <activity android:name="dev.elu.analytics.internal.replay.NativeWindowCompatibilityTestActivity"
             android:exported="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name="dev.elu.analytics.internal.replay.NativeAppCompatTestActivity"
+            android:exported="false" android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
     </application>
 </manifest>

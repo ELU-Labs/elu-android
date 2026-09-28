@@ -249,6 +249,19 @@ readable when it is plain, fully visible, and untransformed. Styled, transformed
 clipped, transparent and custom text remain masked. Text is limited to 4096 UTF-8
 bytes per view; larger values become a placeholder. Input values, images,
 WebViews and unsupported/custom views stay hidden. All-text mode masks ordinary text too.
+The same checks apply to exact AppCompat `AppCompatTextView`, `AppCompatButton`,
+`AppCompatCheckBox`, `AppCompatRadioButton`, `AppCompatToggleButton` and
+`AppCompatCheckedTextView` classes. Their custom subclasses remain masked. Text
+comes from the current displayed layout; capture never waits for a pending
+`setTextFuture`. Emoji/all-caps transformations and styled text remain masked.
+The SDK adds no AppCompat runtime dependency. Its optional recognition uses
+closed class names and framework superclasses, with consumer shrinker rules.
+AppCompat 1.8.0 instrumentation and an optimized consumer remain qualification
+gates for this source change; other AppCompat versions are not yet qualified.
+Standard content, fit-windows and `LinearLayoutCompat` containers are supported.
+Action-bar decoration is observed only as an ancestor with uncertain layout
+bounds; its toolbar siblings are not captured. Material widgets, `SwitchCompat`,
+custom containers and custom drawing remain opaque.
 Opaque native masking rules retain all-text masking; unresolved block rules
 prevent capture. Ordinary display text can contain personal information: mask
 private labels before displaying them and disclose readable replay collection.
@@ -281,12 +294,15 @@ other SDKs are not interpreted. A bounded registry retains up to 128 live view
 restrictions. If that bound is exceeded, replay fails closed for the process;
 requested restrictions are never discarded to continue recording.
 
-Compose semantics replay and readable text from custom/AppCompat view subclasses
+Compose semantics replay and readable text from custom view subclasses
 are not yet supported; keep manual `Elu.screen()` navigation events. Analytics
 works on API 23+, while replay currently requires API 29+. API 26–28 replay and
 Compose parity remain qualification gaps, so this source is not yet a complete
 standalone customer release. No Web Vitals or browser long-task metrics are
 reported as native performance data.
+API 26–28 lack the public transition-alpha and animation-matrix observations
+used to exclude text hidden by framework transitions; ordinary view alpha and
+matrix are insufficient substitutes.
 
 ## Build notes
 

@@ -100,7 +100,10 @@ a store downgrade is unsupported. No preview/aggregate import is introduced.
 
 Replay is an authorized native Views wireframe stream, not screenshots or
 browser DOM capture. The blanket profile masks ordinary text. The sensitive
-profile can retain plain, fully visible text from supported framework Views.
+profile can retain plain, fully visible text from supported framework Views and
+the closed exact AppCompat text classes listed in README. AppCompat is optional
+and adds no published runtime dependency. Capture reads the existing layout and
+does not resolve pending text futures; changed layouts invalidate that frame.
 Inputs stay masked in both profiles; images, WebViews and unsupported content
 are hidden. Text longer than 4096 UTF-8 bytes is not truncated into a partial
 capture. Unsupported rules fail closed through stronger masking or denial.
@@ -115,8 +118,11 @@ These replay restrictions do not sanitize customer-supplied event properties,
 identity values, or exception messages.
 
 Analytics requires API 23 with app-level core-library desugaring. Current Views
-replay requires API 29. API 26–28 replay, Compose semantics replay and readable
-custom/AppCompat text are not supported by this candidate. Compose applications
+replay requires API 29 because older versions lack public transition-alpha and
+animation-matrix observations. API 26–28 replay, Compose semantics replay and
+readable custom-subclass text are not supported by this candidate. Exact
+AppCompat support still requires current artifact/emulator and R8 qualification.
+Compose applications
 can use the analytics APIs and explicit screen events. These differences remain
 explicit release-scope decisions, not silently completed parity claims.
 

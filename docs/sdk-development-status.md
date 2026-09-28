@@ -10,6 +10,13 @@ ineligible for that replay restriction. Its new source tests and additive SQLite
 upgrade require fresh artifact/device qualification; the artifact results below
 predate this change and must not qualify the current source.
 
+The next source slice admits a closed set of exact AppCompat widgets/containers
+without a runtime dependency. Text comes from the already displayed layout so
+an unresolved AppCompat text future cannot block collection. Existing privacy,
+unknown-subclass and API 29 boundaries remain. New AppCompat 1.8.0 instrumentation,
+real optimized consumer behavior and exact-artifact rendering are still unrun;
+the prior device/R8 results below do not qualify this expansion.
+
 The prior consent candidate retains the latest pre-setup choice, commits it before
 lifecycle startup, and prevents a later opt-in from admitting activity submitted
 during an earlier denial. Its local host verification passed 818 JVM tests,

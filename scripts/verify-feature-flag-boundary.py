@@ -13,6 +13,9 @@ import xml.etree.ElementTree as ET
 
 
 PINNED_FILES = {
+    # Closed optional AppCompat class identities; no reflective or private API calls.
+    "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/replay/NativeAppCompatViewTypes.kt":
+        "0afbc44d70284de8343d7dd28821d8c4ff8393a0f7662c2923403fc89da3aad4",
     "elu-analytics/src/main/AndroidManifest.xml":
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
@@ -23,9 +26,9 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
         "b4a9d289d617e7abfb04c6eded0e742eebea728be0896e77c2dac7e535559757",
     "elu-analytics/build.gradle.kts":
-        "0c904473c34759bc867e25db92e2b000787423fad5dbf3af73de232e112df553",
+        "5078f447f6432ce825a48366df0b02086029db510037cd8c2c9fb2e48feebbe5",
     "elu-analytics/consumer-rules.pro":
-        "9142fe48201969d44ae8030c19d96987f678df7f9aa5b7a5ebddc1e8f233c03b",
+        "4fabc808ed8f99ec3660a83c224cdcf8e3fd041a51c404093195e4cd8bdbb6cb",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/concurrent/SdkFuture.kt":
         "13b2077148db05774a72c47efb0c864b67b571dac72af77e1343f8a5e97de9a9",
     # These files carry the explicit no-wire release status.
@@ -557,6 +560,16 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         errors.append("native physical owner cannot create its own proof registry")
     collector_path = replay / "AndroidViewReplayCollector.kt"
     collector = sources.get(collector_path, "")
+    text_reader = collector.split("fun textKind(", 1)[-1].split("// Inspect ancestry", 1)[0]
+    if ("{ view.text }" in text_reader or "{ layout.text }" not in text_reader or
+            "NativeAppCompatViewTypes.isText(type.name, type.superclass)" not in text_reader or
+            "text.javaClass !== String::class.java" not in text_reader or
+            "view.transformationMethod } != null" not in text_reader):
+        errors.append("native readable text must retain exact types, displayed layout, and privacy checks")
+    for required in ["observed.view.layout } !== observed.layout", "observed.layout.text } !== observed.text",
+                     "textKind(observed.view, false, false) != observed.kind"]:
+        if required not in collector:
+            errors.append("native readable text must revalidate the original displayed layout before publication")
     for relative, source in sources.items():
         if "observeNativeReplayOutline" in source and relative not in {collector_path, lifecycle}:
             errors.append("native outline observation must remain within collector/selection")

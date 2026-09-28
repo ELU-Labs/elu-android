@@ -4,6 +4,7 @@ import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Looper
 import android.text.InputType
+import android.text.Layout
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -137,7 +138,7 @@ private fun observeNativeReplayOutlineProfiled(
 }
 
 /**
- * One-shot geometry collector. Authorized sensitive profiles read bounded text from known framework
+ * One-shot geometry collector. Authorized sensitive profiles read bounded text from closed framework/AppCompat
  * widgets after all inherited privacy restrictions; drawable appearance and accessibility data are never read.
  * Unknown rendering is an opaque placeholder. Continuous capture and permission belong to the owner.
  * Public transition-matrix/alpha observation is unavailable before API29; legacy framework transitions
@@ -165,6 +166,7 @@ internal class AndroidViewReplayCollector(
     private data class Geometry(val bounds: Bounds, val explicitClip: Bounds?, val hidden: Boolean, val elevation: Float = 0f, val translationZ: Float = 0f, val kind: NativeGeometryKind = NativeGeometryKind.VISIBLE_CLIP)
     private data class GroupClip(val children: Boolean, val padding: Boolean, val left: Int, val top: Int, val right: Int, val bottom: Int)
     private data class Observation(val view: View, val parent: Any?, val geometry: Geometry, val groupClip: GroupClip?, val children: List<View>?)
+    private data class TextObservation(val view: TextView, val layout: Layout, val text: String, val kind: NativeMaskedKind)
     private data class Work(val view: View, val parent: ViewGroup?, val clip: Bounds, val blocked: Boolean, val masked: Boolean, val depth: Int, val geometry: NativeGeometryKind)
 
     private var projections = emptyList<Projection>()
@@ -308,9 +310,12 @@ internal class AndroidViewReplayCollector(
             }
             fun blocked(view: View) = rules.any { it.restriction == NativeViewRestriction.BLOCK && it.appliesTo(view) }
             fun masked(view: View) = rules.any { it.restriction == NativeViewRestriction.MASK && it.appliesTo(view) }
-            fun textKind(view: TextView, hidden: Boolean): NativeMaskedKind {
-                val supported = view.javaClass in setOf(TextView::class.java, Button::class.java,
-                    CheckBox::class.java, RadioButton::class.java, Switch::class.java, ToggleButton::class.java)
+            val textObservations = ArrayList<TextObservation>()
+            fun textKind(view: TextView, hidden: Boolean, remember: Boolean = true): NativeMaskedKind {
+                val type = view.javaClass
+                val supported = type in setOf(TextView::class.java, Button::class.java,
+                    CheckBox::class.java, RadioButton::class.java, Switch::class.java, ToggleButton::class.java) ||
+                    NativeAppCompatViewTypes.isText(type.name, type.superclass)
                 if (!maskingProfile.readsText || hidden || !supported) return NativeMaskedKind.Text
                 // Input classification happens before the first text getter, including a password
                 // transformation installed on an otherwise ordinary framework TextView.
@@ -332,7 +337,9 @@ internal class AndroidViewReplayCollector(
                 for (line in 0 until lines) if (guardedNativeViewRead(profile, readGuard) {
                         layout.getEllipsisCount(line) != 0 || layout.getLineWidth(line) > availableWidth
                     }) return NativeMaskedKind.Text
-                val text = guardedNativeViewRead(profile, readGuard) { view.text } ?: return NativeMaskedKind.Text
+                // Read only the existing displayed layout. AppCompatTextView.getText() can
+                // synchronously wait for a pending setTextFuture; capture must never consume it.
+                val text = guardedNativeViewRead(profile, readGuard) { layout.text } ?: return NativeMaskedKind.Text
                 // Spans may replace or hide their underlying string. Never invoke custom
                 // CharSequence methods, even on an exact framework TextView.
                 if (text.javaClass !== String::class.java) return NativeMaskedKind.Text
@@ -340,8 +347,10 @@ internal class AndroidViewReplayCollector(
                 if (length > NativeReplayText.MAXIMUM_UTF8_BYTES) return NativeMaskedKind.Placeholder
                 if (guardedNativeViewRead(profile, readGuard) { layout.getLineEnd(lines - 1) } < length) return NativeMaskedKind.Text
                 val detached = guardedNativeViewRead(profile, readGuard) { text.toString() }
-                return try { NativeMaskedKind.ReadableText(NativeReplayText.read(detached)) }
-                    catch (_: NativeEncodingException) { NativeMaskedKind.Placeholder }
+                val kind = try { NativeMaskedKind.ReadableText(NativeReplayText.read(detached)) }
+                    catch (_: NativeEncodingException) { return NativeMaskedKind.Placeholder }
+                if (remember) textObservations.add(TextObservation(view, layout, text as String, kind))
+                return kind
             }
 
             // Inspect ancestry, not sibling contents. ViewRootImpl is a non-View terminal parent.
@@ -354,10 +363,12 @@ internal class AndroidViewReplayCollector(
                 if (ancestors.size >= maximumDepth || ancestrySeen.put(ancestor, true) != null) {
                     fail(NativeCollectionFailure.DEPTH_LIMIT)
                 }
+                val exactFrameworkActionBar = ancestor.javaClass.name == "com.android.internal.widget.ActionBarOverlayLayout" &&
+                    ancestor.javaClass.classLoader === View::class.java.classLoader && root.javaClass === FrameLayout::class.java
+                val exactAppCompatActionBar = NativeAppCompatViewTypes.isActionBar(ancestor.javaClass.name, ancestor.javaClass.superclass) &&
+                    NativeAppCompatViewTypes.isContentFrame(root.javaClass.name, root.javaClass.superclass)
                 val exactActionBar = Build.VERSION.SDK_INT >= 29 && ancestor is ViewGroup &&
-                    ancestor.javaClass.name == "com.android.internal.widget.ActionBarOverlayLayout" &&
-                    ancestor.javaClass.classLoader === View::class.java.classLoader &&
-                    ancestor === rootParent && root.javaClass === FrameLayout::class.java &&
+                    (exactFrameworkActionBar || exactAppCompatActionBar) && ancestor === rootParent &&
                     guardedNativeViewRead(profile, readGuard) { root.id } == android.R.id.content
                 if (exactActionBar) frameworkActionBar = ancestor as ViewGroup
                 else if (!knownContainer(ancestor) && !(ancestor.javaClass.name == "com.android.internal.policy.DecorView" &&
@@ -505,6 +516,13 @@ internal class AndroidViewReplayCollector(
                     }
                 }
             }
+            // Projection/geometry callbacks may request new text or replace a layout. A frame
+            // may publish only the same displayed text that passed the full visibility checks.
+            for (observed in textObservations) {
+                if (guardedNativeViewRead(profile, readGuard) { observed.view.layout } !== observed.layout ||
+                    guardedNativeViewRead(profile, readGuard) { observed.layout.text } !== observed.text ||
+                    textKind(observed.view, false, false) != observed.kind) fail(NativeCollectionFailure.TREE_CHANGED)
+            }
             profile?.mark(NativeCollectorStage.SNAPSHOT_COMMIT)
             val snapshot = NativeMaskedSnapshot(ordinal, timestamp, viewport, nodes)
             check()
@@ -520,7 +538,8 @@ internal class AndroidViewReplayCollector(
     private fun knownContainer(view: View): Boolean {
         val type = view.javaClass
         return type === FrameLayout::class.java || type === LinearLayout::class.java ||
-            type === ScrollView::class.java || type === HorizontalScrollView::class.java
+            type === ScrollView::class.java || type === HorizontalScrollView::class.java ||
+            NativeAppCompatViewTypes.isContainer(type.name, type.superclass)
     }
 
     /** Floating division cannot widen a clip by an ulp beyond the encoder's exact containment boundary. */

@@ -67,6 +67,8 @@ dependencies {
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    // Compatibility fixture only. The published SDK has no AppCompat dependency.
+    androidTestImplementation("androidx.appcompat:appcompat:1.8.0")
 }
 
 mavenPublishing {
