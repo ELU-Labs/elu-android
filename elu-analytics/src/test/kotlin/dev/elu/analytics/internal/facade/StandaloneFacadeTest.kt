@@ -656,6 +656,54 @@ class StandaloneFacadeTest {
         assertEquals(1, h.records().filterIsInstance<RuntimeQueuedRecord.Event>().count { it.record.name == "\$performance_sample" })
     }
 
+    @Test fun `network capture can start first session and settles only once`() {
+        val h = harness()
+        assertNull(h.facade.beginNetworkObservation("customer.example"))
+        val document = JSONObject(config()).also { it.getJSONObject("features").put("replay", false) }.toString()
+        h.facade.applyConfiguration(document); h.settle()
+        assertNull(h.owner.snapshot().get().state.identity.session)
+        val observation = checkNotNull(h.facade.beginNetworkObservation("customer.example"))
+        observation.complete(mapOf("\$network_status_code" to 200)); observation.complete(emptyMap()); h.settle()
+        assertEquals(listOf("event:\$network_request"), h.queued())
+        assertTrue(h.owner.snapshot().get().state.identity.session != null)
+    }
+
+    @Test fun `network requests cannot cross accepted consent identity reset config or lifecycle changes`() {
+        for (change in listOf<(StandaloneFacade) -> Unit>(
+            { it.optOut(); it.optIn(null, null) }, { it.identify("other-user", null) },
+            { it.reset() }, { it.applyConfiguration(config()) },
+            { it.nativeReplayLifecycleChanged(false); it.nativeReplayLifecycleChanged(true) },
+        )) {
+            val h = harness(); h.facade.applyConfiguration(config()); h.settle()
+            val observation = checkNotNull(h.facade.beginNetworkObservation("customer.example"))
+            change(h.facade)
+            observation.complete(mapOf("\$network_status_code" to 200)); h.settle()
+            assertTrue(h.records().filterIsInstance<RuntimeQueuedRecord.Event>().none { it.record.name == "\$network_request" })
+        }
+    }
+
+    @Test fun `network process cap is shared by observations and not renewed by reset or consent`() {
+        val h = harness(networkConfigHost = "localhost"); h.facade.applyConfiguration(config()); h.settle()
+        assertNull(h.facade.beginNetworkObservation("elu.dev"))
+        assertNull(h.facade.beginNetworkObservation("ingest.elu.dev"))
+        assertNull(h.facade.beginNetworkObservation("localhost"))
+        repeat(200) { checkNotNull(h.facade.beginNetworkObservation("customer.example")) }
+        assertNull(h.facade.beginNetworkObservation("customer.example"))
+        h.facade.reset(); h.facade.optOut(); h.facade.optIn(null, null); h.settle()
+        assertNull(h.facade.beginNetworkObservation("customer.example"))
+    }
+
+    @Test fun `network cannot attach completion to a session begun by different activity`() {
+        val h = harness(); h.facade.applyConfiguration(config()); h.settle()
+        val original = checkNotNull(h.facade.beginNetworkObservation("customer.example"))
+        h.facade.capture("other activity", null, Date(NOW_MS)); h.settle()
+        original.complete(emptyMap()); h.settle()
+        assertEquals(listOf("event:other activity"), h.queued())
+        val current = checkNotNull(h.facade.beginNetworkObservation("customer.example"))
+        current.complete(mapOf("\$network_status_code" to 200)); h.settle()
+        assertEquals(listOf("event:other activity", "event:\$network_request"), h.queued())
+    }
+
     // ---- harness -------------------------------------------------------------
 
     private fun harness(
@@ -667,6 +715,7 @@ class StandaloneFacadeTest {
         onOpened: (Boolean) -> Unit = {},
         backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
         facadeLane: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor(),
+        networkConfigHost: String? = null,
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -708,6 +757,7 @@ class StandaloneFacadeTest {
                 bufferLimit = bufferLimit,
                 onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
                 lane = facadeLane,
+                networkConfigHost = networkConfigHost,
             )
         facades += facade
         if (autoStart) facade.start()

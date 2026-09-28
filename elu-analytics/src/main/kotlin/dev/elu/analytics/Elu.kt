@@ -90,6 +90,11 @@ public object Elu {
         sink?.capture(event, properties, Date())
     }
 
+    /** Original sink only; installing the customer interceptor never starts another SDK. */
+    @JvmSynthetic
+    internal fun beginNetworkObservation(host: String): dev.elu.analytics.internal.network.NativeNetworkObservation? =
+        sink?.beginNetworkObservation(host)
+
     /** Identity is customer-supplied only — ELU never auto-identifies. */
     @JvmStatic
     @JvmOverloads

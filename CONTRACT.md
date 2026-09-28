@@ -128,6 +128,22 @@ explicit release-scope decisions, not silently completed parity claims.
 
 ## Exceptions and native performance
 
+Customer-installed `EluOkHttpInterceptor` observes that client's requests only.
+General capture authority, consent and original identity/session/configuration
+must remain current through durable enqueue; replay network-detail permission
+does not authorize or disable these independent analytics events. The native
+`$network_request` uses the shared method/status/response-time/initiator/failure
+fields but omits URL/path, headers, bodies and exception messages. Response-time
+ends at headers, with original response/failure and body ownership preserved.
+The shared bound is 200 admitted observations per SDK process lifetime, never
+renewed by identity/reset/consent changes; a process restart resets the bound.
+ELU-owned/configuration hosts are excluded. Pending configuration, background
+transitions and stale contexts drop observations; no later user inherits them.
+
+Request telemetry preserves an existing session's last activity and cannot
+extend its idle timeout. An originally sessionless request may create the first
+actual capture session; a later session or expired original session rejects it.
+
 `captureException` is explicit reporting. This candidate does not install an
 automatic uncaught-exception/crash handler. Exception messages, stacks and
 customer properties can contain sensitive data; callers control what they send.

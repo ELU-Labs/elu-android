@@ -273,6 +273,10 @@ internal class StandaloneRuntime(
     internal fun capturePerformance(properties: Map<String, Any>, expectation: RuntimeCaptureExpectation): Future<RuntimeCaptureResult> =
         submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$performance_sample", now(), properties, versions, expectation))
 
+    internal fun captureNetwork(properties: Map<String, Any>, expectation: RuntimeNetworkExpectation): Future<RuntimeCaptureResult> =
+        submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$network_request", now(), properties, versions,
+            networkExpectation = expectation))
+
     fun captureException(
         throwable: Throwable,
         properties: Map<String, Any?> = emptyMap(),

@@ -17,6 +17,15 @@ unknown-subclass and API 29 boundaries remain. New AppCompat 1.8.0 instrumentati
 real optimized consumer behavior and exact-artifact rendering are still unrun;
 the prior device/R8 results below do not qualify this expansion.
 
+Explicit customer OkHttp instrumentation is implemented as a separate source
+slice. Its numeric `$network_request` telemetry uses general event authority and
+original request-start identity/consent/configuration fences, with a shared
+200-observation process-lifetime bound. No global hook, URLs or bodies are
+captured. The current focused HTTP/facade/transaction suite passes 67 JVM tests,
+including idle-session preservation across a durable reopen.
+The ABI ledger and exact artifact/consumer qualification are still pending and
+remain separate from the historical results below.
+
 The prior consent candidate retains the latest pre-setup choice, commits it before
 lifecycle startup, and prevents a later opt-in from admitting activity submitted
 during an earlier denial. Its local host verification passed 818 JVM tests,

@@ -20,7 +20,7 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "b64e17d6bc733540bf027ed60f6d0173e01dc259938dc6c4b9a81c6599480bd6",
+        "5e9cf975a5c7115cabf2da4a1ba0d35c2583f2816ebe6d1ad3bd278463d6886b",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
@@ -628,6 +628,54 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         errors.append("native authority must retain its single original accounting settlement call")
 
 
+def verify_network_observer_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    """Keep explicit customer instrumentation separate from the SDK transport and replay grants."""
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    public = load_text(root, base / "EluOkHttpInterceptor.kt")
+    observer = load_text(root, base / "internal/network/NativeNetworkInterceptor.kt")
+    facade = load_text(root, base / "internal/facade/StandaloneFacade.kt")
+    owner = load_text(root, OWNER)
+    if ("NativeNetworkInterceptor(Elu::beginNetworkObservation)" not in public or
+            "delegate.intercept(chain)" not in public or "OkHttpClient" in public):
+        errors.append("network instrumentation must remain an explicit customer interceptor")
+    fields = set(re.findall(r'"\\\$(network_[a-z_]+)"\s+to', observer))
+    if fields != {"network_method", "network_status_code", "network_response_time_ms",
+                  "network_initiator", "network_failed"}:
+        errors.append("network observation must retain only the five reviewed request metrics")
+    if (observer.count("chain.proceed(request)") != 1 or
+            re.search(r"\.(?:body|headers?|encodedPath|encodedQuery|query|fragment)\b", observer) or
+            "url.toString" in observer or "throw failure" not in observer or
+            "completed.compareAndSet(false, true)" not in observer or
+            'host == "elu.dev" || host.endsWith(".elu.dev")' not in observer):
+        errors.append("network observation must preserve one proceed, caller results, privacy and SDK exclusion")
+    admission = facade.split("override fun beginNetworkObservation", 1)[-1].split("// ---- properties", 1)[0]
+    if not re.search(r"networkObservations\s*>=\s*200\b", admission):
+        errors.append("network observation must retain the process admission cap")
+    for required in ["networkObservations++", "value != networkConfigHost",
+                     "if (networkContext() != original) return@submit", "networkContext() == original",
+                     "!hasCurrentCapture()", "isOptedOut()", "!nativeLifecycleEligible",
+                     "pendingNativeOperations != 0", "pendingIdentityOperations != 0", "pendingFlagOperations != 0",
+                     "session?.id, session?.startedAt, flagIntentRevision, consentIntentRevision, nativeIntentEpoch"]:
+        if required not in admission:
+            errors.append("network observation must retain its bounded original capture and consent context")
+    if "captureNetwork" in admission.replace(".runtime.captureNetwork", ""):
+        errors.append("network observation must not consume replay request-detail permission")
+    durable = owner.split("fun originalContextMatches()", 1)[-1].split("val mergedProperties", 1)[0]
+    for required in ["command.networkExpectation", "before.state.identity.revision == expected.identityRevision",
+                     "before.state.identity.contextRevision == expected.contextRevision",
+                     "before.state.identity.session?.id == expected.sessionId",
+                     "before.state.identity.session?.startedAt == expected.sessionStartedAt && expected.isCurrent()"]:
+        if required not in durable:
+            errors.append("network durable enqueue must recheck original identity, session and authority")
+    if "commitPreparedAppend(transaction, created)\n                        if (!originalContextMatches()) throw PassiveCaptureWithdrawn()" not in owner:
+        errors.append("network durable enqueue must roll back final context withdrawal")
+    for required in ["val passive = command.expectation != null || command.networkExpectation?.sessionId != null",
+                     "if (passive) RuntimeEventSessionUpdate.Preserve",
+                     "passiveCaptureAt = command.occurredAt.takeIf { passive }"]:
+        if required not in owner:
+            errors.append("network durable enqueue must preserve existing session activity")
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
     verify_pins(root, errors)
@@ -636,6 +684,7 @@ def verify(root: pathlib.Path) -> list[str]:
     verify_lifecycle_bootstrap(root, errors)
     verify_prepared_replay_boundary(root, errors)
     verify_native_authority_boundary(root, errors)
+    verify_network_observer_boundary(root, errors)
     return errors
 
 

@@ -133,6 +133,44 @@ which Android 9 and later block by default: add
 debug-only manifest (`src/debug/AndroidManifest.xml`), as the sample app does,
 or use a debug network security configuration.
 
+## Customer OkHttp request metrics (unreleased source)
+
+Installing the interceptor explicitly enables numeric request metrics for that
+customer client. It never installs a global network hook. Install it once as an
+application interceptor on your existing OkHttp 4.12-compatible client:
+
+```kotlin
+import dev.elu.analytics.EluOkHttpInterceptor
+
+val client = existingClient.newBuilder()
+    .addInterceptor(EluOkHttpInterceptor())
+    .build()
+```
+
+The SDK emits `$network_request` with `$network_method`, `$network_status_code`,
+`$network_response_time_ms`, `$network_initiator: "okhttp"` and `$network_failed`.
+Timing ends when response headers return, not when the body finishes downloading.
+Unlike web request telemetry, native telemetry omits URLs and paths entirely;
+headers, bodies, query strings, fragments and exception messages are never read.
+Unknown methods become `UNKNOWN`. Requests to ELU-owned hosts and the configured
+SDK configuration host are excluded. The interceptor returns the original
+response or throws the original failure, and never reads or closes its body.
+
+Requests need current capture authority and consent at both start and completion.
+They are dropped across identity, session, consent, configuration or foreground
+transitions and are checked again during the durable queue transaction. Pending
+configuration is not buffered for later telemetry. The limit is 200 admitted
+observations per SDK process lifetime, shared by all installed ELU interceptors;
+identity/reset/consent changes do not renew it. Dropped observations consume the
+bound too; only process restart resets it. Replay request-detail permission is
+separate and is not needed for these metrics. A new observation can start the
+installation's first actual analytics session and therefore its replay audience
+history. These events are identity-linked diagnostics and belong in your privacy
+disclosure. Other HTTP libraries and native redirects/individual retry attempts
+are not automatically instrumented.
+Once a session exists, automatic request metrics preserve its last user activity
+time; background polling cannot keep an idle session alive.
+
 ## Native performance (unreleased source)
 
 Performance sampling is disabled by default. Opt in explicitly during setup:

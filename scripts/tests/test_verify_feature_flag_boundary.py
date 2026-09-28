@@ -45,6 +45,48 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_network_observer_cannot_expand_content_or_repeat_the_request(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/network/NativeNetworkInterceptor.kt"
+        original = path.read_text()
+        changes = [
+            ('"\\$network_failed" to failed,', '"\\$network_failed" to failed, "\\$network_url" to "private",'),
+            ("val request = chain.request()", "val request = chain.request(); request.body"),
+            ("val response = chain.proceed(request)", "chain.proceed(request); val response = chain.proceed(request)"),
+            ('host == "elu.dev" || host.endsWith(".elu.dev")', "false"),
+        ]
+        for before, after in changes:
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("network observation", self.run_guard().stderr)
+        path.write_text(original)
+
+    def test_network_observer_cannot_drop_admission_boundaries(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/facade/StandaloneFacade.kt"
+        original = path.read_text()
+        for before, after in [("networkObservations >= 200", "networkObservations >= 2000"),
+                              ("if (networkContext() != original) return@submit", ""),
+                              ("value != networkConfigHost", "true"),
+                              ("session?.id, session?.startedAt, flagIntentRevision, consentIntentRevision, nativeIntentEpoch",
+                               "session?.id, session?.startedAt, 0, 0, nativeIntentEpoch")]:
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("network observation", self.run_guard().stderr)
+        path.write_text(original)
+
+    def test_network_observer_requires_transaction_current_session_and_final_rollback(self) -> None:
+        path = self.root / BOUNDARY.OWNER
+        original = path.read_text()
+        for before in ["before.state.identity.session?.startedAt == expected.sessionStartedAt && expected.isCurrent()",
+                       "command.expectation != null || command.networkExpectation?.sessionId != null",
+                       "if (!originalContextMatches()) throw PassiveCaptureWithdrawn()"]:
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, "true"))
+                self.assertIn("network durable enqueue", self.run_guard().stderr)
+        path.write_text(original)
+
     def test_standalone_must_not_supply_replay_proof(self) -> None:
         stack = self.root / BOUNDARY.STACK
         stack.write_text(stack.read_text() + "\nval readbackProvenReplayTransports = setOf(pair)\n")

@@ -40,6 +40,8 @@ internal interface EluFacadeSink {
 
     fun viewPrivacyChanged() = Unit
 
+    fun beginNetworkObservation(host: String): dev.elu.analytics.internal.network.NativeNetworkObservation? = null
+
     fun isOptedOut(): Boolean
 
     fun captureException(

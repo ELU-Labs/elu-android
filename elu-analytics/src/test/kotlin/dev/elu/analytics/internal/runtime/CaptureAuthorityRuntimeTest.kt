@@ -525,6 +525,66 @@ class CaptureAuthorityRuntimeTest {
         assertEquals(3, user.snapshot.queuedCount)
     }
 
+    @Test fun `network completion preserves user idle boundary across reopen and cannot revive timeout`() {
+        val backing = FakeRuntimeQueueBacking()
+        val clock = FakeCaptureClock(NOW_MS, 1_000L)
+        val identifiers = CountingIdentifiers()
+        val owner = open(backing, clock, identifiers = identifiers)
+        val short = JSONObject(config()).apply { getJSONObject("session").put("idleTimeoutSeconds", 60) }.toString()
+        owner.submitCaptureAuthority(short, privacy(5)).await()
+        val first = owner.capture(command("activity", NOW)).await() as RuntimeCaptureResult.Accepted
+        val original = first.snapshot.state.identity
+        val expected = RuntimeNetworkExpectation(original.revision, original.contextRevision,
+            original.session!!.id, original.session.startedAt) { true }
+        clock.wallEpochMillis += 59_000
+        val sample = owner.capture(command("\$network_request", RuntimeWallTimestamps.rfc3339(clock.wallEpochMillis))
+            .copy(networkExpectation = expected)).await() as RuntimeCaptureResult.Accepted
+        assertEquals(original, sample.snapshot.state.identity)
+        assertEquals(original.session.id, sample.record.record.sessionId)
+        owner.closeAsync().await()
+        val reopened = open(backing, clock, identifiers = identifiers)
+        assertEquals(original, reopened.snapshot().await().state.identity)
+        reopened.submitCaptureAuthority(short, privacy(5)).await()
+        clock.wallEpochMillis = NOW_MS + 61_000
+        val expired = reopened.capture(command("\$network_request", RuntimeWallTimestamps.rfc3339(clock.wallEpochMillis))
+            .copy(networkExpectation = expected)).await()
+        assertTrue(expired is RuntimeCaptureResult.Rejected)
+        val user = reopened.capture(command("next activity", RuntimeWallTimestamps.rfc3339(clock.wallEpochMillis))).await() as RuntimeCaptureResult.Accepted
+        assertNotEquals(original.session.id, user.record.record.sessionId)
+        assertEquals(3, user.snapshot.queuedCount)
+    }
+
+    @Test fun `network context is atomic with first session and final withdrawal rolls back marker`() {
+        val backing = FakeRuntimeQueueBacking(); val owner = open(backing)
+        owner.submitCaptureAuthority(config(), privacy(5)).await()
+        val identity = owner.snapshot().await().state.identity
+        val expected = RuntimeNetworkExpectation(identity.revision, identity.contextRevision, null, null) { true }
+        val checks = AtomicInteger()
+        val withdrawn = owner.capture(command("\$network_request", NOW).copy(networkExpectation =
+            expected.copy(isCurrent = { checks.incrementAndGet() < 3 }))).await()
+        assertTrue(withdrawn is RuntimeCaptureResult.Rejected)
+        assertEquals(0, owner.snapshot().await().queuedCount)
+        assertEquals(RuntimeReplayAudienceState.Unseen, backing.core!!.replayAudience)
+        val accepted = owner.capture(command("\$network_request", NOW).copy(networkExpectation = expected)).await() as RuntimeCaptureResult.Accepted
+        assertTrue(backing.core!!.replayAudience is RuntimeReplayAudienceState.FirstSession)
+        assertEquals(accepted.record.record.sessionId, accepted.snapshot.state.identity.session!!.id)
+        assertTrue(owner.capture(command("\$network_request", NOW).copy(networkExpectation = expected)).await() is RuntimeCaptureResult.Rejected)
+        assertEquals(1, owner.snapshot().await().queuedCount)
+    }
+
+    @Test fun `network guards reject foreign identity session and unrelated event use`() {
+        val owner = open(); owner.submitCaptureAuthority(config(), privacy(5)).await()
+        val first = owner.capture(command("activity", NOW)).await() as RuntimeCaptureResult.Accepted
+        val current = first.snapshot.state.identity
+        val expected = RuntimeNetworkExpectation(current.revision, current.contextRevision, current.session!!.id, current.session.startedAt) { true }
+        for (wrong in listOf(expected.copy(identityRevision = 99), expected.copy(contextRevision = 99),
+            expected.copy(sessionId = "other"), expected.copy(sessionStartedAt = LATER))) {
+            assertTrue(owner.capture(command("\$network_request", NOW).copy(networkExpectation = wrong)).await() is RuntimeCaptureResult.Rejected)
+        }
+        assertTrue(owner.capture(command("customer event", NOW).copy(networkExpectation = expected)).await() is RuntimeCaptureResult.Rejected)
+        assertEquals(1, owner.snapshot().await().queuedCount)
+    }
+
     @Test fun `passive sample rejects changed context and withdrawal at final transaction boundary`() {
         val owner = open()
         owner.submitCaptureAuthority(config(), privacy(5)).await()

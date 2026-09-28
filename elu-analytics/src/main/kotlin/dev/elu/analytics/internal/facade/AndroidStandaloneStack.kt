@@ -121,6 +121,7 @@ internal object AndroidStandaloneStack {
             },
             deliverCallback = { callback -> mainThread.post(callback) },
             configurationGate = gate,
+            networkConfigHost = java.net.URI(configHost).host,
             onOpened = {
                 if (performanceOptions.enabled && !closing.get()) {
                     val monitor = dev.elu.analytics.internal.performance.AndroidPerformanceMonitor(

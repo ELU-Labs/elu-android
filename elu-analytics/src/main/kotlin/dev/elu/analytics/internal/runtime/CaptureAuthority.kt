@@ -78,6 +78,15 @@ internal data class RuntimeCaptureExpectation(
     val isCurrent: () -> Boolean,
 )
 
+/** Request-start state, checked again inside the final event transaction. */
+internal data class RuntimeNetworkExpectation(
+    val identityRevision: Long,
+    val contextRevision: Long,
+    val sessionId: String?,
+    val sessionStartedAt: String?,
+    val isCurrent: () -> Boolean,
+)
+
 internal data class RuntimeCaptureCommand(
     val kind: RuntimeEventKind,
     val name: String,
@@ -85,6 +94,7 @@ internal data class RuntimeCaptureCommand(
     val properties: Map<String, Any?>,
     val versions: RuntimeVersions,
     val expectation: RuntimeCaptureExpectation? = null,
+    val networkExpectation: RuntimeNetworkExpectation? = null,
 )
 
 internal enum class RuntimeCaptureRejection {

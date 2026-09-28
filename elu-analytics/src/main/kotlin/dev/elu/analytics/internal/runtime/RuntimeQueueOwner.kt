@@ -2250,13 +2250,21 @@ internal class RuntimeQueueOwner private constructor(
                         }
                         val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
                         val session = planCaptureSession(before.state, command.occurredAt, authority)
-                        fun originalContextMatches(): Boolean = command.expectation?.let { expected ->
+                        fun originalContextMatches(): Boolean = (command.expectation?.let { expected ->
                             before.state.identity.revision == expected.identityRevision &&
                                 before.state.identity.contextRevision == expected.contextRevision &&
                                 before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
                                 before.state.identity.session?.backgroundedAt == null &&
                                 session.id == expected.sessionId && expected.isCurrent()
-                        } ?: true
+                        } ?: true) && (command.networkExpectation?.let { expected ->
+                            before.state.identity.revision == expected.identityRevision &&
+                                before.state.identity.contextRevision == expected.contextRevision &&
+                                before.state.identity.session?.id == expected.sessionId &&
+                                (expected.sessionId == null ||
+                                    (before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
+                                        before.state.identity.session?.backgroundedAt == null && session.id == expected.sessionId)) &&
+                                before.state.identity.session?.startedAt == expected.sessionStartedAt && expected.isCurrent()
+                        } ?: true)
                         if (!originalContextMatches()) return@transaction CaptureCommit(
                             RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
                         val mergedProperties =
@@ -2272,14 +2280,17 @@ internal class RuntimeQueueOwner private constructor(
                                 properties = mergedProperties,
                                 versions = command.versions,
                             )
+                        // Automatic telemetry must not prolong a live user session. A network
+                        // request admitted before any session exists may still create the first one.
+                        val passive = command.expectation != null || command.networkExpectation?.sessionId != null
                         val created =
                             prepareAppend(
                                 before,
                                 AppendRequest.Events(
-                                    if (command.expectation == null) RuntimeEventSessionUpdate.Replace(before.state.identity.session?.id, session)
-                                    else RuntimeEventSessionUpdate.Preserve, // Internal sampling must not prolong user activity.
+                                    if (passive) RuntimeEventSessionUpdate.Preserve
+                                    else RuntimeEventSessionUpdate.Replace(before.state.identity.session?.id, session),
                                     listOf(draft),
-                                    passiveCaptureAt = command.expectation?.let { command.occurredAt },
+                                    passiveCaptureAt = command.occurredAt.takeIf { passive },
                                 ),
                                 ReplayQueueStore.state(transaction),
                             )
@@ -2460,6 +2471,8 @@ internal class RuntimeQueueOwner private constructor(
         // Diagnostic events are runtime-internal and never admitted through a capture command.
         if (command.kind == RuntimeEventKind.DIAGNOSTIC) return false
         if (command.expectation != null && (command.name != "\$performance_sample" || command.kind != RuntimeEventKind.CAPTURE)) return false
+        if (command.networkExpectation != null && (command.expectation != null ||
+                command.name != "\$network_request" || command.kind != RuntimeEventKind.CAPTURE)) return false
         val nameLength = command.name.codePointCount(0, command.name.length)
         if (nameLength !in 1..512) return false
         if (!hasWellFormedUnicode(command.name)) return false

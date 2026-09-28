@@ -138,6 +138,7 @@ internal class StandaloneFacade(
     private val onCloseRequested: () -> Unit = {},
     private val startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
     private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
+    private val networkConfigHost: String? = null,
     private val lane: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "elu-facade").apply { isDaemon = true }
     },
@@ -191,6 +192,8 @@ internal class StandaloneFacade(
     @Volatile private var closed = false
     @Volatile private var requestedOptOut = false
     private var consentIntentRevision = 0L // guarded by projectionLock
+    // One process-owned facade; no identity, consent or configuration operation resets this cap.
+    private var networkObservations = 0
     @Volatile private var performanceConfiguration: dev.elu.analytics.internal.config.V1CapturePerformance? = null
 
     @Volatile private var identity: IdentityState? = null
@@ -565,6 +568,49 @@ internal class StandaloneFacade(
                     original.contextRevision, original.sessionId) { performanceContext() == original }).await()
             if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
         }
+    }
+
+    override fun beginNetworkObservation(host: String): dev.elu.analytics.internal.network.NativeNetworkObservation? {
+        fun eligibleHost(value: String): Boolean = value != networkConfigHost &&
+            !dev.elu.analytics.internal.network.NativeNetworkInterceptor.isOwnedSdkHost(value)
+        if (!eligibleHost(host)) return null
+        val original = synchronized(projectionLock) {
+            if (networkObservations >= 200) return null
+            val observed = networkContext() ?: return null
+            networkObservations++
+            observed
+        }
+        return dev.elu.analytics.internal.network.NativeNetworkObservation(::eligibleHost) { properties ->
+            val detached = properties.toMap()
+            submit {
+                if (networkContext() != original) return@submit
+                val expectation = dev.elu.analytics.internal.runtime.RuntimeNetworkExpectation(
+                    original.identityRevision, original.contextRevision, original.sessionId, original.sessionStartedAt,
+                ) { networkContext() == original }
+                val result = requireStack().runtime.captureNetwork(detached, expectation).await()
+                if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
+            }
+        }
+    }
+
+    private fun networkContext(): dev.elu.analytics.internal.network.NativeNetworkContext? = synchronized(projectionLock) {
+        if (closed || closeRequested.get() || isOptedOut() || !nativeLifecycleEligible ||
+            pendingNativeOperations != 0 || pendingFlagOperations != 0 || pendingIdentityOperations != 0 ||
+            !hasCurrentCapture()) return null
+        val current = identity ?: return null
+        val session = current.session
+        if (session != null) {
+            if (session.lifecycle != dev.elu.analytics.internal.core.SessionLifecycle.ACTIVE || session.backgroundedAt != null) return null
+            val now = wallClock()
+            val lastActivity = java.time.Instant.parse(session.lastActivityAt).toEpochMilli()
+            val started = java.time.Instant.parse(session.startedAt).toEpochMilli()
+            if (now < lastActivity || now - lastActivity >= session.timeoutSeconds * 1_000L ||
+                now < started || now - started >= session.maximumDurationSeconds * 1_000L) return null
+        }
+        val source = if (configurationGate == null) configDocument ?: return null
+            else appliedConfiguration?.takeIf { it.isCurrent() }?.token ?: return null
+        dev.elu.analytics.internal.network.NativeNetworkContext(source, current.revision, current.contextRevision,
+            session?.id, session?.startedAt, flagIntentRevision, consentIntentRevision, nativeIntentEpoch)
     }
 
     // ---- properties ----------------------------------------------------------
