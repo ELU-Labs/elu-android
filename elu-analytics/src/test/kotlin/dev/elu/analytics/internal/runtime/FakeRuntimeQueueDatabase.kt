@@ -52,6 +52,17 @@ private class FakeRuntimeQueueDatabase(
         }
     }
 
+    override fun ensureDiagnosticsSchema() = synchronized(backing) {
+        check(!closed)
+        val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
+        if (backing.databaseSchemaVersion <= RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) {
+            check(backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET
+            backing.core = checkNotNull(backing.core).copy(diagnostics = RuntimeDiagnosticsState())
+            backing.advanceCommittedMutationGeneration()
+        }
+    }
+
     override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) =
         synchronized(backing) {
             check(!closed) { "Fake database is closed" }
@@ -60,7 +71,7 @@ private class FakeRuntimeQueueDatabase(
                     check(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
                     backing.flagRows[initialAuthority.key] = initialAuthority.deepCopy()
                     backing.databaseSchemaVersion = (when (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt()) { 1 -> 2; 5 -> 6; else -> 4 }) +
-                        if (backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
+                        runtimeDatabaseFeatureOffset(backing.databaseSchemaVersion.toLong())
                     backing.advanceCommittedMutationGeneration()
                 }
                 RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_REPLAY, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_NATIVE_REPLAY -> Unit
@@ -75,7 +86,7 @@ private class FakeRuntimeQueueDatabase(
                 check(initialState.key == "state")
                 backing.replayRows[initialState.key] = initialState.deepCopy()
                 backing.databaseSchemaVersion = (if (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()) == 1L) 3 else 4) +
-                    if (backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
+                    runtimeDatabaseFeatureOffset(backing.databaseSchemaVersion.toLong())
                 backing.advanceCommittedMutationGeneration()
             }
             3, 4, 5, 6 -> Unit
@@ -95,7 +106,7 @@ private class FakeRuntimeQueueDatabase(
                 check(CoreStateCodec.decode(checkNotNull(tx.readCore()).stateJson).stream.streamId == initial.streamId)
                 tx.putReplayRow(initialAuthority)
                 (tx as FakeTransaction).schemaVersion = (if (runtimeBaseDatabaseVersion(tx.schemaVersion.toLong()) == 3L) 5 else 6) +
-                    if (tx.schemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
+                    runtimeDatabaseFeatureOffset(tx.schemaVersion.toLong())
             }
         }
     }

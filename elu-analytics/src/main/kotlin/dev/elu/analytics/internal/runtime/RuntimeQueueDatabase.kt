@@ -52,6 +52,7 @@ internal data class RuntimeStoredCore(
     val queueCount: Long,
     val queueBytes: Long,
     val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
+    val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
 )
 
 internal data class RuntimeStoredRecord(
@@ -122,6 +123,9 @@ internal interface RuntimeQueueTransaction {
 }
 
 internal interface RuntimeQueueDatabase : Closeable {
+    /** Explicit local opt-in first validates the whole owned store, then adds a closed epoch. */
+    fun ensureDiagnosticsSchema()
+
     /** Existing payloads must be validated before this conservative history upgrade. */
     fun ensureReplayAudienceSchema()
 

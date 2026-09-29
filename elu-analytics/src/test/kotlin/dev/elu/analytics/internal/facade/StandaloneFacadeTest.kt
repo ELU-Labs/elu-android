@@ -510,6 +510,54 @@ class StandaloneFacadeTest {
     }
 
     @Test
+    fun `changed denial persists even when standalone diagnostics metadata withdrawal is unavailable`() {
+        val backing = FakeRuntimeQueueBacking(); var rejectedMetadataWrites = 0
+        val h = harness(autoStart = false, backing = backing, databaseDecorator = { database ->
+            object : dev.elu.analytics.internal.runtime.RuntimeQueueDatabase by database {
+                override fun <T> transaction(block: (dev.elu.analytics.internal.runtime.RuntimeQueueTransaction) -> T): T =
+                    database.transaction { tx ->
+                        block(object : dev.elu.analytics.internal.runtime.RuntimeQueueTransaction by tx {
+                            override fun updateCore(core: dev.elu.analytics.internal.runtime.RuntimeStoredCore) {
+                                if (backing.core?.diagnostics?.epoch != null &&
+                                    core.diagnostics == dev.elu.analytics.internal.runtime.RuntimeDiagnosticsState() &&
+                                    !dev.elu.analytics.internal.core.CoreStateCodec.decode(core.stateJson).identity.optedOut) {
+                                    rejectedMetadataWrites++
+                                    throw IllegalStateException("metadata-only withdrawal unavailable")
+                                }
+                                tx.updateCore(core)
+                            }
+                        })
+                    }
+            }
+        })
+        h.owner.configureDiagnostics(dev.elu.analytics.internal.runtime.RuntimeDiagnosticsConfiguration(true, true),
+            dev.elu.analytics.internal.runtime.RuntimeDiagnosticsClock {
+                dev.elu.analytics.internal.runtime.RuntimeDiagnosticsClockReading(1, NOW_MS, 1_000, 1_000)
+            }).get(5, TimeUnit.SECONDS)
+        h.facade.start(); h.facade.applyConfiguration(config()); h.settle()
+        assertTrue(h.owner.diagnosticsEpoch() != null)
+        h.facade.optOut(); assertTrue(h.facade.isOptedOut()); h.settle()
+        assertTrue(h.owner.snapshot().get().state.identity.optedOut)
+        assertNull(backing.core!!.diagnostics.epoch)
+        assertEquals(0, rejectedMetadataWrites)
+    }
+
+    @Test
+    fun `same-choice grant still closes previous diagnostic interval`() {
+        val h = harness(autoStart = false)
+        h.owner.configureDiagnostics(dev.elu.analytics.internal.runtime.RuntimeDiagnosticsConfiguration(true, true),
+            dev.elu.analytics.internal.runtime.RuntimeDiagnosticsClock {
+                dev.elu.analytics.internal.runtime.RuntimeDiagnosticsClockReading(1, NOW_MS, 1_000, 1_000)
+            }).get(5, TimeUnit.SECONDS)
+        h.facade.start(); h.facade.applyConfiguration(config()); h.settle()
+        val original = checkNotNull(h.owner.diagnosticsEpoch())
+        h.facade.optIn(null, null); h.settle()
+        val current = checkNotNull(h.owner.diagnosticsEpoch())
+        assertTrue(original.id != current.id)
+        assertFalse(h.facade.isOptedOut())
+    }
+
+    @Test
     fun `opt in restores consent after durable storage and captures its event`() {
         val harness = harness()
         harness.facade.applyConfiguration(config())
@@ -729,6 +777,7 @@ class StandaloneFacadeTest {
         autoStart: Boolean = true,
         onOpened: (Boolean) -> Unit = {},
         backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),
+        databaseDecorator: (dev.elu.analytics.internal.runtime.RuntimeQueueDatabase) -> dev.elu.analytics.internal.runtime.RuntimeQueueDatabase = { it },
         facadeLane: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor(),
         networkConfigHost: String? = null,
         onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
@@ -737,7 +786,7 @@ class StandaloneFacadeTest {
             RuntimeQueueOwner.open(
                 ownershipKey = "facade-${keyCounter.incrementAndGet()}",
                 limits = RuntimeQueueLimits(10_000, 16_777_216),
-                databaseFactory = backing::connection,
+                databaseFactory = { databaseDecorator(backing.connection()) },
                 legacyStateLoader = ::initialState,
                 trustedSiteKey = SITE_KEY,
                 captureClock = object : RuntimeCaptureClock {

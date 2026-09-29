@@ -67,6 +67,34 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         validateSchemaObjects(sqlite, version + RUNTIME_AUDIENCE_SCHEMA_OFFSET)
     }
 
+    override fun ensureDiagnosticsSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) return
+        check(version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) { "Diagnostics require validated audience schema" }
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            check(SQLiteTransaction(sqlite).readCore() != null) { "Diagnostics require owned core" }
+            sqlite.execSQL(CREATE_DIAGNOSTICS)
+            writeDiagnostics(sqlite, RuntimeDiagnosticsState(), insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain diagnostics schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain diagnostics schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET)
+    }
+
     override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) {
         require(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
         ensureAdditiveSchema(false, initialAuthority.key, initialAuthority.storageSchemaVersion, initialAuthority.payload)
@@ -94,7 +122,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             }
             return
         }
-        val target = (if (baseVersion == 3L) 5 else 6) + if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
+        val target = (if (baseVersion == 3L) 5 else 6) + runtimeDatabaseFeatureOffset(version)
         sqlite.beginTransaction()
         var markedSuccessful = false
         try {
@@ -134,7 +162,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         val alreadyPresent = if (replay) baseVersion in setOf(3L, 4L, 5L, 6L) else baseVersion in setOf(2L, 4L, 6L)
         if (alreadyPresent) return
         val target = (if (replay) { if (baseVersion == 1L) 3 else 4 } else { when (baseVersion) { 1L -> 2; 5L -> 6; else -> 4 } }) +
-            if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RUNTIME_AUDIENCE_SCHEMA_OFFSET else 0
+            runtimeDatabaseFeatureOffset(version)
         sqlite.beginTransaction()
         var markedSuccessful = false
         try {
@@ -251,6 +279,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                 if (!cursor.moveToFirst()) {
                     if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_AUDIENCE_SCHEMA_OFFSET && readAudience(sqlite) != null)
                         corrupt("Audience history exists without an owned core")
+                    if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET && readDiagnostics(sqlite) != null)
+                        corrupt("Diagnostics history exists without an owned core")
                     return null
                 }
                 val core =
@@ -261,6 +291,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         replayAudience = if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
                             readAudience(sqlite) ?: corrupt("Missing installation audience history")
                             else RuntimeReplayAudienceState.Unknown,
+                        diagnostics = if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET)
+                            readDiagnostics(sqlite) ?: corrupt("Missing diagnostics state") else RuntimeDiagnosticsState(),
                     )
                 if (cursor.moveToNext()) corrupt("Runtime database contains duplicate core rows")
                 return core
@@ -284,6 +316,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                 }
             sqlite.insertOrThrow(CORE_TABLE, null, values)
             writeAudience(sqlite, core.replayAudience, insert = true)
+            if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) writeDiagnostics(sqlite, core.diagnostics, insert = true)
+            else check(core.diagnostics == RuntimeDiagnosticsState())
             mutated = true
         }
 
@@ -312,6 +346,9 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     writeAudience(sqlite, core.replayAudience, insert = false)
                 }
             } else check(core.replayAudience === RuntimeReplayAudienceState.Unknown)
+            if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET)
+                writeDiagnostics(sqlite, core.diagnostics, insert = false)
+            else check(core.diagnostics == RuntimeDiagnosticsState())
             mutated = true
         }
 
@@ -570,6 +607,29 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     }
 
     internal companion object {
+        private const val DIAGNOSTICS_TABLE = "native_diagnostics"
+        private val CREATE_DIAGNOSTICS = """
+            CREATE TABLE native_diagnostics (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 2048)
+            )
+        """.trimIndent()
+
+        private fun readDiagnostics(sqlite: SQLiteDatabase): RuntimeDiagnosticsState? =
+            sqlite.query(DIAGNOSTICS_TABLE, arrayOf("payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val result = RuntimeDiagnosticsState.decode(cursor.requiredBlob(0, "native_diagnostics.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate diagnostics state")
+                result
+            }
+
+        private fun writeDiagnostics(sqlite: SQLiteDatabase, state: RuntimeDiagnosticsState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("payload", state.encode()) }
+            if (insert) sqlite.insertOrThrow(DIAGNOSTICS_TABLE, null, values)
+            else if (sqlite.update(DIAGNOSTICS_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Diagnostics update did not affect exactly one row")
+        }
+
         private const val AUDIENCE_TABLE = "replay_audience"
         private val CREATE_AUDIENCE = """
             CREATE TABLE replay_audience (
@@ -804,7 +864,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version !in 1L..12L ->
+                version !in 1L..12L && version !in 25L..30L ->
                     throw UnsupportedRuntimeStorageSchemaException(version)
             }
             validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
@@ -816,6 +876,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             val replayPresent = baseVersion in setOf(3L, 4L, 5L, 6L)
             val expected = mutableSetOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
             if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) expected += "table:$AUDIENCE_TABLE"
+            if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) expected += "table:$DIAGNOSTICS_TABLE"
             if (flagsPresent) expected += "table:$FLAG_CACHE_TABLE"
             if (replayPresent) expected += "table:$REPLAY_TABLE"
             val objects = applicationSchemaObjects(sqlite)
@@ -823,6 +884,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             validateTableSql(sqlite, CORE_TABLE, CREATE_CORE)
             validateTableSql(sqlite, QUEUE_TABLE, CREATE_QUEUE)
             if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) validateTableSql(sqlite, AUDIENCE_TABLE, CREATE_AUDIENCE)
+            if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) validateTableSql(sqlite, DIAGNOSTICS_TABLE, CREATE_DIAGNOSTICS)
             if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
             if (replayPresent) validateTableSql(sqlite, REPLAY_TABLE, CREATE_REPLAY)
         }

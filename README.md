@@ -238,6 +238,55 @@ event properties. Include linked performance diagnostics in your app's privacy
 disclosures. Resource overhead, actual frame delivery and customer artifact
 behavior still require release qualification.
 
+## Observed OS startup timing (unreleased source)
+
+Startup timing is a separate default-off option on API 35+:
+
+```kotlin
+import dev.elu.analytics.EluDiagnosticsOptions
+
+// During the existing Application setup, before the first Activity draws:
+Elu.setup(this, "YOUR_SITE_KEY", EluOptions(
+    diagnostics = EluDiagnosticsOptions(enabled = true, launchTimings = true)
+))
+```
+
+The SDK polls Android's public `ApplicationStartInfo` history for a bounded
+foreground interval. It accepts only a unique current-process Activity launch
+first observed incomplete and then observed with an OS first-frame timestamp.
+It leaves the application's completion listener unchanged. At most 16 records
+are read per query, at most 101 queries are attempted, and a 10-second monotonic
+observation budget is checked after each settled query; launches longer than
+30 seconds are omitted. Backgrounding, consent
+or identity changes cancel this observation.
+
+`$native_launch` contains OS monotonic launch/first-frame nanoseconds, duration
+in milliseconds, numeric launch reason/type and fixed platform/source labels.
+The monotonic timestamps are not wall-clock event times. The analytics event uses
+the current receipt time and an existing live session, without extending its
+idle deadline or inheriting groups and super properties. No process identifiers,
+names, Intent, text, stack traces or crash descriptions are sent.
+
+A durable consent/identity interval must already cover the launch, and current
+server `capturePerformance.long_tasks` permission plus general capture authority
+must permit enqueue. First installation, late setup, an already-complete history
+record, uncertain boot/clock continuity or missing current session can therefore
+produce no startup event. This is intentionally incomplete startup coverage,
+not a fabricated duration from SDK setup. API 23–34 has no equivalent collector.
+Disabling either local option, explicit consent operations, identity/reset,
+terminal collection denial and SDK close end the old interval. Ordinary config
+expiry, background and process restart preserve it only while ownership and
+clock continuity remain provable. If storage cannot settle interval withdrawal,
+close fails and the original store remains occupied in that process; an OS query
+that does not settle also fails close instead of claiming physical cleanup. These
+checks do not promise a hard filesystem or OS-query latency bound. A total
+storage-write failure followed by process death cannot be made durable.
+
+This option does not install automatic crash/ANR or uncaught-exception collection.
+Manual `captureException` remains available. The linked startup event requires
+privacy disclosure. Current OS delivery, upgraded SQLite behavior and overhead
+remain exact-artifact emulator and Lab release gates.
+
 ## Identity
 
 ELU never auto-identifies. Identify users yourself when (and only when) you

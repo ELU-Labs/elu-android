@@ -95,6 +95,7 @@ internal data class RuntimeCaptureCommand(
     val versions: RuntimeVersions,
     val expectation: RuntimeCaptureExpectation? = null,
     val networkExpectation: RuntimeNetworkExpectation? = null,
+    val startupMeasurement: dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement? = null,
 )
 
 internal enum class RuntimeCaptureRejection {

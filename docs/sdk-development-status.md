@@ -35,6 +35,17 @@ delivery, API 26/31+ availability, optimized consumer/ABI checks and emulator
 resource overhead remain untested; the previous AAR/device receipts below do not
 qualify this source. No distribution artifact has been rebuilt for this slice.
 
+The pending startup slice adds default-off API 35+ observed incomplete-to-first-frame
+OS launch timing with a persisted consent/identity interval, passive receipt session
+and atomic dedupe. It deliberately omits already-complete or ambiguous history and
+requires current performance long-tasks authority. Automatic crash/ANR collection
+is still absent. Its current focused host run passes 91 JVM tests, including shutdown
+failure, ambiguous epoch opening, delayed authority and consent-order controls.
+The held-clock and durable-denial regressions each fail against the preceding
+implementation and pass with the correction. New SQLite
+instrumentation is authored but not compiled or executed. There is
+no rebuilt distribution artifact or current OS/emulator result for this slice.
+
 The prior consent candidate retains the latest pre-setup choice, commits it before
 lifecycle startup, and prevents a later opt-in from admitting activity submitted
 during an earlier denial. Its local host verification passed 818 JVM tests,

@@ -164,6 +164,8 @@ internal sealed interface RuntimeRecordDraft {
         val expectedSessionId: String,
         val properties: Map<String, Any?>,
         override val versions: RuntimeVersions,
+        /** Fixed numeric OS observations do not inherit customer group context. */
+        val nativeDiagnostic: Boolean = false,
     ) : RuntimeRecordDraft
 
     data class Mutation(

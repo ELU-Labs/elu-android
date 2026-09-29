@@ -18,10 +18,19 @@ public class EluOptions
     ) {
     private var performanceOptions = EluPerformanceOptions()
     public val performance: EluPerformanceOptions get() = performanceOptions
+    private var diagnosticsOptions = EluDiagnosticsOptions()
+    public val diagnostics: EluDiagnosticsOptions get() = diagnosticsOptions
 
     /** Keeps the original setup constructors available to existing compiled callers. */
     @JvmOverloads
     public constructor(performance: EluPerformanceOptions, configHost: String = "https://elu.dev") : this(configHost) {
         performanceOptions = performance
+    }
+
+    /** Additive typed options preserve every original constructor. */
+    @JvmOverloads
+    public constructor(diagnostics: EluDiagnosticsOptions, performance: EluPerformanceOptions = EluPerformanceOptions(),
+        configHost: String = "https://elu.dev") : this(performance, configHost) {
+        diagnosticsOptions = diagnostics
     }
 }

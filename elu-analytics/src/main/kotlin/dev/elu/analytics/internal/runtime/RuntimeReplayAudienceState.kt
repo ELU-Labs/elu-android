@@ -29,6 +29,5 @@ internal const val RUNTIME_AUDIENCE_SCHEMA_OFFSET: Int = 6
 internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE: Int = 7
 
 internal fun runtimeBaseDatabaseVersion(version: Long): Long {
-    if (version !in 1L..12L) throw UnsupportedRuntimeStorageSchemaException(version)
-    return if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) version - RUNTIME_AUDIENCE_SCHEMA_OFFSET else version
+    return version - runtimeDatabaseFeatureOffset(version)
 }

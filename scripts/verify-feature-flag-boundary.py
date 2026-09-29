@@ -20,11 +20,11 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "5e9cf975a5c7115cabf2da4a1ba0d35c2583f2816ebe6d1ad3bd278463d6886b",
+        "d1d5f62f7bdb02e37f446d1318579b5213e6859a4d552040d16a6cbefb7f435b",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "b4a9d289d617e7abfb04c6eded0e742eebea728be0896e77c2dac7e535559757",
+        "4746881e4e0864653d611db0c71d21458596529f5fcb740bdd886c0af9b06ab1",
     "elu-analytics/build.gradle.kts":
         "5078f447f6432ce825a48366df0b02086029db510037cd8c2c9fb2e48feebbe5",
     "elu-analytics/consumer-rules.pro":
@@ -145,7 +145,7 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("private val consent = EluConsentHandoff()" not in public or
         "private val sink get() = consent.sink" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
         errors.append("public setup must publish the exact owned sink through the consent handoff")
@@ -714,6 +714,43 @@ def verify_network_observer_boundary(root: pathlib.Path, errors: list[str]) -> N
             errors.append("network durable enqueue must preserve existing session activity")
 
 
+def verify_startup_observer_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    options = load_text(root, base / "EluDiagnosticsOptions.kt")
+    access = load_text(root, base / "internal/diagnostics/AndroidStartupAccess.kt")
+    observation = load_text(root, base / "internal/diagnostics/NativeStartupObservation.kt")
+    monitor = load_text(root, base / "internal/diagnostics/NativeStartupMonitor.kt")
+    stack = load_text(root, STACK)
+    owner = load_text(root, OWNER)
+    if ("val enabled: Boolean = false" not in options or "val launchTimings: Boolean = false" not in options or
+            "diagnosticsOptions.enabled && android.os.Build.VERSION.SDK_INT >= 35" not in stack or
+            "startupAccess != null && diagnosticsOptions.launchTimings" not in stack):
+        errors.append("startup observation requires both explicit options and API 35")
+    if ("getHistoricalProcessStartReasons(NativeStartupObservation.MAXIMUM_RECORDS)" not in access or
+            re.search(r"\.(?:intent|traceInputStream|description|getIntent)\b|addApplicationStartInfoCompletionListener", access) or
+            "START_TIMESTAMP_FIRST_FRAME" not in access):
+        errors.append("startup observation must use bounded public history without app callback replacement or private content")
+    fields = set(re.findall(r'"\\\$(diagnostic_[a-z_]+|launch_[a-z_]+)"\s+to', observation))
+    if fields != {"diagnostic_platform", "diagnostic_source", "launch_start_uptime_ns", "launch_first_frame_uptime_ns",
+                  "launch_duration_ms", "launch_reason", "launch_type"}:
+        errors.append("startup observation must retain only reviewed numeric OS fields and fixed labels")
+    for required in ["matching.size != 1", "record.state != STATE_STARTED || record.firstFrameUptimeNanos != null",
+                     "now.bootCount != began.bootCount", "currentEpoch != epoch", "polls > MAXIMUM_POLLS",
+                     "record.state != STATE_FIRST_FRAME", "frame < began.uptimeNanos"]:
+        if required not in observation:
+            errors.append("startup observation must prove an original bounded incomplete-to-first-frame transition")
+    for required in ["context() != admitted", "if (deliveryReady())", "worker.awaitTermination(5, TimeUnit.SECONDS)"]:
+        if required not in monitor:
+            errors.append("startup observation must retain current context and original query settlement")
+    for required in ["!diagnosticsClosurePending && diagnosticsConfiguration.enabled && diagnosticsConfiguration.launchTimings",
+                     "epoch == measurement.epoch", "diagnosticsLaunchAuthority", "nativeDiagnostic = command.startupMeasurement != null",
+                     "created = created.copy(after = created.after.copy(diagnostics = before.diagnostics.copy(",
+                     "lastLaunchUptimeNanos = measurement.launchUptimeNanos)))",
+                     "!nativeSettlementUncertain && !diagnosticsClosurePending", "quarantineDiagnosticsResources()"]:
+        if required not in owner:
+            errors.append("startup observation must retain durable authority, atomic dedupe and failed-close ownership")
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
     verify_pins(root, errors)
@@ -723,6 +760,7 @@ def verify(root: pathlib.Path) -> list[str]:
     verify_prepared_replay_boundary(root, errors)
     verify_native_authority_boundary(root, errors)
     verify_frame_observer_boundary(root, errors)
+    verify_startup_observer_boundary(root, errors)
     verify_network_observer_boundary(root, errors)
     return errors
 

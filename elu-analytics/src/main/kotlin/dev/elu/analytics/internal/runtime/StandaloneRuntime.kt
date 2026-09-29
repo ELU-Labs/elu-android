@@ -277,6 +277,11 @@ internal class StandaloneRuntime(
         submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$network_request", now(), properties, versions,
             networkExpectation = expectation))
 
+    internal fun captureStartup(measurement: dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement,
+        expectation: RuntimeCaptureExpectation): Future<RuntimeCaptureResult> =
+        submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$native_launch", now(),
+            measurement.properties(), versions, expectation, startupMeasurement = measurement))
+
     fun captureException(
         throwable: Throwable,
         properties: Map<String, Any?> = emptyMap(),

@@ -175,7 +175,7 @@ are not covered. These scalar metrics do not enable Compose replay.
 
 Optional process age at the first eligible observed frame is one attempt per
 monitor/process lifetime and can be discarded on withdrawal. It is not an app
-startup/TTID metric; actual startup diagnostics remain unsupported in this slice.
+startup/TTID metric; the separate observed OS launch option is described below.
 Both frame timing and this additional process-age field default off.
 
 `$performance_sample` is an analytics event linked to the current anonymous or
@@ -185,3 +185,40 @@ text or stack traces. These are native diagnostics, not Web Vitals, complete fra
 measurement, or an ANR/crash detector. Applications must account for linked
 performance diagnostics and readable replay text in their privacy disclosures.
 Resource overhead and exact distribution behavior require the final Lab gate.
+
+## Observed startup continuity
+
+`EluDiagnosticsOptions(enabled = true, launchTimings = true)` enables a bounded
+API 35+ public history observation. It never installs or replaces an app
+completion listener. A unique exact current PID/UID/process/launch record must
+first be observed incomplete, then acquire its first-frame timestamp while the
+original foreground, consent and identity interval remains current. Already
+completed, ambiguous, unavailable or invalid records are omitted. The local
+query limits are 16 records, 101 polls and a 10-second budget checked after each
+settled query (not a hard OS-call deadline); accepted launches are at
+most 30 seconds. This is partial observed startup coverage, not app-wide TTID.
+
+The default-off interval is persisted with stream, identity revision, boot and
+monotonic/wall-clock floors. Explicit consent (including same-choice calls),
+identity/reset, local option changes, terminal authority withdrawal and explicit
+close end coverage. Routine config expiry and background do not retrospectively
+invalidate a prior interval. Whole-interval ownership is required; enabling the
+option after launch cannot import an earlier launch. Unknown history fails closed.
+
+Current general capture and `capturePerformance.long_tasks` authorization plus a
+live foreground receipt session are mandatory again inside the event transaction.
+`$native_launch` carries numeric OS monotonic start/first-frame timestamps, duration,
+reason/type, and fixed Android/source labels. Event time/session describe receipt,
+not historical ownership by that session. Groups and super properties are omitted.
+The dedupe watermark commits with the event; rollback and ambiguous completion
+reconcile against exact durable state. Metadata-only interval changes do not
+change identity/context/session or create capture-session audience history.
+
+Explicit opt-in lazily upgrades owned schema families 1–6/7–12 to 25–30 after full
+validation, preserving queued data and starting closed. Versions 13–24 and 31+
+remain refused. Older binaries refuse the new schema; downgrade is unsupported.
+A failed interval closure suppresses observation and cannot release the original
+store lease as a successful shutdown. It retries once only after proven rollback;
+unresolved failure retains process-local resource ownership. No durable guarantee
+is possible if all storage writes fail and the process then dies. Automatic
+uncaught/crash/ANR collection remains unimplemented; manual exceptions are separate.

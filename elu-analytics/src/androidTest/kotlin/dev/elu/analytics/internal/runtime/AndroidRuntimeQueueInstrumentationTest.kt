@@ -563,6 +563,78 @@ class AndroidRuntimeQueueInstrumentationTest {
     }
 
     @Test
+    fun diagnosticsSchemaPreservesAllOwnedFamiliesAndRollsBackFailedMigration() {
+        for (base in 1..6) {
+            val file = databaseFile()
+            val faults = RecordingFaults()
+            val owner = open(file, CountingIdentifiers(), faults, ::freshState, trustedSiteKey = "elu_pk_test_capture")
+            appendEvents(owner, event("retained"))
+            if (base in listOf(2, 4, 6)) owner.ensureFeatureFlagRuntime().await()
+            if (base >= 3) owner.ensurePreparedReplayStorage().await()
+            if (base >= 5) owner.ensureNativeReplayAccounting().await()
+            val before = owner.peek(10, Long.MAX_VALUE).await()
+            val diagnosticClock = RuntimeDiagnosticsClock { RuntimeDiagnosticsClockReading(1,
+                Instant.parse(NOW).toEpochMilli(), 1_000_000_000, 1_000_000_000) }
+            faults.failBeforeCommit.set(true)
+            assertFutureCause(IOException::class.java) {
+                owner.configureDiagnostics(RuntimeDiagnosticsConfiguration(true, true), diagnosticClock).await()
+            }
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+                assertEquals((base + 6).toLong(), pragmaLong(sqlite, "PRAGMA user_version"))
+                sqlite.rawQuery("SELECT name FROM sqlite_master WHERE name='native_diagnostics'", null).use {
+                    assertFalse(it.moveToFirst())
+                }
+            }
+            owner.configureDiagnostics(RuntimeDiagnosticsConfiguration(true, true), diagnosticClock).await()
+            assertEquals(before, owner.peek(10, Long.MAX_VALUE).await())
+            owner.closeAsync().await(); owners.remove(owner)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+                assertEquals((base + 24).toLong(), pragmaLong(sqlite, "PRAGMA user_version"))
+                assertEquals(RuntimeDiagnosticsState(), RuntimeDiagnosticsState.decode(
+                    singleBlob(sqlite, "SELECT payload FROM native_diagnostics WHERE singleton_id=1")))
+            }
+            val reopened = open(file, CountingIdentifiers(), RecordingFaults(), { error("No import on upgrade") },
+                trustedSiteKey = "elu_pk_test_capture")
+            assertEquals(before, reopened.peek(10, Long.MAX_VALUE).await())
+        }
+    }
+
+    @Test
+    fun diagnosticEventAndDedupeSurviveSQLiteAmbiguityAndExplicitCloseEndsEpoch() {
+        val file = databaseFile(); val faults = RecordingFaults()
+        val wall = Instant.parse("2026-08-05T00:01:00Z").toEpochMilli()
+        val owner = open(file, CountingIdentifiers(), faults, ::freshState, trustedSiteKey = "elu_pk_test_capture",
+            captureClock = FixedCaptureClock(wall, 1_000_000_000))
+        var reading = RuntimeDiagnosticsClockReading(1, wall, 1_000_000_000, 1_000_000_000)
+        owner.configureDiagnostics(RuntimeDiagnosticsConfiguration(true, true), RuntimeDiagnosticsClock { reading }).await()
+        val config = JSONObject(captureConfig()).put("capturePerformance",
+            JSONObject().put("memory", false).put("long_tasks", true).put("sample_interval_ms", 5000)).toString()
+        owner.submitCaptureAuthority(config, capturePrivacy()).await()
+        val user = owner.capture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "user",
+            RuntimeWallTimestamps.rfc3339(wall), emptyMap(), versions())).await() as RuntimeCaptureResult.Accepted
+        val epoch = checkNotNull(owner.diagnosticsEpoch())
+        reading = reading.copy(uptimeNanos = 1_300_000_000, elapsedNanos = 1_300_000_000)
+        val measurement = dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement(epoch, 1_100_000_000, 1_200_000_000, 6, 1)
+        val identity = user.snapshot.state.identity
+        val command = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$native_launch",
+            RuntimeWallTimestamps.rfc3339(wall), measurement.properties(), versions(),
+            RuntimeCaptureExpectation(identity.revision, identity.contextRevision, identity.session!!.id) { true },
+            startupMeasurement = measurement)
+        faults.failAfterCommit.set(true)
+        assertTrue(owner.capture(command).await() is RuntimeCaptureResult.Accepted)
+        assertTrue(owner.capture(command).await() is RuntimeCaptureResult.Rejected)
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            val state = RuntimeDiagnosticsState.decode(singleBlob(sqlite, "SELECT payload FROM native_diagnostics WHERE singleton_id=1"))
+            assertEquals(measurement.launchUptimeNanos, state.lastLaunchUptimeNanos)
+        }
+        owner.closeAsync().await(); owners.remove(owner)
+        val reopened = open(file, CountingIdentifiers(), RecordingFaults(), { error("No import on reopen") },
+            trustedSiteKey = "elu_pk_test_capture", captureClock = FixedCaptureClock(wall, 1_000_000_000))
+        assertEquals(null, reopened.diagnosticsEpoch())
+        assertEquals(2, reopened.peek(10, Long.MAX_VALUE).await().size)
+    }
+
+    @Test
     fun duplicateOwnerIsRejectedUntilTheLeaseClosesAndOpenRunsOffMain() {
         val file = databaseFile()
         var loaderThread: Thread? = null

@@ -145,6 +145,8 @@ internal class RuntimeQueueOwner private constructor(
         set(value) {
             if (!nativeScopeReconciliation) nativeScope.publish(value?.state?.identity, captureAuthority as? RuntimeCaptureAuthorityState.Authorized)
             field = value
+            if (value != null) diagnosticsMayRemain = value.diagnostics != RuntimeDiagnosticsState()
+            diagnosticsProjection = value?.diagnostics?.epoch.takeUnless { diagnosticsClosurePending }
         }
     private var poison: Throwable? = null
         set(value) {
@@ -166,6 +168,92 @@ internal class RuntimeQueueOwner private constructor(
             nativeScope.publish(loaded?.state?.identity, value as? RuntimeCaptureAuthorityState.Authorized)
             field = value
         }
+    @Volatile private var diagnosticsProjection: RuntimeDiagnosticsEpoch? = null
+    private var diagnosticsClosurePending = false
+    private var diagnosticsMayRemain = false
+    private var diagnosticsLaunchAuthority = false
+    private var diagnosticsConfiguration = RuntimeDiagnosticsConfiguration()
+    private var diagnosticsClock: RuntimeDiagnosticsClock? = null
+
+    /** Original immutable persisted coverage only. Callers must separately check live intent. */
+    internal fun diagnosticsEpoch(): RuntimeDiagnosticsEpoch? = diagnosticsProjection
+
+    internal fun configureDiagnostics(configuration: RuntimeDiagnosticsConfiguration, clock: RuntimeDiagnosticsClock): Future<Unit> = submit {
+        assertUsable()
+        diagnosticsConfiguration = configuration
+        diagnosticsClock = clock
+        if (configuration.enabled) {
+            // Every preexisting payload was validated by initialize before additive migration.
+            database().ensureDiagnosticsSchema()
+        }
+        val old = requireLoaded().diagnostics.epoch
+        if (old != null && (!configuration.enabled || old.launchTimings != configuration.launchTimings ||
+                !diagnosticEpochMatches(requireLoaded(), old))) clearDiagnosticsOnWorker()
+    }
+
+    /** Every explicit consent intent ends coverage, including repeated same-choice calls. */
+    internal fun withdrawDiagnosticsCoverage(): Future<Unit> = submit { clearDiagnosticsOnWorker() }
+
+    private fun diagnosticEpochMatches(snapshot: LoadedSnapshot, epoch: RuntimeDiagnosticsEpoch): Boolean =
+        epoch.streamId == snapshot.state.stream.streamId && epoch.identityRevision == snapshot.state.identity.revision &&
+            !snapshot.state.identity.optedOut && diagnosticsClock?.read()?.continues(epoch) == true
+
+    private fun clearDiagnosticsOnWorker() {
+        diagnosticsProjection = null
+        diagnosticsClosurePending = true
+        // A retry is safe only after storage proved rollback (including exact reopen readback).
+        // Any unresolved failure leaves observation denied and original ownership occupied.
+        repeat(2) { attempt ->
+            try {
+                assertUsable()
+                if (requireLoaded().diagnostics != RuntimeDiagnosticsState()) updateDiagnosticsOnWorker(RuntimeDiagnosticsState())
+                diagnosticsMayRemain = false
+                diagnosticsClosurePending = false
+                return
+            } catch (rolledBack: ProvenNotCommittedRuntimeTransactionException) {
+                if (attempt != 0) throw rolledBack
+            }
+        }
+    }
+
+    private fun refreshDiagnosticsOnWorker() {
+        if (!diagnosticsConfiguration.enabled || diagnosticsClosurePending) return
+        val current = requireLoaded()
+        if (captureAuthorityRejection(current) != null) return
+        val reading = diagnosticsClock?.read()?.takeIf { it.valid() } ?: run { clearDiagnosticsOnWorker(); return }
+        val epoch = current.diagnostics.epoch
+        if (epoch != null && diagnosticEpochMatches(current, epoch) && epoch.launchTimings == diagnosticsConfiguration.launchTimings) return
+        updateDiagnosticsOnWorker(RuntimeDiagnosticsState(RuntimeDiagnosticsEpoch(java.util.UUID.randomUUID().toString(),
+            current.state.stream.streamId, current.state.identity.revision, reading.bootCount, reading.wallMillis,
+            reading.uptimeNanos, reading.elapsedNanos, diagnosticsConfiguration.launchTimings))) {
+            captureAuthorityRejection(current) == null
+        }
+    }
+
+    private fun updateDiagnosticsOnWorker(state: RuntimeDiagnosticsState, current: () -> Boolean = { true }) {
+        val before = requireLoaded()
+        val after = before.copy(diagnostics = state)
+        // A grant may commit even if its readback subsequently fails. Preserve this
+        // possibility across poison/loading-null so close cannot release that lease.
+        if (state != RuntimeDiagnosticsState()) diagnosticsMayRemain = true
+        try {
+            database().transaction { transaction ->
+                requireCurrent(transaction)
+                check(current()) { "Diagnostics coverage authority changed" }
+                transaction.updateCore(after.storedCore())
+                check(current()) { "Diagnostics coverage authority changed" }
+            }
+            loaded = after
+        } catch (ambiguous: AmbiguousRuntimeCommitException) {
+            val actual = reopenValidated(ambiguous) ?: poisonAndThrow(ambiguous)
+            when {
+                viewsEqual(actual, after) -> loaded = actual
+                viewsEqual(actual, before) -> { loaded = actual; throw ProvenNotCommittedRuntimeTransactionException("Diagnostics write was proved rolled back", ambiguous) }
+                else -> poisonAndThrow(RuntimeQueueCorruptionException("Ambiguous diagnostics write diverged", ambiguous))
+            }
+        }
+    }
+
     private var authorityEpoch: Long = 0
     private var configurationGate: V2ConfigAuthorityGate? = null
     private var pendingCaptureConfiguration: V2ConfigAuthorityWitness? = null
@@ -1846,6 +1934,11 @@ internal class RuntimeQueueOwner private constructor(
     private fun finishCloseOnWorker() {
         assertWorkerThread()
         try {
+            if (diagnosticsMayRemain || diagnosticsClosurePending) {
+                diagnosticsClosurePending = true
+                diagnosticsProjection = null
+                clearDiagnosticsOnWorker()
+            }
             flushNativeReplayDenialOnWorker()
             nativeReceipt?.let {
                 // Unrelated queue poison cannot settle an already committed native epoch.
@@ -1860,9 +1953,10 @@ internal class RuntimeQueueOwner private constructor(
             closeResources()
         } catch (error: Throwable) {
             if (nativeSettlementUncertain) quarantineNativeResources()
+            if (diagnosticsClosurePending) quarantineDiagnosticsResources()
             throw error
         } finally {
-            if (!nativeSettlementUncertain) synchronized(OWNERSHIP_KEYS) { OWNERSHIP_KEYS.remove(ownershipKey) }
+            if (!nativeSettlementUncertain && !diagnosticsClosurePending) synchronized(OWNERSHIP_KEYS) { OWNERSHIP_KEYS.remove(ownershipKey) }
         }
     }
 
@@ -1986,6 +2080,7 @@ internal class RuntimeQueueOwner private constructor(
                     effectivePrivacyBody = effectivePrivacyBody,
                     parsedBoundary = parsedBoundary,
                     previousAuthority = previousAuthority,
+                    launchAllowed = runCatching { V1ConfigJson.parseConfig(configBody).capturePerformance?.longTasks == true }.getOrDefault(false),
                 )
             }
             is V1ConfigUpdateResult.Inactive ->
@@ -2010,6 +2105,7 @@ internal class RuntimeQueueOwner private constructor(
         effectivePrivacyBody: String?,
         parsedBoundary: V1ParsedConfigBoundary?,
         previousAuthority: RuntimeCaptureAuthorityState,
+        launchAllowed: Boolean,
     ): RuntimeCaptureAuthorityUpdateResult {
         // This origin is intentionally adjacent to the authoritative wall sample. The earlier
         // wall read was only for config installation ordering; it grants no lease time.
@@ -2167,11 +2263,12 @@ internal class RuntimeQueueOwner private constructor(
                     val publish = {
                         captureConfiguration = pendingCaptureConfiguration
                         captureAuthority = authority
+                        diagnosticsLaunchAuthority = launchAllowed
                         published = true
                     }
                     if (configurationGate == null) publish()
                     else pendingCaptureConfiguration?.consume(publish)
-                    if (published) RuntimeCaptureAuthorityUpdateResult.Activated(authority)
+                    if (published) { refreshDiagnosticsOnWorker(); RuntimeCaptureAuthorityUpdateResult.Activated(authority) }
                     else terminateAuthority(RuntimeCaptureAuthorityTerminalReason.STALE, null, null, null)
                 }
             }
@@ -2264,11 +2361,21 @@ internal class RuntimeQueueOwner private constructor(
                                     (before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
                                         before.state.identity.session?.backgroundedAt == null && session.id == expected.sessionId)) &&
                                 before.state.identity.session?.startedAt == expected.sessionStartedAt && expected.isCurrent()
+                        } ?: true) && (command.startupMeasurement?.let { measurement ->
+                            val epoch = before.diagnostics.epoch
+                            val reading = diagnosticsClock?.read()
+                            !diagnosticsClosurePending && diagnosticsConfiguration.enabled && diagnosticsConfiguration.launchTimings &&
+                                epoch == measurement.epoch && epoch != null && diagnosticEpochMatches(before, epoch) &&
+                                measurement.launchUptimeNanos >= epoch.startedUptimeNanos &&
+                                measurement.firstFrameUptimeNanos >= measurement.launchUptimeNanos &&
+                                reading != null && measurement.firstFrameUptimeNanos <= reading.uptimeNanos &&
+                                measurement.launchUptimeNanos > (before.diagnostics.lastLaunchUptimeNanos ?: -1L) &&
+                                diagnosticsLaunchAuthority
                         } ?: true)
                         if (!originalContextMatches()) return@transaction CaptureCommit(
                             RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
                         val mergedProperties =
-                            LinkedHashMap(before.state.identity.superProperties).apply {
+                            LinkedHashMap(if (command.startupMeasurement == null) before.state.identity.superProperties else emptyMap()).apply {
                                 putAll(captureProperties)
                             }
                         val draft =
@@ -2279,11 +2386,12 @@ internal class RuntimeQueueOwner private constructor(
                                 expectedSessionId = session.id,
                                 properties = mergedProperties,
                                 versions = command.versions,
+                                nativeDiagnostic = command.startupMeasurement != null,
                             )
                         // Automatic telemetry must not prolong a live user session. A network
                         // request admitted before any session exists may still create the first one.
                         val passive = command.expectation != null || command.networkExpectation?.sessionId != null
-                        val created =
+                        var created =
                             prepareAppend(
                                 before,
                                 AppendRequest.Events(
@@ -2299,6 +2407,10 @@ internal class RuntimeQueueOwner private constructor(
                                 RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.QUEUE_LIMIT, before.publicSnapshot),
                                 published = null,
                             )
+                        }
+                        command.startupMeasurement?.let { measurement ->
+                            created = created.copy(after = created.after.copy(diagnostics = before.diagnostics.copy(
+                                lastLaunchUptimeNanos = measurement.launchUptimeNanos)))
                         }
                         prepared = created
                         // This is the final check after SQLite has begun its transaction and
@@ -2470,7 +2582,10 @@ internal class RuntimeQueueOwner private constructor(
     private fun isValidCaptureCommand(command: RuntimeCaptureCommand): Boolean {
         // Diagnostic events are runtime-internal and never admitted through a capture command.
         if (command.kind == RuntimeEventKind.DIAGNOSTIC) return false
-        if (command.expectation != null && (command.name != "\$performance_sample" || command.kind != RuntimeEventKind.CAPTURE)) return false
+        if (command.expectation != null && ((command.name != "\$performance_sample" && command.startupMeasurement == null) || command.kind != RuntimeEventKind.CAPTURE)) return false
+        if (command.startupMeasurement != null && (command.expectation == null || command.networkExpectation != null ||
+                command.kind != RuntimeEventKind.CAPTURE || command.name != "\$native_launch" ||
+                command.properties != command.startupMeasurement.properties())) return false
         if (command.networkExpectation != null && (command.expectation != null ||
                 command.name != "\$network_request" || command.kind != RuntimeEventKind.CAPTURE)) return false
         val nameLength = command.name.codePointCount(0, command.name.length)
@@ -2565,6 +2680,9 @@ internal class RuntimeQueueOwner private constructor(
                 reason = reason,
             )
         captureAuthority = terminal
+        diagnosticsLaunchAuthority = false
+        if (reason != RuntimeCaptureAuthorityTerminalReason.EXPIRED && reason != RuntimeCaptureAuthorityTerminalReason.STALE && loaded != null)
+            clearDiagnosticsOnWorker()
         return RuntimeCaptureAuthorityUpdateResult.Terminated(terminal)
     }
 
@@ -2778,6 +2896,10 @@ internal class RuntimeQueueOwner private constructor(
                 queuedBytes = bytesAfter,
                 headSequence = if (before.queuedCount == 0 && records.isNotEmpty()) records.first().sequence else before.headSequence,
                 replayAudience = if (request is AppendRequest.Events) before.replayAudience.observe(checkNotNull(committedState.identity.session)) else before.replayAudience,
+                diagnostics = if (before.state.identity.revision != committedState.identity.revision ||
+                    before.state.stream.streamId != committedState.stream.streamId || committedState.identity.optedOut ||
+                    (request is AppendRequest.Local && request.change is RuntimeLocalStateChange.SetOptedOut))
+                    RuntimeDiagnosticsState() else before.diagnostics,
             )
         return PreparedAppend(before, after, records, rejection = null)
     }
@@ -2833,7 +2955,7 @@ internal class RuntimeQueueOwner private constructor(
                         identity = RuntimeEventIdentity(identity.anonymousId, identity.userId, identity.revision),
                         sessionId = session.id,
                         properties = draft.properties,
-                        groups = identity.groups,
+                        groups = if (draft.nativeDiagnostic) emptyMap() else identity.groups,
                         versions = draft.versions,
                     )
                 val payload = RuntimeRecordCodec.encodeEvent(event)
@@ -3049,13 +3171,17 @@ internal class RuntimeQueueOwner private constructor(
         val canonicalState = CoreStateCodec.encode(state)
         if (!canonicalState.contentEquals(core.stateJson)) corrupt("Stored core state is not canonical")
         validateStateInvariants(state)
+        core.diagnostics.epoch?.let { epoch ->
+            if (epoch.streamId != state.stream.streamId || epoch.identityRevision != state.identity.revision || state.identity.optedOut)
+                corrupt("Diagnostics epoch does not match owned identity")
+        }
         ReplayQueueStore.validateNative(transaction, ownerNamespaceHash, state.stream.streamId)
         val count = core.queueCount.toInt()
         if (core.queueCount > state.stream.nextSequence) {
             corrupt("Stored queue count exceeds the allocated sequence range")
         }
         val head = Math.subtractExact(state.stream.nextSequence, core.queueCount)
-        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience)
+        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics)
         if (validatePayloads) {
             validateAllRecords(transaction, loaded)
             ReplayQueueStore.validate(transaction, ownerNamespaceHash)
@@ -3691,7 +3817,7 @@ internal class RuntimeQueueOwner private constructor(
         left.queuedCount == right.queuedCount &&
             left.queuedBytes == right.queuedBytes &&
             left.headSequence == right.headSequence &&
-            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience
+            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience && left.diagnostics == right.diagnostics
 
     private fun storedRecordsEqual(
         left: RuntimeStoredRecord,
@@ -3749,6 +3875,14 @@ internal class RuntimeQueueOwner private constructor(
         database = null; lease = null; loaded = null
     }
 
+    /** Retain only the original resources after failed durable diagnostics withdrawal. */
+    private fun quarantineDiagnosticsResources() {
+        synchronized(DIAGNOSTICS_QUARANTINED_RESOURCES) {
+            if (database != null || lease != null) DIAGNOSTICS_QUARANTINED_RESOURCES += database to lease
+        }
+        database = null; lease = null; loaded = null
+    }
+
     private fun closeResources() {
         try {
             database?.close()
@@ -3799,11 +3933,12 @@ internal class RuntimeQueueOwner private constructor(
         val queuedBytes: Long,
         val headSequence: Long,
         val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
+        val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
     ) {
         val publicSnapshot: RuntimeQueueSnapshot
             get() = RuntimeQueueSnapshot(state, queuedCount, queuedBytes, headSequence)
 
-        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience)
+        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience, diagnostics)
     }
 
     private data class PreparedAppend(
@@ -3871,6 +4006,7 @@ internal class RuntimeQueueOwner private constructor(
     }
 
     internal companion object {
+        private val DIAGNOSTICS_QUARANTINED_RESOURCES = mutableListOf<Pair<RuntimeQueueDatabase?, RuntimeOwnershipLease?>>()
         private val NATIVE_QUARANTINED_RESOURCES = mutableListOf<Pair<RuntimeQueueDatabase?, RuntimeOwnershipLease?>>()
 
         private val OWNERSHIP_KEYS = mutableSetOf<String>()

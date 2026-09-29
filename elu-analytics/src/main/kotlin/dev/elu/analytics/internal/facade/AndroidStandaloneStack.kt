@@ -36,7 +36,8 @@ internal object AndroidStandaloneStack {
     private val LIMITS = RuntimeQueueLimits(maximumCount = 10_000, maximumBytes = 16_777_216)
 
     fun facade(appContext: Context, siteKey: String, configHost: String = "https://elu.dev",
-        performanceOptions: dev.elu.analytics.EluPerformanceOptions = dev.elu.analytics.EluPerformanceOptions()): StandaloneFacade {
+        performanceOptions: dev.elu.analytics.EluPerformanceOptions = dev.elu.analytics.EluPerformanceOptions(),
+        diagnosticsOptions: dev.elu.analytics.EluDiagnosticsOptions = dev.elu.analytics.EluDiagnosticsOptions()): StandaloneFacade {
         // Capture fresh identity chronology before Elu.setup can publish this facade.
         val freshIdentityStartedAt = SystemCoreEpochClock.nowEpochMillis()
         val mainThread = Handler(Looper.getMainLooper())
@@ -48,6 +49,10 @@ internal object AndroidStandaloneStack {
         val runtimeRef = AtomicReference<StandaloneRuntime?>()
         val performanceRef = AtomicReference<dev.elu.analytics.internal.performance.AndroidPerformanceMonitor?>()
         val performanceClose = AtomicReference(dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(Unit))
+        val startupAccess = if (diagnosticsOptions.enabled && android.os.Build.VERSION.SDK_INT >= 35)
+            dev.elu.analytics.internal.diagnostics.AndroidStartupAccess(appContext) else null
+        val startupRef = AtomicReference<dev.elu.analytics.internal.diagnostics.NativeStartupMonitor?>()
+        val startupClose = AtomicReference(dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(Unit))
         fun closePerformance() {
             performanceRef.getAndSet(null)?.let { performanceClose.set(it.closeAndWait()) }
         }
@@ -81,6 +86,10 @@ internal object AndroidStandaloneStack {
                     assertStartupCurrent = { check(!closing.get()) { "Standalone stack is closed" } }).get()
                 var native: NativeReplayComposition? = null
                 try {
+                    owner.configureDiagnostics(dev.elu.analytics.internal.runtime.RuntimeDiagnosticsConfiguration(
+                        enabled = diagnosticsOptions.enabled && startupAccess != null,
+                        launchTimings = diagnosticsOptions.launchTimings), startupAccess ?:
+                        dev.elu.analytics.internal.runtime.RuntimeDiagnosticsClock { null }).get()
                     owner.bindConfigurationGate(gate).get()
                     native = NativeReplayComposition(owner, AndroidProcessLifecycle.nativeObserved,
                         NativeReplayCapabilities(
@@ -134,11 +143,19 @@ internal object AndroidStandaloneStack {
                     performanceRef.set(monitor)
                     if (closing.get()) closePerformance()
                 }
+                if (startupAccess != null && diagnosticsOptions.launchTimings && !closing.get()) {
+                    val monitor = dev.elu.analytics.internal.diagnostics.NativeStartupMonitor(startupAccess.process,
+                        startupAccess, startupAccess::records, facade::startupContext, facade::captureStartup,
+                        deliveryReady = { facade.performanceContext()?.policy?.longTasks == true })
+                    startupRef.set(monitor)
+                    if (closing.get()) startupRef.getAndSet(null)?.let { startupClose.set(it.closeAndWait()) }
+                }
                 lifecycle.ready()
             },
             onCloseRequested = {
                 closing.set(true)
                 closePerformance()
+                startupRef.getAndSet(null)?.let { startupClose.set(it.closeAndWait()) }
                 runtimeRef.get()?.withdrawNativeReplay(restrictive = true)
                 driver.close()
                 gate.close()
@@ -146,7 +163,7 @@ internal object AndroidStandaloneStack {
                 flagTransport.close()
                 notifications.shutdownNow()
             },
-            onCloseSettled = { performanceClose.get() },
+            onCloseSettled = { dev.elu.analytics.internal.concurrent.SdkFuture.allOf(performanceClose.get(), startupClose.get()) },
         )
         // The manifest initializer normally installs before the first Activity. If customers
         // remove it, installing here can observe future starts/resumes but cannot invent past ones.
@@ -155,6 +172,7 @@ internal object AndroidStandaloneStack {
             override fun applicationForegrounded(occurredAt: String, fromBackground: Boolean) {
                 facade.nativeReplayLifecycleChanged(true)
                 performanceRef.get()?.foreground(true)
+                startupRef.get()?.foreground(true)
                 driver.onForeground()
                 runtimeRef.get()?.markForegrounded()
                 facade.capture(StandaloneRuntime.APPLICATION_OPENED_EVENT,
@@ -165,6 +183,7 @@ internal object AndroidStandaloneStack {
                 // Revoke synchronously before any queued storage or customer callback can run.
                 facade.nativeReplayLifecycleChanged(false)
                 performanceRef.get()?.foreground(false)
+                startupRef.get()?.foreground(false)
                 val runtime = runtimeRef.get()
                 if (runtime == null) driver.onBackground()
                 else runtime.applicationBackgrounded(driver, occurredAt)

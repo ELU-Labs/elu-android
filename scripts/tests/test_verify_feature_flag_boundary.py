@@ -45,6 +45,25 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_startup_observer_rejects_privacy_lifecycle_and_durable_boundary_bypasses(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        for relative, before, after in [
+            ("EluDiagnosticsOptions.kt", "val launchTimings: Boolean = false", "val launchTimings: Boolean = true"),
+            ("internal/facade/AndroidStandaloneStack.kt", "android.os.Build.VERSION.SDK_INT >= 35", "android.os.Build.VERSION.SDK_INT >= 30"),
+            ("internal/diagnostics/AndroidStartupAccess.kt", "val times = record.startupTimestamps", "val times = record.startupTimestamps; record.intent"),
+            ("internal/diagnostics/NativeStartupObservation.kt", "matching.size != 1", "matching.isEmpty()"),
+            ("internal/diagnostics/NativeStartupObservation.kt", "record.state != STATE_STARTED || record.firstFrameUptimeNanos != null", "false"),
+            ("internal/diagnostics/NativeStartupMonitor.kt", "context() != admitted", "false"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "!nativeSettlementUncertain && !diagnosticsClosurePending", "!nativeSettlementUncertain"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "!diagnosticsClosurePending && diagnosticsConfiguration.enabled && diagnosticsConfiguration.launchTimings", "true"),
+        ]:
+            with self.subTest(relative=relative, before=before):
+                path = base / relative; original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("startup observation", self.run_guard().stderr)
+                path.write_text(original)
+
     def test_frame_observer_rejects_default_on_and_unsupported_timestamp_floor(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
         for relative, before, after in [
@@ -726,7 +745,7 @@ internal class WiredTransport : FlagTransport {
     def test_public_setup_cannot_bypass_owned_sink_or_validated_host(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
-        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
+        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
                          ("consent.install(facade, facade::start)", "facade.start()")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))

@@ -504,7 +504,12 @@ internal class StandaloneFacade(
     private fun applyConsentOnLane(intent: ConsentIntent) {
         if (stack == null || appliedConsentRevision >= intent.revision || !isCurrentConsent(intent)) return
         if (identity?.optedOut != intent.optedOut) {
+            // Consent and its diagnostics withdrawal already share this durable
+            // mutation. Optional metadata work must not prevent a changed denial.
             applyLocalChange(RuntimeLocalStateChange.SetOptedOut(intent.optedOut, now()))
+        } else {
+            // Repeated same-choice intent still ends the previous coverage interval.
+            requireStack().owner.withdrawDiagnosticsCoverage().await()
         }
         if (identity?.optedOut != intent.optedOut) return
         appliedConsentRevision = intent.revision
@@ -570,6 +575,30 @@ internal class StandaloneFacade(
             val result = requireStack().runtime.capturePerformance(detached,
                 dev.elu.analytics.internal.runtime.RuntimeCaptureExpectation(original.identityRevision,
                     original.contextRevision, original.sessionId) { performanceContext() == original }).await()
+            if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
+        }
+    }
+
+    /** Coverage is durable, while intent/lifecycle denial is synchronous and process-local. */
+    internal fun startupContext(): dev.elu.analytics.internal.diagnostics.NativeStartupContext? = synchronized(projectionLock) {
+        if (closed || closeRequested.get() || isOptedOut() || !nativeLifecycleEligible ||
+            pendingNativeOperations != 0 || pendingFlagOperations != 0 || pendingIdentityOperations != 0) return null
+        val current = identity ?: return null
+        val epoch = stack?.owner?.diagnosticsEpoch() ?: return null
+        if (!epoch.launchTimings || epoch.identityRevision != current.revision) return null
+        dev.elu.analytics.internal.diagnostics.NativeStartupContext(epoch, consentIntentRevision)
+    }
+
+    internal fun captureStartup(original: dev.elu.analytics.internal.diagnostics.NativeStartupContext,
+        measurement: dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement) {
+        submit {
+            if (startupContext() != original) return@submit
+            val current = performanceContext()?.takeIf { it.policy.longTasks } ?: return@submit
+            val result = requireStack().runtime.captureStartup(measurement,
+                dev.elu.analytics.internal.runtime.RuntimeCaptureExpectation(current.identityRevision,
+                    current.contextRevision, current.sessionId) {
+                    startupContext() == original && performanceContext() == current
+                }).await()
             if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
         }
     }
