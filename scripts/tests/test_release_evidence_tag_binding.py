@@ -13,9 +13,10 @@ spec.loader.exec_module(release)
 class ReleaseEvidenceTagBindingTest(unittest.TestCase):
     def verify_message(self, message):
         def observed(*args):
-            if args[0] == "cat-file": return "tag"
+            if args[:2] == ("cat-file", "-t"): return "tag"
+            if args[:2] == ("cat-file", "tag"):
+                return "object " + "b" * 40 + "\ntype commit\ntag 0.2.0\n\n" + message + "\n-----BEGIN PGP SIGNATURE-----\nunit-mocked-signature\n-----END PGP SIGNATURE-----\n"
             if args[0] == "rev-parse": return "b" * 40
-            if args[0] == "for-each-ref": return message
             if args[0] == "status": return ""
             raise AssertionError(args)
         with patch.object(release, "git", observed), patch.object(release, "trusted_fingerprints", return_value={"A" * 40}), \
