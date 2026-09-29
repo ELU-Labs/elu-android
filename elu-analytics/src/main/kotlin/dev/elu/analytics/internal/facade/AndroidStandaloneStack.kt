@@ -110,7 +110,7 @@ internal object AndroidStandaloneStack {
                             transports = nativeReplayTransports,
                             generations = nativeReplayGenerations,
                         ), StandaloneRuntime.defaultVersions(), EluEuGuard::isEuTimezone,
-                        facade::nativeReplayIntakeAllowed)
+                        facade::nativeReplayIntakeAllowed, recordingAllowed = facade::nativeReplayRecordingAllowed)
                     // Preparation concerns storage only and must finish before runtime publication.
                     // Private component capability; current source, privacy, session and physical guards still apply.
                     native.ready().get()

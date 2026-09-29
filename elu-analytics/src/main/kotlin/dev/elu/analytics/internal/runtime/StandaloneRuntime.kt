@@ -335,6 +335,12 @@ internal class StandaloneRuntime(
         if (restrictive) nativeReplay?.withdrawAll() else nativeReplay?.withdrawFresh()
     }
 
+    internal fun startNativeRecording() { nativeReplay?.startRecording() }
+
+    internal fun stopNativeRecording() { nativeReplay?.stopRecording() }
+
+    internal fun nativeRecordingStarted(): Boolean = nativeReplay?.recordingStarted() == true
+
     internal fun reevaluateNativeReplay(force: Boolean = false, originalAcceptance: () -> Boolean) {
         nativeReplay.also { nativeStartTrace.mark(NativeStartPhase.NATIVE_PRESENT, it != null) }?.reevaluate(force, originalAcceptance)
     }

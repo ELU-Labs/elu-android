@@ -20,7 +20,7 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "5ba1a75d51ba366fb8341b2b39413018e44ff05a207ef6293da1b3d961cd3279",
+        "d5627ae0e8748ebbddb8ca8d17081e917b7db02db5473375e14badab7561afbd",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
@@ -466,7 +466,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
                      "queue.ensurePreparedReplayStorage().awaitExact()", "queue.ensureNativeReplayAccounting().awaitExact()",
                      "PrivacyStateProjector.nativeSealedDeliveryPolicy(capabilities, deviceInEuTimezone)",
                      "selected.closeAndWait().awaitExact()", "queue.retainNativeReplayCleanupFailure().awaitExact()",
-                     "old.stop().awaitExact()", "original.settlement.whenComplete",
+                     "old.settleStop().awaitExact()", "original.settlement.whenComplete",
                      "!closed.get() && !canceled.get() && authorizeIo()",
                      "original = intent; useForce = forceRequested; forceRequested = false; requested = false",
                      "runEvaluation(result, original, useForce, acceptance)", "acceptance() && current(original) && acceptance()", "if (includeDelivery) deliveryEpoch.set(null)",
@@ -487,6 +487,10 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     for relative, text in sources.items():
         for method, permitted in {
             "nativeReplayIntakeAllowed": {STACK, facade_file},
+            "nativeReplayRecordingAllowed": {STACK, facade_file},
+            "startNativeRecording": {facade_file, runtime_file},
+            "stopNativeRecording": {facade_file, runtime_file},
+            "nativeRecordingStarted": {facade_file, runtime_file},
             "nativeReplayLifecycleChanged": {STACK, facade_file},
             "withdrawNativeReplay": {STACK, facade_file, runtime_file},
             "reevaluateNativeReplay": {facade_file, runtime_file},
@@ -603,7 +607,9 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
                      "read { selected.window } !== window", "read { root.rootView } !== decor", "return value.takeIf { current() }"]:
         if required not in lookup:
             errors.append("native current-root discovery must retain main original window and withdrawal checks")
-    if (life.count("matchesDiscovery(selectedActivity, selectedRoot)") != 2 or
+    if ("!allowed() || !discoveredMatches()" not in life or
+            "access.currentRoot(selectedActivity, ::allowed) === selectedRoot" not in life or
+            "facts.apiLevel == api && discoveredMatches() && allowed()" not in life or
             "matchesDiscovery(activity, root)" not in life or
             "matchesDiscovery(checkNotNull(activity), checkNotNull(root))" not in life or
             "NativeReplaySelection.issue(access, selectedActivity, selectedRoot, facts, discovered)" not in life):
@@ -613,7 +619,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     closing = disposal.find("selection.closeAndWait()")
     if not (0 <= registered < closing) or "if (cleanupError == null) synchronized(monitor) { unsettledSelections.remove(selection) }" not in disposal:
         errors.append("native unpublished disposal must reserve before close and release only proven cleanup")
-    if not re.search(r"fun\s+consumeOriginalRoot\s*\(\s*current:\s*\(\)\s*->\s*Boolean,\s*consume:\s*\(Any,\s*\(\)\s*->\s*Boolean\)\s*->\s*NativeReplayCollectionAttempt\?,\s*\):\s*SdkFuture<NativeReplayCollectionAttempt\?>", life):
+    if not re.search(r"fun\s+consumeOriginalRoot\s*\(\s*current:\s*\(\)\s*->\s*Boolean,\s*locallyStopped:\s*\(\)\s*->\s*Boolean\s*=\s*\{\s*false\s*\},\s*consume:\s*\(Any,\s*\(\)\s*->\s*Boolean\)\s*->\s*NativeReplayCollectionAttempt\?,\s*\):\s*SdkFuture<NativeReplayCollectionAttempt\?>", life):
         errors.append("native root consumption must return only a detached masked snapshot")
     for relative, source in sources.items():
         if "NativeReplayCollectionAttempt" in source and relative not in {lifecycle, loop}:
@@ -849,6 +855,24 @@ def verify_durable_flag_exposures(root: pathlib.Path, errors: list[str]) -> None
 
 
 
+def verify_replay_controls(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    requirements = {
+        "Elu.kt": ["fun startSessionRecording() { sink?.startSessionRecording() }", "fun stopSessionRecording() { sink?.stopSessionRecording() }", "fun sessionRecordingStarted(): Boolean = sink?.sessionRecordingStarted() ?: false"],
+        "internal/facade/AndroidStandaloneStack.kt": ["recordingAllowed = facade::nativeReplayRecordingAllowed"],
+        "internal/facade/StandaloneFacade.kt": ["@Volatile private var recordingRequested = true", "recordingRequested = false", "stack?.runtime?.stopNativeRecording()", "stack?.runtime?.nativeRecordingStarted() == true"],
+        "internal/replay/NativeReplayComposition.kt": ["old.settleStop().awaitExact()", "original?.stopRecording()", "recordingGeneration === originalRecording", "restrictionGeneration === originalRestriction", "intakeCurrent = { acceptance() && intakeAllowed()", "original?.recordingStarted() == true", "if (includeDelivery) deliveryEpoch.set(null)"],
+        "internal/replay/NativeReplayCaptureOwner.kt": ["collectorCurrent.get()?.invoke() == true", "frames.beginDraining()?.let { prefix -> sealPrefix(prefix) }", "if (captured === NativeReplayCollectionAttempt.LocalStop)", "discardTail = true", "fence.gracefulStopRequested() && !discardTail", "privacyCurrent() && fence.isCurrent()", "!restricted && intakeCurrent() && !restricted", "admission.isCurrent()", "selection.isCurrent()", "if (!fence.acceptFrame { frames.append(captured.frame, captured.continuous) }) break"],
+        "internal/replay/NativeReplayFrameBuffer.kt": ["frames.isEmpty() || (!firstChunkCommitted && !ready)"],
+        "internal/replay/NativeReplayLifecycle.kt": ["fun stopped(): Boolean = locallyStopped() && authorized() && locallyStopped()", "fun allowed(): Boolean = !locallyStopped() && authorized() && !locallyStopped()"],
+    }
+    for relative, tokens in requirements.items():
+        source = load_text(root, base / relative)
+        for token in tokens:
+            if token not in source:
+                errors.append("replay controls lost original local-switch/status/tail boundary: " + relative + ": " + token)
+
+
 def verify_capture_rate_limiter(root: pathlib.Path, errors: list[str]) -> None:
     base = MAIN_KOTLIN / "dev/elu/analytics"
     required = {
@@ -881,6 +905,7 @@ def verify_capture_rate_limiter(root: pathlib.Path, errors: list[str]) -> None:
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
     verify_capture_rate_limiter(root, errors)
+    verify_replay_controls(root, errors)
     verify_durable_flag_exposures(root, errors)
     verify_local_endpoint_binding(root, errors)
     verify_person_selection(root, errors)

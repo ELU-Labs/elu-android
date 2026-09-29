@@ -41,6 +41,25 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_replay_controls_reject_status_shortcut_unguarded_tail_and_minimum_bypass(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        changes = [
+            ("internal/facade/AndroidStandaloneStack.kt", "recordingAllowed = facade::nativeReplayRecordingAllowed", "recordingAllowed = { true }"),
+            ("internal/replay/NativeReplayComposition.kt", "original?.recordingStarted() == true", "true"),
+            ("internal/replay/NativeReplayComposition.kt", "restrictionGeneration === originalRestriction", "true"),
+            ("internal/replay/NativeReplayCaptureOwner.kt", "fence.gracefulStopRequested() && !discardTail", "fence.gracefulStopRequested()"),
+            ("internal/replay/NativeReplayCaptureOwner.kt", "privacyCurrent() && fence.isCurrent()", "fence.isCurrent()"),
+            ("internal/replay/NativeReplayFrameBuffer.kt", "frames.isEmpty() || (!firstChunkCommitted && !ready)", "frames.isEmpty()"),
+            ("internal/replay/NativeReplayLifecycle.kt", "locallyStopped() && authorized() && locallyStopped()", "locallyStopped()"),
+        ]
+        for relative, before, after in changes:
+            with self.subTest(relative=relative, before=before):
+                path = base / relative; original = path.read_text(); self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                result = self.run_guard()
+                self.assertNotEqual(0, result.returncode); self.assertIn("replay controls", result.stderr)
+                path.write_text(original)
+
     def test_person_mode_cannot_be_omitted_from_production_or_raw_reopen(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
         changes = [
@@ -428,7 +447,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_discovered_root_identity_cannot_be_dropped_before_physical_collection(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayLifecycle.kt"
         original = path.read_text()
-        before = "matchesDiscovery(selectedActivity, selectedRoot)"
+        before = "access.currentRoot(selectedActivity, ::allowed) === selectedRoot"
         self.assertIn(before, original)
         path.write_text(original.replace(before, "true", 1))
         result = self.run_guard()
@@ -970,7 +989,7 @@ internal class WiredTransport : FlagTransport {
 
     def test_native_public_private_hooks_cannot_escape_to_other_files(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/UnexpectedBridge.kt"
-        for method in ["nativeReplayIntakeAllowed", "nativeReplayLifecycleChanged", "withdrawNativeReplay", "reevaluateNativeReplay"]:
+        for method in ["nativeReplayIntakeAllowed", "nativeReplayRecordingAllowed", "startNativeRecording", "stopNativeRecording", "nativeRecordingStarted", "nativeReplayLifecycleChanged", "withdrawNativeReplay", "reevaluateNativeReplay"]:
             with self.subTest(method=method):
                 path.write_text("fun invoke() = runtime." + method + "()\n")
                 self.assertIn("bridge escaped exact assembly", self.run_guard().stderr)

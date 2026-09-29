@@ -144,10 +144,19 @@ internal class NativeReplayCaptureOwner private constructor(
     private val fence: NativeReplayCaptureFence,
     private val completion: SdkFuture<NativeReplayCaptureOutcome>,
     private val completionObservation: AtomicReference<NativeReplayCaptureCompletion?>,
+    private val collectorCurrent: AtomicReference<(() -> Boolean)?>,
     @Suppress("unused") private val lifetime: Any,
 ) : AutoCloseable {
     fun withdraw() = fence.withdraw()
     fun stop(): Future<NativeReplayCaptureOutcome> { withdraw(); return completion }
+    /** Stops new reads synchronously; accepted frames still need their original authority. */
+    fun stopRecording(): Future<NativeReplayCaptureOutcome> { fence.stopFresh(); return completion }
+    internal fun settleStop(): Future<NativeReplayCaptureOutcome> =
+        if (fence.gracefulStopRequested()) completion else stop()
+    fun recordingStarted(): Boolean = runCatching {
+        !completion.isDone && fence.mayCollect() && collectorCurrent.get()?.invoke() == true &&
+            fence.mayCollect() && !completion.isDone
+    }.getOrDefault(false)
     fun finished(): SdkFuture<NativeReplayCaptureOutcome> = completion
     // The candidate may be prepared before complete(), but cannot be observed before original settlement.
     fun completedDiagnostic(): NativeReplayCaptureCompletion? =
@@ -162,19 +171,24 @@ internal class NativeReplayCaptureOwner private constructor(
             versions: RuntimeVersions,
             platform: NativeReplayCapturePlatform = AndroidNativeReplayCapturePlatform,
             nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
+            /** Restrictive local recording switch, never a source or privacy grant. */
+            freshIntakeAllowed: () -> Boolean = { true },
+            /** Restrictive source/lifecycle intent remains required even while a local tail drains. */
+            intakeCurrent: () -> Boolean = { true },
             /** A post-commit hint only; no immutable request or raw frame is exposed. */
             onCommitted: () -> Unit = {},
         ): NativeReplayCaptureOwner? {
             // No persistable guard, enrollment, clock sample or thread on unsupported API levels.
             if ((platform.apiLevel < 29 || !authority.belongsTo(queue, prepared)).also { nativeStartTrace.mark(NativeStartPhase.CAPTURE_OWNER_ELIGIBLE, !it) }) return null
             val lifetime = Any()
-            val fence = NativeReplayCaptureFence(WeakReference(lifetime))
+            val fence = NativeReplayCaptureFence(WeakReference(lifetime), freshIntakeAllowed, intakeCurrent)
             val completion = object : SdkFuture<NativeReplayCaptureOutcome>() {
                 override fun cancel(mayInterruptIfRunning: Boolean) = false
             }
             val observation = AtomicReference<NativeReplayCaptureCompletion?>()
-            val owner = NativeReplayCaptureOwner(fence, completion, observation, lifetime)
-            val run = NativeReplayCaptureRun(queue, authority, prepared, versions, platform, fence, completion, observation, onCommitted, nativeStartTrace)
+            val collectorCurrent = AtomicReference<(() -> Boolean)?>()
+            val owner = NativeReplayCaptureOwner(fence, completion, observation, collectorCurrent, lifetime)
+            val run = NativeReplayCaptureRun(queue, authority, prepared, versions, platform, fence, completion, observation, collectorCurrent, onCommitted, nativeStartTrace)
             val thread = Thread({ run.execute() }, "elu-native-capture").apply { isDaemon = true }
             try { thread.start() }
             catch (error: Throwable) {
@@ -192,18 +206,35 @@ internal class NativeReplayCaptureOwner private constructor(
 }
 
 /** This local fence owns no queue, authority, task or native root. */
-private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>) {
+private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>, private val freshIntakeAllowed: () -> Boolean,
+    private val intakeCurrent: () -> Boolean) {
+    private val monitor = Any()
     val collection = NativeCollectionFence()
-    val withdrawn = CountDownLatch(1)
-    fun isCurrent() = lifetime.get() != null && collection.isCurrent() && withdrawn.count != 0L
-    fun withdraw() { collection.withdraw(); withdrawn.countDown() }
+    val withdrawn = CountDownLatch(1) // wakes both local stop and restrictive withdrawal
+    @Volatile private var restricted = false
+    @Volatile private var stopping = false
+    fun isCurrent() = lifetime.get() != null && !restricted && intakeCurrent() && !restricted
+    fun mayCollect() = isCurrent() && !stopping && freshIntakeAllowed() && collection.isCurrent() && !stopping
+    fun gracefulStopRequested() = (stopping || !freshIntakeAllowed()) && !restricted
+    fun stopFresh() {
+        synchronized(monitor) { stopping = true }
+        // No fence monitor is held while joining the collector's commit lock.
+        collection.withdraw(); withdrawn.countDown()
+    }
+    fun withdraw() { synchronized(monitor) { restricted = true }; stopFresh() }
+    fun acceptFrame(action: () -> Unit): Boolean = synchronized(monitor) {
+        if (stopping || !isCurrent() || !freshIntakeAllowed()) false else { action(); true }
+    }
 }
 
 /** A deadline carries no frame; only the exact original collection callback can create it. */
 internal sealed class NativeReplayCollectionAttempt {
     class Captured(val frame: NativeMaskedSnapshot, val continuous: Long) : NativeReplayCollectionAttempt()
     object CollectorDeadline : NativeReplayCollectionAttempt()
+    object LocalStop : NativeReplayCollectionAttempt()
 }
+
+private class NativeReplayLocalStop : IllegalStateException()
 
 /** One independent run, never the handle; all main and durable Futures are observed exactly once. */
 private class NativeReplayCaptureRun(
@@ -215,6 +246,7 @@ private class NativeReplayCaptureRun(
     private val fence: NativeReplayCaptureFence,
     private val completion: SdkFuture<NativeReplayCaptureOutcome>,
     private val completionObservation: AtomicReference<NativeReplayCaptureCompletion?>,
+    private val collectorCurrent: AtomicReference<(() -> Boolean)?>,
     private val onCommitted: () -> Unit,
     private val nativeStartTrace: NativeStartTrace,
 ) {
@@ -241,13 +273,14 @@ private class NativeReplayCaptureRun(
         var retryablePassDeadline = false
         var completedFailure: NativeCaptureFailureKind? = null
         fun complete(outcome: NativeReplayCaptureOutcome) {
+            collectorCurrent.set(null)
             completionObservation.set(NativeReplayCaptureCompletion(diagnosticStage, completedFrames, completedFailure, outcome))
             completion.complete(outcome)
         }
         val passProfile = if (nativeStartTrace === NativeStartTrace.NONE) null else NativeCapturePassProfile()
         try {
             // Local selection/lifetime only until original physical accounting is reserved.
-            requireCurrent(local())
+            requireCurrent(local() && fence.mayCollect())
             nativeStartTrace.mark(NativeStartPhase.ENROLL_BEGIN)
             enrollment = queue.enrollNativeReplayCapture().awaitExact()
             nativeStartTrace.mark(NativeStartPhase.ENROLL_RESULT, enrollment != null)
@@ -270,70 +303,119 @@ private class NativeReplayCaptureRun(
                 admission.privacy, admission.profile, versions)
             requireCurrent(current(permit, admission))
             nativeStartTrace.mark(NativeStartPhase.CAPTURE_LOOP_READY)
+            fun sealPrefix(prefix: List<NativeMaskedSnapshot>) {
+                requireCurrent(current(permit, admission))
+                diagnosticStage = NativeCaptureStage.SEAL_REQUEST
+                pendingRequest = sealer.seal(prefix)
+                requireCurrent(current(permit, admission))
+                diagnosticStage = NativeCaptureStage.DURABLE_APPEND
+                when (queue.appendNativeReplay(checkNotNull(pendingRequest), admission, physicalUse).awaitExact()) {
+                    is NativeReplayAppendOutcome.Committed -> {
+                        pendingRequest = null
+                        runCatching { onCommitted() }
+                    }
+                    is NativeReplayAppendOutcome.CommittedThenWithdrawn -> {
+                        pendingRequest = null
+                        runCatching { onCommitted() }
+                        error("Native append committed after withdrawal")
+                    }
+                    is NativeReplayAppendOutcome.Rejected -> {
+                        pendingRequest = null
+                        error("Native append rejected")
+                    }
+                }
+                requireCurrent(current(permit, admission))
+                diagnosticStage = NativeCaptureStage.COMMIT_FRAME
+                frames.committed(prefix)
+            }
+            var discardTail = false
             var collector: NativeReplayCaptureCollector? = null // implementation retains only weak View projections
             // Keep the existing capped exponential cadence across this original owner's attempts.
             // Successful frames do not reset it; no session/config/whole-run deadline is extended.
             var collectorRetryDelayMillis = NATIVE_REPLAY_CAPTURE_INTERVAL_MILLIS
-            while (true) {
+            captureLoop@ while (true) {
+                if (fence.gracefulStopRequested()) break
                 diagnosticStage = NativeCaptureStage.LOOP_CURRENT
                 requireCurrent(current(permit, admission))
                 val ordinal = frames.nextFrameOrdinal
                 passFailure = null
                 diagnosticStage = NativeCaptureStage.ROOT_COLLECT
-                val captured = selection.consumeOriginalRoot({ current(permit, admission) }) { root, rootCurrent ->
-                    requireCurrent(current(permit, admission) && rootCurrent())
-                    val continuous = clock.elapsedRealtimeNanos()
-                    passProfile?.begin(continuous)
-                    requireCurrent(continuous >= 0)
-                    val timestamp = clock.wallNowEpochMillis()
-                    requireCurrent(timestamp in 1..253_402_300_799_999L)
-                    fun withinPass(): Boolean {
-                        // rootCurrent includes this same current(permit, admission) check.
-                        if (!rootCurrent()) return false
-                        val now = clock.elapsedRealtimeNanos()
-                        passProfile?.sample(now)
-                        if (now < continuous) {
-                            passFailure = NativeCaptureFailureKind.PASS_CLOCK_REVERSED
-                            return false
+                val captured = selection.consumeOriginalRoot({ current(permit, admission) }, fence::gracefulStopRequested) { root, rootCurrent ->
+                    try {
+                        fun requireCollection(allowed: Boolean) {
+                            if (!allowed && fence.gracefulStopRequested() && current(permit, admission))
+                                throw NativeReplayLocalStop()
+                            requireCurrent(allowed)
                         }
-                        if (now - continuous > MAXIMUM_PASS_NANOSECONDS) {
-                            passFailure = NativeCaptureFailureKind.PASS_DEADLINE
-                            return false
+                        requireCollection(fence.mayCollect() && current(permit, admission) && rootCurrent())
+                        val continuous = clock.elapsedRealtimeNanos()
+                        passProfile?.begin(continuous)
+                        requireCurrent(continuous >= 0)
+                        val timestamp = clock.wallNowEpochMillis()
+                        requireCurrent(timestamp in 1..253_402_300_799_999L)
+                        fun withinPass(): Boolean {
+                            // rootCurrent includes this same current(permit, admission) check.
+                            if (!fence.mayCollect() || !rootCurrent()) return false
+                            val now = clock.elapsedRealtimeNanos()
+                            passProfile?.sample(now)
+                            if (now < continuous) {
+                                passFailure = NativeCaptureFailureKind.PASS_CLOCK_REVERSED
+                                return false
+                            }
+                            if (now - continuous > MAXIMUM_PASS_NANOSECONDS) {
+                                passFailure = NativeCaptureFailureKind.PASS_DEADLINE
+                                return false
+                            }
+                            return rootCurrent()
                         }
-                        return rootCurrent()
-                    }
-                    requireCurrent(withinPass())
-                    diagnosticStage = NativeCaptureStage.COLLECTOR
-                    val originalCollector = collector ?: platform.createCollector(admission.profile, passProfile).also { collector = it }
-                    requireCurrent(withinPass())
-                    passProfile?.configMaterialization()
-                    val unresolvedBlockRules = admission.hasUnresolvedBlockRules
-                    val frame = try {
-                        originalCollector.collect(root, ordinal, timestamp, fence.collection, ::withinPass,
-                            unresolvedBlockRules)
-                    } catch (error: NativeCollectionException) {
-                        // Only this known collector timeout may retain the original accepted buffer.
-                        // The collector has not returned/committed a frame; no seal or append ran.
-                        if (completedFrames == 0 || error.failure != NativeCollectionFailure.WITHDRAWN ||
-                            passFailure != NativeCaptureFailureKind.PASS_DEADLINE || pendingRequest != null) throw error
-                        requireCurrent(rootCurrent() && current(permit, admission) && rootCurrent())
-                        nativeStartTrace.captureFailed(NativeCaptureStage.COLLECTOR, completedFrames,
-                            NativeCaptureFailureKind.PASS_DEADLINE)
-                        if (passProfile != null) nativeStartTrace.captureProfile(passProfile)
-                        // Selection still executes its exact root/current-authority postvalidation.
-                        return@consumeOriginalRoot NativeReplayCollectionAttempt.CollectorDeadline
-                    }
-                    requireCurrent(withinPass())
-                    NativeReplayCollectionAttempt.Captured(frame, continuous)
+                        requireCollection(withinPass())
+                        diagnosticStage = NativeCaptureStage.COLLECTOR
+                        val originalCollector = collector ?: platform.createCollector(admission.profile, passProfile).also { collector = it }
+                        requireCollection(withinPass())
+                        collectorCurrent.compareAndSet(null) { fence.mayCollect() && current(permit, admission) }
+                        passProfile?.configMaterialization()
+                        val unresolvedBlockRules = admission.hasUnresolvedBlockRules
+                        val frame = try {
+                            originalCollector.collect(root, ordinal, timestamp, fence.collection, ::withinPass,
+                                unresolvedBlockRules)
+                        } catch (error: NativeCollectionException) {
+                            if (error.failure == NativeCollectionFailure.WITHDRAWN && fence.gracefulStopRequested() &&
+                                current(permit, admission)) return@consumeOriginalRoot NativeReplayCollectionAttempt.LocalStop
+                            // Only this known collector timeout may retain the original accepted buffer.
+                            // The collector has not returned/committed a frame; no seal or append ran.
+                            if (completedFrames == 0 || error.failure != NativeCollectionFailure.WITHDRAWN ||
+                                passFailure != NativeCaptureFailureKind.PASS_DEADLINE || pendingRequest != null) throw error
+                            requireCurrent(rootCurrent() && current(permit, admission) && rootCurrent())
+                            nativeStartTrace.captureFailed(NativeCaptureStage.COLLECTOR, completedFrames,
+                                NativeCaptureFailureKind.PASS_DEADLINE)
+                            if (passProfile != null) nativeStartTrace.captureProfile(passProfile)
+                            // Selection still executes its exact root/current-authority postvalidation.
+                            return@consumeOriginalRoot NativeReplayCollectionAttempt.CollectorDeadline
+                        }
+                        requireCollection(withinPass())
+                        NativeReplayCollectionAttempt.Captured(frame, continuous)
+                    } catch (_: NativeReplayLocalStop) { NativeReplayCollectionAttempt.LocalStop }
                 }.awaitExact() ?: error("Native collection denied")
                 requireCurrent(current(permit, admission))
+                if (captured === NativeReplayCollectionAttempt.LocalStop) {
+                    // Local stop prevented exact View/privacy postvalidation of this callback.
+                    // Discard both its unaccepted frame and the unsealed tail; pure source checks
+                    // cannot establish an unobserved Window/privacy change on the main thread.
+                    frames.withdraw()
+                    discardTail = true
+                    break
+                }
+                if (fence.gracefulStopRequested()) break
                 if (captured === NativeReplayCollectionAttempt.CollectorDeadline) {
                     // Same fence, enrollment, selection, sealer and buffer. Wait off main in the
                     // existing one-second cancellable ticks, checking original authority each time.
                     var remaining = collectorRetryDelayMillis
                     while (remaining > 0) {
                         requireCurrent(current(permit, admission))
-                        requireCurrent(platform.awaitNext(fence.withdrawn))
+                        if (!platform.awaitNext(fence.withdrawn)) {
+                            if (fence.gracefulStopRequested()) break@captureLoop
+                            requireCurrent(false)
+                        }
                         requireCurrent(current(permit, admission))
                         remaining -= NATIVE_REPLAY_CAPTURE_INTERVAL_MILLIS
                     }
@@ -343,38 +425,19 @@ private class NativeReplayCaptureRun(
                 }
                 check(captured is NativeReplayCollectionAttempt.Captured)
                 diagnosticStage = NativeCaptureStage.FRAME_APPEND
-                frames.append(captured.frame, captured.continuous)
+                if (!fence.acceptFrame { frames.append(captured.frame, captured.continuous) }) break
                 if (completedFrames < Int.MAX_VALUE) completedFrames += 1
                 if (frames.isReady) {
                     diagnosticStage = NativeCaptureStage.SEAL_PREFIX
-                    val prefix = frames.beginSealing()
-                    requireCurrent(current(permit, admission))
-                    diagnosticStage = NativeCaptureStage.SEAL_REQUEST
-                    pendingRequest = sealer.seal(prefix)
-                    requireCurrent(current(permit, admission))
-                    diagnosticStage = NativeCaptureStage.DURABLE_APPEND
-                    when (queue.appendNativeReplay(checkNotNull(pendingRequest), admission, physicalUse).awaitExact()) {
-                        is NativeReplayAppendOutcome.Committed -> {
-                            pendingRequest = null
-                            runCatching { onCommitted() }
-                        }
-                        is NativeReplayAppendOutcome.CommittedThenWithdrawn -> {
-                            pendingRequest = null
-                            runCatching { onCommitted() }
-                            error("Native append committed after withdrawal")
-                        }
-                        is NativeReplayAppendOutcome.Rejected -> {
-                            pendingRequest = null
-                            error("Native append rejected")
-                        }
-                    }
-                    requireCurrent(current(permit, admission))
-                    diagnosticStage = NativeCaptureStage.COMMIT_FRAME
-                    frames.committed(prefix)
+                    sealPrefix(frames.beginSealing())
                 }
                 requireCurrent(current(permit, admission))
                 diagnosticStage = NativeCaptureStage.WAIT_NEXT
                 if (!platform.awaitNext(fence.withdrawn)) break
+            }
+            if (fence.gracefulStopRequested() && !discardTail) {
+                requireCurrent(current(permit, admission))
+                frames.beginDraining()?.let { prefix -> sealPrefix(prefix) }
             }
         } catch (error: Throwable) {
             // Only closed diagnostic values leave this catch; the original error is never serialized.
@@ -404,6 +467,7 @@ private class NativeReplayCaptureRun(
             // No suffix, retry or regenerated request follows an uncertain main/seal/append result.
             fence.withdraw()
         }
+        collectorCurrent.set(null)
         fence.withdraw()
         buffer?.withdraw()
         if (enrollment == null) { complete(NativeReplayCaptureOutcome.SETTLED); return }

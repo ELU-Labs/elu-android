@@ -408,3 +408,29 @@ exempt. Native bounded caller-value detachment happens before the serialized own
 there are no customer capture hooks or browser console logging on Android. Additional
 metadata I/O and current JVM/SQLite/artifact/device performance remain validation
 requirements; authored tests are not execution evidence.
+
+## Local replay controls
+
+`startSessionRecording()`, `stopSessionRecording()` and
+`sessionRecordingStarted()` are additive no-argument APIs. The default instance
+latch is enabled; only explicit local start reverses local stop. The latch is
+separate from consent/source/identity epochs and is not persisted. Pre-setup calls
+are no-op/false; a stop on the published pending facade survives stack opening.
+There are no browser trigger overrides or new wire/schema permissions.
+
+Local stop immediately fences fresh reads, accepted frames and status, then joins
+the original capture on the existing worker. A validated idle tail uses the same
+sealer, immutable timestamps/ordinals, permit, physical use, source/identity/session,
+selection and local privacy-revision checks at seal and durable admission. It never
+raises elapsed duration to meet the initial minimum. A main callback interrupted
+before exact View/privacy postvalidation contributes no frame and discards the
+unsealed tail. No stop-time View read is used to establish permission. Restrictive
+withdrawal continues to discard unsealed work and revoke delivery when required;
+an uncertain append retains its original physical accounting/quarantine.
+
+Status samples the actual original installed collector and current guards; an
+ACTIVE scheduling result alone is insufficient. No synchronous View dispatch,
+SQLite request or network operation occurs in the getter. Stop/start generations
+cannot adopt an old callback or begin replacement before original cleanup settles.
+These source contracts require actual compiled API, emulator and exact-artifact
+qualification; source controls alone do not establish those results.

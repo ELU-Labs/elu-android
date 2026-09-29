@@ -58,6 +58,37 @@ class StandaloneFacadeTest {
     }
 
     @Test
+    fun `recording controls are instance local and independent of identity consent or configuration`() {
+        val h = harness(autoStart = false)
+        val before = h.owner.snapshot().get()
+        assertTrue(h.facade.nativeReplayRecordingAllowed()); assertFalse(h.facade.sessionRecordingStarted())
+        h.facade.stopSessionRecording(); h.facade.stopSessionRecording()
+        assertFalse(h.facade.nativeReplayRecordingAllowed())
+        h.facade.start(); h.facade.applyConfiguration(config()); h.settle()
+        h.facade.identify("recording-user", null); h.settle()
+        h.facade.reset(); h.settle()
+        h.facade.optOut(); h.settle(); h.facade.optIn(null, null); h.settle()
+        h.facade.applyConfiguration(config()); h.settle()
+        assertFalse(h.facade.nativeReplayRecordingAllowed()); assertFalse(h.facade.sessionRecordingStarted())
+        val stopped = h.owner.snapshot().get()
+        h.facade.startSessionRecording(); h.settle()
+        assertTrue(h.facade.nativeReplayRecordingAllowed())
+        assertFalse("No collector in this production-runtime harness", h.facade.sessionRecordingStarted())
+        assertEquals(stopped.state, h.owner.snapshot().get().state)
+        assertNull(before.state.identity.session)
+        h.facade.closeAndWait().get(3, TimeUnit.SECONDS)
+        h.facade.startSessionRecording(); assertFalse(h.facade.nativeReplayRecordingAllowed())
+    }
+
+    @Test
+    fun `pending recording stop does not create session or change consent`() {
+        val h = harness(autoStart = false); val before = h.owner.snapshot().get().state
+        h.facade.stopSessionRecording(); h.facade.start(); h.facade.settled().get()
+        assertEquals(before, h.owner.snapshot().get().state)
+        assertFalse(h.facade.nativeReplayRecordingAllowed()); assertFalse(h.facade.sessionRecordingStarted())
+    }
+
+    @Test
     fun `every state-changing method reaches the standalone runtime`() {
         val harness = harness()
         harness.facade.applyConfiguration(config())

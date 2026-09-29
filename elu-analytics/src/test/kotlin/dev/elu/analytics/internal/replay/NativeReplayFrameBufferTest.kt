@@ -19,6 +19,36 @@ class NativeReplayFrameBufferTest {
         buffer.committed(buffer.beginSealing())
     }
 
+    @Test fun `local drain never manufactures initial minimum duration`() {
+        val buffer = NativeReplayFrameBuffer(5)
+        assertNull(buffer.beginDraining())
+        buffer.append(frame(0, 1000), 0)
+        buffer.append(frame(1, 999999), 4_999_999_999)
+        assertNull(buffer.beginDraining())
+        assertFalse(buffer.isReady)
+        assertEquals(listOf(1000L, 999999L), buffer.bufferedFrames.map { it.timestamp })
+    }
+
+    @Test fun `local drain seals exact accepted suffix before normal cadence once`() {
+        val buffer = NativeReplayFrameBuffer(0); commitInitial(buffer)
+        val suffix = frame(1, 1234); buffer.append(suffix, 1)
+        assertFalse(buffer.isReady)
+        val prefix = checkNotNull(buffer.beginDraining())
+        assertSame(suffix, prefix.single()); assertEquals(1L, prefix.single().ordinal)
+        buffer.committed(prefix)
+        assertEquals(2L, buffer.nextFrameOrdinal); assertNull(buffer.beginDraining())
+    }
+
+    @Test fun `drain cannot replace a pending prefix or revive withdrawal`() {
+        val buffer = NativeReplayFrameBuffer(0); buffer.append(frame(0), 0)
+        val original = buffer.beginSealing()
+        fails(NativeReplayBufferFailure.WITHDRAWN) { buffer.beginDraining() }
+        assertSame(original.single(), buffer.bufferedFrames.single())
+        buffer.withdraw()
+        fails(NativeReplayBufferFailure.WITHDRAWN) { buffer.beginDraining() }
+        assertTrue(buffer.bufferedFrames.isEmpty())
+    }
+
     @Test fun `positive minimum retains original initial and only the latest without consuming ordinals`() {
         val buffer = NativeReplayFrameBuffer(5)
         val initial = frame(0, 1001); buffer.append(initial, 100)

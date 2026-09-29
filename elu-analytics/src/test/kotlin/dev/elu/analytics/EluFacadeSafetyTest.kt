@@ -28,6 +28,9 @@ class EluFacadeSafetyTest {
         Elu.reloadFeatureFlags()
         Elu.onFeatureFlagsLoaded { error("must not fire before setup") }
         Elu.flush()
+        Elu.stopSessionRecording()
+        Elu.startSessionRecording()
+        assertFalse(Elu.sessionRecordingStarted())
 
         assertNull(Elu.distinctId())
         assertNull(Elu.getFeatureFlag("flag"))
@@ -65,6 +68,9 @@ class EluFacadeSafetyTest {
                         Elu.group("worker", worker.toString())
                         Elu.reset()
                         Elu.flush()
+                        Elu.stopSessionRecording()
+                        Elu.startSessionRecording()
+                        assertFalse(Elu.sessionRecordingStarted())
                     } catch (failure: Throwable) {
                         failures += failure
                     }

@@ -245,6 +245,7 @@ internal class NativeReplaySelection private constructor(
      */
     fun consumeOriginalRoot(
         current: () -> Boolean,
+        locallyStopped: () -> Boolean = { false },
         consume: (Any, () -> Boolean) -> NativeReplayCollectionAttempt?,
     ): SdkFuture<NativeReplayCollectionAttempt?> {
         val result = object : SdkFuture<NativeReplayCollectionAttempt?>() {
@@ -255,22 +256,31 @@ internal class NativeReplaySelection private constructor(
                 try {
                     val selectedActivity = activity.get()
                     val selectedRoot = root.get()
-                    fun allowed(): Boolean = isCurrent() && current() && isCurrent()
+                    fun authorized(): Boolean = isCurrent() && current() && isCurrent()
+                    fun stopped(): Boolean = locallyStopped() && authorized() && locallyStopped()
+                    fun allowed(): Boolean = !locallyStopped() && authorized() && !locallyStopped()
+                    fun discoveredMatches(): Boolean = !discovered || (selectedActivity != null && allowed() &&
+                        access.currentRoot(selectedActivity, ::allowed) === selectedRoot && allowed())
                     fun matches(): Boolean {
-                        if (selectedActivity == null || selectedRoot == null || !allowed() || !matchesDiscovery(selectedActivity, selectedRoot)) return false
+                        if (selectedActivity == null || selectedRoot == null || !allowed() || !discoveredMatches()) return false
                         val facts = access.observe(selectedActivity, selectedRoot, ::allowed) ?: return false
                         return facts.window === window.get() && facts.token === token.get() &&
                             facts.width == width && facts.height == height && facts.density == density &&
-                            facts.apiLevel == api && matchesDiscovery(selectedActivity, selectedRoot) && allowed()
+                            facts.apiLevel == api && discoveredMatches() && allowed()
                     }
-                    if (!matches()) {
-                        withdrawn.set(true)
-                        result.complete(null)
+                    if (stopped()) {
+                        // This carries no frame and proves no fresh View facts. Existing tail
+                        // bytes still require their independent original admission guards.
+                        result.complete(NativeReplayCollectionAttempt.LocalStop)
+                    } else if (!matches()) {
+                        if (stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
+                        else { withdrawn.set(true); result.complete(null) }
                     } else {
                         val value = consume(checkNotNull(selectedRoot), ::allowed)
-                        if (value == null || !matches()) {
-                            withdrawn.set(true)
-                            result.complete(null)
+                        if (value != null && stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
+                        else if (value == null || value === NativeReplayCollectionAttempt.LocalStop || !matches()) {
+                            if (value != null && stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
+                            else { withdrawn.set(true); result.complete(null) }
                         } else result.complete(value)
                     }
                 } catch (error: Throwable) {

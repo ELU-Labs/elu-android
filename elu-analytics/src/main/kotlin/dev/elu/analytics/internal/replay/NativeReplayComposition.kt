@@ -53,9 +53,14 @@ internal class NativeReplayComposition(
         Thread(task, "elu-native-delivery-timer").apply { isDaemon = true }
     },
     private val nativeStartObserver: BoundedNativeStartObserver = BoundedNativeStartObserver.NONE,
+    private val recordingAllowed: () -> Boolean = { true },
 ) : AutoCloseable {
     private val monitor = Any()
     private var closed = false
+    private var recordingRequested = true
+    private var recordingGeneration: Any = Any()
+    private var restrictionGeneration: Any = Any()
+    private var localStop: SdkFuture<Unit>? = null
     private var intent: Any = Any()
     private var requested = false
     private var forceRequested = false
@@ -126,6 +131,49 @@ internal class NativeReplayComposition(
     private fun current(original: Any): Boolean = synchronized(monitor) { !closed && intent === original } &&
         intakeAllowed() && synchronized(monitor) { !closed && intent === original }
 
+    private fun recordingEnabled(): Boolean = synchronized(monitor) { !closed && recordingRequested } &&
+        recordingAllowed() && synchronized(monitor) { !closed && recordingRequested }
+
+    fun recordingStarted(): Boolean {
+        val original = synchronized(monitor) { capture }
+        return recordingEnabled() && intakeAllowed() && original?.recordingStarted() == true &&
+            recordingEnabled() && intakeAllowed() && synchronized(monitor) { capture === original && !closed }
+    }
+
+    fun startRecording() {
+        synchronized(monitor) {
+            if (closed || recordingRequested) return
+            recordingRequested = true; intent = Any(); localStop = null
+        }
+        reevaluate(force = true)
+    }
+
+    /** The switch is immediate; only the private worker joins lawful tail and physical cleanup. */
+    fun stopRecording(): SdkFuture<Unit> {
+        val original: NativeReplayCaptureOwner?
+        val result: SdkFuture<Unit>
+        synchronized(monitor) {
+            if (closed) return closeResult
+            localStop?.takeIf { !recordingRequested }?.let { return it }
+            recordingRequested = false; recordingGeneration = Any(); intent = Any(); requested = false; forceRequested = true
+            deadlineRetryToken = null; deadlineRetry?.cancel(false); deadlineRetry = null
+            original = capture
+            result = noncancelable(); localStop = result
+            // Reserve this worker turn before a concurrent start can enqueue its evaluation.
+            try { worker.execute {
+                try {
+                    readyResult.awaitExact()
+                    retireFresh()
+                    if (quarantined) error("Native replay cleanup is quarantined")
+                    flushSealed()
+                    result.complete(Unit)
+                } catch (error: Throwable) { quarantined = true; result.completeExceptionally(error) }
+            } } catch (error: Throwable) { result.completeExceptionally(error) }
+        }
+        original?.stopRecording()
+        return result
+    }
+
     /** Synchronous local intake withdrawal. Physical work and all submitted results remain owned. */
     fun withdrawFresh() = withdraw(includeDelivery = false)
 
@@ -135,7 +183,7 @@ internal class NativeReplayComposition(
     private fun withdraw(includeDelivery: Boolean) {
         val old: NativeReplayCaptureOwner?; val sending: ReplayDeliveryCoordinator?
         synchronized(monitor) {
-            intent = Any(); requested = false; forceRequested = true
+            intent = Any(); restrictionGeneration = Any(); requested = false; forceRequested = true
             deadlineRetryToken = null; deadlineRetry?.cancel(false); deadlineRetry = null
             if (includeDelivery) deliveryEpoch.set(null)
             old = capture; sending = if (includeDelivery) delivery else null
@@ -172,6 +220,8 @@ internal class NativeReplayComposition(
             ?: SdkFuture.completedFuture(ReplayDeliveryPass(0, 0))
 
     private fun runEvaluation(result: SdkFuture<NativeReplayCompositionEvaluation>, original: Any, force: Boolean, acceptance: () -> Boolean) {
+        val originalRecording = synchronized(monitor) { recordingGeneration }
+        val originalRestriction = synchronized(monitor) { restrictionGeneration }
         val nativeStartTrace = nativeStartObserver.begin()
         // Original caller acceptance is restrictive only and survives every asynchronous handoff.
         fun accepted(): Boolean = acceptance() && current(original) && acceptance()
@@ -188,7 +238,7 @@ internal class NativeReplayComposition(
                 flushSealed()
                 val identity = queue.snapshot().awaitExact().state.identity
                 nativeStartTrace.mark(NativeStartPhase.IDENTITY_RETURNED)
-                if (!accepted()) retireFresh()
+                if (!accepted() || !recordingEnabled()) retireFresh()
                 else {
                     val key = IdentityKey(identity)
                     val running = synchronized(monitor) { capture }
@@ -197,7 +247,7 @@ internal class NativeReplayComposition(
                         value = NativeReplayCompositionEvaluation.ACTIVE
                     } else {
                         retireFresh()
-                        if ((!quarantined && accepted() && (force || key != lastAttempt)).also { nativeStartTrace.mark(NativeStartPhase.ATTEMPT_ELIGIBLE, it) }) {
+                        if ((!quarantined && accepted() && recordingEnabled() && (force || key != lastAttempt)).also { nativeStartTrace.mark(NativeStartPhase.ATTEMPT_ELIGIBLE, it) }) {
                             // Any newly admitted attempt supersedes the prior scheduling hint,
                             // including a forced same-identity attempt and a physically late wake.
                             synchronized(monitor) {
@@ -216,12 +266,17 @@ internal class NativeReplayComposition(
                                 if (selected != null && accepted()) {
                                     val prepared = checkNotNull(authority).prepare(selected, nativeStartTrace).awaitExact()
                                     nativeStartTrace.mark(NativeStartPhase.PREPARE_RESULT, prepared != null)
-                                    if ((prepared != null && accepted() && selected.isCurrent()).also { nativeStartTrace.mark(NativeStartPhase.PREPARE_POSTCHECK, it) }) {
+                                    if ((prepared != null && accepted() && recordingEnabled() && selected.isCurrent()).also { nativeStartTrace.mark(NativeStartPhase.PREPARE_POSTCHECK, it) }) {
                                         val weak = WeakReference(this)
-                                        val opened = NativeReplayCaptureOwner.start(queue, authority, checkNotNull(prepared), versions, platform, nativeStartTrace) {
+                                        val opened = NativeReplayCaptureOwner.start(queue, authority, checkNotNull(prepared), versions, platform, nativeStartTrace,
+                                            freshIntakeAllowed = { recordingEnabled() && synchronized(monitor) { recordingGeneration === originalRecording } },
+                                            intakeCurrent = { acceptance() && intakeAllowed() && synchronized(monitor) {
+                                                !closed && restrictionGeneration === originalRestriction
+                                            } && acceptance() && intakeAllowed() }) {
                                             weak.get()?.flushSealed()
                                         }
                                         synchronized(monitor) { capture = opened; captureDiagnosticPublished = false }
+                                        if (!recordingEnabled()) opened?.stopRecording()
                                         nativeStartTrace.mark(NativeStartPhase.CAPTURE_OWNER_RESULT, opened != null)
                                         if (opened != null) {
                                             opened.finished().whenComplete { outcome, _ ->
@@ -267,7 +322,7 @@ internal class NativeReplayComposition(
     private fun retireFresh() {
         val old = synchronized(monitor) { capture }
         if (old != null) {
-            if (old.stop().awaitExact() == NativeReplayCaptureOutcome.QUARANTINED) quarantined = true
+            if (old.settleStop().awaitExact() == NativeReplayCaptureOutcome.QUARANTINED) quarantined = true
             // An original completion listener may still be executing on another thread. Publish
             // before replacement, so that its late callback cannot lose or overwrite this result.
             publishCompletedCapture(old)

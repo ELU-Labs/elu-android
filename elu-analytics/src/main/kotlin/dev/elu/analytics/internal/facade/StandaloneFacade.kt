@@ -193,6 +193,9 @@ internal class StandaloneFacade(
     private var nativeIntentEpoch: Any = Any()
     private var pendingNativeOperations = 0
     private var nativeLifecycleEligible = true
+    // Independent of consent/source epochs. Never held by capture or native status callbacks.
+    private val recordingControlLock = Any()
+    @Volatile private var recordingRequested = true
     private var executingNativeEpoch: Any? = null // facade lane only
     private var nativeSessionRefreshNeeded = false // facade lane only
     private val closeResult = object : SdkFuture<Unit>() {
@@ -322,6 +325,34 @@ internal class StandaloneFacade(
         }
         if (!accepted) settleNativeChange(token, onLane = false)
     }
+
+    override fun startSessionRecording() {
+        synchronized(recordingControlLock) {
+            if (closed || closeRequested.get() || recordingRequested) return
+            recordingRequested = true
+            stack?.runtime?.startNativeRecording()
+            submit {
+                if (nativeReplayRecordingAllowed()) {
+                    requestNativeEvaluation(synchronized(projectionLock) { nativeIntentEpoch }, force = true)
+                }
+            }
+        }
+    }
+
+    override fun stopSessionRecording() {
+        synchronized(recordingControlLock) {
+            if (closed || closeRequested.get() || !recordingRequested) return
+            recordingRequested = false
+            stack?.runtime?.stopNativeRecording()
+        }
+    }
+
+    override fun sessionRecordingStarted(): Boolean = nativeReplayRecordingAllowed() &&
+        nativeReplayIntakeAllowed() && stack?.runtime?.nativeRecordingStarted() == true &&
+        nativeReplayRecordingAllowed() && nativeReplayIntakeAllowed()
+
+    internal fun nativeReplayRecordingAllowed(): Boolean =
+        recordingRequested && !closeRequested.get() && !closed
 
     internal fun nativeReplayIntakeAllowed(): Boolean = synchronized(projectionLock) {
         !closeRequested.get() && !closed && !isOptedOut() && pendingNativeOperations == 0 && nativeLifecycleEligible

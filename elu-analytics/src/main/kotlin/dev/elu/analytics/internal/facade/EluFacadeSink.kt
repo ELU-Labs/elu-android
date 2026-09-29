@@ -40,6 +40,12 @@ internal interface EluFacadeSink {
 
     fun optIn(captureEventName: String?, properties: Map<String, Any>?)
 
+    fun startSessionRecording() = Unit
+
+    fun stopSessionRecording() = Unit
+
+    fun sessionRecordingStarted(): Boolean = false
+
     fun viewPrivacyChanged() = Unit
 
     fun beginNetworkObservation(host: String): dev.elu.analytics.internal.network.NativeNetworkObservation? = null

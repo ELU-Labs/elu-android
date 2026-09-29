@@ -7,15 +7,17 @@ Current source includes owned event delivery, identity/groups/properties, profil
 modes and independent device identity, durable feature-flag exposure metadata,
 explicit consent, real memory-only analytics storage, strict HTTPS self-host bases
 including prefixes, manual exceptions, Views/AppCompat replay, optional HTTP/frame
-metrics and limited observed OS startup timing. The new local capture limiter is a
-source-only slice: its Kotlin/JVM and real SQLite tests are authored but not yet run.
-Its actual AAR/API inventory, consumer, emulator and resource results remain pending.
+metrics and limited observed OS startup timing. Public local replay start/stop/status controls are a new source-only slice;
+its Kotlin tests are authored but not yet compiled or run. Hosted limiter testing
+has begun separately; its native migration fixture required a trusted-key setup
+correction. Neither result is replay-controls qualification. The current exact
+AAR/API inventory, consumer, emulator and resource results remain pending.
 
 Hosted CI at commit `1d2fd17` ran 962 JVM tests with zero failures or ignored tests
 and 94 Android instrumentation tests with zero failures, errors or skips. Build,
 lint and consumer checks passed. The actual 1,905,062-byte AAR (SHA-256 prefix
 `0e9b4aca`) produced a 726-class inventory; generated API review is separate. These
-results cover the source before the limiter. They do not qualify this new slice or
+results cover the source before the limiter. They do not qualify the limiter/replay-controls slices or
 the final release artifact. Public API snapshots must come from actual compiled
 bytes, with old public descriptors preserved.
 

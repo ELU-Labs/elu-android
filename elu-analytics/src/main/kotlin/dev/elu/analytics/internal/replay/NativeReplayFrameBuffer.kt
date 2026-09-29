@@ -79,6 +79,14 @@ internal class NativeReplayFrameBuffer(minimumDurationSeconds: Int) {
         }
     }
 
+    /** Local stop may flush a lawful suffix, never inflate the initial duration. */
+    fun beginDraining(): List<NativeMaskedSnapshot>? {
+        checked(!terminal && sealedPrefix == null, NativeReplayBufferFailure.WITHDRAWN)
+        if (frames.isEmpty() || (!firstChunkCommitted && !ready)) return null
+        ready = true
+        return beginSealing()
+    }
+
     /** Only the known committed original prefix advances ordinals. Unknown admission must withdraw. */
     fun committed(prefix: List<NativeMaskedSnapshot>) {
         try {

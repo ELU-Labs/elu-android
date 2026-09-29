@@ -179,6 +179,43 @@ class NativeReplayLifecycleTest {
     }
     private fun detached(ordinal: Long = 0) = NativeReplayCollectionAttempt.Captured(NativeMaskedSnapshot(ordinal, 1234, NativeViewport(100, 200), emptyList()), 1000)
 
+    @Test fun `explicit local stop returns no fresh facts and performs no View reads`() {
+        val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
+        val activity = Any(); val root = Any(); lifecycle.resumed(activity)
+        val selected = checkNotNull(lifecycle.select(activity, root).get())
+        val observed = platform.observed; val reads = platform.rootReads
+        assertSame(NativeReplayCollectionAttempt.LocalStop,
+            selected.consumeOriginalRoot({ true }, { true }) { _, _ -> error("Stopped callback") }.get())
+        assertEquals(observed, platform.observed); assertEquals(reads, platform.rootReads)
+        assertTrue(selected.isCurrent()) // Existing ownership only, never fresh validation.
+        selected.close()
+    }
+
+    @Test fun `local stop discards returned frame before further View observations`() {
+        val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
+        val activity = Any(); val root = Any(); lifecycle.resumed(activity)
+        val selected = checkNotNull(lifecycle.select(activity, root).get()); var stopped = false
+        val observed = platform.observed
+        assertSame(NativeReplayCollectionAttempt.LocalStop,
+            selected.consumeOriginalRoot({ true }, { stopped }) { _, current ->
+                assertTrue(current()); stopped = true; assertFalse(current()); detached()
+            }.get())
+        assertEquals(observed + 1, platform.observed); selected.close()
+    }
+
+    @Test fun `local stop cannot excuse source withdrawal root withdrawal or unrequested stop`() {
+        for (reason in 0..2) {
+            val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
+            val activity = Any(); val root = Any(); lifecycle.resumed(activity)
+            val selected = checkNotNull(lifecycle.select(activity, root).get())
+            if (reason == 1) platform.callback!!.invoke()
+            val result = selected.consumeOriginalRoot({ reason != 0 }, { reason != 2 }) { _, _ ->
+                NativeReplayCollectionAttempt.LocalStop
+            }.get()
+            assertNull(result); assertFalse(selected.isCurrent()); selected.close()
+        }
+    }
+
     @Test fun `consume original root publishes only detached snapshot after two main observations`() {
         val platform = TestSelectionAccess(); val lifecycle = NativeReplayLifecycle(platform)
         val activity = Any(); val root = Any(); lifecycle.resumed(activity)

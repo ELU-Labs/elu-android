@@ -588,3 +588,30 @@ metadata transaction per attempted event; current overhead and exact-artifact
 qualification remain pending. Unlike the browser, Android has no customer capture
 hooks or console rate-limit logger; bounded caller-value conversion precedes the
 serialized capture admission.
+
+### Local replay controls
+
+Automatic replay remains enabled by default when the existing remote policy,
+consent, live analytics session and supported Views permit it. After setup, use:
+
+```kotlin
+Elu.stopSessionRecording()
+Elu.startSessionRecording()
+val collecting = Elu.sessionRecordingStarted()
+```
+
+The local switch lasts for this SDK instance. Stop prevents fresh collection and
+asynchronously joins in-flight work. An already accepted tail can seal under its
+original privacy, session and source guards; it cannot satisfy an unmet initial
+minimum duration. If stop interrupts main-thread privacy validation, the unfinished
+frame and unsealed tail are discarded. Previously sealed delivery remains subject
+to its normal authority. Opt-out, identity, configuration and privacy withdrawal
+retain their restrictive behavior.
+
+Start requests reevaluation; it creates no analytics session and overrides no
+consent, sampling, audience, privacy or remote permission. Reset and configuration
+changes do not undo a local stop. Calls before setup do nothing and status is false.
+Status becomes true only after the original collector is installed with live
+guards. It is false during stop/drain or after withdrawal and is not delivery or
+player proof. API 29+ Views/AppCompat support and opaque Compose/custom content
+limitations remain unchanged; these methods do not add full-tree Compose capture.

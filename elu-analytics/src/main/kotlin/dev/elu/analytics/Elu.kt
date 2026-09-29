@@ -270,6 +270,18 @@ public object Elu {
         sink?.setGroupPropertiesForFlags(type, properties)
     }
 
+    /** Allows automatic replay to resume when the existing session, privacy and remote policy permit it. */
+    @JvmStatic
+    public fun startSessionRecording() { sink?.startSessionRecording() }
+
+    /** Stops fresh replay collection. A lawful accepted tail may finish under its original authority. */
+    @JvmStatic
+    public fun stopSessionRecording() { sink?.stopSessionRecording() }
+
+    /** Whether this instance has a current installed collector; does not imply upload or rendering. */
+    @JvmStatic
+    public fun sessionRecordingStarted(): Boolean = sink?.sessionRecordingStarted() ?: false
+
     /** Hides text in this view and its descendants from future replay captures. */
     @JvmStatic
     public fun maskView(view: View) { NativeViewPrivacy.restrict(view, NativeViewRestriction.MASK); sink?.viewPrivacyChanged() }

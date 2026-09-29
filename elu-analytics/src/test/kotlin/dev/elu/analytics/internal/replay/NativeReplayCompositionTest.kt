@@ -44,8 +44,9 @@ class NativeReplayCompositionTest {
         override val apiLevel = 36
         val factories = AtomicInteger(); val collections = AtomicInteger(); val firstFrame = CountDownLatch(1)
         @Volatile var onCollect: (() -> Unit)? = null
+        @Volatile var onFactory: (() -> Unit)? = null
         override fun createCollector(): NativeReplayCaptureCollector {
-            check(Thread.currentThread() === access.main); factories.incrementAndGet()
+            check(Thread.currentThread() === access.main); factories.incrementAndGet(); onFactory?.invoke()
             val identity = UUID.randomUUID()
             return NativeReplayCaptureCollector { root, ordinal, timestamp, _, current, unresolved ->
                 check(Thread.currentThread() === access.main); check(root === access.root); check(current()); check(!unresolved)
@@ -100,6 +101,50 @@ class NativeReplayCompositionTest {
         capabilities: NativeReplayCapabilities = proof(), worker: ExecutorService = Executors.newSingleThreadExecutor()) =
         NativeReplayComposition(rig.owner, lifecycle, capabilities, StandaloneRuntime.defaultVersions(), { false }, allowed,
             platform, transport, worker)
+
+    @Test fun `status observes actual collector and stop start waits for original main settlement`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access); val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        platform.onFactory = { if (platform.factories.get() == 1) { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) } }
+        val owner = composition(rig, life, platform)
+        try {
+            owner.ready().get(); assertFalse(owner.recordingStarted())
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate(true).get(3, TimeUnit.SECONDS))
+            assertTrue(entered.await(3, TimeUnit.SECONDS)); assertFalse(owner.recordingStarted())
+            val stopped = owner.stopRecording(); assertFalse(stopped.isDone); assertFalse(owner.recordingStarted())
+            owner.startRecording()
+            assertEquals(1, platform.factories.get()); assertFalse(owner.recordingStarted())
+            release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+            awaitCondition("replacement collector actually installed") { owner.recordingStarted() && platform.factories.get() == 2 }
+            assertEquals(1, access.closes.get())
+            owner.stopRecording().get(3, TimeUnit.SECONDS); assertFalse(owner.recordingStarted())
+            val count = platform.factories.get()
+            owner.reevaluate(true).get(3, TimeUnit.SECONDS)
+            assertEquals(count, platform.factories.get()); assertFalse(owner.recordingStarted())
+        } finally { release.countDown(); owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        assertEquals(access.watches.get(), access.closes.get())
+    } }
+
+    @Test fun `local stop preserves admitted sealed delivery and does not grant a missing session`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access); val wire = Transport(hold = true)
+        val owner = composition(rig, life, platform, wire)
+        try {
+            owner.ready().get(); owner.reevaluate(true).get(3, TimeUnit.SECONDS)
+            assertTrue(wire.entered.await(3, TimeUnit.SECONDS))
+            owner.stopRecording().get(3, TimeUnit.SECONDS)
+            assertEquals(0, wire.canceled.get()); assertEquals(1, wire.requests.size)
+            assertFalse(owner.recordingStarted())
+            owner.withdrawAll(); assertTrue(wire.canceled.get() > 0)
+            wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
+            rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish()
+            owner.startRecording(); owner.reevaluate(true).get(3, TimeUnit.SECONDS)
+            assertNull(rig.owner.snapshot().get().state.identity.session); assertFalse(owner.recordingStarted())
+        } finally {
+            wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
+            owner.closeAndWait().get(3, TimeUnit.SECONDS)
+        }
+    } }
 
     @Test fun `empty local proof never observes a native root platform or network`() = Rig().use { rig -> MainAccess().use { access ->
         val life = NativeReplayLifecycle(access); life.resumed(access.activity); val wire = Transport()

@@ -23,12 +23,16 @@ class NativeReplayCaptureOwnerTest {
         val executor = Executors.newSingleThreadExecutor { task -> Thread(task, "fixture-native-main").also { main = it } }
         val window = Any(); val token = Any()
         @Volatile var valid = true
+        var invalidate: (() -> Unit)? = null
         override fun onMain(action: () -> Unit) { if (Thread.currentThread() === main) action() else executor.execute(action) }
         override fun observe(activity: Any, root: Any, current: () -> Boolean): NativeReplayRootFacts? {
             check(Thread.currentThread() === main)
             return if (valid && current()) NativeReplayRootFacts(window, token, 100, 200, 1f, 36) else null
         }
-        override fun watch(root: Any, withdrawn: () -> Unit) = AutoCloseable { }
+        override fun watch(root: Any, withdrawn: () -> Unit): AutoCloseable {
+            invalidate = withdrawn
+            return AutoCloseable { invalidate = null }
+        }
         override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS)) }
     }
     private class Session(val rig: Rig, proof: NativeReplayCapabilities? = null) : AutoCloseable {
@@ -78,6 +82,132 @@ class NativeReplayCaptureOwnerTest {
     }
     private fun Rig.minimum(seconds: Int) = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", seconds) }
     private fun Rig.rows(): List<ReplayStoredChunk> = owner.storedPreparedReplayForTesting().get()
+
+    @Test fun `local stop flushes exact accepted suffix without waiting ten seconds`() = localStopIdleTail(null)
+    @Test fun `local stop cannot seal after source withdrawal`() = localStopIdleTail("source")
+    @Test fun `local stop cannot seal after identity change`() = localStopIdleTail("identity")
+    @Test fun `local stop cannot seal after original root watcher withdrawal`() = localStopIdleTail("root")
+    @Test fun `local stop cannot seal after local privacy tightening`() = localStopIdleTail("privacy")
+
+    private fun localStopIdleTail(restriction: String?): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate(); Session(rig).use { session ->
+            val entered = CountDownLatch(1); val platform = Platform(rig, session.access)
+            platform.onPause = { stopped ->
+                if (platform.collections.get() == 1) { rig.advance(); true }
+                else { entered.countDown(); !stopped.await(3, TimeUnit.SECONDS) }
+            }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            try {
+                assertTrue(entered.await(3, TimeUnit.SECONDS)); assertTrue(owner.recordingStarted())
+                assertEquals(1, rig.rows().size)
+                when (restriction) {
+                    "source" -> rig.gate.close()
+                    "identity" -> rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get()
+                    "root" -> checkNotNull(session.access.invalidate).invoke()
+                    "privacy" -> platform.privacyRevision = Any()
+                }
+                val stopped = owner.stopRecording(); assertFalse(owner.recordingStarted())
+                assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(3, TimeUnit.SECONDS))
+                val rows = rig.rows()
+                if (restriction == null) {
+                    assertEquals(2, rows.size)
+                    assertEquals(listOf(0L, 1L), rows.map { JSONObject(String(it.prepared.copyBytes())).getJSONObject("chunk").getLong("sequence") })
+                    assertEquals(listOf(0L, 1L), platform.ordinals.toList())
+                    assertEquals(2, platform.collections.get())
+                } else assertTrue("No new tail after $restriction", rows.size <= 1)
+                assertFalse(owner.recordingStarted())
+            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+        }
+    }
+
+    @Test fun `local stop below minimum does not seal and never creates another frame`(): Unit = Rig().use { rig ->
+        rig.minimum(5); rig.activate(); Session(rig).use { session ->
+            val waiting = CountDownLatch(1); val platform = Platform(rig, session.access)
+            platform.onPause = { stop -> waiting.countDown(); !stop.await(3, TimeUnit.SECONDS) }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            try {
+                assertTrue(waiting.await(3, TimeUnit.SECONDS)); owner.stopRecording().get(3, TimeUnit.SECONDS)
+                assertEquals(1, platform.collections.get()); assertTrue(rig.rows().isEmpty())
+            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+        }
+    }
+
+    @Test fun `held factory is not started and local stop joins and discards unfinished pass`(): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate(); Session(rig).use { session ->
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val platform = Platform(rig, session.access)
+            platform.onFactory = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            try {
+                assertTrue(entered.await(3, TimeUnit.SECONDS)); assertFalse(owner.recordingStarted())
+                val stopped = owner.stopRecording(); assertFalse(stopped.isDone); assertFalse(owner.recordingStarted())
+                assertNull(rig.owner.enrollNativeReplayCapture().get())
+                release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+                assertEquals(0, platform.collections.get()); assertTrue(rig.rows().isEmpty())
+            } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+        }
+    }
+
+    @Test fun `stop during third main pass discards prior unsealed tail even with unchanged pure guards`(): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate(); Session(rig).use { session ->
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val platform = Platform(rig, session.access, maximumSamples = 3)
+            platform.onCollect = { if (platform.collections.get() == 3) {
+                entered.countDown(); check(release.await(3, TimeUnit.SECONDS))
+            } }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            try {
+                assertTrue(entered.await(3, TimeUnit.SECONDS)); assertEquals(1, rig.rows().size)
+                val stopped = owner.stopRecording(); assertFalse(stopped.isDone)
+                release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+                assertEquals(1, rig.rows().size); assertEquals(3, platform.collections.get())
+            } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+        }
+    }
+
+    @Test fun `local stop retains exact pending append until settlement and source denial still rolls back`() {
+        for (withdrawSource in listOf(false, true)) Rig().use { rig ->
+            rig.minimum(0); rig.activate(); Session(rig).use { session ->
+                val entered = CountDownLatch(1); val release = CountDownLatch(1)
+                val platform = Platform(rig, session.access)
+                rig.onReplayWrite = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+                val originalTime = rig.clock.wall
+                val owner = session.start(checkNotNull(session.prepare()), platform)
+                try {
+                    assertTrue(entered.await(3, TimeUnit.SECONDS))
+                    val stopped = owner.stopRecording(); assertFalse(stopped.isDone)
+                    if (withdrawSource) rig.gate.close()
+                    release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+                    val rows = rig.rows()
+                    if (withdrawSource) assertTrue(rows.isEmpty()) else {
+                        val chunk = JSONObject(String(rows.single().prepared.copyBytes())).getJSONObject("chunk")
+                        assertEquals(0L, chunk.getLong("sequence"))
+                        assertEquals(RuntimeWallTimestamps.rfc3339(originalTime), chunk.getString("startedAt"))
+                        assertEquals(1, platform.collections.get())
+                    }
+                } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+            }
+        }
+    }
+
+    @Test fun `restrictive intent defeats local drain before asynchronous physical withdrawal`(): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate(); Session(rig).use { session ->
+            val waiting = CountDownLatch(1); val platform = Platform(rig, session.access)
+            val allowed = java.util.concurrent.atomic.AtomicBoolean(true)
+            platform.onPause = { stop -> if (platform.collections.get() == 1) { rig.advance(); true }
+                else { waiting.countDown(); !stop.await(3, TimeUnit.SECONDS) } }
+            val owner = checkNotNull(NativeReplayCaptureOwner.start(rig.owner, session.authority,
+                checkNotNull(session.prepare()), StandaloneRuntime.defaultVersions(), platform,
+                intakeCurrent = allowed::get))
+            try {
+                assertTrue(waiting.await(3, TimeUnit.SECONDS)); assertEquals(1, rig.rows().size)
+                allowed.set(false)
+                assertFalse(owner.recordingStarted())
+                owner.stopRecording().get(3, TimeUnit.SECONDS)
+                assertEquals(1, rig.rows().size)
+            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+        }
+    }
 
     @Test fun `stronger local privacy discards buffered readable frames before seal`(): Unit = Rig().use { rig ->
         rig.minimum(2)
