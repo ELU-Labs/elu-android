@@ -71,9 +71,13 @@ jobs:
             build/reports/
 
   owned-runtime:
-    name: Android owned runtime instrumentation
+    name: Android owned runtime instrumentation (API ${{ matrix.api-level }})
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [29, 35]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -90,14 +94,20 @@ jobs:
       - name: Verify clean setup, owned SQLite continuity, refusal and privacy
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: ${{ matrix.api-level }}
           arch: x86_64
           disable-animations: true
-          script: ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
+          script: |
+            adb shell getprop ro.build.fingerprint
+            adb shell getprop ro.build.version.sdk
+            adb shell getprop ro.product.cpu.abi
+            test "$(adb shell getprop ro.build.version.sdk | tr -d '\r')" = "${{ matrix.api-level }}"
+            test "$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" = "x86_64"
+            ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-owned-runtime-instrumentation
+          name: android-owned-runtime-instrumentation-api-${{ matrix.api-level }}
           retention-days: 14
           if-no-files-found: warn
           path: |
