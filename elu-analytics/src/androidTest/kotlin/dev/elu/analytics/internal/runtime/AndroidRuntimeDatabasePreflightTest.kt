@@ -99,24 +99,47 @@ class AndroidRuntimeDatabasePreflightTest {
         assertFamily(before); assertFalse(scratch.exists())
     }
 
-    @Test fun abandonedKnownScratchIsBoundedAndUnknownSymlinkOrHardlinkEntriesRefuseWithoutDeletion() {
+    @Test fun abandonedKnownScratchIsBoundedAndUnknownOrSymlinkEntriesRefuseWithoutDeletion() {
         database.writeBytes(byteArrayOf(1, 2, 3))
         assertTrue(scratch.mkdir()); Os.chmod(scratch.path, 448)
         File(scratch, "database.sqlite").writeBytes(byteArrayOf(9))
         AndroidRuntimeDatabasePreflight.withSnapshot(database) { assertArrayEquals(database.readBytes(), it.readBytes()) }
         assertFalse(scratch.exists())
-        for (kind in listOf("unknown", "symlink", "hardlink")) {
+        for (kind in listOf("unknown", "symlink")) {
             assertTrue(scratch.mkdir()); Os.chmod(scratch.path, 448)
             val path = File(scratch, if (kind == "unknown") "unowned" else "database.sqlite")
-            when (kind) {
-                "unknown" -> path.writeBytes(byteArrayOf(7))
-                "symlink" -> Os.symlink(database.path, path.path)
-                else -> Os.link(database.path, path.path)
-            }
+            if (kind == "unknown") path.writeBytes(byteArrayOf(7))
+            else Os.symlink(database.path, path.path)
             assertThrows(IOException::class.java) { AndroidRuntimeDatabasePreflight.withSnapshot(database) { error("Must refuse") } }
             assertTrue(path.exists()); assertArrayEquals(byteArrayOf(1, 2, 3), database.readBytes())
             Os.remove(path.path); Os.remove(scratch.path)
         }
+    }
+
+    @Test fun hardlinkScratchEitherMeetsOriginalOsDenialOrExercisesSdkRefusal() {
+        database.writeBytes(byteArrayOf(1, 2, 3))
+        assertTrue(scratch.mkdir()); Os.chmod(scratch.path, 448)
+        val path = File(scratch, "database.sqlite")
+        try {
+            Os.link(database.path, path.path)
+        } catch (error: android.system.ErrnoException) {
+            // Android app filesystem/SELinux policy may refuse the fixture itself.
+            // Only these explicit permission errors establish that separate outcome.
+            if (error.errno != android.system.OsConstants.EACCES && error.errno != android.system.OsConstants.EPERM) throw error
+            assertFalse(path.exists())
+            assertEquals(1L, Os.lstat(database.path).st_nlink)
+            assertArrayEquals(byteArrayOf(1, 2, 3), database.readBytes())
+            assertTrue(checkNotNull(scratch.list()).isEmpty())
+            android.util.Log.i("EluPreflightTest", "hardlink fixture: OS permission denial; SDK hardlink refusal NOT exercised")
+            Os.remove(scratch.path)
+            return
+        }
+        assertEquals(2L, Os.lstat(database.path).st_nlink)
+        assertThrows(IOException::class.java) { AndroidRuntimeDatabasePreflight.withSnapshot(database) { error("Must refuse") } }
+        assertEquals(Os.lstat(database.path).st_ino, Os.lstat(path.path).st_ino)
+        assertArrayEquals(byteArrayOf(1, 2, 3), database.readBytes())
+        android.util.Log.i("EluPreflightTest", "hardlink fixture: actual SDK refusal exercised")
+        Os.remove(path.path); Os.remove(scratch.path)
     }
 
     @Test fun repeatedSuccessAndCopyFailureCloseBothOriginalDescriptors() {
