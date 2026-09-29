@@ -835,6 +835,25 @@ class NativeReplayCaptureOwnerTest {
         }
     }
 
+    @Test fun `geometry exception rechecks original pass clock without collector callback`() = run {
+        for (clockDelta in listOf(50_000_001L, -1L)) Rig().use { rig ->
+            rig.minimum(2); rig.activate(); Session(rig).use { session ->
+                val platform = Platform(rig, session.access, 3)
+                platform.onCollect = { if (platform.collections.get() == 2) {
+                    rig.clock.nanos += clockDelta
+                    // Deliberately do not call current(): only the owner can detect this edge.
+                    throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY)
+                } }
+                val owner = session.start(checkNotNull(session.prepare()), platform)
+                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+                assertTrue(rig.rows().isEmpty()); assertEquals(2, platform.collections.get())
+                assertEquals(1, platform.factories.get()); assertEquals(1, owner.completedDiagnostic()!!.frames)
+                assertEquals(NativeCaptureFailureKind.UNSUPPORTED_GEOMETRY, owner.completedDiagnostic()!!.failure)
+                assertNull(rig.state().session!!.activeEpoch)
+            }
+        }
+    }
+
     private class Rig : AutoCloseable {
         val clock = Clock(); val worker = Worker(); val gate = V2ConfigAuthorityGate()
         var body = ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json")

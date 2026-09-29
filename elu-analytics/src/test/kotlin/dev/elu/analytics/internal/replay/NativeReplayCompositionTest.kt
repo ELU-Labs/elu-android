@@ -210,10 +210,18 @@ class NativeReplayCompositionTest {
     @Test fun `root replacement waits for durable stop and unknown accounting cannot recover`() = run {
         for (unknown in listOf(false, true)) Rig().use { rig -> MainAccess().use { access ->
             rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
-            val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+            val platform = Platform(rig, access); val ticks = platform.manualTicks(); val wire = Transport(hold = true)
+            val owner = composition(rig, life, platform, wire)
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             try {
                 owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+                // Isolate accounting uncertainty from a separately unresolved delivery. Poisoning
+                // while a physical response still awaits its durable refusal must keep close pending.
+                assertTrue(wire.entered.await(3, TimeUnit.SECONDS))
+                val delivery = owner.flushSealed()
+                wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
+                assertEquals(ReplayDeliveryPass(1, 1), delivery.get(3, TimeUnit.SECONDS))
+                assertEquals(1, wire.requests.size)
                 val original = owner.currentCapture()
                 rig.onWrite = {
                     entered.countDown(); check(release.await(3, TimeUnit.SECONDS))
@@ -231,7 +239,10 @@ class NativeReplayCompositionTest {
                     failure { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
                     assertEquals(1, platform.factories.get()); assertFalse(owner.observingRoot())
                 } else awaitCondition("fresh capture after durable stop") { platform.factories.get() == 2 }
-            } finally { release.countDown(); runCatching { owner.closeAndWait().get(3, TimeUnit.SECONDS) } }
+            } finally {
+                release.countDown(); wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
+                runCatching { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            }
         } }
     }
 

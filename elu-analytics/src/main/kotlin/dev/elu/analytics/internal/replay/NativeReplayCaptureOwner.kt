@@ -392,6 +392,9 @@ private class NativeReplayCaptureRun(
                             if (error.failure == NativeCollectionFailure.WITHDRAWN && fence.gracefulStopRequested() &&
                                 current(permit, admission)) return@consumeOriginalRoot NativeReplayCollectionAttempt.LocalStop
                             if (error.failure == NativeCollectionFailure.UNSUPPORTED_GEOMETRY) {
+                                // Geometry retry never overrides the original pass clock/deadline.
+                                // The collector may throw without sampling its current callback.
+                                if (!withinPass()) throw error
                                 geometryFailure = error
                                 requireCurrent(rootCurrent() && current(permit, admission) && rootCurrent())
                                 // No failed frame/ordinal escapes; selection still performs its full postcheck.
