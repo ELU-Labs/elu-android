@@ -6,6 +6,7 @@ public final class dev.elu.analytics.Elu {
   public static void setup$default(android.content.Context, java.lang.String, dev.elu.analytics.EluOptions, int, java.lang.Object);
   public static final void capture(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
   public static void capture$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public final dev.elu.analytics.internal.network.NativeNetworkObservation beginNetworkObservation$elu_analytics_release(java.lang.String);
   public static final void identify(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
   public static void identify$default(java.lang.String, java.util.Map, int, java.lang.Object);
   public static final void identify(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>, java.util.Map<java.lang.String, ? extends java.lang.Object>);
@@ -63,13 +64,20 @@ public final class dev.elu.analytics.EluOptions {
   public dev.elu.analytics.EluOptions(java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public final java.lang.String getConfigHost();
   public final dev.elu.analytics.EluPerformanceOptions getPerformance();
+  public final dev.elu.analytics.EluDiagnosticsOptions getDiagnostics();
+  public final java.lang.String getApiHost();
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
-  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
-  public final java.lang.String getApiHost();
   public dev.elu.analytics.EluOptions(java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public dev.elu.analytics.EluOptions();
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions);
 }
 Compiled from "EluFeatureFlagResult.kt"
 public final class dev.elu.analytics.EluFeatureFlagResult {
@@ -97,9 +105,36 @@ public final class dev.elu.analytics.EluPerformanceOptions {
   public final boolean getMainThreadStalls();
   public final long getSampleIntervalMillis();
   public final long getMainThreadStallThresholdMillis();
+  public final boolean getFrameMetrics();
+  public final boolean getProcessAgeAtFirstObservedFrame();
+  public dev.elu.analytics.EluPerformanceOptions(dev.elu.analytics.EluFrameMetricsOptions, boolean, boolean, boolean, long, long);
+  public dev.elu.analytics.EluPerformanceOptions(dev.elu.analytics.EluFrameMetricsOptions, boolean, boolean, boolean, long, long, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public dev.elu.analytics.EluPerformanceOptions(boolean, boolean, boolean, long);
   public dev.elu.analytics.EluPerformanceOptions(boolean, boolean, boolean);
   public dev.elu.analytics.EluPerformanceOptions(boolean, boolean);
   public dev.elu.analytics.EluPerformanceOptions(boolean);
   public dev.elu.analytics.EluPerformanceOptions();
+}
+Compiled from "EluOkHttpInterceptor.kt"
+public final class dev.elu.analytics.EluOkHttpInterceptor implements okhttp3.Interceptor {
+  public dev.elu.analytics.EluOkHttpInterceptor();
+  public okhttp3.Response intercept(okhttp3.Interceptor$Chain);
+}
+Compiled from "EluFrameMetricsOptions.kt"
+public final class dev.elu.analytics.EluFrameMetricsOptions {
+  public dev.elu.analytics.EluFrameMetricsOptions(boolean, boolean);
+  public dev.elu.analytics.EluFrameMetricsOptions(boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final boolean getEnabled();
+  public final boolean getProcessAgeAtFirstObservedFrame();
+  public dev.elu.analytics.EluFrameMetricsOptions(boolean);
+  public dev.elu.analytics.EluFrameMetricsOptions();
+}
+Compiled from "EluDiagnosticsOptions.kt"
+public final class dev.elu.analytics.EluDiagnosticsOptions {
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean);
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final boolean getEnabled();
+  public final boolean getLaunchTimings();
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean);
+  public dev.elu.analytics.EluDiagnosticsOptions();
 }
