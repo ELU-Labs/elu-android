@@ -391,6 +391,7 @@ dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$Captured
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$CollectorDeadline
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$LocalStop
+dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$UnsupportedGeometry
 dev.elu.analytics.internal.replay.NativeReplayCompletedCaptureSnapshot
 dev.elu.analytics.internal.replay.NativeReplayComposition
 dev.elu.analytics.internal.replay.NativeReplayComposition$Companion$noncancelable$1
@@ -400,6 +401,7 @@ dev.elu.analytics.internal.replay.NativeReplayFrameBuffer$Companion
 dev.elu.analytics.internal.replay.NativeReplayGuard
 dev.elu.analytics.internal.replay.NativeReplayHttpRouter$Flight$settlement$1
 dev.elu.analytics.internal.replay.NativeReplayLifecycle
+dev.elu.analytics.internal.replay.NativeReplayLifecycle$observeRootReadiness$result$1
 dev.elu.analytics.internal.replay.NativeReplayLifecycle$selectCurrent$result$1
 dev.elu.analytics.internal.replay.NativeReplayOutlineObservation
 dev.elu.analytics.internal.replay.NativeReplayOutlineRect
@@ -414,6 +416,7 @@ dev.elu.analytics.internal.replay.NativeReplayPrivacyProjection$Companion
 dev.elu.analytics.internal.replay.NativeReplayProjectionInput
 dev.elu.analytics.internal.replay.NativeReplayProjectionInput$Companion
 dev.elu.analytics.internal.replay.NativeReplayRootFacts
+dev.elu.analytics.internal.replay.NativeReplayRootReadiness
 dev.elu.analytics.internal.replay.NativeReplayScope
 dev.elu.analytics.internal.replay.NativeReplaySealer
 dev.elu.analytics.internal.replay.NativeReplaySealingException
