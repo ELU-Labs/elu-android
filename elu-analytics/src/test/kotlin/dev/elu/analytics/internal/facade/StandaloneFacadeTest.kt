@@ -8,6 +8,7 @@ import dev.elu.analytics.internal.flags.AndroidFeatureFlagClient
 import dev.elu.analytics.internal.flags.FlagClock
 import dev.elu.analytics.internal.flags.FlagOpaqueIdSource
 import dev.elu.analytics.internal.flags.FlagTransport
+import dev.elu.analytics.internal.runtime.RuntimeRecordCodec
 import dev.elu.analytics.internal.runtime.FakeRuntimeQueueBacking
 import dev.elu.analytics.internal.runtime.RuntimeCaptureClock
 import dev.elu.analytics.internal.runtime.RuntimeEventKind
@@ -831,14 +832,21 @@ class StandaloneFacadeTest {
             val h = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
             h.facade.applyConfiguration(config()); h.settle()
             h.facade.getFeatureFlag("variant"); h.settle()
-            val attempts = backing.mutatedTransactionAttempts
+            val attempts = backing.attemptedRecordAppends.size
             if (ambiguous) backing.ambiguousNextCommit = dev.elu.analytics.internal.runtime.FakeAmbiguousOutcome.ROLLBACK
             else backing.failNextKnownCommit = java.io.IOException("known rollback")
             h.facade.getFeatureFlag("variant"); h.settle()
             if (ambiguous) {
                 // Exact reconciliation proves the first attempt rolled back and retries once.
                 // If the first attempt had consumed the marker, this retry could not report.
-                assertEquals(attempts + 2, backing.mutatedTransactionAttempts)
+                val appended = backing.attemptedRecordAppends.drop(attempts)
+                // Session publication also refreshes flag authority. Count only the two
+                // record-appending transactions, not that separate metadata-only write.
+                assertEquals(2, appended.size)
+                assertEquals(listOf(StandaloneFacade.FEATURE_FLAG_CALLED_EVENT, StandaloneFacade.FEATURE_FLAG_CALLED_EVENT),
+                    appended.map { RuntimeRecordCodec.decodeEvent(it.single().internalPayload).name })
+                assertEquals(appended.first().single().recordId, appended.last().single().recordId)
+                assertNull(backing.ambiguousNextCommit)
                 assertEquals(1, h.exposures().size)
             } else {
                 assertTrue(h.exposures().isEmpty())

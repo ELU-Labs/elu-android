@@ -24,6 +24,8 @@ internal class FakeRuntimeQueueBacking {
     var scanCalls: Int = 0
     var connectionCalls: Int = 0
     var mutatedTransactionAttempts: Int = 0
+    /** Candidate record appends observed before injected commit outcomes; excludes metadata-only writes. */
+    val attemptedRecordAppends = mutableListOf<List<RuntimeStoredRecord>>()
     /** Logical storage generation: one step per durably committed mutated transaction. */
     var committedMutationGeneration: Long = 0L
     val transactionThreads: MutableList<Thread> = Collections.synchronizedList(mutableListOf())
@@ -162,6 +164,8 @@ private class FakeRuntimeQueueDatabase(
                 return@synchronized result
             }
             backing.mutatedTransactionAttempts += 1
+            val appended = transaction.records.filterKeys { it !in originalRecords }.values.map { it.deepCopy() }
+            if (appended.isNotEmpty()) backing.attemptedRecordAppends += appended
 
             backing.failNextKnownCommit?.let { failure ->
                 backing.failNextKnownCommit = null
