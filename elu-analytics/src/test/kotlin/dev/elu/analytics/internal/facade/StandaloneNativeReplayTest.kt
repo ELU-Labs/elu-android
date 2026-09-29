@@ -148,11 +148,15 @@ class StandaloneNativeReplayTest {
         protocol: NativeReplayProtocol = NativeReplayProtocol.V1, reopen: Boolean = false,
         generation: String = protocol.generation,
         advertised: List<V1ReplayTransport> = listOf(NativeReplayProtocol.V2.transport, NativeReplayProtocol.V1.transport),
-        apiLevel: Int = 36) : AutoCloseable {
+        apiLevel: Int = 36, traceNativeStart: Boolean = false) : AutoCloseable {
         val rig = Rig(protocol, generation, advertised); val access = MainAccess()
         val lifecycle = NativeReplayLifecycle(access)
         val platform = Platform(rig, access, apiLevel = apiLevel)
         val wire = Transport()
+        val nativeTrace = CopyOnWriteArrayList<String>()
+        private val nativeObserver = if (traceNativeStart) BoundedNativeStartObserver.create {
+            nativeTrace += String(it, Charsets.US_ASCII)
+        } else BoundedNativeStartObserver.NONE
         lateinit var facade: StandaloneFacade
         val native: NativeReplayComposition
         val runtime: StandaloneRuntime
@@ -163,13 +167,16 @@ class StandaloneNativeReplayTest {
             if (resetEarly) { rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish() }
             lifecycle.resumed(access.activity)
             native = NativeReplayComposition(rig.owner, lifecycle, proof(), StandaloneRuntime.defaultVersions(), { false },
-                { ::facade.isInitialized && facade.nativeReplayIntakeAllowed() }, platform, wire)
+                { ::facade.isInitialized && facade.nativeReplayIntakeAllowed() }, platform, wire,
+                nativeStartObserver = nativeObserver)
             native.ready().get(3, TimeUnit.SECONDS)
             runtime = StandaloneRuntime(rig.owner, KEY, wallClock = { rig.clock.wall },
                 transportFactory = { BatchHTTPTransport { BatchHTTPResponse(503, byteArrayOf()) } },
-                deviceInEuTimezone = { false }, flushDelayMillis = 60_000, configurationGate = rig.gate, nativeReplay = native)
+                deviceInEuTimezone = { false }, flushDelayMillis = 60_000, configurationGate = rig.gate, nativeReplay = native,
+                nativeStartTrace = nativeObserver.global)
             facade = StandaloneFacade(open = { StandaloneStack(runtime, rig.owner, null) }, deliverCallback = { it.run() },
-                wallClock = { rig.clock.wall }, bufferLimit = bufferLimit, configurationGate = rig.gate)
+                wallClock = { rig.clock.wall }, bufferLimit = bufferLimit, configurationGate = rig.gate,
+                nativeStartTrace = nativeObserver.global)
             facade.start()
         }
         fun settle() { facade.settled().get(3, TimeUnit.SECONDS) }
@@ -256,14 +263,20 @@ class StandaloneNativeReplayTest {
             assertEquals(0, h.platform.factories.get()); assertTrue(h.rig.rows().isEmpty())
         }
 
-    @Test fun `public first activity creates actual native session and later activities reuse one owner`(): Unit = Harness(resetEarly = true).use { h ->
-        h.settle(); assertEquals(0, h.platform.factories.get())
-        h.facade.capture("first", null, Date(h.rig.clock.wall)); h.settle()
-        assertTrue(h.platform.firstFrame.await(3, TimeUnit.SECONDS))
-        awaitCondition("first sealed public row") { h.rig.rows().isNotEmpty() }
-        repeat(12) { h.facade.capture("activity-$it", null, Date(h.rig.clock.wall)) }
-        h.settle(); assertEquals(1, h.platform.factories.get()); assertEquals(1, h.access.watches.get())
-        assertTrue(h.facade.nativeReplayIntakeAllowed())
+    @Test fun `public first activity creates actual native session and later activities reuse one owner`() {
+        repeat(20) { attempt -> Harness(resetEarly = true, traceNativeStart = true).use { h ->
+            fun diagnostic(boundary: String) = "$boundary, attempt=$attempt, collectors=${h.platform.factories.get()}, " +
+                "watchers=${h.access.watches.get()}, closed=${h.access.closes.get()}\n" + h.nativeTrace.joinToString("")
+            h.settle(); assertEquals(diagnostic("before activity"), 0, h.platform.factories.get())
+            h.facade.capture("first", null, Date(h.rig.clock.wall)); h.settle()
+            assertTrue(diagnostic("first frame"), h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+            awaitCondition("first sealed public row") { h.rig.rows().isNotEmpty() }
+            repeat(12) { h.facade.capture("activity-$it", null, Date(h.rig.clock.wall)) }
+            h.settle()
+            assertEquals(diagnostic("collector reuse"), 1, h.platform.factories.get())
+            assertEquals(diagnostic("watcher reuse"), 1, h.access.watches.get())
+            assertTrue(diagnostic("intake remains allowed"), h.facade.nativeReplayIntakeAllowed())
+        } }
     }
 
     @Test fun `valid context acceptance revokes a held main frame without blocking facade or granting replacement`(): Unit = Harness(activateEarly = false).use { h ->
