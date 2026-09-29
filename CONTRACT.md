@@ -16,20 +16,26 @@ not authorize collection. Unsupported, malformed, expired, revoked or mismatched
 configuration cannot open a capture or delivery path.
 
 The public `apiHost` declaration permits an exactly matching self-hosted config
-origin: HTTPS with no explicit port, credentials, path beyond `/`, query, fragment
-or trailing-dot hostname. Undeclared origins are refused before runtime setup.
-This origin declaration does not itself authorize configuration or ingestion;
+base: HTTPS with an optional regular path prefix, no explicit port, credentials,
+query, fragment or trailing-dot hostname. Empty/dot path segments, backslashes,
+raw non-ASCII characters, encoded separators/spaces/controls and double escapes are
+refused. Prior outer-whitespace/host-case normalization and one trailing-slash
+removal are retained; accepted path bytes remain exact. Undeclared bases are
+refused before runtime setup. This declaration does not itself authorize ingestion;
 the owned runtime's endpoint and configuration authority checks still apply.
 The immutable local declaration reaches config validation, queue authorization
 and the physical event, flag and replay transports. Every role retains its exact
-contract path; remote documents cannot widen the origin. Config fetching binds
+contract path appended to the declared prefix; remote documents cannot widen the
+host or prefix. Config fetching binds
 the exact original site-key URI, and all transports refuse redirects. Local
-customer HTTP telemetry excludes both selected SDK configuration and API hosts.
+customer HTTP telemetry excludes both selected SDK configuration and API hosts,
+including requests outside the declared API prefix.
 
-Cloud keeps the previous site-key storage namespace. Custom API origins use a
-domain-separated hash of their canonical origin and exact site-key hash. Identity,
-consent, event/replay queues and flag cache never migrate between origins. Opening
-an equivalent normalized origin reuses its original store. The protocol's
+Cloud keeps the previous site-key storage namespace. Custom API bases use a
+domain-separated hash of their canonical host plus prefix and exact site-key hash.
+Existing prefixless namespaces are unchanged. Identity, consent, event/replay
+queues and flag cache never migrate between bases. Opening an equivalent
+normalized base reuses its original store. The protocol's
 site-key hash is unchanged; no remote credential or history identity is invented.
 
 Configuration can independently restrict features, endpoints, privacy, session

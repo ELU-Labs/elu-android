@@ -28,11 +28,13 @@ internal object V2ConfigEndpoint {
 
     fun requireApproved(endpoint: URI, debuggable: Boolean = false, apiHost: String? = null) {
         val components = endpoint.rawPath?.split('/') ?: emptyList()
-        require(components.size == 5 && components[1] == "sdk" && components[2] == "v2" && components[4] == "config") {
+        val tail = components.takeLast(4)
+        require(components.size >= 5 && tail[0] == "sdk" && tail[1] == "v2" && tail[3] == "config") {
             "Invalid v2 config endpoint"
         }
-        val origin = "${endpoint.scheme}://${endpoint.rawAuthority}"
-        require(endpoint == build(origin, components[3], debuggable, apiHost)) { "Invalid v2 config endpoint" }
+        val prefix = components.dropLast(4).joinToString("/")
+        val base = "${endpoint.scheme}://${endpoint.rawAuthority}$prefix"
+        require(endpoint == build(base, tail[2], debuggable, apiHost)) { "Invalid v2 config endpoint" }
     }
 }
 

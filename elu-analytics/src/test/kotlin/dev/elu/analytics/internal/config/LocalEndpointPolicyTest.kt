@@ -33,12 +33,41 @@ class LocalEndpointPolicyTest {
     }
 
     @Test fun `invalid explicit API declaration cannot hide behind approved cloud or debug config origins`() {
-        for (api in listOf("", "bad", "http://analytics.example.com", "$origin:443", "$origin/path",
+        for (api in listOf("", "bad", "http://analytics.example.com", "$origin:443", "$origin/path/../other",
             "$origin?x=1", "$origin#x", "https://user@analytics.example.com", "$origin.", "https://localhost")) {
             assertThrows(api, IllegalArgumentException::class.java) { LocalEndpointPolicy.fromApiHost(api) }
             assertNull(EluConfigHostPolicy.resolve("https://elu.dev", false, api))
             assertNull(EluConfigHostPolicy.resolve("http://localhost:8787", true, api))
         }
+    }
+
+    @Test fun `all roles require exact declared prefix including separators and case`() {
+        val base = "$origin/team-a/elu"
+        val prefixed = LocalEndpointPolicy.fromApiHost("$base/")
+        assertEquals(base, prefixed.apiOrigin)
+        assertEquals("analytics.example.com", prefixed.apiHost)
+        for ((role, path) in listOf(V1EndpointRole.EVENTS to "/v1/events", V1EndpointRole.FLAGS to "/v1/flags",
+            V1EndpointRole.REPLAY to "/v2/replay", V1EndpointRole.ASSETS to "/sdk/")) {
+            prefixed.requireApproved(URI("$base$path?route=eu"), role)
+            for (bad in listOf("$origin$path", "$origin/team-b/elu$path", "$origin/Team-a/elu$path", "$base-extra$path",
+                "$base/$path", "$base/../elu$path", "$base$path/", "$origin/%74eam-a/elu$path", "$base$path?%73ite_key=x")) {
+                assertThrows(bad, IllegalArgumentException::class.java) { prefixed.requireApproved(URI(bad), role) }
+            }
+            assertThrows(IllegalArgumentException::class.java) { selected.requireApproved(URI("$base$path"), role) }
+        }
+        prefixed.requireApproved(URI("$base/v1/replay"), V1EndpointRole.REPLAY, 1)
+        assertThrows(IllegalArgumentException::class.java) { prefixed.requireApproved(URI("$base/v1/replay"), V1EndpointRole.REPLAY) }
+    }
+
+    @Test fun `prefixes have separate namespaces with root and cloud continuity unchanged`() {
+        val key = "elu_pk_test_${"A".repeat(26)}"
+        val root = RuntimeSiteNamespace.directory(key, selected)
+        val a = RuntimeSiteNamespace.directory(key, LocalEndpointPolicy.fromApiHost("$origin/a"))
+        val b = RuntimeSiteNamespace.directory(key, LocalEndpointPolicy.fromApiHost("$origin/b"))
+        assertEquals(a, RuntimeSiteNamespace.directory(key, LocalEndpointPolicy.fromApiHost(" HTTPS://Analytics.Example.Com/a/ ")))
+        assertEquals(4, setOf(root, a, b, RuntimeSiteNamespace.directory(key)).size)
+        assertEquals("host-${RuntimeSiteNamespace.digest("elu-runtime-selfhost-v1\u0000$origin\u0000${RuntimeSiteNamespace.digest(key)}")}", root)
+        assertFalse(a.contains(key)); assertFalse(a.contains("/a"))
     }
 
     @Test fun `canonical custom origin preserves namespace while cloud other hosts and keys remain isolated`() {

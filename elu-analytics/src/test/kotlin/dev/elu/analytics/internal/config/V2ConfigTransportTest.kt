@@ -34,6 +34,26 @@ class V2ConfigTransportTest {
         assertFalse(connection.instanceFollowRedirects); assertTrue(connection.disconnected)
     }
 
+    @Test fun `prefixed selected custom config URI is immutable before physical connection and never follows redirect`() {
+        val origin = "https://analytics.example.com/team-a/elu"
+        val policy = LocalEndpointPolicy.fromApiHost(origin)
+        val expected = V2ConfigEndpoint.build(origin, KEY, apiHost = policy.apiOrigin)
+        var opens = 0
+        val connection = FakeConnection(302, failBody = true)
+        val transport = HttpURLConnectionV2ConfigTransport(elapsedRealtimeNanos = System::nanoTime,
+            endpointPolicy = policy, boundEndpoint = expected,
+            connectionFactory = { actual -> assertEquals(expected, actual); opens++; connection })
+        for (foreign in listOf("https://elu.dev/sdk/v2/$KEY/config", "$origin/sdk/v2/${KEY}B/config",
+            "https://other.example.com/sdk/v2/$KEY/config", "https://analytics.example.com/sdk/v2/$KEY/config",
+            "https://analytics.example.com/team-b/elu/sdk/v2/$KEY/config", "$origin//sdk/v2/$KEY/config")) {
+            assertThrows(IllegalArgumentException::class.java) { transport.fetch(URI(foreign)) }
+        }
+        assertEquals(0, opens)
+        assertEquals(302, transport.fetch(expected).status)
+        assertEquals(1, opens); assertEquals(0, connection.bodyReads)
+        assertFalse(connection.instanceFollowRedirects); assertTrue(connection.disconnected)
+    }
+
     @Test
     fun `debug loopback eligibility reaches both endpoint validation and original config transport`() {
         listOf("http://127.0.0.1:8787", "http://localhost:8787", "http://10.0.2.2:8787", "https://[::1]:8787").forEach { host ->

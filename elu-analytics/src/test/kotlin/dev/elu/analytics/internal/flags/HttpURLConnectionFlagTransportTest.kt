@@ -39,6 +39,24 @@ class HttpURLConnectionFlagTransportTest {
         assertThrows(IllegalArgumentException::class.java) { HttpURLConnectionFlagTransport(KEY, ENDPOINT, endpointPolicy = policy) }
     }
 
+    @Test fun `prefixed selfhost physical flags request retains bearer endpoint and redirect denial`() {
+        val endpoint = URI("https://analytics.example.com/team-a/elu/v1/flags?route=eu")
+        val policy = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://analytics.example.com/team-a/elu")
+        val worker = Worker(); val connection = Connection(200, "{}".toByteArray())
+        val transport = HttpURLConnectionFlagTransport(KEY, endpoint, endpointPolicy = policy,
+            elapsedRealtimeNanos = System::nanoTime, executor = worker,
+            connectionFactory = { actual -> assertEquals(endpoint, actual); connection })
+        try {
+            val pending = transport.send(FlagTransportRequest(endpoint, "{}".toByteArray())).toFuture()
+            worker.runNext(); assertArrayEquals("{}".toByteArray(), pending.get(1, TimeUnit.SECONDS))
+            assertEquals("Bearer $KEY", connection.getRequestProperty("Authorization"))
+            assertFalse(connection.instanceFollowRedirects)
+            assertFailure(transport.send(FlagTransportRequest(ENDPOINT, "{}".toByteArray())).toFuture())
+            assertTrue(worker.tasks.isEmpty())
+        } finally { transport.close() }
+        assertThrows(IllegalArgumentException::class.java) { HttpURLConnectionFlagTransport(KEY, ENDPOINT, endpointPolicy = policy) }
+    }
+
     @Test
     fun `transport posts immutable producer bytes to its bound endpoint with bearer and identity encoding`() {
         val worker = Worker()

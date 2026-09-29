@@ -136,27 +136,32 @@ An app that sends to a self-hosted ELU instance declares that instance as its
 Elu.setup(
     this,
     "YOUR_SITE_KEY",
-    EluOptions(configHost = "https://analytics.example.com", apiHost = "https://analytics.example.com"),
+    EluOptions(configHost = "https://analytics.example.com/elu", apiHost = "https://analytics.example.com/elu"),
 )
 ```
 
 A `configHost` outside `elu.dev` is accepted only when it is exactly the
-declared `apiHost`: both HTTPS, the same host, the default port, and no
-credentials, path, query or fragment. Anything else (plain HTTP, another port,
-a subdomain, a trailing-dot host) makes `Elu.setup` log a warning and leave the
-SDK idle, as for any unapproved override. The instance serves the same
-`/sdk/v2/<siteKey>/config` contract as ELU Cloud. Declaring an origin does not
-bypass configuration or delivery authorization. The selected API origin is used
-only for the maintained `/v1/events`, `/v1/flags` and `/v2/replay` paths (and the
-optional `/sdk/` asset role). Remote configuration cannot select another origin,
+declared `apiHost`: both HTTPS, the same host and path prefix, no explicit port,
+credentials, query or fragment. A root URL remains supported. A prefix consists
+of regular path segments; empty or dot segments, backslashes, non-ASCII raw
+characters, and encoded separators, spaces, controls or double escapes are rejected.
+Existing surrounding-whitespace/host-case normalization is preserved; one final
+slash is removed, while path case and other accepted percent escapes stay exact.
+An invalid declaration makes `Elu.setup` log a warning and leave the SDK idle.
+The example fetches `/elu/sdk/v2/<siteKey>/config` and uses `/elu/v1/events`,
+`/elu/v1/flags`, `/elu/v2/replay` and the optional `/elu/sdk/` asset role.
+Declaring a base does not bypass configuration or delivery authorization.
+Remote configuration cannot select another host or prefix,
 fall back to Cloud, or follow redirects. An invalid explicit `apiHost` is refused
 even when `configHost` itself is an approved Cloud or debug origin.
 
-Cloud retains its existing on-device store. Each explicitly declared API origin
+Cloud retains its existing on-device store. Each explicitly declared API base
 and site key has a separate identity, event/replay queue, consent and flag store.
-Changing the API origin therefore starts a separate installation; it does not
+Changing the host or prefix therefore starts a separate installation; it does not
 move or delete the old store. Equivalent case/trailing-slash spellings normalize
-to the same origin. The owned self-hosted delivery path still requires fresh
+to the same base. Existing root-based self-hosted stores retain their namespace.
+Customer request telemetry excludes the entire selected SDK host, including paths
+outside its API prefix. The owned self-hosted delivery path still requires fresh
 exact-package and end-to-end release qualification.
 
 An `http://` loopback origin also needs the app to permit cleartext traffic,

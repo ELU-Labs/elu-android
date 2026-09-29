@@ -93,6 +93,40 @@ class FeatureFlagActivityVectorTest {
         assertEquals(3, stores.size)
     }
 
+    @Test fun `cloud root and distinct prefixed stores isolate actual flag cache identity and queued mutations`() {
+        val key = "elu_pk_test_flags"
+        val a = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com/a")
+        val b = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com/b")
+        val cloud = dev.elu.analytics.internal.config.LocalEndpointPolicy.CLOUD
+        val stores = mutableMapOf<String, FakeRuntimeQueueBacking>()
+        fun scoped(policy: dev.elu.analytics.internal.config.LocalEndpointPolicy): RuntimeQueueOwner {
+            val path = dev.elu.analytics.internal.runtime.RuntimeSiteNamespace.directory(key, policy)
+            val owner = open(stores.getOrPut(path) { FakeRuntimeQueueBacking() }, key, policy)
+            owner.ensureFeatureFlagRuntime().await()
+            val body = policy.apiOrigin?.let { configAllowed().replace("https://ingest.elu.dev", it).replace("https://assets.elu.dev", it) } ?: configAllowed()
+            assertTrue(owner.applyFeatureFlagConfiguration(body, millis("2026-08-04T00:01:00.000Z")).await() is V1FlagAuthorizationResolution.Allowed)
+            return owner
+        }
+        val first = scoped(a)
+        val begun = first.begin("flags_request_1", "store_epoch_1", "2026-08-04T00:01:01.000Z")
+        assertTrue(complete(first, begun, responseMixed(), "2026-08-04T00:01:02.000Z") is FlagReloadResult.Updated)
+        assertFalse(first.readFlag("variant").isMissing())
+        val others = listOf(scoped(cloud), scoped(b), scoped(dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com")))
+        assertTrue(others.all { it.readFlag("variant").isMissing() })
+        assertTrue(first.appendMutations(listOf(RuntimeRecordDraft.Mutation("2026-08-04T00:01:04.000Z",
+            RuntimeMutationChange.Identify("selfhost-only-user", emptyMap(), emptyMap()), browserVersions()))).await() is RuntimeAppendResult.Accepted)
+        assertEquals("selfhost-only-user", first.snapshot().await().state.identity.userId)
+        assertEquals(1, first.snapshot().await().queuedCount)
+        others.forEach { assertEquals("user_123", it.snapshot().await().state.identity.userId); assertEquals(0, it.snapshot().await().queuedCount) }
+        first.closeAsync().await()
+        val normalized = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost(" HTTPS://SAME.EXAMPLE.COM/a/ ")
+        val sameStore = stores.getValue(dev.elu.analytics.internal.runtime.RuntimeSiteNamespace.directory(key, normalized))
+        val reopened = open(sameStore, key, normalized)
+        assertEquals("selfhost-only-user", reopened.snapshot().await().state.identity.userId)
+        assertEquals(1, reopened.snapshot().await().queuedCount)
+        assertEquals(4, stores.size)
+    }
+
     @Test
     fun `shared canonical and fatal byte cases execute exactly`() {
         assertEquals(1, vector.getInt("schemaVersion"))

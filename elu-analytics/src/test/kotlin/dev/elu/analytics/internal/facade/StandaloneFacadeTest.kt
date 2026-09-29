@@ -731,6 +731,18 @@ class StandaloneFacadeTest {
         }
     }
 
+    @Test fun `prefixed local API declaration still excludes all customer traffic to the SDK host`() {
+        val policy = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://analytics.example.com/team-a/elu/")
+        val h = harness(networkApiHost = policy.apiHost); h.facade.applyConfiguration(config()); h.settle()
+        // Interceptor admission and completion pass only the host, so a prefix cannot
+        // narrow the exclusion to SDK paths or admit sibling-prefix requests.
+        assertEquals("analytics.example.com", policy.apiHost)
+        assertNull(h.facade.beginNetworkObservation(java.net.URI("https://analytics.example.com/unrelated").host))
+        val original = checkNotNull(h.facade.beginNetworkObservation("customer.example"))
+        original.complete(emptyMap(), "analytics.example.com"); h.settle()
+        assertTrue(h.records().filterIsInstance<RuntimeQueuedRecord.Event>().none { it.record.name == "\$network_request" })
+    }
+
     @Test fun `network process cap is shared by observations and not renewed by reset or consent`() {
         val h = harness(networkConfigHost = "localhost", networkApiHost = "analytics.example.com"); h.facade.applyConfiguration(config()); h.settle()
         assertNull(h.facade.beginNetworkObservation("elu.dev"))

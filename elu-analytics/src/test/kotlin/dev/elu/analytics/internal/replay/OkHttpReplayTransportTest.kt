@@ -49,6 +49,27 @@ class OkHttpReplayTransportTest {
         assertThrows(IllegalArgumentException::class.java) { OkHttpReplayTransport(KEY, ENDPOINT, endpointPolicy = policy) }
     }
 
+    @Test fun `prefixed selfhost physical replay request preserves exact claim bytes and isolated TLS client`() {
+        val endpoint = URI("https://analytics.example.com/team-a/elu/v2/replay?route=eu")
+        val policy = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://analytics.example.com/team-a/elu")
+        val worker = Worker(); lateinit var call: FakeCall
+        val adapter = OkHttpReplayTransport(KEY, endpoint, endpointPolicy = policy, elapsedRealtimeNanos = { 0L },
+            scheduleDeadline = { _, _ -> AutoCloseable {} }, executor = worker, callFactory = { client, request ->
+                assertEquals(endpoint.toString(), request.url.toString())
+                assertEquals("Bearer $KEY", request.header("Authorization"))
+                assertFalse(client.followRedirects); assertFalse(client.followSslRedirects)
+                FakeCall(client, request).also { call = it }
+            })
+        try {
+            val original = claim(endpoint = endpoint)
+            val operation = adapter.start(original) { true }; worker.runNext(); operation.settlement.get(1, TimeUnit.SECONDS)
+            assertArrayEquals(original.row.prepared.copyBytes(), call.written.readByteArray())
+            assertThrows(IllegalArgumentException::class.java) { adapter.start(claim()) { true } }
+            assertTrue(worker.tasks.isEmpty())
+        } finally { adapter.close() }
+        assertThrows(IllegalArgumentException::class.java) { OkHttpReplayTransport(KEY, ENDPOINT, endpointPolicy = policy) }
+    }
+
     @Test fun `posts original bytes using isolated client and one shot authority before execute`() {
         val worker = Worker(); val order = mutableListOf<String>(); val calls = mutableListOf<FakeCall>()
         val claim = claim(); val original = claim.row.prepared.copyBytes()

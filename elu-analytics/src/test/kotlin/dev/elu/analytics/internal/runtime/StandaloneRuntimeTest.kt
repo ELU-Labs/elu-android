@@ -78,6 +78,25 @@ class StandaloneRuntimeTest {
         assertEquals(1, transport.requests.size)
     }
 
+    @Test fun `prefixed local API policy reaches owner authorization and final event batch without cloud fallback`() {
+        val origin = "https://analytics.example.com/team-a/elu"
+        val policy = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost(origin)
+        val transport = ScriptedTransport()
+        val h = runtime(transport, FakeScheduler(), endpointPolicy = policy)
+        val ownConfig = config().replace("https://ingest.elu.dev", origin).replace("https://assets.elu.dev", origin)
+        assertTrue(h.runtime.applyConfiguration(ownConfig).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
+        settleDelivery(h)
+        assertTrue(h.runtime.capture("selfhost-event").await() is RuntimeCaptureResult.Accepted)
+        assertEquals(BatchDeliveryStop.DRAINED, h.runtime.flush().get(5, TimeUnit.SECONDS).stop)
+        assertEquals("$origin/v1/events", transport.requests.single().endpoint.toString())
+        assertEquals("Bearer $SITE_KEY", transport.requests.single().authorizationHeader())
+        val changed = JSONObject(config()).put("issuedAt", "2026-08-04T00:00:30.000Z").toString()
+        assertTrue(h.runtime.applyConfiguration(changed).await() is RuntimeCaptureAuthorityUpdateResult.Terminated)
+        assertFalse(h.runtime.hasDeliveryAuthorization())
+        assertTrue(h.runtime.capture("refused-cloud-fallback").await() is RuntimeCaptureResult.Rejected)
+        assertEquals(1, transport.requests.size)
+    }
+
     @Test
     fun `enabled config activates capture and a flush posts one authorized batch that drains`() {
         val transport = ScriptedTransport()

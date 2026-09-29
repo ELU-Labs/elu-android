@@ -106,6 +106,46 @@ class AndroidRuntimeQueueInstrumentationTest {
     }
 
     @Test
+    fun selfHostedPrefixesUseSeparateRealSQLiteFilesAndCanonicalBaseReopensOriginal() {
+        val original = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(original.cacheDir, "origin-isolation-${UUID.randomUUID()}").apply { mkdirs() }
+        testDirectories += root
+        val context = object : ContextWrapper(original) {
+            override fun getApplicationContext(): Context = this
+            override fun getNoBackupFilesDir(): File = root
+        }
+        val key = "elu_pk_test_${"A".repeat(26)}"
+        val cloud = dev.elu.analytics.internal.config.LocalEndpointPolicy.CLOUD
+        val a = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com/a")
+        val b = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com/b")
+        fun openOrigin(policy: dev.elu.analytics.internal.config.LocalEndpointPolicy): RuntimeQueueOwner =
+            AndroidRuntimeQueue.open(context, key, RuntimeQueueLimits(100, 1_000_000), null,
+                endpointPolicy = policy).await().also { owners += it }
+        val rootBase = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com")
+        val originalOwners = listOf(openOrigin(cloud), openOrigin(a), openOrigin(b), openOrigin(rootBase))
+        originalOwners.forEach { it.ensureFeatureFlagRuntime().await() }
+        val originalStates = originalOwners.map { it.snapshot().await() }
+        assertEquals(4, originalStates.map { it.state.identity.anonymousId }.toSet().size)
+        val at = RuntimeWallTimestamps.rfc3339(System.currentTimeMillis())
+        assertTrue(originalOwners[1].appendMutations(listOf(RuntimeRecordDraft.Mutation(at,
+            RuntimeMutationChange.Identify("only-origin-a", emptyMap(), emptyMap()), versions()))).await() is RuntimeAppendResult.Accepted)
+        assertEquals(1, originalOwners[1].snapshot().await().queuedCount)
+        for (index in listOf(0, 2, 3)) {
+            assertEquals(originalStates[index].state.identity, originalOwners[index].snapshot().await().state.identity)
+            assertEquals(0, originalOwners[index].snapshot().await().queuedCount)
+        }
+        val paths = listOf(cloud, a, b, rootBase).map { AndroidRuntimeQueue.databaseFileFor(context, key, it).canonicalPath }
+        assertEquals(4, paths.toSet().size)
+        originalOwners[1].closeAsync().await(); owners.remove(originalOwners[1])
+        val normalized = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost(" HTTPS://SAME.EXAMPLE.COM/a/ ")
+        val reopened = openOrigin(normalized)
+        assertEquals(paths[1], AndroidRuntimeQueue.databaseFileFor(context, key, normalized).canonicalPath)
+        assertEquals("only-origin-a", reopened.snapshot().await().state.identity.userId)
+        assertEquals(originalStates[1].state.identity.anonymousId, reopened.snapshot().await().state.identity.anonymousId)
+        assertEquals(1, reopened.snapshot().await().queuedCount)
+    }
+
+    @Test
     fun cleanSetupAndReopenNeverAccessUnrelatedAppStorage() {
         val original = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(original.cacheDir, "clean-setup-${UUID.randomUUID()}").apply { mkdirs() }
