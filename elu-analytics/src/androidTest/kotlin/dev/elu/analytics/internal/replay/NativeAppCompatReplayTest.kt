@@ -89,7 +89,11 @@ class NativeAppCompatReplayTest {
             AppCompatCheckedTextView(activity).apply { setEmojiCompatEnabled(false); text = "Checked" },
         )
         views.forEachIndexed { index, view -> add(root, view, index * 70) }
-        assertEquals(listOf("Ordinary", "Button", "Checkbox", "Radio", "Toggle", "Checked"), readable(capture(activity)))
+        val labels = listOf("Ordinary", "Button", "Checkbox", "Radio", "Toggle", "Checked")
+        // The actual theme elevates some controls. Replay follows Android's public
+        // drawing order: lower Z first, preserving sibling order for equal Z.
+        val expected = views.indices.sortedWith(compareBy<Int> { views[it].z }.thenBy { it }).map { labels[it] }
+        assertEquals(expected, readable(capture(activity)))
     }
 
     @Test fun actionBarContentUsesOriginalAncestryAndUncertainLayout() = fixture(true) { activity, root ->

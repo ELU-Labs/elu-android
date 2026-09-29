@@ -96,7 +96,8 @@ class NativeStartupMonitorTest {
 
     @Test fun `pending first frame is discarded when consent changes before authority arrives`() {
         val queries = AtomicInteger(); val now = AtomicReference(reading)
-        val waiting = CountDownLatch(1); val withdrawn = CountDownLatch(1); val ready = AtomicBoolean(false)
+        val waiting = CountDownLatch(1); val releaseReadiness = CountDownLatch(1)
+        val withdrawn = CountDownLatch(1); val ready = AtomicBoolean(false)
         val current = AtomicReference<NativeStartupContext?>(context); val emissions = AtomicInteger()
         val monitor = NativeStartupMonitor(process, RuntimeDiagnosticsClock { now.get() }, {
             if (queries.incrementAndGet() == 1) listOf(record) else {
@@ -104,13 +105,23 @@ class NativeStartupMonitorTest {
                 listOf(record.copy(state = 2, type = 1, firstFrameUptimeNanos = 4_000_000_000))
             }
         }, { current.get().also { if (it == null) withdrawn.countDown() } }, { _, _ -> emissions.incrementAndGet() },
-            { waiting.countDown(); ready.get() })
+            {
+                // Establish the unavailable-authority observation before notifying the
+                // caller. A grant racing the callback return must not rewrite that result.
+                val observedReady = ready.get()
+                waiting.countDown()
+                check(releaseReadiness.await(2, TimeUnit.SECONDS))
+                observedReady
+            })
         try {
             monitor.foreground(true); assertTrue(waiting.await(2, TimeUnit.SECONDS))
-            current.set(null); ready.set(true)
+            current.set(null); ready.set(true); releaseReadiness.countDown()
             assertTrue(withdrawn.await(2, TimeUnit.SECONDS))
             assertEquals(0, emissions.get()); assertEquals(2, queries.get())
-        } finally { monitor.closeAndWait().get(2, TimeUnit.SECONDS) }
+        } finally {
+            releaseReadiness.countDown()
+            monitor.closeAndWait().get(2, TimeUnit.SECONDS)
+        }
     }
 
 }
