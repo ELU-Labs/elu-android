@@ -26,7 +26,7 @@ class NativeWireframeV2EncoderTest {
         val e = encoder(); val initial = e.encode(listOf(frame(0)))
         assertEquals(2, initial.eventCount); assertEquals(2, json(initial).getJSONObject(1).getInt("type"))
         assertEquals(NativeWireframeV2Encoder.CODEC, data(initial).getString("codec"))
-        assertEquals(setOf("codec", "width", "height"), data(initial).keySet())
+        assertEquals(setOf("codec", "width", "height"), data(initial).keys().asSequence().toSet())
         val start = e.encode(listOf(NativeReplayInteraction.Start(point())))
         assertEquals(7, data(start).getInt("type")); assertEquals(2, data(start).getInt("source"))
         assertEquals(10_000_001L, data(start).getLong("id")); assertEquals(2, data(start).getInt("pointerType"))
@@ -46,7 +46,7 @@ class NativeWireframeV2EncoderTest {
         e.encode(listOf(NativeReplayInteraction.Start(point())))
         fail(NativeInteractionFailure.GESTURE) { e.encode(listOf(NativeReplayInteraction.Start(point()))) }
         val cancel = e.encode(listOf(NativeReplayInteraction.Cancel(time + 1)))
-        assertEquals(setOf("source", "type", "id", "pointerType"), data(cancel).keySet())
+        assertEquals(setOf("source", "type", "id", "pointerType"), data(cancel).keys().asSequence().toSet())
         assertEquals(10_000_000L, data(cancel).getLong("id")); assertEquals(10, data(cancel).getInt("type"))
         fail(NativeInteractionFailure.GESTURE) { e.encode(listOf(NativeReplayInteraction.End(point(time + 2)))) }
     }
