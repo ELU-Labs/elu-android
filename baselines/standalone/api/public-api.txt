@@ -14,6 +14,7 @@ public final class dev.elu.analytics.Elu {
   public static void screen$default(java.lang.String, java.util.Map, int, java.lang.Object);
   public static final void alias(java.lang.String);
   public static final void reset();
+  public static final void reset(boolean);
   public static final void captureException(java.lang.Throwable, java.util.Map<java.lang.String, ? extends java.lang.Object>);
   public static void captureException$default(java.lang.Throwable, java.util.Map, int, java.lang.Object);
   public static final void optOut();
@@ -63,9 +64,15 @@ public final class dev.elu.analytics.EluOptions {
   public dev.elu.analytics.EluOptions(java.lang.String);
   public dev.elu.analytics.EluOptions(java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public final java.lang.String getConfigHost();
+  public final dev.elu.analytics.EluPersistenceMode getPersistence();
   public final dev.elu.analytics.EluPerformanceOptions getPerformance();
   public final dev.elu.analytics.EluDiagnosticsOptions getDiagnostics();
   public final java.lang.String getApiHost();
+  public final dev.elu.analytics.EluPersonProfilesMode getPersonProfiles();
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public dev.elu.analytics.EluOptions(java.lang.String, java.lang.String);
@@ -75,6 +82,15 @@ public final class dev.elu.analytics.EluOptions {
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public dev.elu.analytics.EluOptions();
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions);
@@ -137,4 +153,21 @@ public final class dev.elu.analytics.EluDiagnosticsOptions {
   public final boolean getLaunchTimings();
   public dev.elu.analytics.EluDiagnosticsOptions(boolean);
   public dev.elu.analytics.EluDiagnosticsOptions();
+}
+Compiled from "EluPersonProfilesMode.kt"
+public final class dev.elu.analytics.EluPersonProfilesMode extends java.lang.Enum<dev.elu.analytics.EluPersonProfilesMode> {
+  public static final dev.elu.analytics.EluPersonProfilesMode IDENTIFIED_ONLY;
+  public static final dev.elu.analytics.EluPersonProfilesMode ALWAYS;
+  public static final dev.elu.analytics.EluPersonProfilesMode NEVER;
+  public static dev.elu.analytics.EluPersonProfilesMode[] values();
+  public static dev.elu.analytics.EluPersonProfilesMode valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<dev.elu.analytics.EluPersonProfilesMode> getEntries();
+}
+Compiled from "EluPersistenceMode.kt"
+public final class dev.elu.analytics.EluPersistenceMode extends java.lang.Enum<dev.elu.analytics.EluPersistenceMode> {
+  public static final dev.elu.analytics.EluPersistenceMode PERSISTENT;
+  public static final dev.elu.analytics.EluPersistenceMode MEMORY;
+  public static dev.elu.analytics.EluPersistenceMode[] values();
+  public static dev.elu.analytics.EluPersistenceMode valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<dev.elu.analytics.EluPersistenceMode> getEntries();
 }
