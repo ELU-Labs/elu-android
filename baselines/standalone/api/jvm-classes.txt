@@ -173,6 +173,11 @@ dev.elu.analytics.internal.core.UnsupportedCoreSchemaException
 dev.elu.analytics.internal.core.UnsupportedCoreSchemaExtensionException
 dev.elu.analytics.internal.core.UuidCoreIdentifierGenerator
 dev.elu.analytics.internal.diagnostics.AndroidStartupAccess
+dev.elu.analytics.internal.diagnostics.AndroidUncaughtExceptionOwner
+dev.elu.analytics.internal.diagnostics.AndroidUncaughtExceptionRegistry
+dev.elu.analytics.internal.diagnostics.NativeExceptionMechanism
+dev.elu.analytics.internal.diagnostics.NativeExceptionObservation
+dev.elu.analytics.internal.diagnostics.NativeExceptionObservation$Companion
 dev.elu.analytics.internal.diagnostics.NativeStartupContext
 dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement
 dev.elu.analytics.internal.diagnostics.NativeStartupMonitor
@@ -181,6 +186,8 @@ dev.elu.analytics.internal.diagnostics.NativeStartupObservation
 dev.elu.analytics.internal.diagnostics.NativeStartupObservation$Companion
 dev.elu.analytics.internal.diagnostics.NativeStartupProcess
 dev.elu.analytics.internal.diagnostics.NativeStartupRecord
+dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionAdmission
+dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionRegistry
 dev.elu.analytics.internal.facade.AndroidStandaloneStack
 dev.elu.analytics.internal.facade.AndroidStandaloneStack$facade$1$flags$1
 dev.elu.analytics.internal.facade.AndroidStandaloneStack$facade$7
