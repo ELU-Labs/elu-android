@@ -340,6 +340,8 @@ dev.elu.analytics.internal.replay.NativeEncodingException
 dev.elu.analytics.internal.replay.NativeEncodingFailure
 dev.elu.analytics.internal.replay.NativeFont
 dev.elu.analytics.internal.replay.NativeGeometryKind
+dev.elu.analytics.internal.replay.NativeInteractionException
+dev.elu.analytics.internal.replay.NativeInteractionFailure
 dev.elu.analytics.internal.replay.NativeMaskedKind
 dev.elu.analytics.internal.replay.NativeMaskedKind$Input
 dev.elu.analytics.internal.replay.NativeMaskedKind$Placeholder
@@ -400,9 +402,17 @@ dev.elu.analytics.internal.replay.NativeReplayFrameBuffer
 dev.elu.analytics.internal.replay.NativeReplayFrameBuffer$Companion
 dev.elu.analytics.internal.replay.NativeReplayGuard
 dev.elu.analytics.internal.replay.NativeReplayHttpRouter$Flight$settlement$1
+dev.elu.analytics.internal.replay.NativeReplayInteraction
+dev.elu.analytics.internal.replay.NativeReplayInteraction$Cancel
+dev.elu.analytics.internal.replay.NativeReplayInteraction$End
+dev.elu.analytics.internal.replay.NativeReplayInteraction$Moves
+dev.elu.analytics.internal.replay.NativeReplayInteraction$Start
+dev.elu.analytics.internal.replay.NativeReplayInteractionKt
 dev.elu.analytics.internal.replay.NativeReplayLifecycle
 dev.elu.analytics.internal.replay.NativeReplayLifecycle$observeRootReadiness$result$1
 dev.elu.analytics.internal.replay.NativeReplayLifecycle$selectCurrent$result$1
+dev.elu.analytics.internal.replay.NativeReplayMoveCoalescer
+dev.elu.analytics.internal.replay.NativeReplayMoveCoalescer$Offer
 dev.elu.analytics.internal.replay.NativeReplayOutlineObservation
 dev.elu.analytics.internal.replay.NativeReplayOutlineRect
 dev.elu.analytics.internal.replay.NativeReplayPermit
@@ -415,6 +425,8 @@ dev.elu.analytics.internal.replay.NativeReplayPrivacyProjection
 dev.elu.analytics.internal.replay.NativeReplayPrivacyProjection$Companion
 dev.elu.analytics.internal.replay.NativeReplayProjectionInput
 dev.elu.analytics.internal.replay.NativeReplayProjectionInput$Companion
+dev.elu.analytics.internal.replay.NativeReplayProtocol
+dev.elu.analytics.internal.replay.NativeReplayProtocol$Companion
 dev.elu.analytics.internal.replay.NativeReplayRootFacts
 dev.elu.analytics.internal.replay.NativeReplayRootReadiness
 dev.elu.analytics.internal.replay.NativeReplayScope
@@ -441,6 +453,11 @@ dev.elu.analytics.internal.replay.NativeReplayStartedProjection
 dev.elu.analytics.internal.replay.NativeReplayStartedProjection$Companion
 dev.elu.analytics.internal.replay.NativeReplayText
 dev.elu.analytics.internal.replay.NativeReplayText$Companion
+dev.elu.analytics.internal.replay.NativeReplayTouchPoint
+dev.elu.analytics.internal.replay.NativeReplayV2Buffer
+dev.elu.analytics.internal.replay.NativeReplayV2Buffer$Offer
+dev.elu.analytics.internal.replay.NativeReplayV2Entry
+dev.elu.analytics.internal.replay.NativeReplayV2Geometry
 dev.elu.analytics.internal.replay.NativeSolidColor
 dev.elu.analytics.internal.replay.NativeStyle
 dev.elu.analytics.internal.replay.NativeViewAnnotation
@@ -451,6 +468,8 @@ dev.elu.analytics.internal.replay.NativeViewport
 dev.elu.analytics.internal.replay.NativeWireframeEncoder
 dev.elu.analytics.internal.replay.NativeWireframeEncoder$Companion
 dev.elu.analytics.internal.replay.NativeWireframeEncoder$Limits
+dev.elu.analytics.internal.replay.NativeWireframeV2Encoder
+dev.elu.analytics.internal.replay.NativeWireframeV2Encoder$Companion
 dev.elu.analytics.internal.replay.OkHttpReplayTransport
 dev.elu.analytics.internal.replay.OkHttpReplayTransport$2$1
 dev.elu.analytics.internal.replay.OkHttpReplayTransport$Flight$result$1
