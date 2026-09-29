@@ -902,7 +902,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
             "person = transitionedPerson", "left.person == right.person",
             "request.drafts.any { isPersonMutation(it.change) }", "putAll(checkNotNull(person).stamps(identity, personProfiles))"],
         "internal/runtime/AndroidSQLiteRuntimeDatabase.kt": [
-            "version !in 1L..12L && version !in 25L..48L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
+            "version !in 1L..12L && version !in 25L..54L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
             'readPerson(sqlite) ?: corrupt("Missing person state")'],
     }
     for relative, tokens in required.items():
@@ -1031,8 +1031,48 @@ def verify_capture_rate_limiter(root: pathlib.Path, errors: list[str]) -> None:
     if not (0 <= owner.find("owner.reconcileExplicitConsentOnWorker()") < owner.find("owner.initializeCaptureRateLimiting()")):
         errors.append("capture limiter must initialize after durable explicit consent reconciliation")
 
+def verify_exception_intake(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics/internal"
+    required = {
+        "runtime/RuntimeDiagnosticsState.kt": ["in 49L..54L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET", "else -> throw UnsupportedRuntimeStorageSchemaException(version)"],
+        "runtime/AndroidSQLiteRuntimeDatabase.kt": ["version !in 1L..12L && version !in 25L..54L", "validateTableSql(sqlite, EXCEPTIONS_TABLE, CREATE_EXCEPTIONS)",
+            'readExceptions(sqlite) ?: corrupt("Missing exception state")', "exceptions.reservation.matches(state)"],
+        "runtime/RuntimeQueueOwner.kt": ["if (memoryOnly || exceptionSpoolFactory == null", "exceptionIntake?.let { barriers += it.close() }",
+            "exceptionIntake?.joinClosedWriter()", "val sourceIsCurrent = { !sourceRequired || originalSource?.isCurrent() == true }",
+            "left.exceptions == right.exceptions", "consumedDigest = imported.report.digest()", "exceptionImport = imported", "spool.clear()",
+            "if (!it.reportSettlement.isDone) return@submit null", "original.rearm(reservation, policy, mono, remaining, sourceIsCurrent)",
+            'require(command.exceptionImport == null)', "consentStorageUncertain = true; poisonAndThrow(error)",
+            "current.state.identity.contextRevision, policy.policyHash, wall, expiry"],
+        "diagnostics/NativeExceptionIntake.kt": ["original.claimed.compareAndSet(false, true)", "pending.compareAndSet(null, work)",
+            "!original.sourceIsCurrent()", "while (writer.isAlive)", "writer.join()", "if (interrupted) Thread.currentThread().interrupt()",
+            "spool.publish(work.report) { current(work.arm) }", "elapsed >= 0 && elapsed < original.budget",
+            "wall < original.reservation.expiresWall", "if (!current(original) && pending.compareAndSet(work, null))", "previous.completion.isDone"],
+        "diagnostics/AndroidExceptionSpool.kt": ["OsConstants.O_NOFOLLOW", "OsConstants.O_EXCL", "value.st_nlink != 1L",
+            "if (!mayPublish()) return false", "Os.rename(temporary.path, this.report.path)", "syncDirectory(directory)", "Os.close(fd)"],
+    }
+    for relative, tokens in required.items():
+        try:
+            source = load_text(root, base / relative)
+        except ValueError as error:
+            errors.append(str(error)); continue
+        if any(token not in source for token in tokens):
+            errors.append("exception intake lost exact schema, original slot/authority or physical settlement: " + relative)
+    owner = load_text(root, base / "runtime/RuntimeQueueOwner.kt")
+    close = owner[owner.index("fun closeAsync()"):owner.index("private fun finishQuarantinedNativeCloseOnWorker")]
+    if "exceptionIntake?.joinClosedWriter()" not in close or close.index("exceptionIntake?.joinClosedWriter()") > close.index("if (capture?.isQuarantined()"):
+        errors.append("exception intake lost original writer join before every close branch")
+    for path in (root / MAIN_KOTLIN).rglob("*.kt"):
+        text = path.read_text()
+        if path.name != "RuntimeQueueOwner.kt" and "prepareExceptionIntake(" in text:
+            errors.append("exception intake production installation remains disabled")
+    # The worker may not use the queue, SQLite, HTTP or the manual detail serializer.
+    intake = load_text(root, base / "diagnostics/NativeExceptionIntake.kt")
+    if any(name in intake for name in ("RuntimeQueueOwner", "SQLiteDatabase", "ExceptionSerializer", "HttpURLConnection", "Thread.sleep", ".get(100")):
+        errors.append("exception callback/writer escaped its detached one-slot boundary")
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_exception_intake(root, errors)
     verify_capture_rate_limiter(root, errors)
     verify_replay_controls(root, errors)
     verify_replay_continuity(root, errors)

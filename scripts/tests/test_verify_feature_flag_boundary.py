@@ -41,6 +41,34 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_exception_intake_keeps_exact_schema_and_original_commit(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal"
+        cases = [
+            ("runtime/AndroidSQLiteRuntimeDatabase.kt", "version !in 1L..12L && version !in 25L..54L", "version < 1L"),
+            ("runtime/RuntimeDiagnosticsState.kt", "in 49L..54L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET", "in 49L..60L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET"),
+            ("runtime/AndroidSQLiteRuntimeDatabase.kt", "validateTableSql(sqlite, EXCEPTIONS_TABLE, CREATE_EXCEPTIONS)", "Unit"),
+            ("runtime/RuntimeQueueOwner.kt", "consumedDigest = imported.report.digest()", "consumedDigest = null"),
+            ("runtime/RuntimeQueueOwner.kt", "exceptionIntake?.let { barriers += it.close() }", "Unit"),
+            ("runtime/RuntimeQueueOwner.kt", "exceptionIntake?.joinClosedWriter()", "Unit"),
+            ("diagnostics/NativeExceptionIntake.kt", "writer.join()", "Unit"),
+            ("diagnostics/NativeExceptionIntake.kt", "!original.sourceIsCurrent()", "false"),
+            ("runtime/RuntimeQueueOwner.kt", "originalSource?.isCurrent() == true", "true"),
+            ("diagnostics/NativeExceptionIntake.kt", "spool.publish(work.report) { current(work.arm) }", "spool.publish(work.report) { true }"),
+            ("diagnostics/NativeExceptionIntake.kt", "if (!current(original) && pending.compareAndSet(work, null))", "if (false)"),
+            ("diagnostics/AndroidExceptionSpool.kt", "if (!mayPublish()) return false", "Unit"),
+        ]
+        self.assertEqual(self.run_guard().returncode, 0)
+        for relative, before, after in cases:
+            path = base / relative; original = path.read_text(); self.assertIn(before, original)
+            path.write_text(original.replace(before, after))
+            self.assertIn("exception intake lost exact schema", self.run_guard().stderr)
+            path.write_text(original)
+
+    def test_exception_intake_is_not_installed_by_public_stack(self) -> None:
+        path = self.root / BOUNDARY.STACK
+        path.write_text(path.read_text() + "\nfun escaped() = queue.prepareExceptionIntake()\n")
+        self.assertIn("exception intake production installation remains disabled", self.run_guard().stderr)
+
     def test_native_touch_observer_has_only_exact_projection_access(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/AndroidReplayTouchObserver.kt"
         original = path.read_text()

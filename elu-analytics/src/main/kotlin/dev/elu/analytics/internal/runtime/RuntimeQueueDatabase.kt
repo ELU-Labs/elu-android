@@ -55,6 +55,7 @@ internal data class RuntimeStoredCore(
     val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
     val person: RuntimePersonState? = null,
     val exposures: RuntimeFlagExposureState? = null,
+    val exceptions: RuntimeExceptionState? = null,
 )
 
 internal data class RuntimeStoredRecord(
@@ -134,6 +135,8 @@ internal interface RuntimeQueueDatabase : Closeable {
 
     /** Validated owned upgrade; device continuity starts at the existing anonymous identity. */
     fun ensurePersonSchema()
+
+    fun ensureExceptionSchema()
 
     fun ensureCaptureRateSchema()
 

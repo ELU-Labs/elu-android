@@ -84,5 +84,6 @@ internal fun runtimeDatabaseFeatureOffset(version: Long): Int = when (version) {
     in 31L..36L -> RUNTIME_PERSON_SCHEMA_OFFSET
     in 37L..42L -> RUNTIME_EXPOSURE_SCHEMA_OFFSET
     in 43L..48L -> RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET
+    in 49L..54L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET
     else -> throw UnsupportedRuntimeStorageSchemaException(version)
 }

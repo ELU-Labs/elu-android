@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Looper
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.elu.analytics.internal.config.V1StrictCanonicalJson
+import dev.elu.analytics.internal.core.CoreStateCodec
 import dev.elu.analytics.internal.core.CoreIdentifierGenerator
 import dev.elu.analytics.internal.core.FlagContextState
 import dev.elu.analytics.internal.core.IdentityState
@@ -27,6 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -912,7 +914,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                     "corrupt" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf("{}".toByteArray()))
                     "foreign" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf(RuntimePersonState("foreign", "device").encode()))
                     "table" -> sqlite.execSQL("ALTER TABLE person_state ADD COLUMN unknown TEXT")
-                    "future" -> executePragma(sqlite, "PRAGMA user_version=49")
+                    "future" -> executePragma(sqlite, "PRAGMA user_version=55")
                     "exposure-missing" -> sqlite.execSQL("DELETE FROM flag_exposure_state")
                     "exposure-corrupt" -> sqlite.execSQL("UPDATE flag_exposure_state SET payload=?", arrayOf("{}".toByteArray()))
                     "exposure-foreign" -> sqlite.execSQL("UPDATE flag_exposure_state SET payload=?", arrayOf(RuntimeFlagExposureState.initial(
@@ -1066,7 +1068,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                     "corrupt" -> db.execSQL("UPDATE capture_rate_limit SET payload=?", arrayOf("{}".toByteArray()))
                     "foreign" -> db.execSQL("UPDATE capture_rate_limit SET stream_id='foreign'")
                     "table" -> db.execSQL("ALTER TABLE capture_rate_limit ADD COLUMN unknown TEXT")
-                    "future" -> executePragma(db, "PRAGMA user_version=49")
+                    "future" -> executePragma(db, "PRAGMA user_version=55")
                 }
                 if (wal) retained = family().also { assertTrue(it.containsKey(file.name + "-wal")); assertTrue(it.containsKey(file.name + "-shm")) }
             }
@@ -1162,6 +1164,123 @@ class AndroidRuntimeQueueInstrumentationTest {
         val reopened = selected(false); reopened.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
         assertEquals(RuntimeCaptureRejection.RATE_LIMITED, (reopened.capture(invalid.copy(name="later")).await() as RuntimeCaptureResult.Rejected).reason)
         assertEquals(0, reopened.snapshot().await().queuedCount)
+    }
+
+    @Test fun exceptionWriterAndSqlImportSurviveRetainedProcessDeathFamilyAndAmbiguousCommit() {
+        for (uncertain in listOf(false, true)) {
+            val file = databaseFile(); val clock = FixedCaptureClock(Instant.parse(NOW).toEpochMilli(), 1000)
+            fun selected(faults: RecordingFaults = RecordingFaults()): RuntimeQueueOwner = AndroidRuntimeQueue.openForTesting(
+                file, RuntimeQueueLimits(1000, 1_000_000), ::freshState, trustedSiteKey = "elu_pk_test_capture",
+                captureClock = clock, faults = faults, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+                exceptionSpoolFactory = { dev.elu.analytics.internal.diagnostics.AndroidExceptionSpool(file) })
+                .await().also { owners += it }
+            val original = selected()
+            appendEvents(original, event("before-exception"))
+            original.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+            val policy = dev.elu.analytics.internal.diagnostics.NativeExceptionPolicyLease("b".repeat(64))
+            val intake = checkNotNull(original.prepareExceptionIntake(policy, versions()).await())
+            intake.offer(dev.elu.analytics.internal.diagnostics.NativeExceptionObservation.from(IllegalStateException("PRIVATE")))
+            intake.reportSettlement.get(5, TimeUnit.SECONDS); assertTrue(intake.published)
+            // Stable committed DB/WAL + the original writer's synced report are retained before
+            // graceful cleanup, then restored after lease release to model abrupt process death.
+            val suffixes = listOf("", "-wal", "-shm", "-journal")
+            val retained = suffixes.filter { it != "-shm" }.map { File(file.path + it) }
+                .filter { it.exists() }.associate { it.name to it.readBytes() }
+            val reportFile = File(file.parentFile, "exceptions-v1/report")
+            val report = reportFile.readBytes()
+            original.closeAsync().await(); owners.remove(original)
+            for (suffix in suffixes) {
+                val member = File(file.path + suffix); val bytes = retained[member.name]
+                if (bytes == null) { if (member.exists()) assertTrue(member.delete()) } else member.writeBytes(bytes)
+            }
+            reportFile.writeBytes(report); android.system.Os.chmod(reportFile.path, 384)
+            val faults = RecordingFaults(); val reopened = selected(faults)
+            reopened.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+            val before = reopened.snapshot().await().state.identity
+            if (uncertain) faults.failAfterCommit.set(true)
+            checkNotNull(reopened.prepareExceptionIntake(dev.elu.analytics.internal.diagnostics.NativeExceptionPolicyLease("b".repeat(64)), versions()).await())
+            val events = reopened.peek(10, Long.MAX_VALUE).await().filterIsInstance<RuntimeQueuedRecord.Event>()
+            assertEquals(2, events.size); assertEquals(1, events.count { it.record.name == ExceptionSerializer.EVENT_NAME })
+            val imported = events.last().record
+            assertEquals(before, reopened.snapshot().await().state.identity)
+            assertTrue(imported.groups.isEmpty()); assertFalse(imported.properties.toString().contains("PRIVATE"))
+            assertFalse(reportFile.exists())
+            reopened.closeAsync().await(); owners.remove(reopened)
+            val final = selected(); assertEquals(events, final.peek(10, Long.MAX_VALUE).await())
+        }
+    }
+
+    @Test fun exceptionMetadataMigratesAllThirtySixOwnedFamiliesWithoutChangingRecordsOrCore() {
+        for (offset in listOf(0, 6, 24, 30, 36, 42)) for (base in 1..6) {
+            val file = databaseFile()
+            val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
+                trustedSiteKey = "elu_pk_test_capture",
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY.takeIf { offset >= 30 },
+                rateLimiting = dev.elu.analytics.EluRateLimitingOptions().takeIf { offset >= 42 })
+            appendEvents(original, event("retained-before-exception"))
+            if (base in listOf(2, 4, 6)) original.ensureFeatureFlagRuntime().await()
+            if (base >= 3) original.ensurePreparedReplayStorage().await()
+            if (base >= 5) original.ensureNativeReplayAccounting().await()
+            if (offset == 24) original.configureDiagnostics(RuntimeDiagnosticsConfiguration(true, false), RuntimeDiagnosticsClock { null }).await()
+            val records = original.peek(10, Long.MAX_VALUE).await(); val state = original.snapshot().await().state
+            original.closeAsync().await(); owners.remove(original)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+                if (offset == 0) db.execSQL("DROP TABLE replay_audience")
+                if (offset == 30) db.execSQL("DROP TABLE flag_exposure_state")
+                executePragma(db, "PRAGMA user_version=${base + offset}")
+            }
+            AndroidSQLiteRuntimeDatabase.open(file).use { database ->
+                database.ensureExceptionSchema()
+                database.transaction { tx ->
+                    assertEquals(RuntimeExceptionState(STREAM_ID), tx.readCore()!!.exceptions)
+                    assertArrayEquals(CoreStateCodec.encode(state), tx.readCore()!!.stateJson)
+                }
+            }
+            val migrated = open(file, CountingIdentifiers(), RecordingFaults(), { error("No legacy import") },
+                trustedSiteKey = "elu_pk_test_capture", personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            assertEquals(state, migrated.snapshot().await().state)
+            assertEquals(records, migrated.peek(10, Long.MAX_VALUE).await())
+            migrated.closeAsync().await(); owners.remove(migrated)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+                assertEquals(base + 48, db.version)
+            }
+        }
+    }
+
+    @Test fun exceptionMetadataRefusesCorruptForeignMissingAndFutureFamiliesWithoutOriginalWrites() {
+        for (wal in listOf(false, true)) for (damage in listOf("missing", "corrupt", "foreign", "table", "future")) {
+            val file = databaseFile(); val suffixes = listOf("", "-wal", "-shm", "-journal")
+            fun family() = suffixes.map { File(file.path + it) }.filter { it.exists() }.associate { it.name to it.readBytes() }
+            val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            owner.closeAsync().await(); owners.remove(owner)
+            AndroidSQLiteRuntimeDatabase.open(file).use { it.ensureExceptionSchema() }
+            var retained: Map<String, ByteArray>? = null
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+                if (wal) { assertTrue(db.enableWriteAheadLogging()); executePragma(db, "PRAGMA wal_autocheckpoint=0") }
+                else db.disableWriteAheadLogging()
+                when (damage) {
+                    "missing" -> db.execSQL("DELETE FROM exception_state")
+                    "corrupt" -> db.execSQL("UPDATE exception_state SET payload=?", arrayOf("{}".toByteArray()))
+                    "foreign" -> db.execSQL("UPDATE exception_state SET payload=?", arrayOf(RuntimeExceptionState("foreign").encode()))
+                    "table" -> db.execSQL("ALTER TABLE exception_state ADD COLUMN unknown TEXT")
+                    "future" -> executePragma(db, "PRAGMA user_version=55")
+                }
+                if (wal) retained = family().also { assertTrue(it.containsKey(file.name + "-wal")); assertTrue(it.containsKey(file.name + "-shm")) }
+            }
+            retained?.let { rows -> suffixes.forEach { suffix ->
+                val member = File(file.path + suffix); val bytes = rows[member.name]
+                if (bytes == null) { if (member.exists()) assertTrue(member.delete()) } else member.writeBytes(bytes)
+            } }
+            val before = family(); val faults = RecordingFaults()
+            assertThrows(java.util.concurrent.ExecutionException::class.java) {
+                open(file, CountingIdentifiers(), faults, { error("No recovery") },
+                    personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            }
+            val after = family(); assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertArrayEquals(name, bytes, after.getValue(name)) }
+            assertTrue(faults.connectionSettings.isEmpty())
+        }
     }
 
     private fun open(

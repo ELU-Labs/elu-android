@@ -1,5 +1,8 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.diagnostics.NativeExceptionIntake
+import dev.elu.analytics.internal.diagnostics.NativeExceptionPolicyLease
+import dev.elu.analytics.internal.diagnostics.NativeExceptionSpool
 import dev.elu.analytics.EluPersonProfilesMode
 
 import dev.elu.analytics.internal.config.LocalEndpointPolicy
@@ -145,7 +148,12 @@ internal class RuntimeQueueOwner private constructor(
     private val memoryOnly: Boolean,
     private val explicitConsentStore: RuntimeExplicitConsentStore?,
     rateLimiting: dev.elu.analytics.EluRateLimitingOptions?,
+    private val exceptionSpoolFactory: (() -> NativeExceptionSpool)?,
 ) {
+    @Volatile private var exceptionIntake: NativeExceptionIntake? = null
+    private var exceptionSpool: NativeExceptionSpool? = null
+    private var exceptionClosurePending = false
+    private val exceptionNamespace = exceptionDigest(ownershipKey.toByteArray(Charsets.UTF_8))
     private val captureRateLimiter = rateLimiting?.let(::RuntimeCaptureRateLimiter)
     private var database: RuntimeQueueDatabase? = null
         set(value) { field = value; nativeCaptureResources?.updateDatabase(value) }
@@ -157,6 +165,9 @@ internal class RuntimeQueueOwner private constructor(
     private var nativeScopeReconciliation = false
     private var loaded: LoadedSnapshot? = null
         set(value) {
+            if (field?.exceptions?.reservation != value?.exceptions?.reservation ||
+                field?.state?.identity?.contextRevision != value?.state?.identity?.contextRevision ||
+                value?.state?.identity?.optedOut != false) exceptionIntake?.invalidate()
             if (!nativeScopeReconciliation) nativeScope.publish(value?.state?.identity, captureAuthority as? RuntimeCaptureAuthorityState.Authorized)
             field = value
             if (value != null) diagnosticsMayRemain = value.diagnostics != RuntimeDiagnosticsState()
@@ -165,6 +176,7 @@ internal class RuntimeQueueOwner private constructor(
     private var poison: Throwable? = null
         set(value) {
             if (value != null) {
+                exceptionIntake?.invalidate()
                 nativeScope.close(); nativeCaptureEnrollment?.retainQuarantine()
                 if (memoryOnly) memorySettlementUncertain = true
             }
@@ -184,6 +196,7 @@ internal class RuntimeQueueOwner private constructor(
     private var pinnedConfigSiteId: String? = null
     private var captureAuthority: RuntimeCaptureAuthorityState = RuntimeCaptureAuthorityState.Absent
         set(value) {
+            if (field !== value) exceptionIntake?.invalidate()
             nativeScope.publish(loaded?.state?.identity, value as? RuntimeCaptureAuthorityState.Authorized)
             field = value
         }
@@ -193,6 +206,130 @@ internal class RuntimeQueueOwner private constructor(
     private var diagnosticsLaunchAuthority = false
     private var diagnosticsConfiguration = RuntimeDiagnosticsConfiguration()
     private var diagnosticsClock: RuntimeDiagnosticsClock? = null
+
+    /** Dormant internal integration seam. No production opener installs a handler or policy yet.
+     * The supplied future policy lifetime is necessary but never sufficient: the original queue
+     * independently checks general capture authority, persisted consent, identity and deadlines.
+     */
+    internal fun prepareExceptionIntake(
+        policy: NativeExceptionPolicyLease,
+        versions: RuntimeVersions,
+    ): Future<NativeExceptionIntake?> = submit {
+        assertUsable()
+        check(personProfiles != null) { "Exception intake requires an explicit production profile selection" }
+        exceptionIntake?.let {
+            it.invalidate()
+            if (!it.reportSettlement.isDone) return@submit null
+        }
+        if (memoryOnly || exceptionSpoolFactory == null || !policy.isCurrent() || captureAuthorityRejection(requireLoaded()) != null) return@submit null
+        try {
+            database().ensureExceptionSchema()
+        } catch (ambiguous: AmbiguousRuntimeCommitException) {
+            val recovered = reopenValidated(ambiguous) ?: throw ambiguous
+            if (recovered.exceptions == null) throw ambiguous
+        }
+        loaded = database().transaction { loadValidated(it, validatePayloads = true) }
+            ?: corrupt("Exception migration lost owned core")
+        // Retain the original spool before any operation which may throw. No writer exists yet.
+        val spool = exceptionSpool ?: exceptionSpoolFactory.invoke().also { exceptionSpool = it }
+        val retained = spool.read()
+        if (retained != null) {
+            val row = requireLoaded().exceptions ?: corrupt("Missing exception state")
+            if (row.reservation?.id == retained.reservation.id && (row.reservation != retained.reservation ||
+                row.consumedDigest != null && row.consumedDigest != retained.digest())) corrupt("Reserved exception bytes changed")
+            if (row.reservation != null && row.reservation == retained.reservation && row.reservation.matches(requireLoaded().state) &&
+                row.reservation.namespace == exceptionNamespace && row.reservation.policyHash == policy.policyHash) {
+                if (row.consumedDigest != null) {
+                    if (row.consumedDigest != retained.digest()) corrupt("Consumed exception bytes changed")
+                } else {
+                    if (captureClock.wallNowEpochMillis() < retained.occurredWall) return@submit null
+                    val identity = requireLoaded().state.identity
+                    val session = identity.session ?: return@submit null
+                    val imported = RuntimeExceptionImport(retained) { policy.isCurrent() }
+                    val result = try { captureOnWorker(RuntimeCaptureCommand(RuntimeEventKind.EXCEPTION, ExceptionSerializer.EVENT_NAME,
+                        RuntimeWallTimestamps.rfc3339(captureClock.wallNowEpochMillis()), retained.properties(), versions,
+                        expectation = RuntimeCaptureExpectation(identity.revision, identity.contextRevision, session.id) { policy.isCurrent() },
+                        exceptionImport = imported)) }
+                    catch (error: Throwable) {
+                        if (error is AmbiguousRuntimeCommitException || poison != null) {
+                            consentStorageUncertain = true; poisonAndThrow(error)
+                        }
+                        throw error
+                    }
+                    if (result !is RuntimeCaptureResult.Accepted) return@submit null
+                }
+            }
+        }
+        // The fixed slot/consumed marker is not reusable until the original file family is
+        // physically absent and fsynced. Unknown cleanup leaves the reservation intact.
+        spool.clear()
+        retireExceptionReservationOnWorker()
+        val current = requireLoaded()
+        if (!policy.isCurrent() || captureAuthorityRejection(current) != null) return@submit null
+        val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
+        // Capture this exact source now. Callback/writer never look up a replacement on the
+        // owner lane; a same-body new token cannot keep an old arm alive. Raw conformance
+        // owners have no gate, whereas every production opener supplies one.
+        val originalSource = captureConfiguration
+        val sourceRequired = configurationGate != null
+        val sourceIsCurrent = { !sourceRequired || originalSource?.isCurrent() == true }
+        val wall = captureClock.wallNowEpochMillis()
+        val mono = captureClock.elapsedRealtimeNanos()
+        val expiry = authority.configExpiresAt.toEpochMillisFloor()
+        val remaining = authority.monotonicBudget - (mono - authority.monotonicStartedAt)
+        if (wall < 0 || wall >= expiry || mono < authority.monotonicStartedAt || remaining <= 0) return@submit null
+        val reservation = RuntimeExceptionReservation(java.util.UUID.randomUUID().toString(), exceptionNamespace,
+            current.state.stream.streamId, current.state.identity.anonymousId, current.state.identity.revision,
+            current.state.identity.contextRevision, policy.policyHash, wall, expiry)
+        updateExceptionStateOnWorker(checkNotNull(current.exceptions).copy(reservation = reservation))
+        if (!policy.isCurrent() || captureAuthorityRejection(requireLoaded()) != null) return@submit null
+        synchronized(lifecycleLock) {
+            if (!acceptingTasks || !policy.isCurrent()) return@submit null
+            val original = exceptionIntake
+            if (original != null) {
+                original.rearm(reservation, policy, mono, remaining, sourceIsCurrent)
+                original
+            } else {
+                val intake = NativeExceptionIntake(reservation, spool, policy, captureClock, mono, remaining, sourceIsCurrent)
+                // Retain before Thread.start. Startup failures and later close see this handle.
+                exceptionIntake = intake
+                intake.start()
+                intake
+            }
+        }
+    }
+
+    private fun retireExceptionReservationOnWorker() {
+        exceptionIntake?.invalidate()
+        val current = requireLoaded().exceptions ?: return
+        if (current.reservation != null) updateExceptionStateOnWorker(RuntimeExceptionState(current.streamId))
+    }
+
+    private fun updateExceptionStateOnWorker(next: RuntimeExceptionState) {
+        var retried = false
+        while (true) {
+            val before = requireLoaded()
+            val after = before.copy(exceptions = next)
+            try {
+                database().transaction { transaction ->
+                    requireCurrent(transaction)
+                    transaction.updateCore(after.storedCore())
+                }
+                loaded = after
+                return
+            } catch (known: ProvenNotCommittedRuntimeTransactionException) {
+                if (retried) throw known
+                retried = true
+            } catch (ambiguous: AmbiguousRuntimeCommitException) {
+                val alreadyUncertain = consentStorageUncertain
+                consentStorageUncertain = true
+                val actual = reopenValidated(ambiguous) ?: poisonAndThrow(ambiguous)
+                if (viewsEqual(actual, after)) { consentStorageUncertain = alreadyUncertain; loaded = actual; return }
+                if (viewsEqual(actual, before) && !retried) { consentStorageUncertain = alreadyUncertain; loaded = actual; retried = true }
+                else { consentStorageUncertain = true; poisonAndThrow(ambiguous) }
+            }
+        }
+    }
 
     /** Original immutable persisted coverage only. Callers must separately check live intent. */
     internal fun diagnosticsEpoch(): RuntimeDiagnosticsEpoch? = diagnosticsProjection
@@ -433,6 +570,7 @@ internal class RuntimeQueueOwner private constructor(
 
     /** Creates and consumes capture admission inside this one serialized command. */
     fun capture(command: RuntimeCaptureCommand, attempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt()): Future<RuntimeCaptureResult> {
+        require(command.exceptionImport == null) { "Exception imports require the original spool owner" }
         val copy =
             command.copy(
                 properties = Collections.unmodifiableMap(LinkedHashMap(command.properties)),
@@ -1919,11 +2057,12 @@ internal class RuntimeQueueOwner private constructor(
         }
         val (capture, replay) = synchronized(lifecycleLock) {
             if (!acceptingTasks) throw IllegalStateException("Runtime queue owner is already closing")
-            acceptingTasks = false; nativeScope.close()
+            acceptingTasks = false; nativeScope.close(); exceptionIntake?.invalidate()
             nativeCaptureEnrollment?.withdraw()
             nativeCaptureEnrollment to replayPhysicalOperation
         }
         val barriers = mutableListOf<dev.elu.analytics.internal.concurrent.SdkFuture<*>>()
+        exceptionIntake?.let { barriers += it.close() }
         capture?.let { barriers += it.settlement }
         replay?.let { operation ->
             val settled = dev.elu.analytics.internal.concurrent.SdkFuture<Unit>()
@@ -1937,6 +2076,9 @@ internal class RuntimeQueueOwner private constructor(
                 try {
                     executor.execute {
                         try {
+                            // Completion listeners run on the writer. Even a completed future
+                            // cannot release or quarantine this owner's resources until it exits.
+                            exceptionIntake?.joinClosedWriter()
                             if (capture?.isQuarantined() == true) finishQuarantinedNativeCloseOnWorker(capture)
                             else finishCloseOnWorker()
                             completion.complete(Unit)
@@ -1969,6 +2111,13 @@ internal class RuntimeQueueOwner private constructor(
                 quarantineConsentResources()
                 throw IllegalStateException("Original memory/consent settlement is unresolved")
             }
+            if (exceptionSpool != null) {
+                exceptionClosurePending = true
+                check(exceptionIntake?.settlement?.isDone != false)
+                exceptionSpool?.clear()
+                retireExceptionReservationOnWorker()
+                exceptionClosurePending = false
+            }
             if (diagnosticsMayRemain || diagnosticsClosurePending) {
                 diagnosticsClosurePending = true
                 diagnosticsProjection = null
@@ -1987,6 +2136,12 @@ internal class RuntimeQueueOwner private constructor(
             }
             closeResources()
         } catch (error: Throwable) {
+            if (exceptionClosurePending) {
+                // Reuse the existing privacy/consent quarantine; never release an uncertain
+                // reservation's original connection/lease or install a second owner list.
+                consentStorageUncertain = true
+                quarantineConsentResources()
+            }
             if (nativeSettlementUncertain) quarantineNativeResources()
             if (diagnosticsClosurePending) quarantineDiagnosticsResources()
             throw error
@@ -2141,6 +2296,7 @@ internal class RuntimeQueueOwner private constructor(
         // Same-choice intent ends diagnostics coverage without changing identity/context or
         // minting a new session. The exact original core is read again before consent settles.
         clearDiagnosticsOnWorker()
+        retireExceptionReservationOnWorker()
         return database().transaction { transaction ->
             val current = requireCurrent(transaction)
             RuntimeAppendResult.Accepted(emptyList(), current.publicSnapshot)
@@ -2512,6 +2668,15 @@ internal class RuntimeQueueOwner private constructor(
         plannedSession: SessionState? = null,
     ): RuntimeCaptureRejection? {
         val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
+        command.exceptionImport?.let { imported ->
+            val row = before.exceptions ?: return RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED
+            if (row.reservation != imported.report.reservation || !imported.report.reservation.matches(before.state) ||
+                !imported.isCurrent()) return RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED
+            row.consumedDigest?.let { digest ->
+                if (digest != imported.report.digest()) corrupt("Consumed exception bytes changed")
+                return RuntimeCaptureRejection.EXCEPTION_ALREADY_REPORTED
+            }
+        }
         val session = plannedSession ?: if (command.expectation != null || command.networkExpectation?.sessionId != null)
             planCaptureSession(before.state, command.occurredAt, authority) else before.state.identity.session
         fun originalContextMatches(): Boolean = captureExposureMatches(transaction, before, command) && (command.expectation?.let { expected ->
@@ -2619,7 +2784,7 @@ internal class RuntimeQueueOwner private constructor(
                         if (!originalContextMatches()) return@transaction CaptureCommit(
                             RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
                         val mergedProperties =
-                            LinkedHashMap(if (source.startupMeasurement == null) before.state.identity.superProperties else emptyMap()).apply {
+                            LinkedHashMap(if (source.startupMeasurement == null && source.exceptionImport == null) before.state.identity.superProperties else emptyMap()).apply {
                                 putAll(captureProperties)
                             }
                         val draft =
@@ -2630,7 +2795,7 @@ internal class RuntimeQueueOwner private constructor(
                                 expectedSessionId = session.id,
                                 properties = mergedProperties,
                                 versions = command.versions,
-                                nativeDiagnostic = source.startupMeasurement != null,
+                                nativeDiagnostic = source.startupMeasurement != null || source.exceptionImport != null,
                             )
                         // Automatic telemetry must not prolong a live user session. A network
                         // request admitted before any session exists may still create the first one.
@@ -2655,6 +2820,10 @@ internal class RuntimeQueueOwner private constructor(
                         command.startupMeasurement?.let { measurement ->
                             created = created.copy(after = created.after.copy(diagnostics = before.diagnostics.copy(
                                 lastLaunchUptimeNanos = measurement.launchUptimeNanos)))
+                        }
+                        command.exceptionImport?.let { imported ->
+                            created = created.copy(after = created.after.copy(exceptions = checkNotNull(before.exceptions).copy(
+                                consumedDigest = imported.report.digest())))
                         }
                         if (nextExposures != null) created = created.copy(after = created.after.copy(exposures = nextExposures))
                         prepared = created
@@ -2830,7 +2999,10 @@ internal class RuntimeQueueOwner private constructor(
         if (command.flagExposure != null && (command.kind != RuntimeEventKind.CAPTURE || command.name != "\$feature_flag_called" ||
                 command.expectation != null || command.networkExpectation != null || command.startupMeasurement != null ||
                 command.properties != command.flagExposure.properties())) return false
-        if (command.expectation != null && ((command.name != "\$performance_sample" && command.startupMeasurement == null) || command.kind != RuntimeEventKind.CAPTURE)) return false
+        if (command.exceptionImport != null && (command.expectation == null || command.networkExpectation != null ||
+                command.startupMeasurement != null || command.flagExposure != null || command.kind != RuntimeEventKind.EXCEPTION ||
+                command.name != ExceptionSerializer.EVENT_NAME || command.properties != command.exceptionImport.report.properties())) return false
+        if (command.exceptionImport == null && command.expectation != null && ((command.name != "\$performance_sample" && command.startupMeasurement == null) || command.kind != RuntimeEventKind.CAPTURE)) return false
         if (command.startupMeasurement != null && (command.expectation == null || command.networkExpectation != null ||
                 command.kind != RuntimeEventKind.CAPTURE || command.name != "\$native_launch" ||
                 command.properties != command.startupMeasurement.properties())) return false
@@ -3168,6 +3340,11 @@ internal class RuntimeQueueOwner private constructor(
                 person = transitionedPerson,
                 exposures = if (before.exposures != null && before.state.identity.anonymousId != committedState.identity.anonymousId)
                     RuntimeFlagExposureState.initial(committedState) else before.exposures,
+                exceptions = before.exceptions?.let { previous ->
+                    if (previous.reservation?.matches(committedState) == false ||
+                        request is AppendRequest.Local && request.change is RuntimeLocalStateChange.SetOptedOut)
+                        RuntimeExceptionState(committedState.stream.streamId) else previous
+                },
             )
         return PreparedAppend(before, after, records, rejection = null)
     }
@@ -3452,6 +3629,10 @@ internal class RuntimeQueueOwner private constructor(
             if (personProfiles == null) corrupt("Person metadata requires a selected profile mode")
             if (it.streamId != state.stream.streamId) corrupt("Person metadata does not match owned stream")
         }
+        core.exceptions?.let {
+            if (it.streamId != state.stream.streamId || (it.reservation != null && !it.reservation.matches(state)))
+                corrupt("Exception state does not match current owned identity")
+        }
         core.exposures?.let {
             if (personProfiles == null) corrupt("Exposure metadata requires production person mode")
             if (it.streamId != state.stream.streamId || it.anonymousId != state.identity.anonymousId)
@@ -3467,7 +3648,7 @@ internal class RuntimeQueueOwner private constructor(
             corrupt("Stored queue count exceeds the allocated sequence range")
         }
         val head = Math.subtractExact(state.stream.nextSequence, core.queueCount)
-        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics, core.person, core.exposures)
+        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics, core.person, core.exposures, core.exceptions)
         if (validatePayloads) {
             transaction.readCaptureRateState()?.let { rate ->
                 if (rate.streamId != state.stream.streamId) corrupt("Capture limiter metadata does not match owned stream")
@@ -4114,7 +4295,7 @@ internal class RuntimeQueueOwner private constructor(
         left.queuedCount == right.queuedCount &&
             left.queuedBytes == right.queuedBytes &&
             left.headSequence == right.headSequence &&
-            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience && left.diagnostics == right.diagnostics && left.person == right.person && left.exposures == right.exposures
+            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience && left.diagnostics == right.diagnostics && left.person == right.person && left.exposures == right.exposures && left.exceptions == right.exceptions
 
     private fun storedRecordsEqual(
         left: RuntimeStoredRecord,
@@ -4209,7 +4390,7 @@ internal class RuntimeQueueOwner private constructor(
     private fun <T> submit(revokeNative: Boolean = false, block: () -> T): Future<T> =
         synchronized(lifecycleLock) {
             if (!acceptingTasks) throw IllegalStateException("Runtime queue owner is closing")
-            if (revokeNative) nativeScope.invalidate()
+            if (revokeNative) { nativeScope.invalidate(); exceptionIntake?.invalidate() }
             try {
                 executor.submit(Callable { assertWorkerThread(); block() })
             } catch (error: RejectedExecutionException) {
@@ -4248,11 +4429,12 @@ internal class RuntimeQueueOwner private constructor(
         val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
         val person: RuntimePersonState? = null,
         val exposures: RuntimeFlagExposureState? = null,
+        val exceptions: RuntimeExceptionState? = null,
     ) {
         val publicSnapshot: RuntimeQueueSnapshot
             get() = RuntimeQueueSnapshot(state, queuedCount, queuedBytes, headSequence, person, exposures)
 
-        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience, diagnostics, person, exposures)
+        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience, diagnostics, person, exposures, exceptions)
     }
 
     private data class PreparedAppend(
@@ -4351,6 +4533,7 @@ internal class RuntimeQueueOwner private constructor(
             memoryOnly: Boolean = false,
             explicitConsentStore: RuntimeExplicitConsentStore? = null,
             rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
+            exceptionSpoolFactory: (() -> NativeExceptionSpool)? = null,
         ): Future<RuntimeQueueOwner> {
             require(rateLimiting == null || personProfiles != null) { "Capture limiting requires a selected production profile mode" }
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
@@ -4398,6 +4581,7 @@ internal class RuntimeQueueOwner private constructor(
                                 memoryOnly,
                                 explicitConsentStore,
                                 rateLimiting,
+                                exceptionSpoolFactory,
                             )
                         owner.initialize()
                         owner.reconcileExplicitConsentOnWorker()

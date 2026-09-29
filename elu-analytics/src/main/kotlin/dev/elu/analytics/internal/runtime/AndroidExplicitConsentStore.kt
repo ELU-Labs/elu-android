@@ -25,6 +25,7 @@ internal class AndroidExplicitConsentStore(
 
     override fun priorAnalyticsPresent(): Boolean =
         listOf("", "-wal", "-shm", "-journal", ".preflight-v1").any { stat(File(database.path + it)) != null } ||
+            stat(File(checkNotNull(database.parentFile), "exceptions-v1")) != null ||
             legacyFiles.any { stat(it) != null }
 
     override fun read(): RuntimeExplicitConsent? = withDirectory { identity, _ ->

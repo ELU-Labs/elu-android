@@ -58,6 +58,16 @@ private class FakeRuntimeQueueDatabase(
         }
     }
 
+    override fun ensureExceptionSchema() = synchronized(backing) {
+        ensureReplayAudienceSchema(); ensurePersonSchema(); ensureExposureSchema(); ensureCaptureRateSchema()
+        if (backing.databaseSchemaVersion <= RUNTIME_EXCEPTION_SCHEMA_OFFSET) {
+            val core = checkNotNull(backing.core)
+            backing.core = core.copy(exceptions = RuntimeExceptionState(CoreStateCodec.decode(core.stateJson).stream.streamId))
+            backing.databaseSchemaVersion = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt() + RUNTIME_EXCEPTION_SCHEMA_OFFSET
+            backing.advanceCommittedMutationGeneration()
+        }
+    }
+
     override fun ensureCaptureRateSchema() = synchronized(backing) {
         check(!closed)
         val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())

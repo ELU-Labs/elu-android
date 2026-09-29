@@ -239,7 +239,7 @@ class RuntimeDiagnosticsTest {
             reopened.owner.ensureNativeReplayAccounting().await()
             assertEquals(30, rig.backing.databaseSchemaVersion)
         }
-        for (unsupported in (13L..24L) + listOf(0L, 49L))
+        for (unsupported in (13L..24L) + listOf(0L, 55L))
             assertThrows(UnsupportedRuntimeStorageSchemaException::class.java) { runtimeBaseDatabaseVersion(unsupported) }
     }
 

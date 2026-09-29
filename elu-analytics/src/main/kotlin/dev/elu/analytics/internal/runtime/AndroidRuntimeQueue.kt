@@ -75,6 +75,10 @@ internal object AndroidRuntimeQueue {
             endpointPolicy = endpointPolicy,
             personProfiles = personProfiles,
             rateLimiting = rateLimiting,
+            // Only a factory is retained. No directory/writer/handler exists until the future
+            // closed exception policy consumer explicitly prepares the original queue intake.
+            exceptionSpoolFactory = if (persistence == EluPersistenceMode.PERSISTENT)
+                ({ dev.elu.analytics.internal.diagnostics.AndroidExceptionSpool(databaseFile) }) else null,
         )
     }
 
@@ -88,6 +92,7 @@ internal object AndroidRuntimeQueue {
         captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
         personProfiles: EluPersonProfilesMode? = null,
         rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
+        exceptionSpoolFactory: (() -> dev.elu.analytics.internal.diagnostics.NativeExceptionSpool)? = null,
     ): Future<RuntimeQueueOwner> {
         val canonical = databaseFile.canonicalFile
         return RuntimeQueueOwner.open(
@@ -101,6 +106,7 @@ internal object AndroidRuntimeQueue {
             captureClock = captureClock,
             personProfiles = personProfiles,
             rateLimiting = rateLimiting,
+            exceptionSpoolFactory = exceptionSpoolFactory,
         )
     }
 
