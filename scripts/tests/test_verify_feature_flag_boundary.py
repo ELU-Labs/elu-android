@@ -41,6 +41,24 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_native_touch_observer_has_only_exact_projection_access(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/AndroidReplayTouchObserver.kt"
+        original = path.read_text()
+        self.assertEqual(self.run_guard().returncode, 0)
+        for call in ["AndroidViewReplayCollector()", "collector.collect(root)"]:
+            path.write_text(original + "\nfun escaped() = " + call + "\n")
+            self.assertIn("may only inspect the original collector projection", self.run_guard().stderr)
+        for name in ["RuntimeQueueOwner", "RuntimeQueueDatabase", "NativeReplayAuthority", "NativeReplayLifecycle", "NativeReplayCaptureOwner"]:
+            path.write_text(original + "\nval escaped: " + name + "? = null\n")
+            self.assertIn("native touch observer cannot enter authority queue or lifecycle", self.run_guard().stderr)
+        for call in ["NativeReplaySelection.issue()", "NativeReplayPermit.issue()", "beginNativeReplayAuthority()", "appendNativeReplay()", "consumeOriginalRoot()"]:
+            path.write_text(original + "\nfun escaped() = " + call + "\n")
+            self.assertNotEqual(self.run_guard().returncode, 0, call)
+        path.write_text(original)
+        stack = self.root / BOUNDARY.STACK
+        stack.write_text(stack.read_text() + "\nval escaped: AndroidReplayTouchObserver? = null\n")
+        self.assertIn("native touch observer remains uninstalled", self.run_guard().stderr)
+
     def test_native_continuity_rejects_missing_original_guards(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
         cases = [

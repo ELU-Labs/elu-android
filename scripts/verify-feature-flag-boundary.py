@@ -391,6 +391,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     composition = replay / "NativeReplayComposition.kt"
     lifecycle = replay / "NativeReplayLifecycle.kt"
     accounting = replay / "NativeReplayAccounting.kt"
+    touch_observer = replay / "AndroidReplayTouchObserver.kt"
     initializer = runtime / "EluLifecycleInitializer.kt"
     projector = runtime / "PrivacyStateProjector.kt"
     sources = {path.relative_to(root): path.read_text(encoding="utf-8")
@@ -434,6 +435,13 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         "NativeReplayCaptureAdmission": (authority, OWNER),
     }
     for relative, text in sources.items():
+        if relative == touch_observer:
+            if re.search(r"\bAndroidViewReplayCollector\s*\(|\bcollector\s*\.\s*collect\s*\(", text):
+                errors.append("native touch observer may only inspect the original collector projection")
+            if re.search(r"\b(?:RuntimeQueueOwner|RuntimeQueueDatabase|NativeReplayAuthority|NativeReplayLifecycle|NativeReplayCaptureOwner)\b", text):
+                errors.append("native touch observer cannot enter authority queue or lifecycle")
+        elif re.search(r"\bAndroidReplayTouchObserver\b", text):
+            errors.append("native touch observer remains uninstalled pending original capture integration")
         if relative == replay / "NativeReplayV2Buffer.kt":
             # This pure buffer shares only existing size/time ceilings, never the physical owner.
             constants_only = re.sub(r"\bNativeReplayFrameBuffer\s*\.\s*(?:MAXIMUM_ESTIMATED_BYTES|MAXIMUM_FRAME_NODES|MAXIMUM_FRAMES|MAXIMUM_NODES|FLUSH_NANOSECONDS)\b", "", text)
@@ -453,7 +461,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         for name, permitted in capture_methods.items():
             if re.search(r"\b" + name + r"\b", text) and relative not in permitted:
                 errors.append(f"native capture call escaped its exact seam: {name}: {relative}")
-        if re.search(r"\bAndroidViewReplayCollector\b", text) and relative not in {replay / "AndroidViewReplayCollector.kt", loop}:
+        if re.search(r"\bAndroidViewReplayCollector\b", text) and relative not in {replay / "AndroidViewReplayCollector.kt", loop, touch_observer}:
             errors.append(f"native collector must remain unconstructed: {relative}")
         if re.search(r"\bregisterActivityLifecycleCallbacks\s*\(", text) and relative not in {initializer, MAIN_KOTLIN / "dev/elu/analytics/EluCore.kt", runtime / "ActivityLifecycleEmitter.kt"}:
             errors.append(f"native lifecycle must reuse the sole Application callback source: {relative}")

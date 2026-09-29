@@ -24,6 +24,7 @@ import android.widget.TextView
 import java.lang.ref.WeakReference
 import java.util.IdentityHashMap
 import java.util.UUID
+import kotlin.math.floor
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -137,6 +138,11 @@ private fun observeNativeReplayOutlineProfiled(
     return NativeReplayOutlineObservation(rect)
 }
 
+/** Detached snapshot identity only; the collector accepts only its original current instance. */
+internal class NativeTouchProjection(val generation: Long, val snapshot: NativeMaskedSnapshot)
+internal data class NativeTouchLocation(val windowX: Double, val windowY: Double)
+internal data class NativeProjectedTouch(val projection: NativeTouchProjection, val identity: UUID, val x: Int, val y: Int)
+
 /**
  * One-shot geometry collector. Authorized sensitive profiles read bounded text from closed framework/AppCompat
  * widgets after all inherited privacy restrictions; drawable appearance and accessibility data are never read.
@@ -151,6 +157,7 @@ internal class AndroidViewReplayCollector(
     private val newProjection: () -> UUID = UUID::randomUUID,
     private val profile: NativeCapturePassProfile? = null,
     private val maskingProfile: NativeMaskingProfile = NativeMaskingProfile.blanketMask(),
+    private val retainTouchWitnesses: Boolean = false,
 ) {
     private data class Projection(val view: WeakReference<View>, val id: UUID)
     private data class Bounds(val x: Double, val y: Double, val width: Double, val height: Double) {
@@ -172,6 +179,33 @@ internal class AndroidViewReplayCollector(
     private var projections = emptyList<Projection>()
     private var issued = emptySet<UUID>()
     private var collecting = false
+    private data class TextProjection(val view: WeakReference<View>, val layout: WeakReference<Layout>,
+        val text: WeakReference<String>, val kind: NativeMaskedKind)
+    private class PointQuery(val projection: NativeTouchProjection, val locations: List<NativeTouchLocation>) {
+        var result: List<NativeProjectedTouch?> = emptyList()
+    }
+    private var touchTexts = emptyList<TextProjection>()
+    private var touchProjection: NativeTouchProjection? = null
+    private var touchRoot: WeakReference<View>? = null
+    private var projectionGeneration = 0L
+
+    /** Descriptive only. The future capture owner must join this snapshot to its known durable commit. */
+    fun touchProjection(snapshot: NativeMaskedSnapshot): NativeTouchProjection? {
+        if (Looper.myLooper() !== Looper.getMainLooper()) fail(NativeCollectionFailure.NOT_MAIN_THREAD)
+        return touchProjection?.takeIf { it.snapshot === snapshot }
+    }
+
+    /** Geometry/privacy pass only: no ID allocation or text-content operation. */
+    fun projectTouchPoints(root: View, projection: NativeTouchProjection, locations: List<NativeTouchLocation>,
+        fence: NativeCollectionFence, isCurrent: () -> Boolean, unresolvedBlockRules: Boolean,
+        annotations: List<NativeViewAnnotation> = emptyList()): List<NativeProjectedTouch?> {
+        if (!retainTouchWitnesses) fail(NativeCollectionFailure.WITHDRAWN)
+        require(locations.size in 1..33)
+        val query = PointQuery(projection, locations.toList())
+        collectInternal(root, projection.snapshot.ordinal, projection.snapshot.timestamp, fence, isCurrent,
+            unresolvedBlockRules, annotations, query)
+        return query.result
+    }
 
     init {
         require(maximumNodes in 1..9_999 && maximumDepth in 1..64 && maximumProjectionIds in 1..99_999)
@@ -185,6 +219,17 @@ internal class AndroidViewReplayCollector(
         isCurrent: () -> Boolean,
         unresolvedBlockRules: Boolean,
         annotations: List<NativeViewAnnotation> = emptyList(),
+    ): NativeMaskedSnapshot = collectInternal(root, ordinal, timestamp, fence, isCurrent, unresolvedBlockRules, annotations, null)
+
+    private fun collectInternal(
+        root: View,
+        ordinal: Long,
+        timestamp: Long,
+        fence: NativeCollectionFence,
+        isCurrent: () -> Boolean,
+        unresolvedBlockRules: Boolean,
+        annotations: List<NativeViewAnnotation>,
+        pointQuery: PointQuery?,
     ): NativeMaskedSnapshot {
         if (Looper.myLooper() !== Looper.getMainLooper()) fail(NativeCollectionFailure.NOT_MAIN_THREAD)
         if (collecting) fail(NativeCollectionFailure.REENTRANT)
@@ -193,10 +238,14 @@ internal class AndroidViewReplayCollector(
             profile?.mark(NativeCollectorStage.ROOT_PRIME)
             require(ordinal >= 0 && timestamp in 1..9_007_199_254_740_991L && annotations.size <= 128)
             if (unresolvedBlockRules) fail(NativeCollectionFailure.UNRESOLVED_BLOCK_RULE)
+            if (pointQuery != null && (touchProjection !== pointQuery.projection || touchRoot?.get() !== root)) {
+                fail(NativeCollectionFailure.WITHDRAWN)
+            }
             val localPrivacy = NativeViewPrivacy.snapshot()
             if (localPrivacy.overflow) fail(NativeCollectionFailure.UNRESOLVED_BLOCK_RULE)
             val rules = annotations.toList() + localPrivacy.annotations
             fun check() {
+                if (pointQuery != null && touchProjection !== pointQuery.projection) fail(NativeCollectionFailure.WITHDRAWN)
                 if (!localPrivacy.isCurrent() || !fence.isCurrent() || !isCurrent() || !fence.isCurrent()) fail(NativeCollectionFailure.WITHDRAWN)
             }
             val readGuard: () -> Unit = ::check
@@ -217,6 +266,16 @@ internal class AndroidViewReplayCollector(
             val origin = IntArray(2)
             guardedNativeViewRead(profile, readGuard) { root.getLocationInWindow(origin) }
             val exactRoot = Bounds(0.0, 0.0, rootWidth.toDouble(), rootHeight.toDouble())
+            if (pointQuery != null && pointQuery.projection.snapshot.viewport != viewport) fail(NativeCollectionFailure.TREE_CHANGED)
+            val pointLocations = pointQuery?.locations?.map {
+                if (!it.windowX.isFinite() || !it.windowY.isFinite()) fail(NativeCollectionFailure.UNSUPPORTED_GEOMETRY)
+                (it.windowX - origin[0]) / density to (it.windowY - origin[1]) / density
+            } ?: emptyList()
+            val pointResults = arrayOfNulls<NativeProjectedTouch>(pointLocations.size)
+            val pointVetoes = BooleanArray(pointLocations.size)
+            val encodedNodes = pointQuery?.projection?.snapshot?.nodes?.associateBy { it.identity } ?: emptyMap()
+            val priorText = IdentityHashMap<View, TextProjection>()
+            if (pointQuery != null) for (original in touchTexts) original.view.get()?.let { priorText[it] = original }
 
             fun bounds(view: View): Bounds {
                 val location = IntArray(2)
@@ -340,6 +399,14 @@ internal class AndroidViewReplayCollector(
                 // Read only the existing displayed layout. AppCompatTextView.getText() can
                 // synchronously wait for a pending setTextFuture; capture must never consume it.
                 val text = guardedNativeViewRead(profile, readGuard) { layout.text } ?: return NativeMaskedKind.Text
+                if (pointQuery != null) {
+                    val original = priorText[view] ?: return NativeMaskedKind.Text
+                    val originalText = original.text.get() ?: return NativeMaskedKind.Text
+                    // Identity-only access to the already-proven String; no methods/content are read.
+                    if (original.layout.get() !== layout || text !== originalText || text.javaClass !== String::class.java) return NativeMaskedKind.Text
+                    if (remember) textObservations.add(TextObservation(view, layout, originalText, original.kind))
+                    return original.kind
+                }
                 // Spans may replace or hide their underlying string. Never invoke custom
                 // CharSequence methods, even on an exact framework TextView.
                 if (text.javaClass !== String::class.java) return NativeMaskedKind.Text
@@ -450,20 +517,43 @@ internal class AndroidViewReplayCollector(
                     exactClass === View::class.java || knownContainer -> NativeMaskedKind.Rectangle
                     else -> NativeMaskedKind.Placeholder
                 }
-                val id = previous[view] ?: run {
+                val id = previous[view] ?: if (pointQuery != null) null else run {
                     profile?.mark(NativeCollectorStage.PROJECTION_ID); profile?.projection()
                     guardedNativeViewRead(profile, readGuard) { newProjection() }
                 }.also {
                     if (nextIssued.size >= maximumProjectionIds || !nextIssued.add(it)) fail(NativeCollectionFailure.PROJECTION_LIMIT)
                 }
-                nextProjections.add(Projection(WeakReference(view), id))
+                if (id != null) nextProjections.add(Projection(WeakReference(view), id))
                 clip = clip.intersect(g.bounds).intersect(exactRoot)
                 if (clip.width == 0.0 || clip.height == 0.0) {
                     clip = Bounds(clip.x.coerceIn(0.0, exactRoot.width), clip.y.coerceIn(0.0, exactRoot.height), 0.0, 0.0)
                 }
                 val wireBounds = g.bounds.wire(density)
-                nodes.add(NativeMaskedNode(id, kind, wireBounds, containedClip(clip.wire(density), wireBounds, exactRoot.wire(density)),
-                    if (kind === NativeMaskedKind.Placeholder) NativeStyle(backgroundColor = NativeSolidColor(255, 255, 255)) else NativeStyle(), geometryKind))
+                val wireClip = containedClip(clip.wire(density), wireBounds, exactRoot.wire(density))
+                if (pointQuery == null) {
+                    nodes.add(NativeMaskedNode(checkNotNull(id), kind, wireBounds, wireClip,
+                        if (kind === NativeMaskedKind.Placeholder) NativeStyle(backgroundColor = NativeSolidColor(255, 255, 255)) else NativeStyle(), geometryKind))
+                } else {
+                    fun contains(box: NativeRect, x: Double, y: Double) = box.width > 0 && box.height > 0 &&
+                        x >= box.x && y >= box.y && x < box.x + box.width && y < box.y + box.height
+                    for ((index, location) in pointLocations.withIndex()) {
+                        val (x, y) = location
+                        if (!contains(wireClip, x, y)) continue
+                        // Known layout containers do not supply a leaf hit. A private/opaque overlap
+                        // vetoes conservatively even if a later sibling also covers the coordinate.
+                        if (knownContainer && !localBlocked && !localMasked) continue
+                        val encoded = id?.let { encodedNodes[it] }
+                        val px = floor(x); val py = floor(y)
+                        val lawful = !localBlocked && !localMasked && maskingProfile.readsText &&
+                            (exactClass === View::class.java || kind is NativeMaskedKind.ReadableText) &&
+                            geometryKind == NativeGeometryKind.VISIBLE_CLIP && encoded != null &&
+                            encoded.geometry == NativeGeometryKind.VISIBLE_CLIP && encoded.kind === kind &&
+                            px in 0.0..16_383.0 && py in 0.0..16_383.0 &&
+                            contains(encoded.clip, x, y) && contains(encoded.clip, px, py) && contains(wireClip, px, py)
+                        if (lawful) pointResults[index] = NativeProjectedTouch(pointQuery.projection, checkNotNull(id), px.toInt(), py.toInt())
+                        else pointVetoes[index] = true
+                    }
+                }
                 var observedChildren: List<View>? = null
                 if (!localBlocked && knownContainer) {
                     val group = view as ViewGroup
@@ -521,14 +611,28 @@ internal class AndroidViewReplayCollector(
             for (observed in textObservations) {
                 if (guardedNativeViewRead(profile, readGuard) { observed.view.layout } !== observed.layout ||
                     guardedNativeViewRead(profile, readGuard) { observed.layout.text } !== observed.text ||
-                    textKind(observed.view, false, false) != observed.kind) fail(NativeCollectionFailure.TREE_CHANGED)
+                    (if (pointQuery != null) textKind(observed.view, false, false) !== observed.kind
+                        else textKind(observed.view, false, false) != observed.kind)) fail(NativeCollectionFailure.TREE_CHANGED)
             }
             profile?.mark(NativeCollectorStage.SNAPSHOT_COMMIT)
+            if (pointQuery != null) {
+                check()
+                return fence.commit(pointQuery.projection.snapshot) {
+                    pointQuery.result = pointResults.mapIndexed { index, point -> point.takeUnless { pointVetoes[index] } }
+                }
+            }
+            if (retainTouchWitnesses && projectionGeneration == Long.MAX_VALUE) fail(NativeCollectionFailure.PROJECTION_LIMIT)
             val snapshot = NativeMaskedSnapshot(ordinal, timestamp, viewport, nodes)
             check()
             return fence.commit(snapshot) {
                 projections = nextProjections
                 issued = nextIssued
+                if (retainTouchWitnesses) {
+                    projectionGeneration += 1
+                    touchProjection = NativeTouchProjection(projectionGeneration, snapshot)
+                    touchRoot = WeakReference(root)
+                    touchTexts = textObservations.map { TextProjection(WeakReference(it.view), WeakReference(it.layout), WeakReference(it.text), it.kind) }
+                }
             }
         } finally {
             collecting = false
