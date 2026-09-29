@@ -1019,6 +1019,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         for (offset in listOf(0, 6, 24, 30, 36)) for (base in 1..6) {
             val file = databaseFile()
             val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
+                trustedSiteKey = "elu_pk_test_capture",
                 personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY.takeIf { offset >= 30 })
             appendEvents(original, event("retained-before-rate"))
             if (base in listOf(2, 4, 6)) original.ensureFeatureFlagRuntime().await()
@@ -1034,6 +1035,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                 executePragma(db, "PRAGMA user_version=${base + offset}")
             }
             val migrated = open(file, CountingIdentifiers(), RecordingFaults(), { error("No legacy import") },
+                trustedSiteKey = "elu_pk_test_capture",
                 captureClock = FixedCaptureClock(Instant.parse(NOW).toEpochMilli(), 1000),
                 personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
                 rateLimiting = dev.elu.analytics.EluRateLimitingOptions(1.0, 2.0))
