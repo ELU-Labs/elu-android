@@ -79,6 +79,25 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
                 self.assertIn("durable flag exposure", self.run_guard().stderr)
                 path.write_text(original)
 
+    def test_capture_limiter_rejects_lost_selection_debit_stream_and_retry_fences(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        changes = [
+            ("internal/facade/AndroidStandaloneStack.kt", "rateLimiting = rateLimiting,", "rateLimiting = dev.elu.analytics.EluRateLimitingOptions(999.0),"),
+            ("internal/runtime/RuntimeCaptureRateLimiter.kt", "stored ?: held", "held ?: stored"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "attempt.claim(this, command)", "true"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "checkExposureLedger = true", "checkExposureLedger = false"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "command.flagExposure?.takeIf { checkExposureLedger }?.let { exposure ->", "command.flagExposure?.takeIf { checkExposureLedger }?.let { exposure ->\n if (MAX_RUNTIME_FLAG_EXPOSURES > 0) return RuntimeCaptureRejection.QUEUE_LIMIT"),
+            ("internal/runtime/AndroidSQLiteRuntimeDatabase.kt", "readCaptureRate(readOnly).streamId != state.stream.streamId", "false"),
+            ("internal/facade/StandaloneFacade.kt", "val second = send(attempt).await()", "val second = send(RuntimeCaptureRateAttempt()).await()"),
+        ]
+        for relative, before, after in changes:
+            with self.subTest(relative=relative, before=before):
+                path = base / relative; original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("capture limiter", self.run_guard().stderr)
+                path.write_text(original)
+
     def test_clean_internal_transport_boundary_passes(self) -> None:
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)
@@ -198,7 +217,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         path = self.root / BOUNDARY.OWNER
         original = path.read_text()
         for before in ["before.state.identity.session?.startedAt == expected.sessionStartedAt && expected.isCurrent()",
-                       "command.expectation != null || command.networkExpectation?.sessionId != null",
+                       "source.expectation != null || source.networkExpectation?.sessionId != null",
                        "if (!originalContextMatches()) throw PassiveCaptureWithdrawn()"]:
             with self.subTest(before=before):
                 self.assertIn(before, original)
@@ -812,7 +831,7 @@ internal class WiredTransport : FlagTransport {
     def test_public_setup_cannot_bypass_owned_sink_or_validated_host(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
-        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
+        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
                          ("consent.install(facade, facade::start)", "facade.start()")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))

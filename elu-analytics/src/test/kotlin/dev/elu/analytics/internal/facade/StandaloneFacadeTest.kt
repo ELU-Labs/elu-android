@@ -1043,6 +1043,28 @@ class StandaloneFacadeTest {
         assertEquals(false, (harness.records().last() as RuntimeQueuedRecord.Event).record.properties["\$process_person_profile"])
     }
 
+
+    @Test fun `public facade invalid names spend selected budget and exceptions share it`() {
+        val backing = FakeRuntimeQueueBacking()
+        val harness = harness(backing=backing, personProfiles=dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+            rateLimiting=dev.elu.analytics.EluRateLimitingOptions(1.0, 2.0))
+        harness.facade.applyConfiguration(config()); harness.settle()
+        harness.facade.capture("", null, Date(NOW_MS))
+        harness.facade.screen("", null)
+        harness.settle()
+        assertEquals(0.0, backing.captureRateState!!.bucket!!.tokens, 0.0)
+        assertEquals(2, harness.diagnostics().dropped[EluFacadeDropReason.INVALID_INPUT])
+        assertTrue(harness.records().isEmpty())
+        assertNull(harness.owner.snapshot().get().state.identity.session)
+        harness.facade.captureException(IllegalStateException("not serialized into warning"), null)
+        harness.settle()
+        assertEquals(listOf("event:\$\$client_ingestion_warning"), harness.queued())
+        assertEquals(1, harness.diagnostics().dropped[EluFacadeDropReason.RATE_LIMITED])
+        harness.facade.identify("identity-exempt", null); harness.settle()
+        assertTrue(harness.queued().contains("mutation:identify"))
+        assertEquals(0.0, backing.captureRateState!!.bucket!!.tokens, 0.0)
+    }
+
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
@@ -1060,6 +1082,7 @@ class StandaloneFacadeTest {
         suppliedFlagTransport: RespondingFlagTransport = RespondingFlagTransport(),
         retryScheduler: dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler = ManualFlagRetryScheduler(),
         limits: RuntimeQueueLimits = RuntimeQueueLimits(10_000, 16_777_216),
+        rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -1068,6 +1091,7 @@ class StandaloneFacadeTest {
                 databaseFactory = { databaseDecorator(backing.connection()) },
                 legacyStateLoader = ::initialState,
                 personProfiles = personProfiles,
+                rateLimiting = rateLimiting,
                 trustedSiteKey = SITE_KEY,
                 captureClock = object : RuntimeCaptureClock {
                     override fun wallNowEpochMillis() = wall()

@@ -41,7 +41,8 @@ internal object AndroidStandaloneStack {
         diagnosticsOptions: dev.elu.analytics.EluDiagnosticsOptions = dev.elu.analytics.EluDiagnosticsOptions(),
         apiHost: String? = null,
         personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
-        persistence: dev.elu.analytics.EluPersistenceMode = dev.elu.analytics.EluPersistenceMode.PERSISTENT): StandaloneFacade {
+        persistence: dev.elu.analytics.EluPersistenceMode = dev.elu.analytics.EluPersistenceMode.PERSISTENT,
+        rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions()): StandaloneFacade {
         val endpointPolicy = LocalEndpointPolicy.fromApiHost(apiHost)
         // Capture fresh identity chronology before Elu.setup can publish this facade.
         val freshIdentityStartedAt = SystemCoreEpochClock.nowEpochMillis()
@@ -95,6 +96,7 @@ internal object AndroidStandaloneStack {
                     endpointPolicy = endpointPolicy,
                     personProfiles = personProfiles,
                     persistence = persistence,
+                    rateLimiting = rateLimiting,
                     assertStartupCurrent = { check(!closing.get()) { "Standalone stack is closed" } }).get()
                 var native: NativeReplayComposition? = null
                 try {

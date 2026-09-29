@@ -799,7 +799,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         assertEquals(reset, reopened.snapshot().await())
         reopened.closeAsync().await(); owners.remove(reopened)
         SQLiteDatabase.openDatabase(AndroidRuntimeQueue.databaseFileFor(context, key).path, null,
-            SQLiteDatabase.OPEN_READONLY).use { sqlite -> assertEquals(37, sqlite.version) }
+            SQLiteDatabase.OPEN_READONLY).use { sqlite -> assertEquals(43, sqlite.version) }
     }
 
     @Test
@@ -912,7 +912,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                     "corrupt" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf("{}".toByteArray()))
                     "foreign" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf(RuntimePersonState("foreign", "device").encode()))
                     "table" -> sqlite.execSQL("ALTER TABLE person_state ADD COLUMN unknown TEXT")
-                    "future" -> executePragma(sqlite, "PRAGMA user_version=43")
+                    "future" -> executePragma(sqlite, "PRAGMA user_version=49")
                     "exposure-missing" -> sqlite.execSQL("DELETE FROM flag_exposure_state")
                     "exposure-corrupt" -> sqlite.execSQL("UPDATE flag_exposure_state SET payload=?", arrayOf("{}".toByteArray()))
                     "exposure-foreign" -> sqlite.execSQL("UPDATE flag_exposure_state SET payload=?", arrayOf(RuntimeFlagExposureState.initial(
@@ -1014,6 +1014,154 @@ class AndroidRuntimeQueueInstrumentationTest {
         }
     }
 
+
+    @Test fun captureRateMetadataMigratesAllThirtyOwnedFamiliesWithoutChangingRecordsOrCore() {
+        for (offset in listOf(0, 6, 24, 30, 36)) for (base in 1..6) {
+            val file = databaseFile()
+            val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY.takeIf { offset >= 30 })
+            appendEvents(original, event("retained-before-rate"))
+            if (base in listOf(2, 4, 6)) original.ensureFeatureFlagRuntime().await()
+            if (base >= 3) original.ensurePreparedReplayStorage().await()
+            if (base >= 5) original.ensureNativeReplayAccounting().await()
+            if (offset == 24) original.configureDiagnostics(RuntimeDiagnosticsConfiguration(true, false), RuntimeDiagnosticsClock { null }).await()
+            val records = original.peek(10, Long.MAX_VALUE).await()
+            val state = original.snapshot().await().state
+            original.closeAsync().await(); owners.remove(original)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+                if (offset == 0) db.execSQL("DROP TABLE replay_audience")
+                if (offset == 30) db.execSQL("DROP TABLE flag_exposure_state")
+                executePragma(db, "PRAGMA user_version=${base + offset}")
+            }
+            val migrated = open(file, CountingIdentifiers(), RecordingFaults(), { error("No legacy import") },
+                captureClock = FixedCaptureClock(Instant.parse(NOW).toEpochMilli(), 1000),
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+                rateLimiting = dev.elu.analytics.EluRateLimitingOptions(1.0, 2.0))
+            assertEquals(state, migrated.snapshot().await().state)
+            assertEquals(records, migrated.peek(10, Long.MAX_VALUE).await())
+            migrated.closeAsync().await(); owners.remove(migrated)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+                assertEquals(base + 42, db.version)
+                val bucket = RuntimeCaptureRateState.decode(STREAM_ID, singleBlob(db, "SELECT payload FROM capture_rate_limit WHERE singleton_id=1"))
+                assertEquals(2.0, bucket.bucket!!.tokens, 0.0)
+            }
+        }
+    }
+
+    @Test fun captureRateRowRefusalsPreserveTheEntireOriginalDatabaseFamily() {
+        for (wal in listOf(false, true)) for (damage in listOf("missing", "corrupt", "foreign", "table", "future")) {
+            val file = databaseFile(); val suffixes = listOf("", "-wal", "-shm", "-journal")
+            fun family() = suffixes.map { File(file.path + it) }.filter { it.exists() }.associate { it.name to it.readBytes() }
+            val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY, rateLimiting = dev.elu.analytics.EluRateLimitingOptions())
+            original.closeAsync().await(); owners.remove(original)
+            var retained: Map<String, ByteArray>? = null
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
+                if (wal) { assertTrue(db.enableWriteAheadLogging()); executePragma(db, "PRAGMA wal_autocheckpoint=0") }
+                else db.disableWriteAheadLogging()
+                when (damage) {
+                    "missing" -> db.execSQL("DELETE FROM capture_rate_limit")
+                    "corrupt" -> db.execSQL("UPDATE capture_rate_limit SET payload=?", arrayOf("{}".toByteArray()))
+                    "foreign" -> db.execSQL("UPDATE capture_rate_limit SET stream_id='foreign'")
+                    "table" -> db.execSQL("ALTER TABLE capture_rate_limit ADD COLUMN unknown TEXT")
+                    "future" -> executePragma(db, "PRAGMA user_version=49")
+                }
+                if (wal) retained = family().also { assertTrue(it.containsKey(file.name + "-wal")); assertTrue(it.containsKey(file.name + "-shm")) }
+            }
+            retained?.let { rows -> suffixes.forEach { suffix ->
+                val member = File(file.path + suffix); val bytes = rows[member.name]
+                if (bytes == null) { if (member.exists()) assertTrue(member.delete()) } else member.writeBytes(bytes)
+            } }
+            val before = family(); val faults = RecordingFaults()
+            try {
+                // Even a caller omitting limiter selection must validate a present new row.
+                open(file, CountingIdentifiers(), faults, { error("No recovery") },
+                    personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+                fail("Expected $damage refusal")
+            } catch (error: ExecutionException) {
+                assertTrue(error.cause is RuntimeQueueCorruptionException || error.cause is UnsupportedRuntimeStorageSchemaException)
+            }
+            assertTrue(faults.connectionSettings.isEmpty())
+            val after = family(); assertEquals(before.keys, after.keys)
+            before.forEach { (name, bytes) -> assertArrayEquals("$damage WAL=$wal $name", bytes, after.getValue(name)) }
+        }
+    }
+
+    @Test fun captureRateDebitPersistsBeforeInvalidEventAndEmptyReopenDoesNotWarn() {
+        val file = databaseFile(); val wall = Instant.parse("2026-08-05T00:01:00.000Z").toEpochMilli()
+        fun selected() = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState, "elu_pk_test_capture",
+            FixedCaptureClock(wall, 1000), dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+            dev.elu.analytics.EluRateLimitingOptions(1.0, 1.0))
+        val owner = selected(); owner.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+        val invalid = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "", RuntimeWallTimestamps.rfc3339(wall), emptyMap(), versions())
+        assertEquals(RuntimeCaptureRejection.EVENT_INVALID, (owner.capture(invalid).await() as RuntimeCaptureResult.Rejected).reason)
+        assertEquals(0, owner.snapshot().await().queuedCount)
+        owner.closeAsync().await(); owners.remove(owner)
+        val reopened = selected(); reopened.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+        assertEquals(RuntimeCaptureRejection.RATE_LIMITED, (reopened.capture(invalid.copy(name="after-reopen")).await() as RuntimeCaptureResult.Rejected).reason)
+        assertEquals(0, reopened.snapshot().await().queuedCount)
+        assertEquals(null, reopened.snapshot().await().state.identity.session)
+    }
+
+    @Test fun captureRateOptionalRollbackUsesHeldButUnknownCommitNeverReopensMemory() {
+        for (memory in listOf(false, true)) {
+            val file = databaseFile(); val wall = Instant.parse("2026-08-05T00:01:00.000Z").toEpochMilli()
+            var rejectRead = false; var rejectWrite = false; var unknownWrite = false; var connections = 0
+            val faults = object : AndroidRuntimeDatabaseFaults {
+                override fun beforeCaptureRateRead() { if (rejectRead) { rejectRead=false; throw IOException("optional read") } }
+                override fun beforeCommit() { if (rejectWrite) { rejectWrite=false; throw IOException("optional rolled-back write") } }
+                override fun afterCommit() { if (unknownWrite) { unknownWrite=false; throw IOException("unknown commit") } }
+            }
+            val owner = RuntimeQueueOwner.open(file.path, RuntimeQueueLimits(100, 1_000_000), {
+                connections++
+                if (memory) AndroidSQLiteRuntimeDatabase.openMemory(faults) else AndroidSQLiteRuntimeDatabase.open(file, faults)
+            }, ::freshState, trustedSiteKey="elu_pk_test_capture", captureClock=FixedCaptureClock(wall, 1000),
+                personProfiles=dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY, memoryOnly=memory,
+                rateLimiting=dev.elu.analytics.EluRateLimitingOptions(1.0, 1.0)).await().also { owners += it }
+            owner.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+            val command = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "ordinary", RuntimeWallTimestamps.rfc3339(wall), emptyMap(), versions())
+            rejectRead=true; rejectWrite=true
+            assertTrue(owner.capture(command).await() is RuntimeCaptureResult.Accepted)
+            // Readable original storage wins over the held empty bucket after failed write.
+            assertTrue(owner.capture(command.copy(name="durable-wins")).await() is RuntimeCaptureResult.Accepted)
+            unknownWrite=true
+            assertFutureCause(AmbiguousRuntimeCommitException::class.java) { owner.capture(command).await() }
+            assertFutureCause(IllegalStateException::class.java) { owner.capture(command).await() }
+            assertEquals(1, connections)
+            if (memory) {
+                assertFalse(file.exists())
+                // The original ambiguous memory connection remains quarantined until process exit.
+                testDirectories.remove(file.parentFile)
+            }
+        }
+    }
+
+
+    @Test fun captureRateMemoryBucketDisappearsWithoutChangingDormantPersistentBudget() {
+        val file = databaseFile(); val wall = Instant.parse("2026-08-05T00:01:00.000Z").toEpochMilli()
+        val options = dev.elu.analytics.EluRateLimitingOptions(1.0, 1.0)
+        fun selected(memory: Boolean) = RuntimeQueueOwner.open(file.path, RuntimeQueueLimits(100, 1_000_000), {
+            if (memory) AndroidSQLiteRuntimeDatabase.openMemory() else AndroidSQLiteRuntimeDatabase.open(file)
+        }, ::freshState, trustedSiteKey="elu_pk_test_capture", captureClock=FixedCaptureClock(wall, 1000),
+            personProfiles=dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY, memoryOnly=memory, rateLimiting=options)
+            .await().also { owners += it }
+        val invalid = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "", RuntimeWallTimestamps.rfc3339(wall), emptyMap(), versions())
+        val persistent = selected(false); persistent.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+        assertEquals(RuntimeCaptureRejection.EVENT_INVALID, (persistent.capture(invalid).await() as RuntimeCaptureResult.Rejected).reason)
+        persistent.closeAsync().await(); owners.remove(persistent)
+        val bytes = file.readBytes()
+        repeat(2) {
+            val memory = selected(true); memory.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+            // A new original memory connection starts full each time, not at the dormant empty balance.
+            assertEquals(RuntimeCaptureRejection.EVENT_INVALID, (memory.capture(invalid).await() as RuntimeCaptureResult.Rejected).reason)
+            memory.closeAsync().await(); owners.remove(memory)
+            assertArrayEquals(bytes, file.readBytes())
+        }
+        val reopened = selected(false); reopened.submitCaptureAuthority(captureConfig(), capturePrivacy()).await()
+        assertEquals(RuntimeCaptureRejection.RATE_LIMITED, (reopened.capture(invalid.copy(name="later")).await() as RuntimeCaptureResult.Rejected).reason)
+        assertEquals(0, reopened.snapshot().await().queuedCount)
+    }
+
     private fun open(
         file: File,
         identifiers: CountingIdentifiers,
@@ -1022,6 +1170,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         trustedSiteKey: String? = null,
         captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
         personProfiles: dev.elu.analytics.EluPersonProfilesMode? = null,
+        rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
     ): RuntimeQueueOwner {
         val owner =
             AndroidRuntimeQueue.openForTesting(
@@ -1033,6 +1182,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                 trustedSiteKey = trustedSiteKey,
                 captureClock = captureClock,
                 personProfiles = personProfiles,
+                rateLimiting = rateLimiting,
             ).await()
         owners += owner
         return owner

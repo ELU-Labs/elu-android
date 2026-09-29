@@ -361,3 +361,50 @@ store lease as a successful shutdown. It retries once only after proven rollback
 unresolved failure retains process-local resource ownership. No durable guarantee
 is possible if all storage writes fail and the process then dies. Automatic
 uncaught/crash/ANR collection remains unimplemented; manual exceptions are separate.
+
+## Local capture budget
+
+`EluOptions.rateLimiting` defaults to 10 events/second and a 100-event burst.
+`EluRateLimitingOptions` accepts positive finite fractional values, normalizes invalid
+values to defaults, and clamps burst to at least rate. Default burst multiplication
+overflow clamps to the greatest finite native Double. The selected bucket is a
+strict stream-bound `capture_rate_limit` singleton, with canonical numeric payload
+at most 256 bytes. Schema 43–48 adds this table to each six-way owned combination;
+all supported 1–12 and 25–42 families upgrade without changing queued bytes or core
+generation. Versions 13–24 remain refused. Existing-file snapshot preflight validates
+its exact shape, canonical payload and stream before the live writable connection.
+Old binaries cannot reopen these newer stores.
+
+The owner rereads durable tokens/last-wall-time, otherwise uses held state, otherwise
+starts full. Signed wall delta refills before the burst clamp; backwards time incurs
+debt. Constructor check-only refill remembers the limited state, so reopening an
+empty bucket does not issue a fresh warning. Reset, identity, group and consent
+mutations do not reset the bucket. Memory uses the same table on its original
+`:memory:` connection; it neither reads nor changes a dormant persistent bucket.
+
+Original source/consent/current authority and duplicate/stale flag-exposure checks
+precede the debit. Canonical validation, event enrichment, ledger capacity and queue
+quota follow it. The debit is an independent transaction: later event rejection or
+rollback never refunds it and cannot alter core generation. Only classified read I/O
+or known no-BEGIN/proved-rollback optional metadata failure may use held arithmetic;
+structural mismatch and ambiguous COMMIT stop the original owner. A subsequent
+readable durable bucket supersedes held state, even after an earlier optional write
+failed, matching released browser behavior. No fresh memory database is substituted.
+
+One internally retained call attempt binds the exact command and owner across the
+facade's authority renewal. Event-transaction retry remains below the debit. One
+private recursion tries `$$client_ingestion_warning` on the transition to limiting,
+with `$$client_ingestion_warning_message` and the fixed numeric settings text. That
+warning uses normal event authority, final identity stamps and quota. Failed warning
+admission is not retried during consecutive limiting. Its passive source context
+cannot create/advance session activity or mark an unaccepted exposure/startup as
+reported. A customer using the same event name receives no bypass. Rejected calls
+remain rejected even if their warning is enqueued; delivery scheduling includes that
+ordinary queue record. Native drops use `RATE_LIMITED`.
+
+All public capture/screen/manual-exception, lifecycle, exposure, HTTP/performance and
+startup event paths share this budget. Identity/local mutations and replay chunks are
+exempt. Native bounded caller-value detachment happens before the serialized owner;
+there are no customer capture hooks or browser console logging on Android. Additional
+metadata I/O and current JVM/SQLite/artifact/device performance remain validation
+requirements; authored tests are not execution evidence.

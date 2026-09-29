@@ -12,6 +12,10 @@ internal enum class FakeAmbiguousOutcome {
 }
 
 internal class FakeRuntimeQueueBacking {
+    var captureRateState: RuntimeCaptureRateState? = null
+    var failNextRateRead: Throwable? = null
+    var failNextRateWrite: Throwable? = null
+    var ambiguousNextRateWrite: Boolean = false
     var core: RuntimeStoredCore? = null
     val records: TreeMap<Long, RuntimeStoredRecord> = TreeMap()
     var databaseSchemaVersion: Int = RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE
@@ -50,6 +54,17 @@ private class FakeRuntimeQueueDatabase(
         if (backing.databaseSchemaVersion <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
             backing.databaseSchemaVersion += RUNTIME_AUDIENCE_SCHEMA_OFFSET
             backing.core = checkNotNull(backing.core).copy(replayAudience = RuntimeReplayAudienceState.Unknown)
+            backing.advanceCommittedMutationGeneration()
+        }
+    }
+
+    override fun ensureCaptureRateSchema() = synchronized(backing) {
+        check(!closed)
+        val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
+        if (backing.databaseSchemaVersion <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) {
+            check(backing.databaseSchemaVersion > RUNTIME_EXPOSURE_SCHEMA_OFFSET)
+            backing.captureRateState = RuntimeCaptureRateState(CoreStateCodec.decode(checkNotNull(backing.core).stateJson).stream.streamId, null)
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET
             backing.advanceCommittedMutationGeneration()
         }
     }
@@ -163,6 +178,10 @@ private class FakeRuntimeQueueDatabase(
                 }
                 return@synchronized result
             }
+            if (transaction.takeRateAmbiguity()) {
+                backing.captureRateState = transaction.captureRateState
+                throw AmbiguousRuntimeCommitException("Fake capture limiter committed ambiguously")
+            }
             backing.mutatedTransactionAttempts += 1
             val appended = transaction.records.filterKeys { it !in originalRecords }.values.map { it.deepCopy() }
             if (appended.isNotEmpty()) backing.attemptedRecordAppends += appended
@@ -173,6 +192,7 @@ private class FakeRuntimeQueueDatabase(
             }
             when (backing.ambiguousNextCommit.also { backing.ambiguousNextCommit = null }) {
                 FakeAmbiguousOutcome.COMMIT -> {
+                    backing.captureRateState = transaction.captureRateState
                     backing.databaseSchemaVersion = transaction.schemaVersion
                     backing.core = transaction.core?.copy(stateJson = transaction.core!!.stateJson.copyOf())
                     backing.records.clear()
@@ -207,6 +227,7 @@ private class FakeRuntimeQueueDatabase(
                     throw AmbiguousRuntimeCommitException("Fake diverged at an ambiguous result")
                 }
                 null -> {
+                    backing.captureRateState = transaction.captureRateState
                     backing.databaseSchemaVersion = transaction.schemaVersion
                     backing.core = transaction.core?.copy(stateJson = transaction.core!!.stateJson.copyOf())
                     backing.records.clear()
@@ -232,9 +253,28 @@ private class FakeRuntimeQueueDatabase(
         val flagRows: TreeMap<String, RuntimeFlagStoredRow>,
         val replayRows: TreeMap<String, RuntimeReplayStoredRow>,
     ) : RuntimeQueueTransaction {
+        var captureRateState: RuntimeCaptureRateState? = backing.captureRateState
+        private var rateMutated = false
         var schemaVersion: Int = backing.databaseSchemaVersion
         var mutated: Boolean = false
             private set
+
+        override fun readCaptureRateState(): RuntimeCaptureRateState? {
+            backing.failNextRateRead?.let { backing.failNextRateRead = null; throw it }
+            if (schemaVersion <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) return null
+            return captureRateState ?: throw RuntimeQueueCorruptionException("Missing fake limiter row")
+        }
+
+        override fun writeCaptureRateState(state: RuntimeCaptureRateState) {
+            check(schemaVersion > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET)
+            if (captureRateState?.streamId != state.streamId) throw RuntimeQueueCorruptionException("Fake limiter stream differs")
+            backing.failNextRateWrite?.let { backing.failNextRateWrite = null; throw it }
+            captureRateState = state
+            rateMutated = true
+            mutated = true
+        }
+
+        fun takeRateAmbiguity(): Boolean = rateMutated && backing.ambiguousNextRateWrite.also { if (rateMutated) backing.ambiguousNextRateWrite = false }
 
         override fun readCore(): RuntimeStoredCore? {
             backing.failNextCoreRead?.let { failure ->

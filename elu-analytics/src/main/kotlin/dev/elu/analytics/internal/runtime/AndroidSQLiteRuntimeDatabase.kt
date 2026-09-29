@@ -14,6 +14,9 @@ import java.io.IOException
 internal interface AndroidRuntimeDatabaseFaults {
     fun connectionConfigured(settings: AndroidRuntimeConnectionSettings) = Unit
 
+    fun beforeCaptureRateRead() = Unit
+    fun beforeCaptureRateWrite() = Unit
+
     fun beforeCommit() = Unit
 
     fun afterCommit() = Unit
@@ -34,6 +37,46 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val faults: AndroidRuntimeDatabaseFaults,
     private val memoryOnly: Boolean = false,
 ) : RuntimeQueueDatabase {
+    override fun ensureCaptureRateSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (version > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) return
+        check(version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) { "Capture limiter requires owned exposure schema" }
+        sqlite.beginTransaction()
+        var successful = false
+        try {
+            val core = SQLiteTransaction(sqlite, faults).readCore() ?: error("Capture limiter requires owned core")
+            sqlite.execSQL(CREATE_CAPTURE_RATE)
+            writeCaptureRate(sqlite, RuntimeCaptureRateState(CoreStateCodec.decode(core.stateJson).stream.streamId, null), true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); successful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                throw AmbiguousRuntimeCommitException("Uncertain capture limiter schema transaction", error)
+            }
+        }
+        check(successful)
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain capture limiter schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET)
+    }
+
+    override fun <T> captureRateTransaction(block: (RuntimeQueueTransaction) -> T): T = try {
+        transaction(block)
+    } catch (error: Throwable) {
+        // Only known optional I/O/no-BEGIN/proved rollback qualifies. Corruption, unknown COMMIT,
+        // schema/stream failures and arbitrary programming errors never become held fallback.
+        val cause = if (error is ProvenNotCommittedRuntimeTransactionException) error.cause else error
+        if (cause is IOException || cause is android.database.sqlite.SQLiteDiskIOException ||
+            cause is android.database.sqlite.SQLiteFullException || cause is android.database.sqlite.SQLiteDatabaseLockedException ||
+            cause is android.database.sqlite.SQLiteCantOpenDatabaseException) throw RuntimeCaptureRateStorageUnavailable(error)
+        throw error
+    }
+
     override fun ensureExposureSchema() {
         assertOwnerThread()
         val version = pragmaLong(sqlite, "PRAGMA user_version")
@@ -257,7 +300,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T {
         assertOwnerThread()
         sqlite.beginTransaction()
-        val transaction = SQLiteTransaction(sqlite)
+        val transaction = SQLiteTransaction(sqlite, faults)
         var markedSuccessful = false
         try {
             val result = block(transaction)
@@ -331,9 +374,25 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         }
     }
 
-    private class SQLiteTransaction(private val sqlite: SQLiteDatabase) : RuntimeQueueTransaction {
+    private class SQLiteTransaction(private val sqlite: SQLiteDatabase, private val faults: AndroidRuntimeDatabaseFaults = AndroidRuntimeDatabaseFaults.None) : RuntimeQueueTransaction {
         var mutated: Boolean = false
             private set
+
+        override fun readCaptureRateState(): RuntimeCaptureRateState? {
+            requireTransaction()
+            if (pragmaLong(sqlite, "PRAGMA user_version") <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) return null
+            faults.beforeCaptureRateRead()
+            return readCaptureRate(sqlite)
+        }
+
+        override fun writeCaptureRateState(state: RuntimeCaptureRateState) {
+            requireTransaction()
+            val previous = readCaptureRate(sqlite)
+            if (previous.streamId != state.streamId) corrupt("Capture limiter stream changed")
+            faults.beforeCaptureRateWrite()
+            writeCaptureRate(sqlite, state, false)
+            mutated = true
+        }
 
         override fun readCore(): RuntimeStoredCore? {
             requireTransaction()
@@ -696,6 +755,31 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     }
 
     internal companion object {
+        private const val CAPTURE_RATE_TABLE = "capture_rate_limit"
+        private val CREATE_CAPTURE_RATE = """
+            CREATE TABLE capture_rate_limit (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                stream_id TEXT NOT NULL,
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND $MAX_RUNTIME_CAPTURE_RATE_BYTES)
+            )
+        """.trimIndent()
+
+        private fun readCaptureRate(sqlite: SQLiteDatabase): RuntimeCaptureRateState =
+            sqlite.query(CAPTURE_RATE_TABLE, arrayOf("stream_id", "payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) corrupt("Missing capture limiter state")
+                val result = RuntimeCaptureRateState.decode(cursor.requiredString(0, "capture_rate_limit.stream_id"),
+                    cursor.requiredBlob(1, "capture_rate_limit.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate capture limiter state")
+                result
+            }
+
+        private fun writeCaptureRate(sqlite: SQLiteDatabase, state: RuntimeCaptureRateState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("stream_id", state.streamId); put("payload", state.encodeBucket()) }
+            if (insert) sqlite.insertOrThrow(CAPTURE_RATE_TABLE, null, values)
+            else if (sqlite.update(CAPTURE_RATE_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Capture limiter update did not affect exactly one row")
+        }
+
         private const val EXPOSURES_TABLE = "flag_exposure_state"
         private val CREATE_EXPOSURES = """
             CREATE TABLE flag_exposure_state (
@@ -968,6 +1052,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         parsed
                     }
                     if (person.streamId != state.stream.streamId) corrupt("Person state stream binding differs")
+                    if (version > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET && readCaptureRate(readOnly).streamId != state.stream.streamId)
+                        corrupt("Capture limiter metadata does not match owned stream")
                     if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) {
                         val exposures = readExposures(readOnly) ?: corrupt("Missing exposure state")
                         if (exposures.streamId != state.stream.streamId || exposures.anonymousId != state.identity.anonymousId)
@@ -1066,7 +1152,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version !in 1L..12L && version !in 25L..42L ->
+                version !in 1L..12L && version !in 25L..48L ->
                     throw UnsupportedRuntimeStorageSchemaException(version)
             }
             validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
@@ -1081,6 +1167,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) expected += "table:$DIAGNOSTICS_TABLE"
             if (version > RUNTIME_PERSON_SCHEMA_OFFSET) expected += "table:$PERSON_TABLE"
             if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) expected += "table:$EXPOSURES_TABLE"
+            if (version > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) expected += "table:$CAPTURE_RATE_TABLE"
             if (flagsPresent) expected += "table:$FLAG_CACHE_TABLE"
             if (replayPresent) expected += "table:$REPLAY_TABLE"
             val objects = applicationSchemaObjects(sqlite)
@@ -1091,6 +1178,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) validateTableSql(sqlite, DIAGNOSTICS_TABLE, CREATE_DIAGNOSTICS)
             if (version > RUNTIME_PERSON_SCHEMA_OFFSET) validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)
             if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) validateTableSql(sqlite, EXPOSURES_TABLE, CREATE_EXPOSURES)
+            if (version > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) validateTableSql(sqlite, CAPTURE_RATE_TABLE, CREATE_CAPTURE_RATE)
             if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
             if (replayPresent) validateTableSql(sqlite, REPLAY_TABLE, CREATE_REPLAY)
         }

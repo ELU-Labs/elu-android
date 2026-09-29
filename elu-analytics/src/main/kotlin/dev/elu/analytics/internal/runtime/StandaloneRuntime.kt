@@ -242,6 +242,7 @@ internal class StandaloneRuntime(
         name: String,
         properties: Map<String, Any?> = emptyMap(),
         occurredAt: String = now(),
+        rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
     ): Future<RuntimeCaptureResult> =
         submitCapture(
             RuntimeCaptureCommand(
@@ -250,17 +251,18 @@ internal class StandaloneRuntime(
                 occurredAt = occurredAt,
                 properties = properties,
                 versions = versions,
-            ),
+            ), rateAttempt,
         )
 
-    internal fun captureFlagExposure(exposure: RuntimeFlagExposureCapture, occurredAt: String): Future<RuntimeCaptureResult> =
+    internal fun captureFlagExposure(exposure: RuntimeFlagExposureCapture, occurredAt: String, rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt()): Future<RuntimeCaptureResult> =
         submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$feature_flag_called", occurredAt,
-            exposure.properties(), versions, flagExposure = exposure))
+            exposure.properties(), versions, flagExposure = exposure), rateAttempt)
 
     fun screen(
         name: String,
         properties: Map<String, Any?> = emptyMap(),
         occurredAt: String = now(),
+        rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
     ): Future<RuntimeCaptureResult> {
         val merged = LinkedHashMap<String, Any?>(properties)
         merged[SCREEN_NAME_PROPERTY] = name
@@ -271,7 +273,7 @@ internal class StandaloneRuntime(
                 occurredAt = occurredAt,
                 properties = Collections.unmodifiableMap(merged),
                 versions = versions,
-            ),
+            ), rateAttempt,
         )
     }
 
@@ -291,8 +293,9 @@ internal class StandaloneRuntime(
         throwable: Throwable,
         properties: Map<String, Any?> = emptyMap(),
         occurredAt: String = now(),
+        rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
     ): Future<RuntimeCaptureResult> =
-        submitCapture(ExceptionSerializer.command(throwable, occurredAt, versions, properties))
+        submitCapture(ExceptionSerializer.command(throwable, occurredAt, versions, properties), rateAttempt)
 
     /** Withdraw and queue the fixed boundary in owner-before-driver order; never wait here. */
     internal fun applicationBackgrounded(
@@ -366,8 +369,8 @@ internal class StandaloneRuntime(
         return closeResult
     }
 
-    private fun submitCapture(command: RuntimeCaptureCommand): Future<RuntimeCaptureResult> {
-        val result = owner.capture(command)
+    private fun submitCapture(command: RuntimeCaptureCommand, rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt()): Future<RuntimeCaptureResult> {
+        val result = owner.capture(command, rateAttempt)
         armFlushTimer()
         return result
     }

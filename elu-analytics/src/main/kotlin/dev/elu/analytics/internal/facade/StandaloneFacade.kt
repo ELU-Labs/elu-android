@@ -18,6 +18,7 @@ import dev.elu.analytics.internal.runtime.RuntimeAppendRejection
 import dev.elu.analytics.internal.runtime.RuntimeAppendResult
 import dev.elu.analytics.internal.runtime.RuntimeCaptureAuthorityTerminalReason
 import dev.elu.analytics.internal.runtime.RuntimeCaptureAuthorityUpdateResult
+import dev.elu.analytics.internal.runtime.RuntimeCaptureRateAttempt
 import dev.elu.analytics.internal.runtime.RuntimeCaptureRejection
 import dev.elu.analytics.internal.runtime.RuntimeCaptureResult
 import dev.elu.analytics.internal.runtime.RuntimeLocalStateChange
@@ -74,6 +75,7 @@ internal enum class EluFacadeDropReason {
     CLOSED,
     INVALID_INPUT,
     RESERVED_PROPERTY,
+    RATE_LIMITED,
     STORAGE,
 }
 
@@ -393,16 +395,12 @@ internal class StandaloneFacade(
         timestamp: Date,
     ) {
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_CALL) }
-        if (event.isEmpty()) {
-            countDrop(EluFacadeDropReason.INVALID_INPUT)
-            return
-        }
         val eventProperties = withoutReservedKeys(properties)
         // The caller's timestamp, so a call held while pending is not re-stamped at release.
         val occurredAt = RuntimeWallTimestamps.rfc3339(timestamp.time)
         dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(eventProperties)) {
             val runtime = requireStack().runtime
-            captureThrough { runtime.capture(event, eventProperties, occurredAt) }
+            captureThrough { attempt -> runtime.capture(event, eventProperties, occurredAt, attempt) }
         }
     }
 
@@ -410,15 +408,11 @@ internal class StandaloneFacade(
         name: String,
         properties: Map<String, Any>?,
     ) {
-        if (name.isEmpty()) {
-            countDrop(EluFacadeDropReason.INVALID_INPUT)
-            return
-        }
         val screenProperties = withoutReservedKeys(properties)
         val occurredAt = now()
         dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(screenProperties)) {
             val runtime = requireStack().runtime
-            captureThrough { runtime.screen(name, screenProperties, occurredAt) }
+            captureThrough { attempt -> runtime.screen(name, screenProperties, occurredAt, attempt) }
         }
     }
 
@@ -430,7 +424,7 @@ internal class StandaloneFacade(
         val occurredAt = now()
         dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(exceptionProperties)) {
             val runtime = requireStack().runtime
-            captureThrough { runtime.captureException(error, exceptionProperties, occurredAt) }
+            captureThrough { attempt -> runtime.captureException(error, exceptionProperties, occurredAt, attempt) }
         }
     }
 
@@ -556,7 +550,8 @@ internal class StandaloneFacade(
         renewAuthority()
         // This is one normal capture attempt, never a delayed-until-config opt-in event.
         if (isCurrentConsent(intent) && !isOptedOut() && state is EluFacadeState.Enabled && intent.eventName != null) {
-            captureThrough { requireStack().runtime.capture(intent.eventName, intent.properties, now()) }
+            val occurredAt = now()
+            captureThrough { attempt -> requireStack().runtime.capture(intent.eventName, intent.properties, occurredAt, attempt) }
         }
     }
 
@@ -1140,8 +1135,9 @@ internal class StandaloneFacade(
             else -> EluFacadeDisabledReason.UNAUTHORIZED
         }
 
-    private fun captureThrough(send: () -> Future<RuntimeCaptureResult>) {
-        val first = send().await()
+    private fun captureThrough(send: (RuntimeCaptureRateAttempt) -> Future<RuntimeCaptureResult>) {
+        val attempt = RuntimeCaptureRateAttempt()
+        val first = send(attempt).await()
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_FIRST,
             captureAccepted = first is RuntimeCaptureResult.Accepted, captureRejection = (first as? RuntimeCaptureResult.Rejected)?.reason) }
         when (first) {
@@ -1159,7 +1155,7 @@ internal class StandaloneFacade(
                     countDrop(currentDropReason())
                     return
                 }
-                val second = send().await()
+                val second = send(attempt).await()
                 observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_SECOND,
                     captureAccepted = second is RuntimeCaptureResult.Accepted, captureRejection = (second as? RuntimeCaptureResult.Rejected)?.reason) }
                 when (second) {
@@ -1318,7 +1314,7 @@ internal class StandaloneFacade(
         } ?: return
         val occurredAt = now()
         dispatch(kind = OperationKind.ACTIVITY) {
-            if (exposure.isCurrent()) captureThrough { requireStack().runtime.captureFlagExposure(exposure, occurredAt) }
+            if (exposure.isCurrent()) captureThrough { attempt -> requireStack().runtime.captureFlagExposure(exposure, occurredAt, attempt) }
         }
     }
 
@@ -1636,6 +1632,7 @@ internal class StandaloneFacade(
                 RuntimeCaptureRejection.OPTED_OUT -> EluFacadeDropReason.OPTED_OUT
                 RuntimeCaptureRejection.EVENT_INVALID -> EluFacadeDropReason.INVALID_INPUT
                 RuntimeCaptureRejection.QUEUE_LIMIT -> EluFacadeDropReason.STORAGE
+                RuntimeCaptureRejection.RATE_LIMITED -> EluFacadeDropReason.RATE_LIMITED
                 else -> EluFacadeDropReason.UNAUTHORIZED
             }
 

@@ -20,11 +20,11 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "9ef4ddbea1b05b87004397386ce7c799bca7626e6ad7ad439a607181d4367bf0",
+        "5ba1a75d51ba366fb8341b2b39413018e44ff05a207ef6293da1b3d961cd3279",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "a941024ae21449673784eb09c4ea5b847f7daa440141ddfae59ce3e1068c2c86",
+        "3282da2f4743b7910e8471d814862540d350b5fb38f782b9c04331756f0d2e77",
     "elu-analytics/build.gradle.kts":
         "5078f447f6432ce825a48366df0b02086029db510037cd8c2c9fb2e48feebbe5",
     "elu-analytics/consumer-rules.pro":
@@ -145,7 +145,7 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("private val consent = EluConsentHandoff()" not in public or
         "private val sink get() = consent.sink" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
         errors.append("public setup must publish the exact owned sink through the consent handoff")
@@ -711,7 +711,7 @@ def verify_network_observer_boundary(root: pathlib.Path, errors: list[str]) -> N
             errors.append("network durable enqueue must recheck original identity, session and authority")
     if "commitPreparedAppend(transaction, created)\n                        if (!originalContextMatches()) throw PassiveCaptureWithdrawn()" not in owner:
         errors.append("network durable enqueue must roll back final context withdrawal")
-    for required in ["val passive = command.expectation != null || command.networkExpectation?.sessionId != null",
+    for required in ["val passive = source.expectation != null || source.networkExpectation?.sessionId != null",
                      "if (passive) RuntimeEventSessionUpdate.Preserve",
                      "passiveCaptureAt = command.occurredAt.takeIf { passive }"]:
         if required not in owner:
@@ -747,7 +747,7 @@ def verify_startup_observer_boundary(root: pathlib.Path, errors: list[str]) -> N
         if required not in monitor:
             errors.append("startup observation must retain current context and original query settlement")
     for required in ["!diagnosticsClosurePending && diagnosticsConfiguration.enabled && diagnosticsConfiguration.launchTimings",
-                     "epoch == measurement.epoch", "diagnosticsLaunchAuthority", "nativeDiagnostic = command.startupMeasurement != null",
+                     "epoch == measurement.epoch", "diagnosticsLaunchAuthority", "nativeDiagnostic = source.startupMeasurement != null",
                      "created = created.copy(after = created.after.copy(diagnostics = before.diagnostics.copy(",
                      "lastLaunchUptimeNanos = measurement.launchUptimeNanos)))",
                      "!nativeSettlementUncertain && !diagnosticsClosurePending", "quarantineDiagnosticsResources()"]:
@@ -792,7 +792,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
     base = MAIN_KOTLIN / "dev/elu/analytics"
     required = {
         "EluOptions.kt": ["personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
-        "Elu.kt": ["options.apiHost, options.personProfiles, options.persistence)", "fun reset(resetDeviceId: Boolean)"],
+        "Elu.kt": ["options.apiHost, options.personProfiles, options.persistence, options.rateLimiting)", "fun reset(resetDeviceId: Boolean)"],
         "internal/facade/AndroidStandaloneStack.kt": ["personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/AndroidRuntimeQueue.kt": ["personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/RuntimeQueueOwner.kt": [
@@ -801,7 +801,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
             "person = transitionedPerson", "left.person == right.person",
             "request.drafts.any { isPersonMutation(it.change) }", "putAll(checkNotNull(person).stamps(identity, personProfiles))"],
         "internal/runtime/AndroidSQLiteRuntimeDatabase.kt": [
-            "version !in 1L..12L && version !in 25L..42L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
+            "version !in 1L..12L && version !in 25L..48L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
             'readPerson(sqlite) ?: corrupt("Missing person state")'],
     }
     for relative, tokens in required.items():
@@ -848,8 +848,39 @@ def verify_durable_flag_exposures(root: pathlib.Path, errors: list[str]) -> None
             errors.append("durable flag exposure must retain atomic visitor ledger, evaluation origin and bounded refresh: " + relative)
 
 
+
+def verify_capture_rate_limiter(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    required = {
+        "EluOptions.kt": ["private var rateLimitingOptions = EluRateLimitingOptions()", "rateLimitingOptions = rateLimiting"],
+        "EluRateLimitingOptions.kt": ["eventsPerSecond.takeIf { it.isFinite() && it > 0.0 } ?: 10.0", "maxOf(this.eventsPerSecond", "Double.MAX_VALUE"],
+        "internal/facade/AndroidStandaloneStack.kt": ["rateLimiting = rateLimiting,"],
+        "internal/runtime/AndroidRuntimeQueue.kt": ["rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions()", "rateLimiting = rateLimiting,"],
+        "internal/runtime/RuntimeCaptureRateLimiter.kt": ["stored ?: held", "((now - previous.last) / 1000.0)", "limited && !previouslyLimited && !checkOnly", "owner === originalOwner && command == originalCommand", "it.encodeBucket().contentEquals(bytes)"],
+        "internal/runtime/RuntimeQueueOwner.kt": ["owner.initializeCaptureRateLimiting()", "consumeCaptureRate(checkOnly = true)", "warningOf == null && captureRateLimiter != null && attempt.claim(this, command)", "checkExposureLedger = true", "captureRateTransaction", 'corrupt("Capture limiter stream differs")', "catch (error: Throwable) { poisonAndThrow(error) }"],
+        "internal/runtime/AndroidSQLiteRuntimeDatabase.kt": ["validateTableSql(sqlite, CAPTURE_RATE_TABLE, CREATE_CAPTURE_RATE)", "readCaptureRate(readOnly).streamId != state.stream.streamId", "cause is android.database.sqlite.SQLiteDiskIOException", 'corrupt("Missing capture limiter state")'],
+        "internal/facade/StandaloneFacade.kt": ["val attempt = RuntimeCaptureRateAttempt()", "val first = send(attempt).await()", "val second = send(attempt).await()", "RuntimeCaptureRejection.RATE_LIMITED -> EluFacadeDropReason.RATE_LIMITED"],
+    }
+    for relative, tokens in required.items():
+        try:
+            source = load_text(root, base / relative)
+        except ValueError as error:
+            errors.append(str(error)); continue
+        if any(token not in source for token in tokens):
+            errors.append("capture limiter must retain selected-store debit, source fences and exact retry identity: " + relative)
+    owner = load_text(root, base / "internal/runtime/RuntimeQueueOwner.kt")
+    capture = owner[owner.find("private fun captureOnWorker("):owner.find("private fun captureAuthorityRejection(")]
+    if not (0 <= capture.find("val sourceRejection") < capture.find("val decision = consumeCaptureRate()") < capture.find("if (!isValidCaptureCommand(command))")):
+        errors.append("capture limiter must debit after source checks and before canonical event validation")
+    source_checks = owner[owner.find("private fun captureSourceRejection("):owner.find("private fun captureOnWorker(")]
+    if "MAX_RUNTIME_FLAG_EXPOSURES" in source_checks:
+        errors.append("capture limiter must charge ledger capacity after source admission")
+    if not (0 <= owner.find("owner.reconcileExplicitConsentOnWorker()") < owner.find("owner.initializeCaptureRateLimiting()")):
+        errors.append("capture limiter must initialize after durable explicit consent reconciliation")
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_capture_rate_limiter(root, errors)
     verify_durable_flag_exposures(root, errors)
     verify_local_endpoint_binding(root, errors)
     verify_person_selection(root, errors)

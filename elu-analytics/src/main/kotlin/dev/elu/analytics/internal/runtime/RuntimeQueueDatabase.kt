@@ -82,6 +82,10 @@ internal data class RuntimeReplayStoredRow(
 
 /** Minimal transaction surface shared by the SQLite implementation and deterministic fake. */
 internal interface RuntimeQueueTransaction {
+    /** Missing schema is allowed only for the raw conformance seam; present rows are strict. */
+    fun readCaptureRateState(): RuntimeCaptureRateState?
+    fun writeCaptureRateState(state: RuntimeCaptureRateState)
+
     fun readCore(): RuntimeStoredCore?
 
     fun insertCore(core: RuntimeStoredCore)
@@ -130,6 +134,11 @@ internal interface RuntimeQueueDatabase : Closeable {
 
     /** Validated owned upgrade; device continuity starts at the existing anonymous identity. */
     fun ensurePersonSchema()
+
+    fun ensureCaptureRateSchema()
+
+    /** Optional metadata I/O is classified separately; ambiguous writes must still escape. */
+    fun <T> captureRateTransaction(block: (RuntimeQueueTransaction) -> T): T = transaction(block)
 
     /** Production visitor ledger; legacy reports cannot be reconstructed. */
     fun ensureExposureSchema()

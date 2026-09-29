@@ -556,3 +556,35 @@ consumer rules ship in the AAR; the SDK facade uses no reflection.
 ## SDK development
 
 [SDK development status](docs/sdk-development-status.md) tracks validation gaps and related work.
+
+### Capture rate limiting
+
+Events share a local token budget. The default is 10 events per second with a
+100-event burst. To select a different budget alongside other setup choices:
+
+```kotlin
+Elu.setup(this, siteKey, EluOptions(
+    rateLimiting = EluRateLimitingOptions(eventsPerSecond = 5.0, eventsBurstLimit = 20.0),
+    persistence = EluPersistenceMode.PERSISTENT,
+))
+```
+
+Positive finite fractional values are supported; invalid values use defaults and
+burst capacity is at least the rate. The budget covers manual and automatic events,
+including screen, exception, flag exposure, HTTP and native performance events.
+Identity mutations and replay chunks are exempt. Source/consent refusal and duplicate
+flag exposure do not spend a token. A validly admitted attempt spends before event
+validation and queue admission; a later rejection or rollback does not refund it.
+The first consecutive limited attempt tries one ordinary `$$client_ingestion_warning`
+event, still subject to authority, consent and queue capacity. Passive telemetry
+warnings cannot start or extend a user session.
+
+Persistent storage retains the bucket across restart, identify, reset and consent
+changes. Memory mode loses it with the original memory connection. A backwards wall
+clock creates debt rather than free capacity. Optional storage I/O failures may use
+the held process bucket; the next successful durable read takes precedence. Unknown
+transaction outcomes stop the original owner. This adds a small separate SQLite
+metadata transaction per attempted event; current overhead and exact-artifact
+qualification remain pending. Unlike the browser, Android has no customer capture
+hooks or console rate-limit logger; bounded caller-value conversion precedes the
+serialized capture admission.

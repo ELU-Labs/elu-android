@@ -144,7 +144,9 @@ internal class RuntimeQueueOwner private constructor(
     private val personProfiles: EluPersonProfilesMode?,
     private val memoryOnly: Boolean,
     private val explicitConsentStore: RuntimeExplicitConsentStore?,
+    rateLimiting: dev.elu.analytics.EluRateLimitingOptions?,
 ) {
+    private val captureRateLimiter = rateLimiting?.let(::RuntimeCaptureRateLimiter)
     private var database: RuntimeQueueDatabase? = null
         set(value) { field = value; nativeCaptureResources?.updateDatabase(value) }
     private var lease: RuntimeOwnershipLease? = null
@@ -429,12 +431,12 @@ internal class RuntimeQueueOwner private constructor(
     }
 
     /** Creates and consumes capture admission inside this one serialized command. */
-    fun capture(command: RuntimeCaptureCommand): Future<RuntimeCaptureResult> {
+    fun capture(command: RuntimeCaptureCommand, attempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt()): Future<RuntimeCaptureResult> {
         val copy =
             command.copy(
                 properties = Collections.unmodifiableMap(LinkedHashMap(command.properties)),
             )
-        return submit { captureOnWorker(copy) }
+        return submit { captureOnWorker(copy, attempt = attempt) }
     }
 
     /** Fixed lifecycle transition; preserve the existing owner-before-driver publication lock order. */
@@ -2161,6 +2163,40 @@ internal class RuntimeQueueOwner private constructor(
         initializeExposureState()
     }
 
+    private fun initializeCaptureRateLimiting() {
+        if (captureRateLimiter == null) return
+        try {
+            database().ensureCaptureRateSchema()
+            consumeCaptureRate(checkOnly = true)
+        } catch (error: Throwable) { poisonAndThrow(error) }
+    }
+
+    private fun consumeCaptureRate(checkOnly: Boolean = false): RuntimeCaptureRateDecision {
+        assertUsable()
+        val limiter = checkNotNull(captureRateLimiter)
+        val stream = requireLoaded().state.stream.streamId
+        val stored = try {
+            database().captureRateTransaction { transaction ->
+                requireCurrent(transaction)
+                val row = transaction.readCaptureRateState() ?: corrupt("Missing selected capture limiter schema")
+                if (row.streamId != stream) corrupt("Capture limiter stream differs")
+                row.bucket
+            }
+        } catch (_: RuntimeCaptureRateStorageUnavailable) { null }
+        catch (error: Throwable) { poisonAndThrow(error) }
+        val decision = limiter.check(stored, captureClock.wallNowEpochMillis().toDouble(), checkOnly)
+        try {
+            database().captureRateTransaction { transaction ->
+                requireCurrent(transaction)
+                transaction.writeCaptureRateState(RuntimeCaptureRateState(stream, decision.bucket))
+            }
+        } catch (_: RuntimeCaptureRateStorageUnavailable) {
+            // Held arithmetic is already debited. A later readable durable bucket still wins,
+            // exactly as on the browser. This path can never replace the original connection.
+        } catch (error: Throwable) { poisonAndThrow(error) }
+        return decision
+    }
+
     private fun initializeExposureState() {
         val before = requireLoaded()
         val expected = before.exposures ?: RuntimeFlagExposureState.initial(before.state)
@@ -2460,11 +2496,84 @@ internal class RuntimeQueueOwner private constructor(
         return timestamps.maxOrNull() ?: V1ConfigJson.parseExactTimestamp(current.state.identity.updatedAt)
     }
 
+    private fun captureExposureMatches(transaction: RuntimeQueueTransaction, before: LoadedSnapshot, command: RuntimeCaptureCommand): Boolean {
+        val exposure = command.flagExposure ?: return true
+        if (!exposure.isCurrent() || featureFlagClockPoisoned || !flagConfigurationIsCurrent()) return false
+        val flagAuthority = currentFlagAuthorization() ?: return false
+        return FlagDurableStore.read(transaction, flagAuthority, before.state, command.versions,
+            exposure.key, captureClock.wallNowEpochMillis()) == exposure.read && exposure.isCurrent()
+    }
+
+    private fun captureSourceRejection(transaction: RuntimeQueueTransaction, before: LoadedSnapshot,
+        command: RuntimeCaptureCommand,
+        checkExposureLedger: Boolean = false,
+        plannedSession: SessionState? = null,
+    ): RuntimeCaptureRejection? {
+        val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
+        val session = plannedSession ?: if (command.expectation != null || command.networkExpectation?.sessionId != null)
+            planCaptureSession(before.state, command.occurredAt, authority) else before.state.identity.session
+        fun originalContextMatches(): Boolean = captureExposureMatches(transaction, before, command) && (command.expectation?.let { expected ->
+            before.state.identity.revision == expected.identityRevision &&
+                before.state.identity.contextRevision == expected.contextRevision &&
+                before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
+                before.state.identity.session?.backgroundedAt == null &&
+                session?.id == expected.sessionId && expected.isCurrent()
+        } ?: true) && (command.networkExpectation?.let { expected ->
+            before.state.identity.revision == expected.identityRevision &&
+                before.state.identity.contextRevision == expected.contextRevision &&
+                before.state.identity.session?.id == expected.sessionId &&
+                (expected.sessionId == null ||
+                    (before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
+                        before.state.identity.session?.backgroundedAt == null && session?.id == expected.sessionId)) &&
+                before.state.identity.session?.startedAt == expected.sessionStartedAt && expected.isCurrent()
+        } ?: true) && (command.startupMeasurement?.let { measurement ->
+            val epoch = before.diagnostics.epoch
+            val reading = diagnosticsClock?.read()
+            !diagnosticsClosurePending && diagnosticsConfiguration.enabled && diagnosticsConfiguration.launchTimings &&
+                epoch == measurement.epoch && epoch != null && diagnosticEpochMatches(before, epoch) &&
+                measurement.launchUptimeNanos >= epoch.startedUptimeNanos &&
+                measurement.firstFrameUptimeNanos >= measurement.launchUptimeNanos &&
+                reading != null && measurement.firstFrameUptimeNanos <= reading.uptimeNanos &&
+                measurement.launchUptimeNanos > (before.diagnostics.lastLaunchUptimeNanos ?: -1L) &&
+                diagnosticsLaunchAuthority
+        } ?: true)
+        if (!originalContextMatches()) return RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED
+        command.flagExposure?.takeIf { checkExposureLedger }?.let { exposure ->
+            val ledger = before.exposures ?: return RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED
+            if (ledger.contains(exposure.digest)) return RuntimeCaptureRejection.EXPOSURE_ALREADY_REPORTED
+        }
+        return null
+    }
+
     private fun captureOnWorker(command: RuntimeCaptureCommand,
         backgroundBoundary: dev.elu.analytics.internal.config.V2ConfigApplicationBackgrounded? = null,
+        attempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
+        warningOf: RuntimeCaptureCommand? = null,
     ): RuntimeCaptureResult {
         assertUsable()
         requireCaptureRuntime()
+        val source = warningOf ?: command
+        if (warningOf != null && source.networkExpectation != null && source.networkExpectation.sessionId == null)
+            return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, requireLoaded().publicSnapshot)
+        // Source permission/consent/duplicate exposure precede charging; event validity does not.
+        if (captureRateLimiter != null) {
+            val sourceRejection = database().transaction { tx ->
+                val current = requireCurrent(tx)
+                captureAuthorityRejection(current, backgroundBoundary) ?: captureSourceRejection(tx, current, source, checkExposureLedger = true)
+            }
+            if (sourceRejection != null) return RuntimeCaptureResult.Rejected(sourceRejection, requireLoaded().publicSnapshot)
+        }
+        if (warningOf == null && captureRateLimiter != null && attempt.claim(this, command)) {
+            val decision = consumeCaptureRate()
+            if (decision.limited) {
+                if (decision.warn) {
+                    captureOnWorker(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$\$client_ingestion_warning", command.occurredAt,
+                        mapOf("\$\$client_ingestion_warning_message" to captureRateLimiter.warningMessage()), command.versions),
+                        backgroundBoundary, warningOf = command)
+                }
+                return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.RATE_LIMITED, requireLoaded().publicSnapshot)
+            }
+        }
         if (!isValidCaptureCommand(command)) {
             return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
         }
@@ -2492,14 +2601,7 @@ internal class RuntimeQueueOwner private constructor(
                             )
                         }
                         val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
-                        fun exposureMatches(): Boolean {
-                            val exposure = command.flagExposure ?: return true
-                            if (!exposure.isCurrent() || featureFlagClockPoisoned || !flagConfigurationIsCurrent()) return false
-                            val flagAuthority = currentFlagAuthorization() ?: return false
-                            return FlagDurableStore.read(transaction, flagAuthority, before.state, command.versions,
-                                exposure.key, captureClock.wallNowEpochMillis()) == exposure.read && exposure.isCurrent()
-                        }
-                        if (!exposureMatches()) return@transaction CaptureCommit(
+                        if (!captureExposureMatches(transaction, before, source)) return@transaction CaptureCommit(
                             RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
                         val nextExposures = command.flagExposure?.let { exposure ->
                             val ledger = before.exposures ?: return@transaction CaptureCommit(
@@ -2510,35 +2612,12 @@ internal class RuntimeQueueOwner private constructor(
                                 RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.QUEUE_LIMIT, before.publicSnapshot), null)
                         }
                         val session = planCaptureSession(before.state, command.occurredAt, authority)
-                        fun originalContextMatches(): Boolean = exposureMatches() && (command.expectation?.let { expected ->
-                            before.state.identity.revision == expected.identityRevision &&
-                                before.state.identity.contextRevision == expected.contextRevision &&
-                                before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
-                                before.state.identity.session?.backgroundedAt == null &&
-                                session.id == expected.sessionId && expected.isCurrent()
-                        } ?: true) && (command.networkExpectation?.let { expected ->
-                            before.state.identity.revision == expected.identityRevision &&
-                                before.state.identity.contextRevision == expected.contextRevision &&
-                                before.state.identity.session?.id == expected.sessionId &&
-                                (expected.sessionId == null ||
-                                    (before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
-                                        before.state.identity.session?.backgroundedAt == null && session.id == expected.sessionId)) &&
-                                before.state.identity.session?.startedAt == expected.sessionStartedAt && expected.isCurrent()
-                        } ?: true) && (command.startupMeasurement?.let { measurement ->
-                            val epoch = before.diagnostics.epoch
-                            val reading = diagnosticsClock?.read()
-                            !diagnosticsClosurePending && diagnosticsConfiguration.enabled && diagnosticsConfiguration.launchTimings &&
-                                epoch == measurement.epoch && epoch != null && diagnosticEpochMatches(before, epoch) &&
-                                measurement.launchUptimeNanos >= epoch.startedUptimeNanos &&
-                                measurement.firstFrameUptimeNanos >= measurement.launchUptimeNanos &&
-                                reading != null && measurement.firstFrameUptimeNanos <= reading.uptimeNanos &&
-                                measurement.launchUptimeNanos > (before.diagnostics.lastLaunchUptimeNanos ?: -1L) &&
-                                diagnosticsLaunchAuthority
-                        } ?: true)
+                        fun originalContextMatches(): Boolean = captureSourceRejection(transaction, before, source,
+                            plannedSession = session) == null
                         if (!originalContextMatches()) return@transaction CaptureCommit(
                             RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
                         val mergedProperties =
-                            LinkedHashMap(if (command.startupMeasurement == null) before.state.identity.superProperties else emptyMap()).apply {
+                            LinkedHashMap(if (source.startupMeasurement == null) before.state.identity.superProperties else emptyMap()).apply {
                                 putAll(captureProperties)
                             }
                         val draft =
@@ -2549,11 +2628,11 @@ internal class RuntimeQueueOwner private constructor(
                                 expectedSessionId = session.id,
                                 properties = mergedProperties,
                                 versions = command.versions,
-                                nativeDiagnostic = command.startupMeasurement != null,
+                                nativeDiagnostic = source.startupMeasurement != null,
                             )
                         // Automatic telemetry must not prolong a live user session. A network
                         // request admitted before any session exists may still create the first one.
-                        val passive = command.expectation != null || command.networkExpectation?.sessionId != null
+                        val passive = source.expectation != null || source.networkExpectation?.sessionId != null
                         var created =
                             prepareAppend(
                                 before,
@@ -3388,6 +3467,9 @@ internal class RuntimeQueueOwner private constructor(
         val head = Math.subtractExact(state.stream.nextSequence, core.queueCount)
         val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics, core.person, core.exposures)
         if (validatePayloads) {
+            transaction.readCaptureRateState()?.let { rate ->
+                if (rate.streamId != state.stream.streamId) corrupt("Capture limiter metadata does not match owned stream")
+            }
             validateAllRecords(transaction, loaded)
             ReplayQueueStore.validate(transaction, ownerNamespaceHash)
         }
@@ -4266,7 +4348,9 @@ internal class RuntimeQueueOwner private constructor(
             personProfiles: EluPersonProfilesMode? = null,
             memoryOnly: Boolean = false,
             explicitConsentStore: RuntimeExplicitConsentStore? = null,
+            rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
         ): Future<RuntimeQueueOwner> {
+            require(rateLimiting == null || personProfiles != null) { "Capture limiting requires a selected production profile mode" }
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
             lateinit var worker: Thread
             val executor =
@@ -4311,9 +4395,11 @@ internal class RuntimeQueueOwner private constructor(
                                 personProfiles,
                                 memoryOnly,
                                 explicitConsentStore,
+                                rateLimiting,
                             )
                         owner.initialize()
                         owner.reconcileExplicitConsentOnWorker()
+                        owner.initializeCaptureRateLimiting()
                         owner
                     } catch (error: Throwable) {
                         try {

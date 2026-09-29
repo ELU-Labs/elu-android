@@ -29,11 +29,22 @@ public class EluOptions
     private var diagnosticsOptions = EluDiagnosticsOptions()
     private var personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY
     private var persistenceMode = EluPersistenceMode.PERSISTENT
+    private var rateLimitingOptions = EluRateLimitingOptions()
+    public val rateLimiting: EluRateLimitingOptions get() = rateLimitingOptions
     public val persistence: EluPersistenceMode get() = persistenceMode
     public val performance: EluPerformanceOptions get() = performanceOptions
     public val diagnostics: EluDiagnosticsOptions get() = diagnosticsOptions
     public val apiHost: String? get() = selfHostedApiHost
     public val personProfiles: EluPersonProfilesMode get() = personProfilesMode
+
+    /** A shared local budget, independent of persistence, identity and remote authority. */
+    @JvmOverloads
+    public constructor(rateLimiting: EluRateLimitingOptions, persistence: EluPersistenceMode = EluPersistenceMode.PERSISTENT,
+        personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
+        diagnostics: EluDiagnosticsOptions = EluDiagnosticsOptions(), performance: EluPerformanceOptions = EluPerformanceOptions(),
+        configHost: String = "https://elu.dev", apiHost: String? = null) : this(persistence, personProfiles, diagnostics, performance, configHost, apiHost) {
+        rateLimitingOptions = rateLimiting
+    }
 
     /** Selects memory storage without replacing any previous constructor descriptor. */
     @JvmOverloads

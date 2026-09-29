@@ -110,6 +110,7 @@ internal enum class RuntimeCaptureRejection {
     EVENT_INVALID,
     QUEUE_LIMIT,
     EXPOSURE_ALREADY_REPORTED,
+    RATE_LIMITED,
 }
 
 internal sealed interface RuntimeCaptureResult {

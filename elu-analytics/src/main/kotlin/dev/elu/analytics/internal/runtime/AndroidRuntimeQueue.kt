@@ -43,6 +43,7 @@ internal object AndroidRuntimeQueue {
         endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
         personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
         persistence: EluPersistenceMode = EluPersistenceMode.PERSISTENT,
+        rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions(),
     ): Future<RuntimeQueueOwner> {
         val applicationContext = context.applicationContext ?: context
         val databaseFile = databaseFileFor(applicationContext, constructorSiteKey, endpointPolicy).canonicalFile
@@ -73,6 +74,7 @@ internal object AndroidRuntimeQueue {
             assertStartupCurrent = assertStartupCurrent,
             endpointPolicy = endpointPolicy,
             personProfiles = personProfiles,
+            rateLimiting = rateLimiting,
         )
     }
 
@@ -85,6 +87,7 @@ internal object AndroidRuntimeQueue {
         trustedSiteKey: String? = null,
         captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
         personProfiles: EluPersonProfilesMode? = null,
+        rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
     ): Future<RuntimeQueueOwner> {
         val canonical = databaseFile.canonicalFile
         return RuntimeQueueOwner.open(
@@ -97,6 +100,7 @@ internal object AndroidRuntimeQueue {
             trustedSiteKey = trustedSiteKey,
             captureClock = captureClock,
             personProfiles = personProfiles,
+            rateLimiting = rateLimiting,
         )
     }
 
