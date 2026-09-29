@@ -750,12 +750,21 @@ class AndroidViewReplayCollectorTest {
     @Test fun touchUnclippedLawfulSiblingsDoNotVetoUnrelatedTargetButChangedPrivatePaintDoes() = main { root ->
         root.clipChildren = false; root.clipToPadding = false
         val target = View(activity); add(root, target, 20, 20, 40, 40)
-        val label = TextView(activity).apply { text = "Ordinary" }
-        add(root, label, 200, 20, 240, 80)
+        val visible = Rect(); assertTrue(root.getLocalVisibleRect(visible))
+        val labelLeft = maxOf(80, visible.left + 80)
+        val labelWidth = minOf(240, visible.right - labelLeft - 20)
+        assertTrue("Fixture needs a fully visible readable sibling", labelWidth >= 120)
+        val label = TextView(activity).apply {
+            text = "Ordinary"
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 16f)
+        }
+        add(root, label, labelLeft, 20, labelWidth, 80)
         fun layoutLabel() {
-            label.measure(View.MeasureSpec.makeMeasureSpec(240, View.MeasureSpec.EXACTLY),
+            label.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
-            label.layout(200, 20, 440, 100)
+            label.layout(labelLeft, 20, labelLeft + labelWidth, 100)
+            assertTrue(visible.contains(label.left, label.top, label.right, label.bottom))
+            assertTrue(target.right < label.left)
         }
         layoutLabel()
         val ordinary = View(activity); add(root, ordinary, 200, 150, 40, 40)
@@ -790,22 +799,26 @@ class AndroidViewReplayCollectorTest {
     }
 
     @Test fun touchPrivateOverflowVetoIncludesEmittedQuantizedCoordinate() = main { root ->
-        val density = root.resources.displayMetrics.density.toDouble()
-        val candidateWidth = (1..100).firstOrNull { it / density != kotlin.math.floor(it / density) }
-        org.junit.Assume.assumeTrue("This layout needs a fractional dp boundary", candidateWidth != null)
-        val width = checkNotNull(candidateWidth)
-        val edge = width / density
-        root.clipChildren = false; root.clipToPadding = false
-        val privateLeaf = object : View(activity) {}; add(root, privateLeaf, 0, 0, width, 100)
-        privateLeaf.clipBounds = Rect(0, 0, width, 100)
-        val safe = View(activity); add(root, safe, 0, 0, 400, 100)
-        val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
-        val fence = NativeCollectionFence(); val snapshot = collector.collect(root, 0, 1000, fence, { true }, false)
-        val projection = checkNotNull(collector.touchProjection(snapshot)); val origin = IntArray(2); root.getLocationInWindow(origin)
-        fun point(logicalX: Double) = listOf(NativeTouchLocation(origin[0] + logicalX * density, origin[1] + density))
-        val outsidePrivateButRoundedInside = (edge + kotlin.math.ceil(edge)) / 2
-        assertNull(collector.projectTouchPoints(root, projection, point(outsidePrivateButRoundedInside), fence, { true }, false).single())
-        assertNotNull(collector.projectTouchPoints(root, projection, point(kotlin.math.ceil(edge) + .25), fence, { true }, false).single())
+        val metrics = root.resources.displayMetrics
+        val originalDensity = metrics.density
+        metrics.density = 2.5f
+        try {
+            val density = metrics.density.toDouble()
+            val width = 1
+            val edge = width / density
+            assertTrue(edge != kotlin.math.floor(edge))
+            root.clipChildren = false; root.clipToPadding = false
+            val privateLeaf = object : View(activity) {}; add(root, privateLeaf, 0, 0, width, 100)
+            privateLeaf.clipBounds = Rect(0, 0, width, 100)
+            val safe = View(activity); add(root, safe, 0, 0, 400, 100)
+            val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+            val fence = NativeCollectionFence(); val snapshot = collector.collect(root, 0, 1000, fence, { true }, false)
+            val projection = checkNotNull(collector.touchProjection(snapshot)); val origin = IntArray(2); root.getLocationInWindow(origin)
+            fun point(logicalX: Double) = listOf(NativeTouchLocation(origin[0] + logicalX * density, origin[1] + density))
+            val outsidePrivateButRoundedInside = (edge + kotlin.math.ceil(edge)) / 2
+            assertNull(collector.projectTouchPoints(root, projection, point(outsidePrivateButRoundedInside), fence, { true }, false).single())
+            assertNotNull(collector.projectTouchPoints(root, projection, point(kotlin.math.ceil(edge) + .25), fence, { true }, false).single())
+        } finally { metrics.density = originalDensity }
     }
 
     @Test fun touchProjectionVetoesBlockedContainerOverflowWithoutReadingPrivateChildren() = main { root ->
