@@ -509,6 +509,17 @@ prevent capture. Ordinary display text can contain personal information: mask
 private labels before displaying them and disclose readable replay collection.
 Replay masking does not sanitize customer event properties or exception messages.
 
+The installed runtime supports native replay v1 and v2. The server must grant the
+exact codec, gzip transport and matching protocol generation; a v1 grant continues
+to record v1. A v2 grant can record single-finger pointer movement over supported,
+currently visible View content after the initial geometry is durably queued.
+Private or unsupported content cancels the gesture without coordinates. These are
+visual pointer observations, not click-recipient or gesture-handler attribution.
+The SDK forwards the original Window.Callback dispatch once and withdraws touch
+collection if another component replaces its callback. Installing the SDK does not
+enable replay or change server release policy. Exact-artifact engine/player and
+interaction-overhead qualification remain pending for this source candidate.
+
 Configuration v2 can restrict replay to `replayAudience: "new-devices"`.
 This records only the installation's first successfully captured analytics session,
 including its continuation after a process restart. Setup and identity changes do

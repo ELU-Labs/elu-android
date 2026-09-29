@@ -329,8 +329,9 @@ def verify_prepared_replay_boundary(root: pathlib.Path, errors: list[str]) -> No
             errors.append(f"prepared replay storage must not contain network or HTTP code: {relative}")
     stack = load_text(root, STACK)
     for required, count in {
-        'val nativeReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP))': 1,
-        'val nativeReplayGenerations = setOf("protocol-generation-v1")': 1,
+        'internal val installedNativeReplayProtocols: Set<NativeReplayProtocol> =\n        Collections.unmodifiableSet(setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2))': 1,
+        'val nativeReplayTransports = installedNativeReplayProtocols.map { it.transport }.toSet()': 1,
+        'val nativeReplayGenerations = installedNativeReplayProtocols.map { it.generation }.toSet()': 1,
         'readbackProvenReplayTransports = nativeReplayTransports': 1,
         'supportedReplayProtocolGenerations = nativeReplayGenerations': 1,
         'transports = nativeReplayTransports': 1, 'generations = nativeReplayGenerations': 1,

@@ -15,10 +15,11 @@ import java.util.UUID
 import java.util.concurrent.*
 import java.util.concurrent.atomic.*
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.*
 import org.junit.Test
 
-/** Actual facade/runtime/native/source/queue composition; fake DB, platform and local proof only. */
+/** Actual facade/runtime/native/source/queue with production installed selection; fake DB/platform only. */
 class StandaloneNativeReplayTest {
     private class MainAccess : NativeReplaySelectionAccess, AutoCloseable {
         @Volatile var main: Thread? = null
@@ -42,10 +43,60 @@ class StandaloneNativeReplayTest {
         }
         override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS)) }
     }
-    private class Platform(val rig: Rig, val access: MainAccess, val single: Boolean = false) : NativeReplayCapturePlatform {
-        override val apiLevel = 36
+    private class Platform(val rig: Rig, val access: MainAccess, val single: Boolean = false,
+        override val apiLevel: Int = 36) : NativeReplayCapturePlatform {
         val factories = AtomicInteger(); val collections = AtomicInteger(); val firstFrame = CountDownLatch(1)
+        val selected = CopyOnWriteArrayList<NativeReplayProtocol>()
+        val armed = CountDownLatch(1); val rowsAtArm = CopyOnWriteArrayList<Int>()
+        val touchCloses = AtomicInteger()
+        private val touchWaits = AtomicInteger()
         @Volatile var onCollect: (() -> Unit)? = null
+        override fun createCollector(protocol: NativeReplayProtocol, masking: NativeMaskingProfile,
+            profile: NativeCapturePassProfile?): NativeReplayCaptureCollector {
+            selected += protocol
+            val original = createCollector()
+            if (protocol == NativeReplayProtocol.V1) return original
+            return object : NativeReplayCaptureCollector {
+                var projection: NativeTouchProjection? = null
+                var generation = 0L
+                override fun collect(root: Any, ordinal: Long, timestamp: Long, fence: NativeCollectionFence,
+                    current: () -> Boolean, unresolvedBlockRules: Boolean): NativeMaskedSnapshot =
+                    original.collect(root, ordinal, timestamp, fence, current, unresolvedBlockRules).also {
+                        projection = NativeTouchProjection(++generation, it)
+                    }
+                override fun touchProjection(frame: NativeMaskedSnapshot) = projection?.takeIf { it.snapshot === frame }
+                override fun touch(window: Any, root: Any, fence: NativeCollectionFence, current: () -> Boolean,
+                    fresh: () -> Boolean, unresolved: () -> Boolean, clock: RuntimeCaptureClock,
+                    wake: () -> Unit): NativeReplayCaptureTouch {
+                    assertSame(access.window, window); assertSame(access.root, root)
+                    // Detached platform facts only. Actual original capture owner performs durable arming.
+                    return object : NativeReplayCaptureTouch {
+                        val core = NativeTouchObservationCore()
+                        private fun main() = check(Thread.currentThread() === access.main)
+                        override fun install() { main() }
+                        override fun arm(value: NativeTouchProjection): Boolean {
+                            main(); rowsAtArm += rig.owner.storedPreparedReplayForTesting().get(3, TimeUnit.SECONDS).size
+                            return core.arm(value).also { if (it) armed.countDown() }
+                        }
+                        override fun handoff(value: NativeTouchProjection, continuous: Long): List<NativeTouchObservation> {
+                            main(); return core.handoff(value, continuous)
+                        }
+                        override fun drain(): List<NativeTouchObservation> { main(); return core.drain() }
+                        override fun active(): Boolean { main(); return core.active() }
+                        override fun stopAndDrain(): List<NativeTouchObservation> {
+                            main(); return core.stop(rig.clock.wall, rig.clock.nanos)
+                        }
+                        override fun withdrawIntake() = Unit
+                        override fun closeAndWait(): SdkFuture<Unit> {
+                            main(); core.withdraw(); touchCloses.incrementAndGet()
+                            return SdkFuture.completedFuture(Unit)
+                        }
+                    }
+                }
+            }
+        }
+        override fun awaitTouch(withdrawn: CountDownLatch, wake: NativeReplayCaptureWake, delayNanos: Long): Boolean =
+            if (touchWaits.incrementAndGet() == 1) true else awaitNext(withdrawn)
         override fun createCollector(): NativeReplayCaptureCollector {
             check(Thread.currentThread() === access.main); factories.incrementAndGet()
             val identity = UUID.randomUUID()
@@ -83,7 +134,9 @@ class StandaloneNativeReplayTest {
             return operation
         }
     }
-    private fun proof() = NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(NativeReplayProtocol.V1.generation))
+    private fun proof() = NativeReplayCapabilities(
+        AndroidStandaloneStack.installedNativeReplayProtocols.map { it.transport }.toSet(),
+        AndroidStandaloneStack.installedNativeReplayProtocols.map { it.generation }.toSet())
     private fun Rig.minimum() = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", 0) }
     private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(3, TimeUnit.SECONDS)
     private fun awaitCondition(message: String, condition: () -> Boolean) {
@@ -91,16 +144,21 @@ class StandaloneNativeReplayTest {
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(5)
         assertTrue(message, condition())
     }
-    private inner class Harness(activateEarly: Boolean = true, resetEarly: Boolean = false, bufferLimit: Int = 100) : AutoCloseable {
-        val rig = Rig(); val access = MainAccess()
+    private inner class Harness(activateEarly: Boolean = true, resetEarly: Boolean = false, bufferLimit: Int = 100,
+        protocol: NativeReplayProtocol = NativeReplayProtocol.V1, reopen: Boolean = false,
+        generation: String = protocol.generation,
+        advertised: List<V1ReplayTransport> = listOf(NativeReplayProtocol.V2.transport, NativeReplayProtocol.V1.transport),
+        apiLevel: Int = 36) : AutoCloseable {
+        val rig = Rig(protocol, generation, advertised); val access = MainAccess()
         val lifecycle = NativeReplayLifecycle(access)
-        val platform = Platform(rig, access)
+        val platform = Platform(rig, access, apiLevel = apiLevel)
         val wire = Transport()
         lateinit var facade: StandaloneFacade
         val native: NativeReplayComposition
         val runtime: StandaloneRuntime
         init {
             rig.minimum()
+            if (reopen) rig.reopen()
             if (activateEarly) rig.activate()
             if (resetEarly) { rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish() }
             lifecycle.resumed(access.activity)
@@ -127,6 +185,76 @@ class StandaloneNativeReplayTest {
             access.close(); rig.close()
         }
     }
+
+    @Test fun `installed selection is closed immutable and requires the original exact tuple`() {
+        val installed = AndroidStandaloneStack.installedNativeReplayProtocols
+        assertEquals(setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2), installed)
+        try { (installed as MutableSet<NativeReplayProtocol>).clear(); fail("Installed selection must be immutable") }
+        catch (_: UnsupportedOperationException) { }
+        for (protocol in installed) {
+            for (advertised in listOf(listOf(NativeReplayProtocol.V1.transport, NativeReplayProtocol.V2.transport),
+                listOf(NativeReplayProtocol.V2.transport, NativeReplayProtocol.V1.transport))) {
+                Rig(protocol, protocol.generation, advertised).use { rig ->
+                    rig.selectProtocol()
+                    assertEquals(protocol.transport, proof().transport(V1ConfigJson.parseConfig(rig.body)))
+                }
+            }
+        }
+    }
+
+    @Test fun `public assembly installed selection reaches both original owners including reopen`(): Unit {
+        for (protocol in AndroidStandaloneStack.installedNativeReplayProtocols) for (reopen in listOf(false, true)) {
+            Harness(protocol = protocol, reopen = reopen).use { h ->
+                h.settle(); assertTrue(h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+                awaitCondition("exact installed protocol durable row") { h.rig.rows().isNotEmpty() }
+                assertEquals(listOf(protocol), h.platform.selected)
+                assertEquals(protocol.codec, JSONObject(String(h.rig.rows().single().prepared.copyBytes()))
+                    .getJSONObject("chunk").getString("codec"))
+                if (protocol == NativeReplayProtocol.V2) {
+                    assertTrue(h.platform.armed.await(3, TimeUnit.SECONDS))
+                    assertEquals(listOf(1), h.platform.rowsAtArm)
+                } else assertTrue(h.platform.rowsAtArm.isEmpty())
+            }
+        }
+    }
+
+    @Test fun `installed v2 does not authorize crossed unknown or uncompressed grants`(): Unit {
+        val cases = listOf(
+            NativeReplayProtocol.V1.generation to listOf(NativeReplayProtocol.V2.transport),
+            NativeReplayProtocol.V2.generation to listOf(NativeReplayProtocol.V1.transport),
+            "unknown-native-generation" to listOf(NativeReplayProtocol.V2.transport, NativeReplayProtocol.V1.transport),
+            NativeReplayProtocol.V2.generation to listOf(V1ReplayTransport(NativeReplayProtocol.V2.codec, V1ReplayCompression.NONE)),
+        )
+        for ((generation, advertised) in cases) Harness(protocol = NativeReplayProtocol.V2,
+            generation = generation, advertised = advertised).use { h ->
+            h.settle(); assertNull(proof().transport(V1ConfigJson.parseConfig(h.rig.body)))
+            h.native.reevaluate(force = true).get(3, TimeUnit.SECONDS)
+            assertEquals(0, h.platform.factories.get()); assertTrue(h.rig.rows().isEmpty())
+            assertTrue(h.platform.rowsAtArm.isEmpty())
+        }
+    }
+
+    @Test fun `installed v2 cannot arm a held initial frame after source expiry or withdrawal`(): Unit {
+        for (expire in listOf(false, true)) Harness(activateEarly = false, protocol = NativeReplayProtocol.V2).use { h ->
+            h.settle(); assertEquals(0, h.platform.factories.get())
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            h.platform.onCollect = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+            try {
+                h.activate(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+                if (expire) h.rig.advance(300) else h.rig.gate.close()
+                h.facade.configurationChanged(); h.settle()
+            } finally { release.countDown() }
+            h.facade.closeAndWait().get(3, TimeUnit.SECONDS)
+            assertTrue(h.rig.backing.replayRows.keys.none { it.startsWith("chunk/") })
+            assertTrue(h.platform.rowsAtArm.isEmpty()); assertEquals(1, h.platform.touchCloses.get())
+        }
+    }
+
+    @Test fun `installed v2 preserves API29 collector floor`(): Unit =
+        Harness(protocol = NativeReplayProtocol.V2, apiLevel = 28).use { h ->
+            h.settle(); h.native.reevaluate(force = true).get(3, TimeUnit.SECONDS)
+            assertEquals(0, h.platform.factories.get()); assertTrue(h.rig.rows().isEmpty())
+        }
 
     @Test fun `public first activity creates actual native session and later activities reuse one owner`(): Unit = Harness(resetEarly = true).use { h ->
         h.settle(); assertEquals(0, h.platform.factories.get())
@@ -209,7 +337,9 @@ class StandaloneNativeReplayTest {
         assertTrue(h.facade.nativeReplayIntakeAllowed())
     }
 
-    private class Rig : AutoCloseable {
+    private class Rig(val protocol: NativeReplayProtocol = NativeReplayProtocol.V1,
+        val generation: String = protocol.generation,
+        val advertised: List<V1ReplayTransport> = listOf(NativeReplayProtocol.V2.transport, NativeReplayProtocol.V1.transport)) : AutoCloseable {
         val clock = Clock(); val worker = Worker(); val gate = V2ConfigAuthorityGate()
         var body = ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json")
         val source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
@@ -228,8 +358,8 @@ class StandaloneNativeReplayTest {
         @Volatile var databaseCloses = 0
         var owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
         fun openSame() = RuntimeQueueOwner.open(ownership, RuntimeQueueLimits(100, MAX_RUNTIME_QUEUE_BYTES),
-            readbackProvenReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
-            supportedReplayProtocolGenerations = setOf(NativeReplayProtocol.V1.generation),
+            readbackProvenReplayTransports = AndroidStandaloneStack.installedNativeReplayProtocols.map { it.transport }.toSet(),
+            supportedReplayProtocolGenerations = AndroidStandaloneStack.installedNativeReplayProtocols.map { it.generation }.toSet(),
             databaseFactory = {
                 onConnection?.also { onConnection = null }?.invoke()
                 val db = backing.connection()
@@ -268,13 +398,20 @@ class StandaloneNativeReplayTest {
         fun executor(): java.util.concurrent.ExecutorService = RuntimeQueueOwner::class.java.getDeclaredField("executor")
             .also { it.isAccessible = true }.get(owner) as java.util.concurrent.ExecutorService
         fun configure(change: (JSONObject) -> Unit) { val json = JSONObject(body); change(json); body = json.toString() }
+        fun selectProtocol() {
+            configure { it.getJSONObject("capabilities").getJSONObject("replay")
+                .put("replayProtocolGeneration", generation).put("transports", JSONArray().also { transports ->
+                    advertised.forEach { transport -> transports.put(JSONObject().put("codec", transport.codec)
+                        .put("compression", transport.compression.wireValue)) }
+                }) }
+        }
         fun activate() {
-            configure { it.getJSONObject("capabilities").getJSONObject("replay").put("replayProtocolGeneration", NativeReplayProtocol.V1.generation) }
-            configure { it.getJSONObject("capabilities").getJSONObject("replay").getJSONArray("transports").put(
-                JSONObject().put("codec", "elu-native-wireframe-v1").put("compression", "gzip")) }
+            selectProtocol()
             configure { it.getJSONObject("privacy").getJSONObject("replay").let { policy ->
                 if (policy.getDouble("sampleRate") != 0.0) policy.put("sampleRate", 1.0)
             } }
+            if (protocol == NativeReplayProtocol.V2) configure { it.getJSONObject("privacy").getJSONObject("masking")
+                .put("text", "sensitive").put("platformRules", JSONArray()) }
             owner.ensurePreparedReplayStorage().get(); owner.ensureNativeReplayAccounting().get()
             driver.start(); worker.runNext(); publish()
         }

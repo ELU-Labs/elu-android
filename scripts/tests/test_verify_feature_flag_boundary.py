@@ -388,9 +388,20 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_owned_native_capability_selection_cannot_add_a_codec_or_generation(self) -> None:
         path = self.root / BOUNDARY.STACK
         original = path.read_text()
-        for before, after in [('setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP))',
-                               'setOf(V1ReplayTransport("foreign-codec", V1ReplayCompression.GZIP))'),
-                              ('setOf("protocol-generation-v1")', 'setOf("protocol-generation-v1", "future")')]:
+        for before, after in [
+            ('Collections.unmodifiableSet(setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2))',
+             'setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2)'),
+            ('setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2)', 'NativeReplayProtocol.values().toSet()'),
+            ('setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2)',
+             'setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2, NativeReplayProtocol.FUTURE)'),
+            ('installedNativeReplayProtocols.map { it.transport }.toSet()',
+             'setOf(V1ReplayTransport("foreign-codec", V1ReplayCompression.GZIP))'),
+            ('installedNativeReplayProtocols.map { it.generation }.toSet()', 'setOf("protocol-generation-v1", "future")'),
+            ('readbackProvenReplayTransports = nativeReplayTransports', 'readbackProvenReplayTransports = emptySet()'),
+            ('supportedReplayProtocolGenerations = nativeReplayGenerations', 'supportedReplayProtocolGenerations = emptySet()'),
+            ('transports = nativeReplayTransports', 'transports = emptySet()'),
+            ('generations = nativeReplayGenerations', 'generations = emptySet()'),
+        ]:
             with self.subTest(before=before):
                 self.assertIn(before, original)
                 path.write_text(original.replace(before, after))

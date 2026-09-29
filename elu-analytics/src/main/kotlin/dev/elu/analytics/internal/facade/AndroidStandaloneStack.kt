@@ -6,8 +6,6 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.os.Handler
 import android.os.Looper
-import dev.elu.analytics.internal.config.V1ReplayCompression
-import dev.elu.analytics.internal.config.V1ReplayTransport
 import dev.elu.analytics.internal.config.AndroidV2ConfigClock
 import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
 import dev.elu.analytics.internal.config.V2ConfigLifecycleDriver
@@ -19,6 +17,7 @@ import dev.elu.analytics.internal.flags.V2ConfigBoundFlagTransport
 import dev.elu.analytics.EluEuGuard
 import dev.elu.analytics.internal.replay.NativeReplayCapabilities
 import dev.elu.analytics.internal.replay.NativeReplayComposition
+import dev.elu.analytics.internal.replay.NativeReplayProtocol
 import dev.elu.analytics.internal.core.SystemCoreEpochClock
 import dev.elu.analytics.internal.runtime.AndroidProcessLifecycle
 import dev.elu.analytics.internal.runtime.StandaloneLifecycleBinding
@@ -27,6 +26,7 @@ import dev.elu.analytics.internal.runtime.RuntimeLifecycleSink
 import dev.elu.analytics.internal.runtime.RuntimeQueueLimits
 import dev.elu.analytics.internal.runtime.StandaloneRuntime
 import java.util.Date
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -35,6 +35,10 @@ import java.util.concurrent.atomic.AtomicReference
 /** Owns the runtime and resources behind the public Elu facade. */
 internal object AndroidStandaloneStack {
     private val LIMITS = RuntimeQueueLimits(maximumCount = 10_000, maximumBytes = 16_777_216)
+    // Installed implementation only: every capture still requires the exact current remote tuple.
+    // Explicit membership prevents a future enum case from silently enabling another protocol.
+    internal val installedNativeReplayProtocols: Set<NativeReplayProtocol> =
+        Collections.unmodifiableSet(setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2))
 
     fun facade(appContext: Context, siteKey: String, configHost: String = "https://elu.dev",
         performanceOptions: dev.elu.analytics.EluPerformanceOptions = dev.elu.analytics.EluPerformanceOptions(),
@@ -88,8 +92,8 @@ internal object AndroidStandaloneStack {
             open = {
                 check(!closing.get()) { "Standalone stack is closed" }
                 // One explicit private component capability selection reaches both original owners.
-                val nativeReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP))
-                val nativeReplayGenerations = setOf("protocol-generation-v1")
+                val nativeReplayTransports = installedNativeReplayProtocols.map { it.transport }.toSet()
+                val nativeReplayGenerations = installedNativeReplayProtocols.map { it.generation }.toSet()
                 val owner = AndroidRuntimeQueue.open(appContext, siteKey, LIMITS, freshIdentityStartedAt,
                     readbackProvenReplayTransports = nativeReplayTransports,
                     supportedReplayProtocolGenerations = nativeReplayGenerations,

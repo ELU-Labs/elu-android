@@ -6,8 +6,9 @@ or production qualification. See [README.md](./README.md) for installation and
 public Kotlin APIs, and [development status](./docs/sdk-development-status.md)
 for outstanding release gates.
 
-The internal, unadvertised native-v2 interaction candidate has detached
-value/encoding/buffering and internal exact-tuple durable admission paths. It uses the exact `elu-native-wireframe-v2` Meta
+The installed native replay implementation supports two closed protocols. Native-v2
+has value/encoding/buffering, current-window observation and exact-tuple durable
+admission paths. It uses the exact `elu-native-wireframe-v2` Meta
 discriminator, primary-pointer start/end and coordinate-free root cancellation,
 and coalesced movement with at most ten samples per second. Samples must join
 live lawful encoded leaf IDs and their positive clips; masked/input/placeholder
@@ -28,10 +29,22 @@ identity and version wrapper; a failed envelope does not advance its encoder.
 Both codecs refuse generic append and require the original current physical use,
 capture admission, source and durable accounting transaction. An ambiguous append
 retains the same prepared bytes through reconciliation; unknown outcomes quarantine
-the original owner. These paths do not arm a collector or supply release proof.
-Window observation, current hierarchy privacy, active collection scheduling and
-final reader/player qualification remain unwired. Production selects v1 only;
-existing v1 encoder/buffer bytes and its chunk domain remain unchanged.
+the original owner. The public runtime supplies one immutable installed V1/V2
+selection to both its queue and composition on every open, including reopen.
+The original configuration generation selects the matching codec; a v1 grant
+remains v1 even when v2 is advertised first. Crossed, unknown and uncompressed
+tuples do not authorize collection. Installed support grants no remote permission
+and does not change the engine's disabled-by-default production release registry.
+
+On API 29+, an authorized v2 capture installs the original Window.Callback observer
+and arms only after its exact initial geometry prefix is known durably committed.
+Current hierarchy privacy, the serialized positive clip, source/session/budget and
+physical ownership remain checked. Original application dispatch is forwarded once;
+callback displacement withdraws collection. Single-finger pointer observations do
+not claim which child handled or clicked the event. Existing v1 encoder/buffer bytes
+and its chunk domain remain unchanged. The installed selection's new facade tests
+remain uncompiled/unrun, and fresh exact-AAR canonical readback, customer-player
+interaction/scroll rendering and resource qualification remain release gates.
 
 ## Configuration and collection authority
 

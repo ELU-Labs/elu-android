@@ -7,31 +7,34 @@ Current source includes owned event delivery, identity/groups/properties, profil
 modes and independent device identity, durable feature-flag exposure metadata,
 explicit consent, real memory-only analytics storage, strict HTTPS self-host bases
 including prefixes, manual exceptions, Views/AppCompat replay, optional HTTP/frame
-metrics and limited observed OS startup timing. Public local replay start/stop/status controls are a new source-only slice;
-its Kotlin tests are authored but not yet compiled or run. Automatic root/viewport
-continuity is a subsequent source-only slice: original capture/accounting/watchers
-must settle, each new replay ID reuses the original session/sample/time budget,
-and missing-root observation cannot renew source permission. Its new JVM controls
-also remain uncompiled/unrun. Hosted limiter testing
-has begun separately; its native migration fixture required a trusted-key setup
-correction. Neither result is replay-controls qualification. The current exact
-AAR/API inventory, consumer, emulator and resource results remain pending.
+metrics and limited observed OS startup timing. Public replay start/stop/status,
+root/viewport continuity, capture rate limiting and native-v2 touch capture now have
+hosted component tests. Original capture/accounting/watchers must settle before
+recovery; each new replay ID reuses the original session/sample/time budget, and
+missing-root observation cannot renew source permission. The latest source change
+shares one immutable v1/v2 installed selection between the public runtime's queue
+and composition, retaining exact remote tuple admission and v1 fallback. Its five
+new facade JVM methods are authored but uncompiled/unrun. Fresh exact-artifact
+emulator, canonical engine/player and resource qualification remain pending.
 
-Hosted CI at commit `1d2fd17` ran 962 JVM tests with zero failures or ignored tests
-and 94 Android instrumentation tests with zero failures, errors or skips. Build,
-lint and consumer checks passed. The actual 1,905,062-byte AAR (SHA-256 prefix
-`0e9b4aca`) produced a 726-class inventory; generated API review is separate. These
-results cover the source before the limiter. They do not qualify the limiter/replay-controls slices or
-the final release artifact. Public API snapshots must come from actual compiled
-bytes, with old public descriptors preserved.
+Hosted CI run `36581976453` tested PR head `d48cca2` through its synthetic merge
+`d2f87761915937a98bc80423dfabeaf2a181aba4`: 1,071 JVM tests and 113 Android
+instrumentation tests passed with zero failures or skips. Build, lint, maintained
+API and consumer gates passed. Its actual 2,074,770-byte AAR (SHA-256
+`0964a00000a75a4d1be596d5da6a46038ab616cfe938eb92b6cd06dda3e630af`)
+has 777 JVM classes. That artifact still selects v1 in the public runtime; it does
+not qualify the subsequent installed-v2 selection or the final release. API
+snapshots must come from actual compiled bytes, with old public descriptors preserved.
 
 Views replay still enforces API 29+. API 26–28 readable replay remains an unresolved
 support requirement; the privacy transition guard has not been weakened. Generic
 Compose/custom-drawn content remains opaque. Frame metrics require API 26+, while
 startup requires API 35+ and an observed incomplete-to-first-frame transition with
 proven continuity. Already-complete/ambiguous startup history is omitted. Automatic
-fatal crash/ANR capture and touch replay are not implemented; manual exceptions and
-explicit screen reporting remain available.
+fatal crash/ANR capture remains unimplemented. Native touch source supports only
+single-finger observations over lawful encoded Views; real drag/scroll, privacy
+crossing, rotation and customer-player rendering still require exact-artifact Lab
+qualification. Manual exceptions and explicit screen reporting remain available.
 
 The owner has waived physical-device testing for this release. Fresh simulator/
 emulator qualification of exact artifacts is still required, including supported
