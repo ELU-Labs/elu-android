@@ -50,6 +50,43 @@ internal class TestSelectionAccess : NativeReplaySelectionAccess {
 }
 
 class NativeReplayLifecycleTest {
+    @Test fun `original window borrow is main bound and cannot survive window replacement`() {
+        val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any(); val root = Any()
+        life.resumed(activity); val selected = checkNotNull(life.select(activity, root).get())
+        var calls = 0
+        assertNotNull(selected.consumeOriginalWindow({ true }) { actualRoot, actualWindow, current ->
+            assertTrue(platform.inMain); assertSame(root, actualRoot); assertSame(platform.window, actualWindow)
+            assertTrue(current()); calls++; NativeReplayCollectionAttempt.TouchBoundary(emptyList())
+        }.get())
+        platform.window = Any()
+        assertNull(selected.consumeOriginalWindow({ true }) { _, _, _ -> calls++; NativeReplayCollectionAttempt.TouchBoundary(emptyList()) }.get())
+        assertEquals(1, calls); selected.closeAndWait().get()
+    }
+
+    @Test fun `original touch cleanup joins main after selection withdrawal with no fresh permission`() {
+        val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any()
+        life.resumed(activity); val selected = checkNotNull(life.select(activity, Any()).get())
+        life.withdrawing(activity)
+        val physical = dev.elu.analytics.internal.concurrent.SdkFuture<Unit>()
+        var pending: (() -> Unit)? = null; var calls = 0; platform.hold = { pending = it }
+        val touch = object : NativeReplayCaptureTouch {
+            override fun install() = error("cleanup cannot install")
+            override fun arm(value: NativeTouchProjection) = error("cleanup cannot arm")
+            override fun handoff(value: NativeTouchProjection, continuous: Long): List<NativeTouchObservation> = error("cleanup cannot collect")
+            override fun drain(): List<NativeTouchObservation> = error("cleanup cannot drain")
+            override fun active() = false
+            override fun stopAndDrain(): List<NativeTouchObservation> = error("cleanup cannot drain")
+            override fun withdrawIntake() = Unit
+            override fun closeAndWait(): dev.elu.analytics.internal.concurrent.SdkFuture<Unit> {
+                assertTrue(platform.inMain); calls++; return physical
+            }
+        }
+        val joined = selected.closeOriginalTouchObserver(touch)
+        assertFalse(joined.isDone); assertFalse(joined.cancel(true)); assertEquals(0, calls)
+        checkNotNull(pending).invoke(); assertEquals(1, calls); assertFalse(joined.isDone)
+        physical.complete(Unit); joined.get(); platform.hold = null; selected.closeAndWait().get()
+    }
+
     @Test fun `root readiness observes sole original activity without selection or watcher`() {
         val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any()
         assertEquals(NativeReplayRootReadiness.INACTIVE, life.observeRootReadiness { true }.get())

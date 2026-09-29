@@ -285,6 +285,15 @@ internal class NativeReplaySelection private constructor(
         current: () -> Boolean,
         locallyStopped: () -> Boolean = { false },
         consume: (Any, () -> Boolean) -> NativeReplayCollectionAttempt?,
+    ): SdkFuture<NativeReplayCollectionAttempt?> = consumeOriginalWindow(current, locallyStopped) { root, _, allowed ->
+        consume(root, allowed)
+    }
+
+    /** Same original validation, borrowing the already-selected weak Window only on main. */
+    fun consumeOriginalWindow(
+        current: () -> Boolean,
+        locallyStopped: () -> Boolean = { false },
+        consume: (Any, Any, () -> Boolean) -> NativeReplayCollectionAttempt?,
     ): SdkFuture<NativeReplayCollectionAttempt?> {
         val result = object : SdkFuture<NativeReplayCollectionAttempt?>() {
             override fun cancel(mayInterruptIfRunning: Boolean) = false
@@ -320,7 +329,7 @@ internal class NativeReplaySelection private constructor(
                         if (stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
                         else { withdrawn.set(true); result.complete(null) }
                     } else {
-                        val value = consume(checkNotNull(selectedRoot), ::allowed)
+                        val value = consume(checkNotNull(selectedRoot), checkNotNull(window.get()), ::allowed)
                         if (value != null && stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
                         else if (value == null || value === NativeReplayCollectionAttempt.LocalStop || !matches()) {
                             if (value != null && stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
@@ -337,6 +346,17 @@ internal class NativeReplaySelection private constructor(
             result.completeExceptionally(error)
         }
         return result
+    }
+
+    /** Cleanup has no selection/permission precondition; it closes only the original retained handle. */
+    fun closeOriginalTouchObserver(original: NativeReplayCaptureTouch): SdkFuture<Unit> {
+        val joined = object : SdkFuture<Unit>() { override fun cancel(mayInterruptIfRunning: Boolean) = false }
+        try { access.onMain {
+            try { original.closeAndWait().whenComplete { _, error ->
+                if (error == null) joined.complete(Unit) else joined.completeExceptionally(error)
+            } } catch (error: Throwable) { joined.completeExceptionally(error) }
+        } } catch (error: Throwable) { joined.completeExceptionally(error) }
+        return joined
     }
 
     override fun close() { closeAndWait() }

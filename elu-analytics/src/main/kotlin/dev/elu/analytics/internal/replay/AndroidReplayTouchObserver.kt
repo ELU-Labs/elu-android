@@ -110,6 +110,18 @@ internal data class NativeTouchWorkObservation(
     val fullEventsRead: Long, val budgetRefusals: Long,
 )
 
+/** Original main-only component handle. Values are descriptive; the capture owner supplies commit ordering. */
+internal interface NativeReplayCaptureTouch {
+    fun install()
+    fun arm(value: NativeTouchProjection): Boolean
+    fun handoff(value: NativeTouchProjection, continuous: Long): List<NativeTouchObservation>
+    fun drain(): List<NativeTouchObservation>
+    fun active(): Boolean
+    fun stopAndDrain(): List<NativeTouchObservation>
+    fun withdrawIntake()
+    fun closeAndWait(): SdkFuture<Unit>
+}
+
 /** Main-serialized detached state. The original capture owner must supply known committed projection arming. */
 internal class NativeTouchObservationCore(private val maximumLogicalEvents: Int = 64) {
     private data class Active(val pointerId: Int, val downTime: Long, val identity: UUID)
@@ -132,6 +144,41 @@ internal class NativeTouchObservationCore(private val maximumLogicalEvents: Int 
         if (withdrawn || contact || active != null || rows.isNotEmpty() || pending.isNotEmpty()) return false
         projection = value
         return true
+    }
+
+    fun active(): Boolean = !withdrawn && active != null
+    fun pressure(): Boolean = logicalCount >= maximumLogicalEvents - 2 || pending.size >= 10
+    fun samples(): List<NativeReplayTouchPoint> = rows.flatMap { row -> when (val event = row.interaction) {
+        is NativeReplayInteraction.Start -> listOf(event.point)
+        is NativeReplayInteraction.End -> listOf(event.point)
+        is NativeReplayInteraction.Moves -> event.points
+        is NativeReplayInteraction.Cancel -> emptyList()
+    } } + pending
+
+    /** Old rows precede the new geometry; no start permission is created for an unarmed contact. */
+    fun handoff(value: NativeTouchProjection, continuous: Long): List<NativeTouchObservation> {
+        if (withdrawn || projection == null) return emptyList()
+        val previous = checkNotNull(projection)
+        check(value.generation > previous.generation && value.snapshot.ordinal > previous.snapshot.ordinal &&
+            value.snapshot.viewport == previous.snapshot.viewport)
+        check(lastWall?.let { value.snapshot.timestamp >= it } != false &&
+            lastContinuous?.let { continuous >= it } != false)
+        val target = active?.identity
+        if (target != null && value.snapshot.nodes.none {
+            it.identity == target && (it.kind === NativeMaskedKind.Rectangle ||
+                it.kind is NativeMaskedKind.ReadableText && it.kind.text.value != NativeWireframeV2Encoder.MASK) &&
+                it.geometry == NativeGeometryKind.VISIBLE_CLIP && it.clip.width > 0 && it.clip.height > 0
+        }) cancel(value.snapshot.timestamp)
+        val old = drain()
+        projection = value
+        lastWall = value.snapshot.timestamp; lastContinuous = continuous
+        return old
+    }
+    fun stop(wall: Long, continuous: Long): List<NativeTouchObservation> {
+        check(wall in 1..253_402_300_799_999L && continuous >= 0 &&
+            lastWall?.let { wall >= it } != false && lastContinuous?.let { continuous >= it } != false)
+        cancel(wall)
+        return drain()
     }
 
     fun needsProjection(action: NativeTouchAction): Boolean = !withdrawn && projection != null &&
@@ -229,12 +276,14 @@ internal class AndroidReplayTouchObserver(
     root: View,
     private val collector: AndroidViewReplayCollector,
     private val fence: NativeCollectionFence,
-    private val isCurrent: () -> Boolean,
-    private val unresolvedBlockRules: () -> Boolean,
-    private val annotations: () -> List<NativeViewAnnotation> = { emptyList() },
-    private val wallClock: () -> Long = System::currentTimeMillis,
-    private val continuousClock: () -> Long = System::nanoTime,
-) {
+    @Volatile private var isCurrent: () -> Boolean,
+    @Volatile private var unresolvedBlockRules: () -> Boolean,
+    @Volatile private var annotations: () -> List<NativeViewAnnotation> = { emptyList() },
+    @Volatile private var wallClock: () -> Long = System::currentTimeMillis,
+    @Volatile private var continuousClock: () -> Long = System::nanoTime,
+    @Volatile private var freshIntakeAllowed: () -> Boolean = { true },
+    @Volatile private var wake: () -> Unit = {},
+) : NativeReplayCaptureTouch {
     private val offMainWithdrawal = AtomicBoolean(false)
     private val originalRoot = WeakReference(root)
     private val original: Window.Callback
@@ -250,6 +299,7 @@ internal class AndroidReplayTouchObserver(
     private var depth = 0
     private var withdrawn = false
     private var closing = false
+    private var installed = false
     private val settled = object : SdkFuture<Unit>() { override fun cancel(mayInterruptIfRunning: Boolean) = false }
 
     init {
@@ -259,21 +309,72 @@ internal class AndroidReplayTouchObserver(
         wrapper = object : Window.Callback by original {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean = dispatch(event)
         }
+    }
+
+    /** Construction is side-effect free. The owner retains this handle BEFORE this call. */
+    override fun install() {
+        requireMain(); check(!installed && !closing && !withdrawn)
+        check(window.callback === original) { "Original callback changed before installation" }
+        installed = true // A throwing setter can have applied; cleanup retains the exact wrapper.
         window.callback = wrapper
-        if (window.callback !== wrapper) withdraw()
+        check(window.callback === wrapper) { "Original touch observer was displaced during installation" }
     }
 
     /** Descriptive selection only; a future original owner must call only after known initial durable commit. */
-    fun arm(value: NativeTouchProjection): Boolean {
+    override fun arm(value: NativeTouchProjection): Boolean {
         requireMain()
         if (!current() || depth != 0 || collector.touchProjection(value.snapshot) !== value) return false
         return core.arm(value).also { if (it) projection = value }
     }
 
-    fun drain(): List<NativeTouchObservation> {
+    override fun drain(): List<NativeTouchObservation> {
         requireMain()
-        if (!current() || depth != 0) return emptyList()
+        check(current() && depth == 0)
+        validatePendingSamples()
         return core.drain()
+    }
+
+    override fun active(): Boolean { requireMain(); return current() && core.active() }
+
+    override fun handoff(value: NativeTouchProjection, continuous: Long): List<NativeTouchObservation> {
+        requireMain(); check(current() && depth == 0 && collector.touchProjection(value.snapshot) === value)
+        val old = core.handoff(value, continuous)
+        // Unarmed initial/minimum frames remain descriptive until arm() after known commit.
+        if (projection != null) projection = value
+        return old
+    }
+
+    override fun stopAndDrain(): List<NativeTouchObservation> {
+        requireMain(); check(current() && depth == 0)
+        validatePendingSamples()
+        return core.stop(wallClock(), continuousClock())
+    }
+
+    /** Queued coordinates still require the current hierarchy before leaving the main mailbox. */
+    private fun validatePendingSamples() {
+        val selected = projection
+        val samples = core.samples()
+        try {
+            if (samples.isNotEmpty()) {
+                check(selected != null && budget.begin(continuousClock()))
+                val root = checkNotNull(originalRoot.get())
+                val origin = IntArray(2)
+                eventFact { root.getLocationInWindow(origin) }
+                val density = eventFact { root.resources.displayMetrics.density }.toDouble()
+                check(density.isFinite() && density > 0)
+                for (batch in samples.chunked(33)) {
+                    val facts = NativeTouchInput(NativeTouchAction.MOVE, 0, 0,
+                        batch.map { NativeTouchLocation(it.x * density + origin[0], it.y * density + origin[1]) }, true)
+                    val proven = project(facts, selected)
+                    check(proven != null && proven.size == batch.size && proven.zip(batch).all { (a, b) ->
+                        a != null && a.projection === selected && a.identity == b.identity && a.x == b.x && a.y == b.y
+                    })
+                }
+                check(budget.pause(continuousClock()))
+            }
+            check(current())
+        } catch (error: Throwable) { withdraw(); throw error }
+        finally { budget.finish(continuousClock()) }
     }
 
     fun workObservation(): NativeTouchWorkObservation {
@@ -282,7 +383,7 @@ internal class AndroidReplayTouchObserver(
     }
 
     /** Completion joins any original callback on the current stack before ownership-sensitive restoration. */
-    fun closeAndWait(): SdkFuture<Unit> {
+    override fun closeAndWait(): SdkFuture<Unit> {
         requireMain(); closing = true; withdraw()
         if (depth == 0) settle()
         return settled
@@ -311,7 +412,7 @@ internal class AndroidReplayTouchObserver(
                     if (sampled < started) throw IllegalStateException("touch action clock reversed")
                     cheapActionNanos = NativeTouchWorkBudget.saturatingAdd(cheapActionNanos, sampled - started)
                     input = NativeTouchInput(action, -1, 0, emptyList(), false)
-                    if (core.needsProjection(action)) {
+                    if (freshIntakeAllowed() && core.needsProjection(action)) {
                         working = budget.begin(sampled)
                         if (working) {
                             fullEventsRead = NativeTouchWorkBudget.saturatingAdd(fullEventsRead, 1)
@@ -339,7 +440,7 @@ internal class AndroidReplayTouchObserver(
                         if (!budget.pause(continuousClock())) after = null
                     }
                     if (working && budget.refused) budgetRefusals = NativeTouchWorkBudget.saturatingAdd(budgetRefusals, 1)
-                    val now = continuousClock(); val wall = wallClock(); val facts = input
+                    val now = continuousClock(); val wall = wallClock(); val facts = input.takeIf { freshIntakeAllowed() }
                     val identical = before != null && after != null && before == after && !budget.refused
                     if (facts != null && current() && projection === selected) observeCore(facts, if (identical) after else null, wall, now)
                 } catch (error: Throwable) {
@@ -361,7 +462,9 @@ internal class AndroidReplayTouchObserver(
     /** Fixed-size detached bookkeeping remains available for cancellation/lift after budget exhaustion. */
     private fun observeCore(input: NativeTouchInput, proof: List<NativeProjectedTouch?>?, wall: Long, continuous: Long) {
         val started = continuousClock()
+        val wasActive = core.active()
         core.observe(input, proof, wall, continuous)
+        if (wasActive != core.active() || core.pressure()) wake()
         val ended = continuousClock()
         if (ended < started) throw IllegalStateException("touch terminal clock reversed")
         coreHandlingNanos = NativeTouchWorkBudget.saturatingAdd(coreHandlingNanos, ended - started)
@@ -377,14 +480,25 @@ internal class AndroidReplayTouchObserver(
     }
 
     private fun current(): Boolean {
-        if (withdrawn || closing) return false
+        if (!installed || withdrawn || closing) return false
         val valid = try { !offMainWithdrawal.get() && window.callback === wrapper && fence.isCurrent() && isCurrent() &&
             fence.isCurrent() && !offMainWithdrawal.get() }
             catch (_: Throwable) { false }
         if (!valid) withdraw()
         return valid
     }
-    private fun withdraw() { withdrawn = true; projection = null; core.withdraw() }
+    /** Off-main-safe denial/reference release only. No View, MotionEvent or core mutation here. */
+    override fun withdrawIntake() {
+        offMainWithdrawal.set(true)
+        // Failed restoration can retain this exact UI handle in the existing resource quarantine.
+        // It must not retain a capture run, authority, queue, wake task or customer annotation closure.
+        isCurrent = { false }; unresolvedBlockRules = { true }; annotations = { emptyList() }
+        freshIntakeAllowed = { false }; wake = {}; wallClock = System::currentTimeMillis
+        continuousClock = System::nanoTime
+    }
+    private fun withdraw() {
+        withdrawn = true; projection = null; core.withdraw(); withdrawIntake()
+    }
     private fun settle() {
         try {
             if (window.callback === wrapper) window.callback = original

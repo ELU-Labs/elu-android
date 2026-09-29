@@ -57,7 +57,42 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         path.write_text(original)
         stack = self.root / BOUNDARY.STACK
         stack.write_text(stack.read_text() + "\nval escaped: AndroidReplayTouchObserver? = null\n")
-        self.assertIn("native touch observer remains uninstalled", self.run_guard().stderr)
+        self.assertIn("native touch observer installation escaped original capture owner", self.run_guard().stderr)
+
+    def test_native_touch_capture_keeps_original_commit_and_cleanup(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+        for name, token in [
+            ("NativeReplayCaptureOwner.kt", "checkNotNull(enrollment).retainOriginalTouch(checkNotNull(physicalUse), originalTouch)"),
+            ("NativeReplayCaptureOwner.kt", "row.projection === acceptedProjection"),
+            ("NativeReplayCaptureOwner.kt", "if (interactions != null && initialCommitted && !touchArmed)"),
+            ("NativeReplayCaptureOwner.kt", "selection.closeOriginalTouchObserver(originalTouch).awaitExact()"),
+            ("NativeReplayAccounting.kt", 'check(originalTouch == null) { "Original UI cleanup is unresolved" }'),
+            ("AndroidReplayTouchObserver.kt", "isCurrent = { false }"),
+            ("AndroidReplayTouchObserver.kt", "it.kind.text.value != NativeWireframeV2Encoder.MASK"),
+        ]:
+            path = base / name; original = path.read_text(); self.assertIn(token, original)
+            path.write_text(original.replace(token, "Unit"))
+            self.assertIn("native touch capture", self.run_guard().stderr)
+            path.write_text(original)
+        stack = self.root / BOUNDARY.STACK; original = stack.read_text()
+        for call in ["consumeOriginalWindow()", "closeOriginalTouchObserver()", "retainOriginalTouch()", "originalTouchSettled()"]:
+            stack.write_text(original + "\nfun escaped() = " + call + "\n")
+            self.assertIn("native capture call escaped its exact seam", self.run_guard().stderr)
+            stack.write_text(original)
+
+    def test_native_touch_overflow_veto_requires_actual_and_encoded_point(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/AndroidViewReplayCollector.kt"
+        original = path.read_text()
+        for token in ["clip.intersect(exactRoot).wire(density)", "contains(checkNotNull(touchPaintClip), x, y)",
+                      "contains(touchPaintClip, floor(x), floor(y))",
+                      "val lawfulLeaf = !localBlocked && !localMasked && maskingProfile.readsText",
+                      "kind.text.value != NativeWireframeV2Encoder.MASK",
+                      "encoded.geometry == NativeGeometryKind.VISIBLE_CLIP && encoded.kind === kind",
+                      "if (!lawfulLeaf && (contains(checkNotNull(touchPaintClip), x, y)"]:
+            self.assertIn(token, original)
+            path.write_text(original.replace(token, "false"))
+            self.assertIn("private paint clip veto", self.run_guard().stderr)
+            path.write_text(original)
 
     def test_native_continuity_rejects_missing_original_guards(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"

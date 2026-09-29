@@ -130,6 +130,59 @@ class AndroidReplayTouchObserverTest {
         assertFalse(core.arm(projection(2))); assertEquals(2, core.drain().size)
         assertTrue(core.arm(projection(2)))
     }
+    @Test fun `handoff drains old rows before same live target enters new geometry`() {
+        val old = projection(); val core = NativeTouchObservationCore(); assertTrue(core.arm(old))
+        observe(core, old, NativeTouchAction.DOWN, 1000)
+        observe(core, old, NativeTouchAction.MOVE, 1100)
+        val next = NativeTouchProjection(2, NativeMaskedSnapshot(1, 1200, old.snapshot.viewport, old.snapshot.nodes))
+        val preceding = core.handoff(next, 1_200_000_000)
+        assertEquals(2, preceding.size); assertTrue(preceding.all { it.projection === old }); assertTrue(core.active())
+        observe(core, next, NativeTouchAction.UP, 1300)
+        assertSame(next, core.drain().single().projection)
+    }
+
+    @Test fun `removal cancels old target before geometry and never adopts replacement mid contact`() {
+        val old = projection(); val core = NativeTouchObservationCore(); assertTrue(core.arm(old))
+        observe(core, old, NativeTouchAction.DOWN, 1000)
+        val next = NativeTouchProjection(2, NativeMaskedSnapshot(1, 1200, old.snapshot.viewport, emptyList()))
+        val preceding = core.handoff(next, 1_200_000_000)
+        assertEquals(NativeReplayInteraction.Cancel(1200), preceding.last().interaction)
+        assertTrue(preceding.all { it.projection === old }); assertFalse(core.active())
+        observe(core, next, NativeTouchAction.MOVE, 1300); assertTrue(core.drain().isEmpty())
+        assertFalse(core.arm(next)); observe(core, next, NativeTouchAction.UP, 1400); assertTrue(core.arm(next))
+    }
+
+    @Test fun `readable sentinel rollover cancels before geometry and keeps the prefix encodable`() {
+        val bounds = NativeRect(0.0, 0.0, 100.0, 100.0)
+        fun textFrame(ordinal: Long, timestamp: Long, text: String) = NativeMaskedSnapshot(ordinal, timestamp,
+            NativeViewport(100, 100), listOf(NativeMaskedNode(id,
+                NativeMaskedKind.ReadableText(NativeReplayText.read(text)), bounds, bounds)))
+        val old = NativeTouchProjection(1, textFrame(0, 1000, "Ordinary"))
+        val core = NativeTouchObservationCore(); assertTrue(core.arm(old))
+        observe(core, old, NativeTouchAction.DOWN, 1000)
+        observe(core, old, NativeTouchAction.MOVE, 1100)
+        val next = NativeTouchProjection(2, textFrame(1, 1200, NativeWireframeV2Encoder.MASK))
+        val preceding = core.handoff(next, 1_200_000_000)
+        assertEquals(3, preceding.size); assertTrue(preceding.all { it.projection === old })
+        assertEquals(NativeReplayInteraction.Cancel(1200), preceding.last().interaction); assertFalse(core.active())
+        val encoder = NativeWireframeV2Encoder(maskingProfile = NativeMaskingProfile.sensitiveMask())
+        encoder.encode(listOf(NativeReplayV2Geometry(old.snapshot))) // Pure encoder state only, no commit proof.
+        val encoded = encoder.encode(preceding.map { it.interaction } + NativeReplayV2Geometry(next.snapshot))
+        assertEquals(4, encoded.eventCount)
+        observe(core, next, NativeTouchAction.MOVE, 1300); assertTrue(core.drain().isEmpty())
+        assertFalse(core.arm(next)); observe(core, next, NativeTouchAction.UP, 1400); assertTrue(core.arm(next))
+    }
+
+    @Test fun `unarmed handoff cannot adopt precommit contact and stop creates only terminal cancel`() {
+        val old = projection(); val core = NativeTouchObservationCore()
+        observe(core, old, NativeTouchAction.DOWN, 1000)
+        assertTrue(core.handoff(projection(2), 1_200_000_000).isEmpty()); assertFalse(core.arm(old))
+        observe(core, old, NativeTouchAction.UP, 1300); assertTrue(core.arm(old))
+        observe(core, old, NativeTouchAction.DOWN, 1400)
+        val rows = core.stop(1500, 1_500_000_000)
+        assertEquals(2, rows.size); assertEquals(NativeReplayInteraction.Cancel(1500), rows.last().interaction)
+    }
+
     @Test fun `work budget excludes host dispatch but sums both SDK segments`() {
         val budget = NativeTouchWorkBudget(callbackLimit = 2, windowLimit = 20, windowNanos = 1000)
         assertTrue(budget.begin(0)); assertTrue(budget.within(1)); assertTrue(budget.pause(1))

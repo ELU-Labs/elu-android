@@ -102,12 +102,20 @@ internal interface NativeReplayCapturePlatform {
     fun createCollector(profile: NativeCapturePassProfile): NativeReplayCaptureCollector = createCollector()
     fun createCollector(masking: NativeMaskingProfile, profile: NativeCapturePassProfile?): NativeReplayCaptureCollector =
         if (profile == null) createCollector() else createCollector(profile)
+    fun createCollector(protocol: NativeReplayProtocol, masking: NativeMaskingProfile, profile: NativeCapturePassProfile?): NativeReplayCaptureCollector =
+        createCollector(masking, profile)
     fun awaitNext(withdrawn: CountDownLatch): Boolean
+    fun awaitTouch(withdrawn: CountDownLatch, wake: NativeReplayCaptureWake, delayNanos: Long): Boolean = awaitNext(withdrawn)
 }
 
 internal fun interface NativeReplayCaptureCollector {
     fun collect(root: Any, ordinal: Long, timestamp: Long, fence: NativeCollectionFence,
         current: () -> Boolean, unresolvedBlockRules: Boolean): NativeMaskedSnapshot
+    fun touchProjection(frame: NativeMaskedSnapshot): NativeTouchProjection? = null
+    /** Construct only; the run stores this handle before calling install on main. */
+    fun touch(window: Any, root: Any, fence: NativeCollectionFence, current: () -> Boolean,
+        fresh: () -> Boolean, unresolved: () -> Boolean, clock: RuntimeCaptureClock, wake: () -> Unit): NativeReplayCaptureTouch =
+        error("Native touch projection unsupported")
 }
 
 internal object AndroidNativeReplayCapturePlatform : NativeReplayCapturePlatform {
@@ -132,7 +140,43 @@ internal object AndroidNativeReplayCapturePlatform : NativeReplayCapturePlatform
             collector.collect(root as View, ordinal, timestamp, fence, current, unresolved)
         }
     }
+    override fun createCollector(protocol: NativeReplayProtocol, masking: NativeMaskingProfile, profile: NativeCapturePassProfile?): NativeReplayCaptureCollector {
+        if (protocol == NativeReplayProtocol.V1) return createCollector(masking, profile)
+        val collector = AndroidViewReplayCollector(profile = profile, maskingProfile = masking, retainTouchWitnesses = true)
+        return object : NativeReplayCaptureCollector {
+            override fun collect(root: Any, ordinal: Long, timestamp: Long, fence: NativeCollectionFence,
+                current: () -> Boolean, unresolvedBlockRules: Boolean) =
+                collector.collect(root as View, ordinal, timestamp, fence, current, unresolvedBlockRules)
+            override fun touchProjection(frame: NativeMaskedSnapshot) = collector.touchProjection(frame)
+            override fun touch(window: Any, root: Any, fence: NativeCollectionFence, current: () -> Boolean,
+                fresh: () -> Boolean, unresolved: () -> Boolean, clock: RuntimeCaptureClock, wake: () -> Unit) =
+                AndroidReplayTouchObserver(window as android.view.Window, root as View, collector, fence, current, unresolved,
+                    wallClock = clock::wallNowEpochMillis, continuousClock = clock::elapsedRealtimeNanos,
+                    freshIntakeAllowed = fresh, wake = wake)
+        }
+    }
+    override fun awaitTouch(withdrawn: CountDownLatch, wake: NativeReplayCaptureWake, delayNanos: Long) = wake.await(withdrawn, delayNanos)
     override fun awaitNext(withdrawn: CountDownLatch) = !withdrawn.await(NATIVE_REPLAY_CAPTURE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
+}
+
+/** One coalesced wake for the existing capture thread, never a per-event task or an authority. */
+internal class NativeReplayCaptureWake {
+    private val monitor = java.lang.Object()
+    private var pending = false
+    fun signal() = synchronized(monitor) { if (!pending) { pending = true; monitor.notifyAll() } }
+    fun await(withdrawn: CountDownLatch, delayNanos: Long): Boolean = synchronized(monitor) {
+        require(delayNanos in 0..1_000_000_000L)
+        val started = System.nanoTime()
+        var remaining = delayNanos
+        while (!pending && withdrawn.count != 0L && remaining > 0) {
+            monitor.wait(remaining / 1_000_000L, (remaining % 1_000_000L).toInt())
+            val elapsed = System.nanoTime() - started
+            if (elapsed < 0) return@synchronized false
+            remaining = (delayNanos - elapsed).coerceAtLeast(0)
+        }
+        pending = false
+        withdrawn.count != 0L
+    }
 }
 
 /**
@@ -211,6 +255,7 @@ private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>,
     private val monitor = Any()
     val collection = NativeCollectionFence()
     val withdrawn = CountDownLatch(1) // wakes both local stop and restrictive withdrawal
+    val wake = NativeReplayCaptureWake()
     @Volatile private var restricted = false
     @Volatile private var stopping = false
     fun isCurrent() = lifetime.get() != null && !restricted && intakeCurrent() && !restricted
@@ -219,7 +264,7 @@ private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>,
     fun stopFresh() {
         synchronized(monitor) { stopping = true }
         // No fence monitor is held while joining the collector's commit lock.
-        collection.withdraw(); withdrawn.countDown()
+        collection.withdraw(); withdrawn.countDown(); wake.signal()
     }
     fun withdraw() { synchronized(monitor) { restricted = true }; stopFresh() }
     fun acceptFrame(action: () -> Unit): Boolean = synchronized(monitor) {
@@ -229,7 +274,10 @@ private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>,
 
 /** A deadline carries no frame; only the exact original collection callback can create it. */
 internal sealed class NativeReplayCollectionAttempt {
-    class Captured(val frame: NativeMaskedSnapshot, val continuous: Long) : NativeReplayCollectionAttempt()
+    class Captured(val frame: NativeMaskedSnapshot, val continuous: Long,
+        val projection: NativeTouchProjection? = null, val preceding: List<NativeTouchObservation> = emptyList(),
+        val activeTouch: Boolean = false) : NativeReplayCollectionAttempt()
+    class TouchBoundary(val observations: List<NativeTouchObservation>, val active: Boolean = false) : NativeReplayCollectionAttempt()
     object CollectorDeadline : NativeReplayCollectionAttempt()
     object UnsupportedGeometry : NativeReplayCollectionAttempt()
     object LocalStop : NativeReplayCollectionAttempt()
@@ -271,6 +319,15 @@ private class NativeReplayCaptureRun(
         var physicalUse: NativeReplayCapturePhysicalUse? = null
         var pendingRequest: PreparedReplayRequest? = null
         var buffer: NativeReplayFrameBuffer? = null
+        var interactionBuffer: NativeReplayV2Buffer? = null
+        val touch = AtomicReference<NativeReplayCaptureTouch?>()
+        val touchFence = NativeCollectionFence()
+        var acceptedProjection: NativeTouchProjection? = null
+        var touchActive = false
+        var touchArmed = false
+        var initialCommitted = false
+        var lastGeometryContinuous: Long? = null
+        var lastGeometryWall: Long? = null
         var startSubmitted = false
         var diagnosticStage = NativeCaptureStage.BEFORE_LOOP
         var completedFrames = 0
@@ -306,15 +363,16 @@ private class NativeReplayCaptureRun(
             val admission = authority.captureAdmission(permit, physicalUse).awaitExact().also { nativeStartTrace.mark(NativeStartPhase.ADMISSION_RESULT, it != null) } ?: error("Native admission denied")
             requireCurrent(current(permit, admission))
             requireCurrent(!admission.hasUnresolvedBlockRules)
+            val protocol = checkNotNull(NativeReplayProtocol.match(admission.authorization.negotiatedReplayTransport,
+                admission.authorization.replayCapabilities.replayProtocolGeneration))
             val frames = NativeReplayFrameBuffer(admission.minimumDurationSeconds).also { buffer = it }
+            val interactions = if (protocol == NativeReplayProtocol.V2)
+                NativeReplayV2Buffer(admission.minimumDurationSeconds).also { interactionBuffer = it } else null
             val sealer = NativeReplaySealer(permit.replayId, admission.identity, admission.authorization,
                 admission.privacy, admission.profile, versions)
             requireCurrent(current(permit, admission))
             nativeStartTrace.mark(NativeStartPhase.CAPTURE_LOOP_READY)
-            fun sealPrefix(prefix: List<NativeMaskedSnapshot>) {
-                requireCurrent(current(permit, admission))
-                diagnosticStage = NativeCaptureStage.SEAL_REQUEST
-                pendingRequest = sealer.seal(prefix)
+            fun appendSealed() {
                 requireCurrent(current(permit, admission))
                 diagnosticStage = NativeCaptureStage.DURABLE_APPEND
                 when (queue.appendNativeReplay(checkNotNull(pendingRequest), admission, physicalUse).awaitExact()) {
@@ -333,8 +391,52 @@ private class NativeReplayCaptureRun(
                     }
                 }
                 requireCurrent(current(permit, admission))
+            }
+            fun sealPrefix(prefix: List<NativeMaskedSnapshot>) {
+                requireCurrent(current(permit, admission))
+                diagnosticStage = NativeCaptureStage.SEAL_REQUEST
+                pendingRequest = sealer.seal(prefix)
+                appendSealed()
                 diagnosticStage = NativeCaptureStage.COMMIT_FRAME
                 frames.committed(prefix)
+            }
+            fun sealInteractions(prefix: List<NativeReplayV2Entry>) {
+                requireCurrent(current(permit, admission))
+                diagnosticStage = NativeCaptureStage.SEAL_REQUEST
+                pendingRequest = sealer.sealV2(prefix)
+                appendSealed()
+                diagnosticStage = NativeCaptureStage.COMMIT_FRAME
+                checkNotNull(interactions).committed(prefix)
+                initialCommitted = true
+                if (!touchArmed && fence.mayCollect()) {
+                    val projection = checkNotNull(acceptedProjection)
+                    val armed = selection.consumeOriginalWindow({ current(permit, admission) }, fence::gracefulStopRequested) { _, _, rootCurrent ->
+                        requireCurrent(rootCurrent() && current(permit, admission) && fence.mayCollect())
+                        // A contact observed before this exact known commit is never adopted.
+                        touchArmed = checkNotNull(touch.get()).arm(projection)
+                        NativeReplayCollectionAttempt.TouchBoundary(emptyList(), checkNotNull(touch.get()).active())
+                    }.awaitExact()
+                    requireCurrent(armed is NativeReplayCollectionAttempt.TouchBoundary && current(permit, admission))
+                }
+            }
+            fun offer(entry: NativeReplayV2Entry, continuous: Long) {
+                requireCurrent(current(permit, admission))
+                val original = checkNotNull(interactions)
+                when (original.offer(entry, continuous)) {
+                    NativeReplayV2Buffer.Offer.UNARMED -> error("Original v2 interaction is unarmed")
+                    NativeReplayV2Buffer.Offer.FLUSH_REQUIRED -> {
+                        sealInteractions(original.beginSealing())
+                        requireCurrent(current(permit, admission))
+                        check(original.offer(entry, continuous) == NativeReplayV2Buffer.Offer.ACCEPTED)
+                    }
+                    NativeReplayV2Buffer.Offer.ACCEPTED -> Unit
+                }
+            }
+            fun offerObserved(rows: List<NativeTouchObservation>, continuous: Long) {
+                for (row in rows) {
+                    check(row.projection === acceptedProjection) { "Interaction preceded its exact accepted geometry" }
+                    offer(row.interaction, continuous)
+                }
             }
             var discardTail = false
             var viewport: NativeViewport? = null
@@ -346,11 +448,12 @@ private class NativeReplayCaptureRun(
                 if (fence.gracefulStopRequested()) break
                 diagnosticStage = NativeCaptureStage.LOOP_CURRENT
                 requireCurrent(current(permit, admission))
-                val ordinal = frames.nextFrameOrdinal
+                val ordinal = interactions?.nextFrameOrdinal ?: frames.nextFrameOrdinal
                 passFailure = null
                 var geometryFailure: NativeCollectionException? = null
+                var beforeGeometry: List<NativeTouchObservation> = emptyList()
                 diagnosticStage = NativeCaptureStage.ROOT_COLLECT
-                val captured = selection.consumeOriginalRoot({ current(permit, admission) }, fence::gracefulStopRequested) { root, rootCurrent ->
+                val captured = selection.consumeOriginalWindow({ current(permit, admission) }, fence::gracefulStopRequested) { root, window, rootCurrent ->
                     try {
                         fun requireCollection(allowed: Boolean) {
                             if (!allowed && fence.gracefulStopRequested() && current(permit, admission))
@@ -380,17 +483,45 @@ private class NativeReplayCaptureRun(
                         }
                         requireCollection(withinPass())
                         diagnosticStage = NativeCaptureStage.COLLECTOR
-                        val originalCollector = collector ?: platform.createCollector(admission.profile, passProfile).also { collector = it }
+                        val originalCollector = collector ?: platform.createCollector(protocol, admission.profile, passProfile).also { collector = it }
                         requireCollection(withinPass())
+                        if (interactions != null && touch.get() == null) {
+                            val originalTouch = originalCollector.touch(window, root, touchFence,
+                                { current(permit, admission) }, fence::mayCollect,
+                                { admission.hasUnresolvedBlockRules }, clock, fence.wake::signal)
+                            check(touch.compareAndSet(null, originalTouch)) // Reachable before any setter side effect.
+                            checkNotNull(enrollment).retainOriginalTouch(checkNotNull(physicalUse), originalTouch)
+                            originalTouch.install()
+                            requireCollection(withinPass())
+                        }
+                        if (interactions != null && initialCommitted && !touchArmed) {
+                            touchArmed = checkNotNull(touch.get()).arm(checkNotNull(acceptedProjection))
+                            requireCollection(withinPass())
+                        }
+                        if (interactions != null && lastGeometryContinuous != null) {
+                            val active = checkNotNull(touch.get()).active()
+                            val interval = if (active) 200_000_000L else 1_000_000_000L
+                            if (continuous - checkNotNull(lastGeometryContinuous) < interval ||
+                                timestamp - checkNotNull(lastGeometryWall) < 200) {
+                                val rows = checkNotNull(touch.get()).drain()
+                                requireCollection(withinPass())
+                                return@consumeOriginalWindow NativeReplayCollectionAttempt.TouchBoundary(rows, active)
+                            }
+                        }
                         collectorCurrent.compareAndSet(null) { fence.mayCollect() && current(permit, admission) }
                         passProfile?.configMaterialization()
                         val unresolvedBlockRules = admission.hasUnresolvedBlockRules
+                        // Recheck pending points against the original serialized projection BEFORE a
+                        // successful collector pass replaces its current weak hierarchy witnesses.
+                        val preceding = if (interactions != null) checkNotNull(touch.get()).drain() else emptyList()
+                        beforeGeometry = preceding
+                        requireCollection(withinPass())
                         val frame = try {
                             originalCollector.collect(root, ordinal, timestamp, fence.collection, ::withinPass,
                                 unresolvedBlockRules)
                         } catch (error: NativeCollectionException) {
                             if (error.failure == NativeCollectionFailure.WITHDRAWN && fence.gracefulStopRequested() &&
-                                current(permit, admission)) return@consumeOriginalRoot NativeReplayCollectionAttempt.LocalStop
+                                current(permit, admission)) return@consumeOriginalWindow NativeReplayCollectionAttempt.LocalStop
                             if (error.failure == NativeCollectionFailure.UNSUPPORTED_GEOMETRY) {
                                 // Geometry retry never overrides the original pass clock/deadline.
                                 // The collector may throw without sampling its current callback.
@@ -398,7 +529,7 @@ private class NativeReplayCaptureRun(
                                 geometryFailure = error
                                 requireCurrent(rootCurrent() && current(permit, admission) && rootCurrent())
                                 // No failed frame/ordinal escapes; selection still performs its full postcheck.
-                                return@consumeOriginalRoot NativeReplayCollectionAttempt.UnsupportedGeometry
+                                return@consumeOriginalWindow NativeReplayCollectionAttempt.UnsupportedGeometry
                             }
                             if (error.failure == NativeCollectionFailure.WITHDRAWN && selection.observedRootBoundary())
                                 throw NativeReplayRootBoundary()
@@ -411,24 +542,45 @@ private class NativeReplayCaptureRun(
                                 NativeCaptureFailureKind.PASS_DEADLINE)
                             if (passProfile != null) nativeStartTrace.captureProfile(passProfile)
                             // Selection still executes its exact root/current-authority postvalidation.
-                            return@consumeOriginalRoot NativeReplayCollectionAttempt.CollectorDeadline
+                            return@consumeOriginalWindow NativeReplayCollectionAttempt.CollectorDeadline
                         }
                         requireCollection(withinPass())
-                        NativeReplayCollectionAttempt.Captured(frame, continuous)
+                        if (viewport != null && viewport != frame.viewport) throw NativeReplayRootBoundary()
+                        val projection = if (interactions != null) checkNotNull(originalCollector.touchProjection(frame)) else null
+                        val rows = if (projection != null) preceding + checkNotNull(touch.get()).handoff(projection, continuous) else emptyList()
+                        requireCollection(withinPass())
+                        NativeReplayCollectionAttempt.Captured(frame, continuous, projection, rows,
+                            interactions != null && checkNotNull(touch.get()).active())
                     } catch (_: NativeReplayLocalStop) { NativeReplayCollectionAttempt.LocalStop }
                 }.awaitExact() ?: run { requireCurrent(false); error("Native collection denied") }
                 requireCurrent(current(permit, admission))
+                if (captured is NativeReplayCollectionAttempt.TouchBoundary) {
+                    offerObserved(captured.observations, clock.elapsedRealtimeNanos())
+                    touchActive = captured.active
+                    if (interactions?.isReady == true) sealInteractions(interactions.beginSealing())
+                    val interval = if (touchActive) 200_000_000L else 1_000_000_000L
+                    val elapsed = clock.elapsedRealtimeNanos() - checkNotNull(lastGeometryContinuous)
+                    requireCurrent(elapsed >= 0 && current(permit, admission))
+                    // If monotonic time is due but the wire clock has not advanced, do not busy poll.
+                    val delay = if (elapsed >= interval) interval else interval - elapsed
+                    if (!platform.awaitTouch(fence.withdrawn, fence.wake, delay)) break
+                    continue
+                }
                 if (captured === NativeReplayCollectionAttempt.LocalStop) {
                     // Local stop prevented exact View/privacy postvalidation of this callback.
                     // Discard both its unaccepted frame and the unsealed tail; pure source checks
                     // cannot establish an unobserved Window/privacy change on the main thread.
-                    frames.withdraw()
+                    frames.withdraw(); interactions?.withdraw()
                     discardTail = true
                     break
                 }
                 if (fence.gracefulStopRequested()) break
                 if (captured === NativeReplayCollectionAttempt.CollectorDeadline ||
                     captured === NativeReplayCollectionAttempt.UnsupportedGeometry) {
+                    // This exact main callback already revalidated the old descriptor. Preserve its
+                    // drained start/movement order even when no new geometry could be collected.
+                    offerObserved(beforeGeometry, clock.elapsedRealtimeNanos())
+                    if (interactions?.isReady == true) sealInteractions(interactions.beginSealing())
                     // Same fence, enrollment, selection, sealer and buffer. Wait off main in the
                     // existing one-second cancellable ticks, checking original authority each time.
                     var remaining = collectorRetryDelayMillis
@@ -450,19 +602,45 @@ private class NativeReplayCaptureRun(
                 diagnosticStage = NativeCaptureStage.FRAME_APPEND
                 if (viewport != null && viewport != captured.frame.viewport) throw NativeReplayRootBoundary()
                 viewport = captured.frame.viewport
-                if (!fence.acceptFrame { frames.append(captured.frame, captured.continuous) }) break
+                if (interactions == null) {
+                    if (!fence.acceptFrame { frames.append(captured.frame, captured.continuous) }) break
+                } else {
+                    offerObserved(captured.preceding, captured.continuous)
+                    requireCurrent(current(permit, admission) && fence.mayCollect())
+                    offer(NativeReplayV2Geometry(captured.frame), captured.continuous)
+                    if (!fence.acceptFrame { acceptedProjection = checkNotNull(captured.projection) }) {
+                        interactions.withdraw(); discardTail = true; break
+                    }
+                    touchActive = captured.activeTouch
+                    lastGeometryContinuous = captured.continuous; lastGeometryWall = captured.frame.timestamp
+                }
                 if (completedFrames < Int.MAX_VALUE) completedFrames += 1
-                if (frames.isReady) {
+                if (interactions?.isReady == true) sealInteractions(interactions.beginSealing())
+                if (interactions == null && frames.isReady) {
                     diagnosticStage = NativeCaptureStage.SEAL_PREFIX
                     sealPrefix(frames.beginSealing())
                 }
                 requireCurrent(current(permit, admission))
                 diagnosticStage = NativeCaptureStage.WAIT_NEXT
-                if (!platform.awaitNext(fence.withdrawn)) break
+                if (interactions == null) {
+                    if (!platform.awaitNext(fence.withdrawn)) break
+                } else if (!platform.awaitTouch(fence.withdrawn, fence.wake,
+                    if (touchActive) 200_000_000L else 1_000_000_000L)) break
             }
             if (fence.gracefulStopRequested() && !discardTail) {
                 requireCurrent(current(permit, admission))
-                frames.beginDraining()?.let { prefix -> sealPrefix(prefix) }
+                if (interactions == null) frames.beginDraining()?.let { prefix -> sealPrefix(prefix) }
+                else {
+                    val tail = selection.consumeOriginalWindow({ current(permit, admission) }) { _, _, rootCurrent ->
+                        requireCurrent(rootCurrent() && current(permit, admission))
+                        val rows = checkNotNull(touch.get()).stopAndDrain()
+                        requireCurrent(rootCurrent() && current(permit, admission))
+                        NativeReplayCollectionAttempt.TouchBoundary(rows)
+                    }.awaitExact()
+                    requireCurrent(tail is NativeReplayCollectionAttempt.TouchBoundary && current(permit, admission))
+                    offerObserved((tail as NativeReplayCollectionAttempt.TouchBoundary).observations, clock.elapsedRealtimeNanos())
+                    interactions.beginDraining()?.let { sealInteractions(it) }
+                }
             }
         } catch (error: Throwable) {
             // Selection is intentionally excluded from this restrictive-only source check.
@@ -501,7 +679,21 @@ private class NativeReplayCaptureRun(
         }
         collectorCurrent.set(null)
         fence.withdraw()
-        buffer?.withdraw()
+        buffer?.withdraw(); interactionBuffer?.withdraw(); touchFence.withdraw()
+        val originalTouch = touch.get()
+        if (originalTouch != null) {
+            try {
+                originalTouch.withdrawIntake()
+                selection.closeOriginalTouchObserver(originalTouch).awaitExact()
+                checkNotNull(enrollment).originalTouchSettled(checkNotNull(physicalUse), originalTouch)
+            }
+            catch (_: Throwable) {
+                // Original cleanup failed; never mark physical completion or release this enrollment.
+                enrollment?.quarantine(retaining = pendingRequest)
+                complete(NativeReplayCaptureOutcome.QUARANTINED)
+                return
+            }
+        }
         if (enrollment == null) { complete(NativeReplayCaptureOutcome.SETTLED); return }
         try {
             // All submitted main/CPU/durable work is finished before marking physical completion.

@@ -178,6 +178,45 @@ class NativeReplayCaptureQueueTest {
         use.settle(); assertFalse(use.isCurrent()); assertNull(e.takePhysicalUse())
         assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(e).get())
     }
+    @Test fun `one original UI cleanup blocks physical settlement and cannot be substituted`() = Rig().use { rig ->
+        rig.activate(); val enrollment = checkNotNull(rig.owner.enrollNativeReplayCapture().get())
+        val use = checkNotNull(enrollment.takePhysicalUse()); val original = cleanupHandle()
+        val foreign = NativeReplayCapturePhysicalUse.issue(enrollment)
+        fun refused(action: () -> Unit) { try { action(); fail("Original ownership required") } catch (_: IllegalStateException) { } }
+        refused { enrollment.retainOriginalTouch(foreign, original) }
+        enrollment.retainOriginalTouch(use, original)
+        refused { enrollment.retainOriginalTouch(use, cleanupHandle()) }
+        refused { enrollment.originalTouchSettled(use, cleanupHandle()) }
+        refused { use.settle() }
+        assertEquals(NativeReplayCaptureFinish.PHYSICAL_WORK_PENDING, rig.owner.finishNativeReplayCapture(enrollment).get())
+        enrollment.originalTouchSettled(use, original)
+        refused { enrollment.retainOriginalTouch(use, original) } // one lifetime binding, even after cleanup
+        use.settle(); assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(enrollment).get())
+    }
+
+    @Test fun `unresolved original UI handle is retained in existing resource quarantine`() {
+        val resources = NativeReplayCaptureResources(null, null)
+        val enrollment = NativeReplayCaptureEnrollment.issue(Any(), resources)
+        val use = checkNotNull(enrollment.takePhysicalUse()); val original = cleanupHandle()
+        enrollment.retainOriginalTouch(use, original); enrollment.quarantine()
+        val field = NativeReplayCaptureResources::class.java.getDeclaredField("originalTouch").also { it.isAccessible = true }
+        assertSame(original, field.get(resources)); assertFalse(enrollment.physicalIsFinished()); assertFalse(enrollment.settlement.isDone)
+        try { use.settle(); fail("Cannot assert physical completion") } catch (_: IllegalStateException) { }
+        assertSame(original, field.get(resources)); assertFalse(enrollment.releaseIfFinished())
+        // No replacement, adopted handle, process-global observer list or automatic retry is supplied.
+    }
+
+    private fun cleanupHandle() = object : NativeReplayCaptureTouch {
+        override fun install() = Unit
+        override fun arm(value: NativeTouchProjection) = false
+        override fun handoff(value: NativeTouchProjection, continuous: Long) = emptyList<NativeTouchObservation>()
+        override fun drain() = emptyList<NativeTouchObservation>()
+        override fun active() = false
+        override fun stopAndDrain() = emptyList<NativeTouchObservation>()
+        override fun withdrawIntake() = Unit
+        override fun closeAndWait() = SdkFuture<Unit>()
+    }
+
     @Test fun `legacy start cannot enter a reserved physical enrollment`() = Rig().use { rig ->
         rig.activate(); Session(rig).use { session ->
             assertNull(rig.owner.beginNativeReplayAuthority(session.prepared.projection).get())

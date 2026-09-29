@@ -524,6 +524,10 @@ internal class AndroidViewReplayCollector(
                     if (nextIssued.size >= maximumProjectionIds || !nextIssued.add(it)) fail(NativeCollectionFailure.PROJECTION_LIMIT)
                 }
                 if (id != null) nextProjections.add(Projection(WeakReference(view), id))
+                // Only an actual ancestor/explicit clip confines unknown paint. A view's
+                // rectangular layout bounds do not confine drawing when parent clipping is off.
+                // Touch-only conservative veto; serialized v1/v2 geometry stays unchanged.
+                val touchPaintClip = if (pointQuery != null) clip.intersect(exactRoot).wire(density) else null
                 clip = clip.intersect(g.bounds).intersect(exactRoot)
                 if (clip.width == 0.0 || clip.height == 0.0) {
                     clip = Bounds(clip.x.coerceIn(0.0, exactRoot.width), clip.y.coerceIn(0.0, exactRoot.height), 0.0, 0.0)
@@ -536,18 +540,28 @@ internal class AndroidViewReplayCollector(
                 } else {
                     fun contains(box: NativeRect, x: Double, y: Double) = box.width > 0 && box.height > 0 &&
                         x >= box.x && y >= box.y && x < box.x + box.width && y < box.y + box.height
+                    val encoded = id?.let { encodedNodes[it] }
+                    // Only a leaf already proven lawful in this exact serialized projection may
+                    // use its bounds as ordinary hit geometry. New/changed/private paint still
+                    // needs the full actual ancestor clip, even away from its layout rectangle.
+                    val lawfulLeaf = !localBlocked && !localMasked && maskingProfile.readsText &&
+                        (exactClass === View::class.java || kind is NativeMaskedKind.ReadableText &&
+                            kind.text.value != NativeWireframeV2Encoder.MASK) &&
+                        geometryKind == NativeGeometryKind.VISIBLE_CLIP && encoded != null &&
+                        encoded.geometry == NativeGeometryKind.VISIBLE_CLIP && encoded.kind === kind
                     for ((index, location) in pointLocations.withIndex()) {
                         val (x, y) = location
-                        if (!contains(wireClip, x, y)) continue
                         // Known layout containers do not supply a leaf hit. A private/opaque overlap
                         // vetoes conservatively even if a later sibling also covers the coordinate.
                         if (knownContainer && !localBlocked && !localMasked) continue
-                        val encoded = id?.let { encodedNodes[it] }
+                        if (!contains(wireClip, x, y)) {
+                            // Includes private/opaque containers without inspecting descendants.
+                            if (!lawfulLeaf && (contains(checkNotNull(touchPaintClip), x, y) ||
+                                contains(touchPaintClip, floor(x), floor(y)))) pointVetoes[index] = true
+                            continue
+                        }
                         val px = floor(x); val py = floor(y)
-                        val lawful = !localBlocked && !localMasked && maskingProfile.readsText &&
-                            (exactClass === View::class.java || kind is NativeMaskedKind.ReadableText) &&
-                            geometryKind == NativeGeometryKind.VISIBLE_CLIP && encoded != null &&
-                            encoded.geometry == NativeGeometryKind.VISIBLE_CLIP && encoded.kind === kind &&
+                        val lawful = lawfulLeaf && encoded != null &&
                             px in 0.0..16_383.0 && py in 0.0..16_383.0 &&
                             contains(encoded.clip, x, y) && contains(encoded.clip, px, py) && contains(wireClip, px, py)
                         if (lawful) pointResults[index] = NativeProjectedTouch(pointQuery.projection, checkNotNull(id), px.toInt(), py.toInt())

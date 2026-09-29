@@ -254,7 +254,11 @@ internal class NativeReplayProjectionInput private constructor(
     }
 }
 
-/** Resource-only retention. It has no owner, worker, source, Activity or callback reference. */
+/**
+ * Existing database/request quarantine. A v2 physical use can additionally retain its ONE original
+ * failed UI cleanup handle. That withdrawn handle clears SDK authority/worker closures and retains
+ * only the original callback/restoration resources; it never grants collection or starts a retry.
+ */
 internal class NativeReplayCaptureResources(
     database: dev.elu.analytics.internal.runtime.RuntimeQueueDatabase?,
     lease: dev.elu.analytics.internal.runtime.RuntimeOwnershipLease?,
@@ -263,6 +267,13 @@ internal class NativeReplayCaptureResources(
     private var lease = lease
     private var prepared: PreparedReplayRequest? = null
     private var quarantined = false
+    private var originalTouch: NativeReplayCaptureTouch? = null
+    @Synchronized fun retainOriginalTouch(value: NativeReplayCaptureTouch) {
+        check(originalTouch == null); originalTouch = value
+    }
+    @Synchronized fun touchSettled(value: NativeReplayCaptureTouch) {
+        check(originalTouch === value); originalTouch = null
+    }
     @Synchronized fun updateDatabase(value: dev.elu.analytics.internal.runtime.RuntimeQueueDatabase?) {
         if (value != null || !quarantined) database = value
     }
@@ -287,6 +298,8 @@ internal class NativeReplayCaptureEnrollment private constructor(
     private var physicalFinished = false
     private var intakeClosed = false
     private var accountingFinished = false
+    private var touchBound = false
+    private var originalTouch: NativeReplayCaptureTouch? = null
     private var quarantined = false
     private var released = false
     internal val settlement = object : dev.elu.analytics.internal.concurrent.SdkFuture<Unit>() {
@@ -306,8 +319,22 @@ internal class NativeReplayCaptureEnrollment private constructor(
     internal fun isCurrent(use: NativeReplayCapturePhysicalUse) = synchronized(monitor) { originalUse === use && taken && !physicalFinished && !intakeClosed && !released && !quarantined }
     internal fun physicalIsFinished() = synchronized(monitor) { physicalFinished }
     internal fun isQuarantined() = synchronized(monitor) { quarantined }
+    internal fun retainOriginalTouch(use: NativeReplayCapturePhysicalUse, touch: NativeReplayCaptureTouch) = synchronized(monitor) {
+        check(originalUse === use && taken && !physicalFinished && !released && !quarantined && !touchBound)
+        touchBound = true; originalTouch = touch
+        resources.retainOriginalTouch(touch)
+    }
+    internal fun originalTouchSettled(use: NativeReplayCapturePhysicalUse, touch: NativeReplayCaptureTouch) = synchronized(monitor) {
+        check(originalUse === use && originalTouch === touch && !physicalFinished)
+        resources.touchSettled(touch); originalTouch = null
+    }
     internal fun physicalFinished(use: NativeReplayCapturePhysicalUse) {
-        synchronized(monitor) { if (originalUse === use) { physicalFinished = true; intakeClosed = true } }
+        synchronized(monitor) {
+            if (originalUse === use) {
+                check(originalTouch == null) { "Original UI cleanup is unresolved" }
+                physicalFinished = true; intakeClosed = true
+            }
+        }
         notifyQuarantineIfPhysicallyFinished()
     }
     fun quarantine(retaining: PreparedReplayRequest? = null) {

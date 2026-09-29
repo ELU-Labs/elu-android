@@ -415,12 +415,18 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         "NativeReplayCaptureOwner": {loop, composition},
         "NativeReplayCapturePlatform": {loop, composition},
         "NativeReplayCaptureCollector": {loop},
+        "NativeReplayCaptureTouch": {touch_observer, loop, lifecycle, accounting},
+        "NativeReplayCaptureWake": {loop},
         "AndroidNativeReplayCapturePlatform": {loop, composition},
     }
     projection_methods = ("observeNativeReplayProjection", "prepareNativeReplayProjection",
                           "beginNativeReplayAuthority", "flushNativeReplayClockDenial")
     capture_methods = {
-        "consumeOriginalRoot": {lifecycle, loop},
+        "consumeOriginalRoot": {lifecycle},
+        "consumeOriginalWindow": {lifecycle, loop},
+        "closeOriginalTouchObserver": {lifecycle, loop},
+        "retainOriginalTouch": {accounting, loop},
+        "originalTouchSettled": {accounting, loop},
         "nativeReplayCaptureClock": {OWNER, loop, composition},
         "nativeReplayCaptureMatches": {OWNER, authority},
         "enrollNativeReplayCapture": {OWNER, loop},
@@ -440,8 +446,8 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
                 errors.append("native touch observer may only inspect the original collector projection")
             if re.search(r"\b(?:RuntimeQueueOwner|RuntimeQueueDatabase|NativeReplayAuthority|NativeReplayLifecycle|NativeReplayCaptureOwner)\b", text):
                 errors.append("native touch observer cannot enter authority queue or lifecycle")
-        elif re.search(r"\bAndroidReplayTouchObserver\b", text):
-            errors.append("native touch observer remains uninstalled pending original capture integration")
+        elif relative != loop and re.search(r"\bAndroidReplayTouchObserver\b", text):
+            errors.append("native touch observer installation escaped original capture owner")
         if relative == replay / "NativeReplayV2Buffer.kt":
             # This pure buffer shares only existing size/time ceilings, never the physical owner.
             constants_only = re.sub(r"\bNativeReplayFrameBuffer\s*\.\s*(?:MAXIMUM_ESTIMATED_BYTES|MAXIMUM_FRAME_NODES|MAXIMUM_FRAMES|MAXIMUM_NODES|FLUSH_NANOSECONDS)\b", "", text)
@@ -473,6 +479,33 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
                 errors.append(f"native capture issuer escaped its exact source: {symbol}: {relative}")
             if re.search(r"\b" + symbol + r"\s*\(", text) and relative != declaration:
                 errors.append(f"native capture constructor escaped its private factory: {symbol}: {relative}")
+
+    # Only this private exact-tuple owner can bind the already-reviewed observer to capture.
+    capture = sources.get(loop, "")
+    for token in [
+        "if (protocol == NativeReplayProtocol.V1) return createCollector(masking, profile)",
+        "check(originalUse === use && taken && !physicalFinished && !released && !quarantined && !touchBound)",
+        'check(originalTouch == null) { "Original UI cleanup is unresolved" }',
+        "checkNotNull(enrollment).retainOriginalTouch(checkNotNull(physicalUse), originalTouch)",
+        "row.projection === acceptedProjection",
+        "if (interactions != null && initialCommitted && !touchArmed)",
+        "originalTouch.withdrawIntake()",
+        "selection.closeOriginalTouchObserver(originalTouch).awaitExact()",
+        "checkNotNull(enrollment).originalTouchSettled(checkNotNull(physicalUse), originalTouch)",
+    ]:
+        if token not in capture and token not in sources.get(accounting, ""):
+            errors.append("native touch capture lost original binding/commit/cleanup: " + token)
+    install = capture.find("originalTouch.install()")
+    retained = capture.find(".retainOriginalTouch(checkNotNull(physicalUse), originalTouch)")
+    cleanup = capture.find("selection.closeOriginalTouchObserver(originalTouch).awaitExact()")
+    physical = capture.find("physicalUse.settle()")
+    if not (0 <= retained < install and 0 <= cleanup < physical):
+        errors.append("native touch capture must retain before install and join before physical settlement")
+    observer_text = sources.get(touch_observer, "")
+    for token in ["validatePendingSamples()", "isCurrent = { false }", "freshIntakeAllowed = { false }; wake = {}",
+                  "it.kind.text.value != NativeWireframeV2Encoder.MASK"]:
+        if token not in observer_text:
+            errors.append("native touch capture lost privacy or withdrawn reference release: " + token)
 
     for relative, text in sources.items():
         if "retainNativeReplayCleanupFailure" in text and relative not in {OWNER, composition}:
@@ -564,10 +597,15 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         expression = r"\b" + symbol + r"\s*(?:\.\s*Companion\s*)?(?:\.|::)\s*issue\b"
         if len(re.findall(expression, sources.get(issuer, ""))) != 1:
             errors.append(f"native capture capability must have exactly one original issuer: {symbol}")
+    exact_capture_counts = {
+        "consumeOriginalWindow": {lifecycle: 2, loop: 3},
+        "retainOriginalTouch": {accounting: 3, loop: 1},
+    }
     for name, permitted in capture_methods.items():
-        if any(len(re.findall(r"(?<!@)\b" + name + r"\b", sources.get(path, ""))) != 1 for path in permitted):
+        if any(len(re.findall(r"(?<!@)\b" + name + r"\b", sources.get(path, ""))) !=
+               exact_capture_counts.get(name, {}).get(path, 1) for path in permitted):
             errors.append(f"native capture call must retain exactly its original declaration/call: {name}")
-    if (len(re.findall(r"originalUse\s*===\s*use", account)) != 3 or
+    if (len(re.findall(r"originalUse\s*===\s*use", account)) != 5 or
             "if (taken || physicalFinished || intakeClosed || released || quarantined)" not in account or
             "taken = true; NativeReplayCapturePhysicalUse.issue(this)" not in account):
         errors.append("native physical use must retain one-shot original-use checks")
@@ -612,6 +650,14 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         errors.append("native physical owner cannot create its own proof registry")
     collector_path = replay / "AndroidViewReplayCollector.kt"
     collector = sources.get(collector_path, "")
+    for required in ["val touchPaintClip = if (pointQuery != null) clip.intersect(exactRoot).wire(density) else null",
+                     "contains(checkNotNull(touchPaintClip), x, y)", "contains(touchPaintClip, floor(x), floor(y))",
+                     "val lawfulLeaf = !localBlocked && !localMasked && maskingProfile.readsText",
+                     "kind.text.value != NativeWireframeV2Encoder.MASK",
+                     "encoded.geometry == NativeGeometryKind.VISIBLE_CLIP && encoded.kind === kind",
+                     "if (!lawfulLeaf && (contains(checkNotNull(touchPaintClip), x, y)"]:
+        if required not in collector:
+            errors.append("native touch projection lost actual or encoded private paint clip veto")
     text_reader = collector.split("fun textKind(", 1)[-1].split("// Inspect ancestry", 1)[0]
     if ("{ view.text }" in text_reader or "{ layout.text }" not in text_reader or
             "NativeAppCompatViewTypes.isText(type.name, type.superclass)" not in text_reader or
@@ -670,7 +716,10 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         if "NativeReplayCollectionAttempt" in source and relative not in {lifecycle, loop}:
             errors.append("native detached collection outcome escaped exact physical owner and selection")
     for required in ["internal sealed class NativeReplayCollectionAttempt",
-                     "class Captured(val frame: NativeMaskedSnapshot, val continuous: Long) : NativeReplayCollectionAttempt()",
+                     "class Captured(val frame: NativeMaskedSnapshot, val continuous: Long,",
+                     "val projection: NativeTouchProjection? = null, val preceding: List<NativeTouchObservation> = emptyList(),",
+                     "val activeTouch: Boolean = false) : NativeReplayCollectionAttempt()",
+                     "class TouchBoundary(val observations: List<NativeTouchObservation>, val active: Boolean = false)",
                      "object CollectorDeadline : NativeReplayCollectionAttempt()"]:
         if required not in capture:
             errors.append("native root consumption must return only a detached masked snapshot or closed deadline outcome")

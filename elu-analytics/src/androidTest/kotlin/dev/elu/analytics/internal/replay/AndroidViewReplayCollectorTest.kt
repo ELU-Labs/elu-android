@@ -726,6 +726,102 @@ class AndroidViewReplayCollectorTest {
         }
     }
 
+    @Test fun touchProjectionVetoesUnknownOverflowUntilActualParentOrExplicitClipConfinesIt() = main { root ->
+        root.clipChildren = false; root.clipToPadding = false
+        val leaf = View(activity); add(root, leaf, 20, 20, 40, 40)
+        val unknown = object : View(activity) {
+            override fun onDraw(canvas: Canvas) { canvas.drawColor(Color.RED) }
+        }
+        add(root, unknown, 200, 20, 20, 20)
+        val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+        val fence = NativeCollectionFence(); val snapshot = collector.collect(root, 0, 1000, fence, { true }, false)
+        val original = checkNotNull(collector.touchProjection(snapshot)); val point = listOf(touchLocation(leaf))
+        assertNull(collector.projectTouchPoints(root, original, point, fence, { true }, false).single())
+        unknown.clipBounds = Rect(0, 0, 20, 20)
+        assertNotNull(collector.projectTouchPoints(root, original, point, fence, { true }, false).single())
+        unknown.clipBounds = null; root.clipChildren = true
+        assertNotNull(collector.projectTouchPoints(root, original, point, fence, { true }, false).single())
+        root.clipChildren = false
+        assertNull(collector.projectTouchPoints(root, original, point, fence, { true }, false).single())
+        val later = collector.collect(root, 1, 1200, fence, { true }, false)
+        assertEquals(snapshot.nodes, later.nodes) // Touch veto never widens wire geometry.
+    }
+
+    @Test fun touchUnclippedLawfulSiblingsDoNotVetoUnrelatedTargetButChangedPrivatePaintDoes() = main { root ->
+        root.clipChildren = false; root.clipToPadding = false
+        val target = View(activity); add(root, target, 20, 20, 40, 40)
+        val label = TextView(activity).apply { text = "Ordinary" }
+        add(root, label, 200, 20, 240, 80)
+        fun layoutLabel() {
+            label.measure(View.MeasureSpec.makeMeasureSpec(240, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY))
+            label.layout(200, 20, 440, 100)
+        }
+        layoutLabel()
+        val ordinary = View(activity); add(root, ordinary, 200, 150, 40, 40)
+        ordinary.clipBounds = Rect(0, 0, 40, 40)
+        val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+        val fence = NativeCollectionFence(); val snapshot = collector.collect(root, 0, 1000, fence, { true }, false)
+        assertEquals(1, snapshot.nodes.count { it.kind is NativeMaskedKind.ReadableText })
+        val projection = checkNotNull(collector.touchProjection(snapshot)); val points = listOf(touchLocation(target))
+        fun projected(annotations: List<NativeViewAnnotation> = emptyList()) =
+            collector.projectTouchPoints(root, projection, points, fence, { true }, false, annotations).single()
+        val original = checkNotNull(projected())
+        ordinary.clipBounds = null // An unchanged exact encoded rectangle also stays ordinary hit geometry.
+        assertEquals(original, projected())
+        assertNull(projected(listOf(NativeViewAnnotation(label, NativeViewRestriction.MASK))))
+        assertNull(projected(listOf(NativeViewAnnotation(ordinary, NativeViewRestriction.BLOCK))))
+        assertEquals(original, projected())
+        val unknown = object : View(activity) {}; add(root, unknown, 400, 150, 20, 20)
+        assertNull(projected()); root.removeView(unknown)
+        assertEquals(original, projected())
+        val unencoded = View(activity); add(root, unencoded, 400, 150, 20, 20)
+        assertNull(projected()); root.removeView(unencoded)
+        assertEquals(original, projected())
+        label.text = "Changed"; layoutLabel()
+        assertNull(projected()) // Identity-only text proof changed; no new string content is read.
+        label.text = NativeWireframeV2Encoder.MASK; layoutLabel()
+        val sentinel = collector.collect(root, 1, 1200, fence, { true }, false)
+        assertEquals(NativeWireframeV2Encoder.MASK,
+            sentinel.nodes.mapNotNull { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value }.single())
+        val sentinelProjection = checkNotNull(collector.touchProjection(sentinel))
+        assertNull(collector.projectTouchPoints(root, sentinelProjection, listOf(touchLocation(label)),
+            fence, { true }, false).single()) // A new DOWN also cannot target the reserved sentinel.
+    }
+
+    @Test fun touchPrivateOverflowVetoIncludesEmittedQuantizedCoordinate() = main { root ->
+        val density = root.resources.displayMetrics.density.toDouble()
+        val candidateWidth = (1..100).firstOrNull { it / density != kotlin.math.floor(it / density) }
+        org.junit.Assume.assumeTrue("This layout needs a fractional dp boundary", candidateWidth != null)
+        val width = checkNotNull(candidateWidth)
+        val edge = width / density
+        root.clipChildren = false; root.clipToPadding = false
+        val privateLeaf = object : View(activity) {}; add(root, privateLeaf, 0, 0, width, 100)
+        privateLeaf.clipBounds = Rect(0, 0, width, 100)
+        val safe = View(activity); add(root, safe, 0, 0, 400, 100)
+        val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+        val fence = NativeCollectionFence(); val snapshot = collector.collect(root, 0, 1000, fence, { true }, false)
+        val projection = checkNotNull(collector.touchProjection(snapshot)); val origin = IntArray(2); root.getLocationInWindow(origin)
+        fun point(logicalX: Double) = listOf(NativeTouchLocation(origin[0] + logicalX * density, origin[1] + density))
+        val outsidePrivateButRoundedInside = (edge + kotlin.math.ceil(edge)) / 2
+        assertNull(collector.projectTouchPoints(root, projection, point(outsidePrivateButRoundedInside), fence, { true }, false).single())
+        assertNotNull(collector.projectTouchPoints(root, projection, point(kotlin.math.ceil(edge) + .25), fence, { true }, false).single())
+    }
+
+    @Test fun touchProjectionVetoesBlockedContainerOverflowWithoutReadingPrivateChildren() = main { root ->
+        root.clipChildren = false; root.clipToPadding = false
+        val leaf = View(activity); add(root, leaf, 20, 20, 40, 40)
+        val blocked = FrameLayout(activity); add(root, blocked, 200, 20, 20, 20)
+        blocked.clipChildren = false; add(blocked, GeometryTrap(activity), -200, 0, 240, 40)
+        val annotations = listOf(NativeViewAnnotation(blocked, NativeViewRestriction.BLOCK))
+        val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+        val fence = NativeCollectionFence(); val snapshot = collector.collect(root, 0, 1000, fence, { true }, false, annotations)
+        val original = checkNotNull(collector.touchProjection(snapshot)); val point = listOf(touchLocation(leaf))
+        assertNull(collector.projectTouchPoints(root, original, point, fence, { true }, false, annotations).single())
+        blocked.clipBounds = Rect(0, 0, 20, 20)
+        assertNotNull(collector.projectTouchPoints(root, original, point, fence, { true }, false, annotations).single())
+    }
+
     @Test fun unchangedPlainTextUsesLayoutIdentityButChangedInputOrSpanStaysPrivate() = main { root ->
         val text = TextView(activity).apply { this.text = "Plain" }
         add(root, text, width = 240, height = 80)
@@ -766,6 +862,7 @@ class AndroidViewReplayCollectorTest {
         val frame = collector.collect(root, 0, 1000, fence, { true }, false)
         val observer = AndroidReplayTouchObserver(activity.window, root, collector, fence, { true }, { false },
             wallClock = { 1000 }, continuousClock = { 0 })
+        observer.install()
         try {
             assertTrue(observer.arm(checkNotNull(collector.touchProjection(frame))))
             val event = finger(MotionEvent.ACTION_DOWN, touchLocation(leaf))
@@ -775,7 +872,7 @@ class AndroidViewReplayCollectorTest {
                 val thrown = IllegalStateException("app sentinel"); failure = thrown
                 try { activity.window.callback.dispatchTouchEvent(event); fail("app error must propagate") }
                 catch (actual: IllegalStateException) { assertSame(thrown, actual) }
-                assertEquals(2, calls); assertTrue(observer.drain().isEmpty())
+                assertEquals(2, calls); touchDrainDenied(observer)
             } finally { event.recycle() }
         } finally {
             assertTrue(observer.closeAndWait().isDone); assertSame(app, activity.window.callback)
@@ -796,6 +893,7 @@ class AndroidViewReplayCollectorTest {
         val frame = collector.collect(root, 0, 1000, fence, { true }, false)
         val observer = AndroidReplayTouchObserver(activity.window, root, collector, fence, { true }, { false },
             wallClock = { 1000 }, continuousClock = { 0 })
+        observer.install()
         val installed = activity.window.callback
         try {
             assertTrue(observer.arm(checkNotNull(collector.touchProjection(frame))))
@@ -804,7 +902,7 @@ class AndroidViewReplayCollectorTest {
             assertTrue(observer.drain().isEmpty())
             val replacement = object : Window.Callback by original {}
             activity.window.callback = replacement
-            assertTrue(observer.drain().isEmpty()) // Observes permanent displacement.
+            touchDrainDenied(observer) // Observes permanent displacement.
             activity.window.callback = installed
             assertFalse(observer.arm(checkNotNull(collector.touchProjection(frame))))
             activity.window.callback = replacement
@@ -831,12 +929,56 @@ class AndroidViewReplayCollectorTest {
         activity.window.callback = app
         val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
         observer = AndroidReplayTouchObserver(activity.window, root, collector, NativeCollectionFence(), { true }, { false })
+        observer.install()
         try {
             val event = finger(MotionEvent.ACTION_DOWN, touchLocation(leaf))
             try { assertTrue(activity.window.callback.dispatchTouchEvent(event)) } finally { event.recycle() }
             assertEquals(2, calls); assertTrue(checkNotNull(settlement).isDone)
-            assertSame(app, activity.window.callback); assertTrue(observer.drain().isEmpty())
+            assertSame(app, activity.window.callback); touchDrainDenied(observer)
         } finally { observer.closeAndWait(); activity.window.callback = original }
+    }
+
+    private fun touchDrainDenied(observer: AndroidReplayTouchObserver) {
+        try { observer.drain(); fail("Withdrawn observer cannot supply an accepted capture boundary") }
+        catch (_: IllegalStateException) { }
+    }
+
+    @Test fun touchConstructionIsUninstalledAndLocalStopRechecksQueuedPrivacy() {
+        for (restrict in listOf(false, true)) main { root ->
+            val leaf = View(activity); add(root, leaf)
+            val original = activity.window.callback
+            val app = object : Window.Callback by original { override fun dispatchTouchEvent(event: MotionEvent) = true }
+            activity.window.callback = app
+            var fresh = true; var wall = 1000L
+            val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+            val fence = NativeCollectionFence(); val snapshot = collector.collect(root, 0, wall, fence, { true }, false)
+            val observer = AndroidReplayTouchObserver(activity.window, root, collector, fence, { true }, { false },
+                wallClock = { wall }, continuousClock = { wall * 1_000_000 }, freshIntakeAllowed = { fresh })
+            assertSame(app, activity.window.callback) // Handle is reachable before setter side effects.
+            observer.install()
+            try {
+                assertTrue(observer.arm(checkNotNull(collector.touchProjection(snapshot))))
+                val down = finger(MotionEvent.ACTION_DOWN, touchLocation(leaf))
+                try { assertTrue(activity.window.callback.dispatchTouchEvent(down)) } finally { down.recycle() }
+                fresh = false; wall += 200
+                if (restrict) {
+                    dev.elu.analytics.Elu.blockView(leaf)
+                    try { observer.stopAndDrain(); fail("Current blocked target must discard pending coordinates") }
+                    catch (_: IllegalStateException) { }
+                    assertFalse(observer.arm(checkNotNull(collector.touchProjection(snapshot))))
+                } else {
+                    val rows = observer.stopAndDrain(); assertEquals(2, rows.size)
+                    assertTrue(rows.first().interaction is NativeReplayInteraction.Start)
+                    assertEquals(NativeReplayInteraction.Cancel(wall), rows.last().interaction)
+                }
+                observer.withdrawIntake()
+                for (name in listOf("isCurrent", "freshIntakeAllowed")) {
+                    val field = AndroidReplayTouchObserver::class.java.getDeclaredField(name).also { it.isAccessible = true }
+                    @Suppress("UNCHECKED_CAST") val predicate = field.get(observer) as () -> Boolean
+                    assertFalse(predicate())
+                }
+            } finally { observer.closeAndWait().get(); assertSame(app, activity.window.callback); activity.window.callback = original }
+        }
     }
 
     @Test fun ordinaryV1CollectorKeepsTouchWitnessBookkeepingDisabled() = main { root ->
@@ -865,6 +1007,7 @@ class AndroidViewReplayCollectorTest {
         val fence = NativeCollectionFence(); val frame = collector.collect(root, 0, 1000, fence, { true }, false)
         val observer = AndroidReplayTouchObserver(activity.window, root, collector, fence, { true }, { false },
             wallClock = { 1000 + ticks / 1_000_000 }, continuousClock = { if (ticking) ticks += 1_000_000; ticks })
+        observer.install()
         try {
             assertTrue(observer.arm(checkNotNull(collector.touchProjection(frame))))
             fun dispatch(action: Int) {
@@ -882,6 +1025,7 @@ class AndroidViewReplayCollectorTest {
             assertEquals(4, calls); assertEquals(4L, end.callbacks)
             assertTrue(end.cheapActionNanos > exhausted.cheapActionNanos)
             assertTrue(end.coreHandlingNanos > exhausted.coreHandlingNanos)
+            ticking = false; ticks += 1_000_000_000 // Fresh drain proof gets its own real rolling budget.
             val rows = observer.drain(); assertEquals(2, rows.size)
             assertTrue(rows.first().interaction is NativeReplayInteraction.Start)
             assertTrue(rows.last().interaction is NativeReplayInteraction.Cancel)
@@ -905,6 +1049,7 @@ class AndroidViewReplayCollectorTest {
                 if (ticking) ticks += 1_000_000
                 ticks
             })
+        observer.install()
         try {
             assertTrue(observer.arm(token))
             fun dispatch(action: Int) {
@@ -916,7 +1061,7 @@ class AndroidViewReplayCollectorTest {
             assertTrue(observer.workObservation().budgetRefusals > 0)
             failing = true; dispatch(MotionEvent.ACTION_UP)
             failing = false; ticking = false
-            assertEquals(3, calls); assertTrue(observer.drain().isEmpty()); assertFalse(observer.arm(token))
+            assertEquals(3, calls); touchDrainDenied(observer); assertFalse(observer.arm(token))
         } finally { observer.closeAndWait(); activity.window.callback = original }
     }
 
