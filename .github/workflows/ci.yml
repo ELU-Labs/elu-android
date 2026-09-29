@@ -65,6 +65,7 @@ jobs:
           name: android-sdk-reports
           path: |
             elu-analytics/build/reports/tests/
+            elu-analytics/build/outputs/aar/elu-analytics-release.aar
             elu-analytics/build/publications/maven/
             elu-analytics/build/reports/sbom/
             build/reports/
