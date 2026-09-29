@@ -390,6 +390,7 @@ dev.elu.analytics.internal.replay.NativeReplayClockAnchor$Sample
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$Captured
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$CollectorDeadline
+dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$LocalStop
 dev.elu.analytics.internal.replay.NativeReplayCompletedCaptureSnapshot
 dev.elu.analytics.internal.replay.NativeReplayComposition
 dev.elu.analytics.internal.replay.NativeReplayComposition$Companion$noncancelable$1

@@ -44,6 +44,9 @@ public final class dev.elu.analytics.Elu {
   public static final void resetGroupPropertiesForFlags(java.lang.String);
   public static void resetGroupPropertiesForFlags$default(java.lang.String, int, java.lang.Object);
   public static final void setGroupPropertiesForFlags(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void startSessionRecording();
+  public static final void stopSessionRecording();
+  public static final boolean sessionRecordingStarted();
   public static final void maskView(android.view.View);
   public static final void blockView(android.view.View);
   public static final void flush();
