@@ -33,6 +33,35 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val ownerThread: Thread,
     private val faults: AndroidRuntimeDatabaseFaults,
 ) : RuntimeQueueDatabase {
+    override fun ensureExposureSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) return
+        check(version > RUNTIME_PERSON_SCHEMA_OFFSET) { "Exposure metadata requires owned person schema" }
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            val core = SQLiteTransaction(sqlite).readCore() ?: error("Exposure metadata requires an owned core")
+            check(core.exposures == null)
+            sqlite.execSQL(CREATE_EXPOSURES)
+            writeExposures(sqlite, RuntimeFlagExposureState.initial(CoreStateCodec.decode(core.stateJson)), insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_EXPOSURE_SCHEMA_OFFSET}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain exposure schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain exposure schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_EXPOSURE_SCHEMA_OFFSET)
+    }
+
     override fun ensurePersonSchema() {
         assertOwnerThread()
         val version = pragmaLong(sqlite, "PRAGMA user_version")
@@ -317,6 +346,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         corrupt("Diagnostics history exists without an owned core")
                     if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_PERSON_SCHEMA_OFFSET && readPerson(sqlite) != null)
                         corrupt("Person state exists without an owned core")
+                    if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_EXPOSURE_SCHEMA_OFFSET && readExposures(sqlite) != null)
+                        corrupt("Exposure state exists without an owned core")
                     return null
                 }
                 val core =
@@ -331,6 +362,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                             readDiagnostics(sqlite) ?: corrupt("Missing diagnostics state") else RuntimeDiagnosticsState(),
                         person = if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_PERSON_SCHEMA_OFFSET)
                             readPerson(sqlite) ?: corrupt("Missing person state") else null,
+                        exposures = if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_EXPOSURE_SCHEMA_OFFSET)
+                            readExposures(sqlite) ?: corrupt("Missing exposure state") else null,
                     )
                 if (cursor.moveToNext()) corrupt("Runtime database contains duplicate core rows")
                 return core
@@ -358,6 +391,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             else check(core.diagnostics == RuntimeDiagnosticsState())
             if (version > RUNTIME_PERSON_SCHEMA_OFFSET) writePerson(sqlite, checkNotNull(core.person), insert = true)
             else check(core.person == null)
+            if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) writeExposures(sqlite, checkNotNull(core.exposures), insert = true)
+            else check(core.exposures == null)
             mutated = true
         }
 
@@ -392,6 +427,9 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_PERSON_SCHEMA_OFFSET)
                 writePerson(sqlite, checkNotNull(core.person), insert = false)
             else check(core.person == null)
+            if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_EXPOSURE_SCHEMA_OFFSET)
+                writeExposures(sqlite, checkNotNull(core.exposures), insert = false)
+            else check(core.exposures == null)
             mutated = true
         }
 
@@ -650,6 +688,29 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     }
 
     internal companion object {
+        private const val EXPOSURES_TABLE = "flag_exposure_state"
+        private val CREATE_EXPOSURES = """
+            CREATE TABLE flag_exposure_state (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND $MAX_RUNTIME_EXPOSURE_STATE_BYTES)
+            )
+        """.trimIndent()
+
+        private fun readExposures(sqlite: SQLiteDatabase): RuntimeFlagExposureState? =
+            sqlite.query(EXPOSURES_TABLE, arrayOf("payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val result = RuntimeFlagExposureState.decode(cursor.requiredBlob(0, "flag_exposure_state.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate exposure state")
+                result
+            }
+
+        private fun writeExposures(sqlite: SQLiteDatabase, state: RuntimeFlagExposureState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("payload", state.encode()) }
+            if (insert) sqlite.insertOrThrow(EXPOSURES_TABLE, null, values)
+            else if (sqlite.update(EXPOSURES_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Exposure update did not affect exactly one row")
+        }
+
         private const val PERSON_TABLE = "person_state"
         private val CREATE_PERSON = """
             CREATE TABLE person_state (
@@ -873,6 +934,11 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         parsed
                     }
                     if (person.streamId != state.stream.streamId) corrupt("Person state stream binding differs")
+                    if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) {
+                        val exposures = readExposures(readOnly) ?: corrupt("Missing exposure state")
+                        if (exposures.streamId != state.stream.streamId || exposures.anonymousId != state.identity.anonymousId)
+                            corrupt("Exposure metadata does not match owned visitor")
+                    }
                 }
             }
         }
@@ -966,7 +1032,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version !in 1L..12L && version !in 25L..36L ->
+                version !in 1L..12L && version !in 25L..42L ->
                     throw UnsupportedRuntimeStorageSchemaException(version)
             }
             validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
@@ -980,6 +1046,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) expected += "table:$AUDIENCE_TABLE"
             if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) expected += "table:$DIAGNOSTICS_TABLE"
             if (version > RUNTIME_PERSON_SCHEMA_OFFSET) expected += "table:$PERSON_TABLE"
+            if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) expected += "table:$EXPOSURES_TABLE"
             if (flagsPresent) expected += "table:$FLAG_CACHE_TABLE"
             if (replayPresent) expected += "table:$REPLAY_TABLE"
             val objects = applicationSchemaObjects(sqlite)
@@ -989,6 +1056,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) validateTableSql(sqlite, AUDIENCE_TABLE, CREATE_AUDIENCE)
             if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) validateTableSql(sqlite, DIAGNOSTICS_TABLE, CREATE_DIAGNOSTICS)
             if (version > RUNTIME_PERSON_SCHEMA_OFFSET) validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)
+            if (version > RUNTIME_EXPOSURE_SCHEMA_OFFSET) validateTableSql(sqlite, EXPOSURES_TABLE, CREATE_EXPOSURES)
             if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
             if (replayPresent) validateTableSql(sqlite, REPLAY_TABLE, CREATE_REPLAY)
         }

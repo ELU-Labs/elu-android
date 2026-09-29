@@ -797,7 +797,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
             "person = transitionedPerson", "left.person == right.person",
             "request.drafts.any { isPersonMutation(it.change) }", "putAll(checkNotNull(person).stamps(identity, personProfiles))"],
         "internal/runtime/AndroidSQLiteRuntimeDatabase.kt": [
-            "version !in 1L..12L && version !in 25L..36L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
+            "version !in 1L..12L && version !in 25L..42L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
             'readPerson(sqlite) ?: corrupt("Missing person state")'],
     }
     for relative, tokens in required.items():
@@ -816,8 +816,37 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
             errors.append("person selection forbids another production raw owner opener")
 
 
+def verify_durable_flag_exposures(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    required = {
+        "internal/runtime/RuntimeFlagExposureState.kt": ["MAX_RUNTIME_FLAG_EXPOSURES = 4096", "RUNTIME_EXPOSURE_SCHEMA_OFFSET = 36", "it.encode().contentEquals(bytes)"],
+        "internal/runtime/RuntimeQueueOwner.kt": [
+            "initializeExposureState()", "FlagDurableStore.read(transaction, flagAuthority, before.state, command.versions",
+            "if (ledger.contains(exposure.digest))", "created.after.copy(exposures = nextExposures)",
+            "if (!originalContextMatches()) throw PassiveCaptureWithdrawn()", "left.exposures == right.exposures",
+            "RuntimeFlagExposureState.initial(committedState) else before.exposures"],
+        "internal/runtime/AndroidSQLiteRuntimeDatabase.kt": [
+            "validateTableSql(sqlite, EXPOSURES_TABLE, CREATE_EXPOSURES)", 'readExposures(sqlite) ?: corrupt("Missing exposure state")'],
+        "internal/runtime/RuntimeFlagExposureCapture.kt": [
+            '"\\$feature_flag_request_id" to metadata.requestId', '"\\$feature_flag_evaluated_at" to metadata.evaluatedAt.toEpochMillisFloor()',
+            '"\\$used_bootstrap_value" to usedBootstrap'],
+        "internal/facade/StandaloneFacade.kt": ["RuntimeFlagExposureCapture.from(key, read, !flagsFromRemote)",
+            "metadata.logicalDigest != flagEvaluationDigest", "floorMillis = 5_000L", "flagRetryAttempt >= 6"],
+        "internal/config/V2ConfigLifecycleDriver.kt": ["minOf(5 * MINUTE", "result is V2ConfigSourceResult.Document && retained", "publishedUpdate?.let(onRetainedRefresh)"],
+        "internal/facade/AndroidStandaloneStack.kt": ["facade.configurationRefreshed(token)"],
+    }
+    for relative, tokens in required.items():
+        try:
+            source = load_text(root, base / relative)
+        except ValueError as error:
+            errors.append(str(error)); continue
+        if any(token not in source for token in tokens):
+            errors.append("durable flag exposure must retain atomic visitor ledger, evaluation origin and bounded refresh: " + relative)
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_durable_flag_exposures(root, errors)
     verify_local_endpoint_binding(root, errors)
     verify_person_selection(root, errors)
     verify_pins(root, errors)

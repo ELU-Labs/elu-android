@@ -54,6 +54,7 @@ internal data class RuntimeStoredCore(
     val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
     val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
     val person: RuntimePersonState? = null,
+    val exposures: RuntimeFlagExposureState? = null,
 )
 
 internal data class RuntimeStoredRecord(
@@ -126,6 +127,9 @@ internal interface RuntimeQueueTransaction {
 internal interface RuntimeQueueDatabase : Closeable {
     /** Validated owned upgrade; device continuity starts at the existing anonymous identity. */
     fun ensurePersonSchema()
+
+    /** Production visitor ledger; legacy reports cannot be reconstructed. */
+    fun ensureExposureSchema()
 
     /** Explicit local opt-in first validates the whole owned store, then adds a closed epoch. */
     fun ensureDiagnosticsSchema()

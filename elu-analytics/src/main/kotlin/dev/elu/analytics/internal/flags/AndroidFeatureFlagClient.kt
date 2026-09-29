@@ -193,9 +193,10 @@ internal class AndroidFeatureFlagClient(
                     }
                 }
                 is FlagReadResult.CacheMiss -> {
-                    installCacheLease(read.cacheLeaseToken, read.responseExpiresAt, sample, lease)
-                    result.complete(FlagReadResult.Missing)
-                    return@execute
+                    if (!installCacheLease(read.cacheLeaseToken, read.responseExpiresAt, sample, lease)) {
+                        result.complete(FlagReadResult.Missing)
+                        return@execute
+                    }
                 }
                 is FlagReadResult.Restricted -> {
                     if (read.reason == FlagRestrictionReason.WALL_ROLLBACK) poisonClock()
@@ -214,8 +215,12 @@ internal class AndroidFeatureFlagClient(
             val completion = try { sampleClock() } catch (_: Exception) { null }
             val currentConfig = completion?.let(::usableConfigLease)
             val currentCache = currentConfig != null && usableCacheLease(checkNotNull(completion), currentConfig)
-            result.complete(if (currentCache && (read !is FlagReadResult.Found ||
-                isCacheLeaseCurrent(read.cacheLeaseToken))) read else FlagReadResult.Missing)
+            val token = when (read) {
+                is FlagReadResult.Found -> read.cacheLeaseToken
+                is FlagReadResult.CacheMiss -> read.cacheLeaseToken
+                else -> null
+            }
+            result.complete(if (currentCache && (token == null || isCacheLeaseCurrent(token))) read else FlagReadResult.Missing)
         }
         return result
     }
@@ -581,7 +586,7 @@ internal class AndroidFeatureFlagClient(
             running.complete(finalized)
             poisonClock()
         }
-        finish(running, finalized)
+        finish(running, if (finalized is FlagReloadResult.Updated) finalized.copy(metadata = response.evaluationMetadata()) else finalized)
     }
 
     private fun finish(running: InFlight, result: FlagReloadResult) {

@@ -100,6 +100,16 @@ internal data class FlagResponse(
     val payloads: FlagJsonValue.ObjectValue,
 )
 
+internal data class FlagEvaluationMetadata(
+    val requestId: String,
+    val evaluatedAt: FlagExactInstant,
+    /** Logical evaluation identity deliberately excludes request/expiry clocks. */
+    val logicalDigest: String,
+)
+
+internal fun FlagResponse.evaluationMetadata() = FlagEvaluationMetadata(requestId, evaluatedAt,
+    FlagJson.sha256(FlagJsonValue.ArrayValue(listOf(FlagJsonValue.StringValue(flagsRevision), flags, payloads))))
+
 internal data class FlagRequestToken(
     val storeEpoch: String,
     val requestGeneration: Long,
@@ -151,6 +161,7 @@ internal sealed interface FlagReloadResult {
         val requestGeneration: Long,
         /** Present only after the separate final CAS. */
         val cacheLeaseToken: FlagCacheLeaseToken? = null,
+        val metadata: FlagEvaluationMetadata? = null,
     ) : FlagReloadResult
 
     data object Stale : FlagReloadResult
@@ -182,12 +193,14 @@ internal sealed interface FlagReadResult {
         /** Internal lease input; it is not exposed through the public facade. */
         val responseExpiresAt: FlagExactInstant,
         val cacheLeaseToken: FlagCacheLeaseToken,
+        val metadata: FlagEvaluationMetadata? = null,
     ) : FlagReadResult
 
     /** Valid current cache whose flag map simply does not contain the requested key. */
     data class CacheMiss(
         val responseExpiresAt: FlagExactInstant,
         val cacheLeaseToken: FlagCacheLeaseToken,
+        val metadata: FlagEvaluationMetadata? = null,
     ) : FlagReadResult
 
     data class Restricted(val reason: FlagRestrictionReason) : FlagReadResult

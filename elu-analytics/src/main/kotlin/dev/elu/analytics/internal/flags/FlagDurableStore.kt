@@ -632,6 +632,7 @@ internal object FlagDurableStore {
                         ?: return FlagReadResult.CacheMiss(
                             envelope.response.expiresAt,
                             cacheLeaseToken(metadata, pointer, envelope),
+                            envelope.response.evaluationMetadata(),
                         )
                 FlagReadResult.Found(
                     value.deepCopy(),
@@ -639,6 +640,7 @@ internal object FlagDurableStore {
                     envelope.response.flagsRevision,
                     envelope.response.expiresAt,
                     cacheLeaseToken(metadata, pointer, envelope),
+                    envelope.response.evaluationMetadata(),
                 )
             }
         }

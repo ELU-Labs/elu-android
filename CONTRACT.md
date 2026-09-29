@@ -80,13 +80,36 @@ Reset clears the marker; consent, ACK, flags, replay and restart preserve it.
 
 Production openers explicitly select a mode and validate a stream-bound singleton
 metadata row. The raw internal frozen-protocol conformance seam cannot reopen a
-store containing this metadata. Owned families 1–6, 7–12 and 25–30 upgrade to 31–36,
+store containing this metadata. Owned families 1–6, 7–12, 25–30 and 31–36 upgrade to 37–42,
 preserving core and queued bytes, audience, flags, replay and diagnostics. Device
 identity begins from the current anonymous ID on upgrade; prior person mutations
 cannot be inferred from flag context. Existing user/group state can enable the
 next accepted event. Missing, malformed, foreign-stream or extended metadata is
-refused. Versions 13–24 and 37+ remain refused; older binaries refuse 31–36.
+refused. Versions 13–24 and 43+ remain refused; older binaries refuse 37–42.
 Downgrading the owned store is unsupported.
+
+Exposure reports use a separate closed stream/anonymous-visitor singleton. Its
+sorted set retains at most 4,096 digests of flag key plus the typed Boolean,
+string or missing result. Identify, consent, configuration changes, ACK and
+restart retain reports; reset clears them with the anonymous identity. Each new
+digest commits atomically with its accepted `$feature_flag_called` event. Quota,
+withdrawal or rolled-back writes consume no report. Ambiguous completion must
+reconcile the exact event and metadata together. Saturation suppresses new
+exposure events without evicting old reports, blocking getters or ordinary events.
+The raw frozen-protocol seam cannot produce this production exposure metadata.
+
+Exposure properties retain the validated evaluation request ID and evaluation
+time, including a missing key in an otherwise valid evaluation. No usable cache
+means no exposure report. The remote/cache bit compares flags revision, flags
+and payloads, excluding request/expiry clocks; bootstrap response/payload fields
+are null because no customer bootstrap input is supported. The original client
+lease and exact current cache read are checked again inside the event transaction.
+Foreground config refresh is capped at 300 seconds (or the earlier lease-derived
+renewal); a successful unchanged response reloads flags without publishing new
+configuration authority or extending its original expiry. Failed flag evaluations
+receive at most six owner-lifetime scheduled retries per reload cycle, with 5, 10,
+20, 40, 80 and 160 second bases plus at most 20% jitter. Identity, consent, source
+withdrawal and close fence late retries; an explicit reload starts a new cycle.
 
 `optOut` immediately fences new collection and delivery work, then persists the
 choice asynchronously. It purges pending replay. Previously queued events stay
@@ -284,7 +307,7 @@ reconcile against exact durable state. Metadata-only interval changes do not
 change identity/context/session or create capture-session audience history.
 
 The raw pre-profile runtime lazily upgrades diagnostics to families 25–30 after
-full validation. Production profile families 31–36 include the diagnostics table
+full validation. Production profile/exposure families 31–42 include the diagnostics table
 in a closed state; creating the table does not enable diagnostics. Existing queued
 data and diagnostics intervals are preserved by the profile migration, then the
 normal current-option/continuity checks apply. Downgrade is unsupported.

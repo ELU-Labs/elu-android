@@ -62,6 +62,8 @@ internal class V2ConfigLifecycleDriver(
     private val clock: V2ConfigClock = AndroidV2ConfigClock,
     private val scheduler: V2ConfigLifecycleScheduler = ScheduledV2ConfigLifecycleScheduler(),
     private val worker: V2ConfigLifecycleWorker = ThreadedV2ConfigLifecycleWorker(),
+    /** Enqueue-only notification: a successful same-body fetch does not republish authority. */
+    private val onRetainedRefresh: (V2ConfigLifecycleUpdate) -> Unit = {},
 ) : AutoCloseable {
     private val lock = Any()
     private var phase = V2ConfigLifecyclePhase.NEW
@@ -194,7 +196,13 @@ internal class V2ConfigLifecycleDriver(
             if (phase == V2ConfigLifecyclePhase.FOREGROUND) scheduleRetry()
         } else {
             retryDelay = SECOND
+            val retained = hasPublished && published?.body == current.body &&
+                publishedUpdate?.kind == V2ConfigLifecycleUpdateKind.CONFIGURATION
             publish(current)
+            if (result is V2ConfigSourceResult.Document && retained && phase == V2ConfigLifecyclePhase.FOREGROUND) {
+                try { publishedUpdate?.let(onRetainedRefresh) }
+                catch (_: Exception) { fail("refresh-listener-failed") }
+            }
             if (phase == V2ConfigLifecyclePhase.FOREGROUND) {
                 scheduleExpiry(current)
                 scheduleRenewal(current)
@@ -262,7 +270,7 @@ internal class V2ConfigLifecycleDriver(
 
     private fun scheduleRenewal(snapshot: V2ConfigLeaseSnapshot) {
         val left = remaining(snapshot)
-        val delay = maxOf(SECOND, left - minOf(MINUTE, left / 5))
+        val delay = minOf(5 * MINUTE, maxOf(SECOND, left - minOf(MINUTE, left / 5)))
         if (delay < left) scheduleRefresh(delay)
     }
 

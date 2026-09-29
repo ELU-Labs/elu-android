@@ -59,6 +59,26 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
                 self.assertIn("person selection", self.run_guard().stderr)
                 path.write_text(original)
 
+    def test_durable_exposure_cannot_lose_atomicity_scope_or_same_body_refresh(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        changes = [
+            ("internal/runtime/RuntimeQueueOwner.kt", "created.after.copy(exposures = nextExposures)", "created.after"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "left.exposures == right.exposures", "true"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "RuntimeFlagExposureState.initial(committedState) else before.exposures", "before.exposures"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "if (!originalContextMatches()) throw PassiveCaptureWithdrawn()", "Unit"),
+            ("internal/facade/StandaloneFacade.kt", "metadata.logicalDigest != flagEvaluationDigest", "false"),
+            ("internal/facade/AndroidStandaloneStack.kt", "facade.configurationRefreshed(token)", "Unit"),
+            ("internal/config/V2ConfigLifecycleDriver.kt", "minOf(5 * MINUTE", "minOf(10 * MINUTE"),
+            ("internal/config/V2ConfigLifecycleDriver.kt", "result is V2ConfigSourceResult.Document && retained", "retained"),
+        ]
+        for relative, before, after in changes:
+            with self.subTest(relative=relative, before=before):
+                path = base / relative; original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("durable flag exposure", self.run_guard().stderr)
+                path.write_text(original)
+
     def test_clean_internal_transport_boundary_passes(self) -> None:
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)

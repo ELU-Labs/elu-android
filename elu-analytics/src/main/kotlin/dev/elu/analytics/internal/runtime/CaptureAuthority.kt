@@ -97,6 +97,7 @@ internal data class RuntimeCaptureCommand(
     val expectation: RuntimeCaptureExpectation? = null,
     val networkExpectation: RuntimeNetworkExpectation? = null,
     val startupMeasurement: dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement? = null,
+    val flagExposure: RuntimeFlagExposureCapture? = null,
 )
 
 internal enum class RuntimeCaptureRejection {
@@ -108,6 +109,7 @@ internal enum class RuntimeCaptureRejection {
     OPTED_OUT,
     EVENT_INVALID,
     QUEUE_LIMIT,
+    EXPOSURE_ALREADY_REPORTED,
 }
 
 internal sealed interface RuntimeCaptureResult {

@@ -876,9 +876,10 @@ class FeatureFlagActivityVectorTest {
             )
         try {
             assertTrue(client.applyConfiguration(configAllowed()).await() is V1FlagAuthorizationResolution.Allowed)
-            assertTrue(client.read("missing").await() is FlagReadResult.Missing)
+            val missing = client.read("missing").await() as FlagReadResult.CacheMiss
+            assertEquals("flags_request_1", missing.metadata!!.requestId)
             clock.set(millis("2026-08-04T00:01:30.000Z"), 100_000_000_000L)
-            assertTrue(client.read("missing").await() is FlagReadResult.Missing)
+            assertEquals(missing, client.read("missing").await())
             clock.set(millis("2026-08-04T00:01:31.000Z"), 178_000_000_000L)
             assertTrue(client.read("missing").await() is FlagReadResult.Missing)
             val metadata = metadataJson(backing)

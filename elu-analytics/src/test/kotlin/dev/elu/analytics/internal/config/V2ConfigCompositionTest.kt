@@ -558,19 +558,51 @@ class V2ConfigCompositionTest {
             assertEquals(0, callbacks)
         }
 
+    @Test fun `successful same-body config fetch actually reevaluates flags under the original authority`() =
+        Rig(withFlags = true).use { rig ->
+            rig.enable(); rig.settleFlags()
+            rig.facade.getFeatureFlag("variant"); rig.settle()
+            assertEquals("a", rig.facade.getFeatureFlag("variant")); rig.settle()
+            val original = checkNotNull(rig.gate.snapshot())
+            val originalRequest = checkNotNull(rig.lastFlagRequest).getString("requestId")
+            val calls = rig.flagCalls.get()
+            rig.flagVariant = "b"
+            rig.driver.refresh(); rig.worker.runNext(); rig.settleFlags()
+            assertEquals(calls + 1, rig.flagCalls.get())
+            assertTrue(original.token === checkNotNull(rig.gate.snapshot()).token)
+            assertEquals("b", rig.facade.getFeatureFlag("variant")); rig.settle()
+            assertFalse(originalRequest == checkNotNull(rig.lastFlagRequest).getString("requestId"))
+            // The successful reevaluation did not mint a later configuration deadline.
+            rig.clock.nanos += 240_000_000_000L
+            assertFalse(original.isCurrent())
+            assertNull(rig.facade.getFeatureFlag("variant"))
+        }
+
+    @Test fun `late successful-refresh handoff cannot evaluate after source withdrawal`() = Rig(withFlags = true).use { rig ->
+        rig.enable(); rig.settleFlags()
+        val original = checkNotNull(rig.gate.snapshot())
+        val calls = rig.flagCalls.get()
+        rig.driver.onBackground()
+        rig.facade.configurationRefreshed(original.token); rig.settleFlags()
+        assertEquals(calls, rig.flagCalls.get())
+        assertNull(rig.facade.getFeatureFlag("variant"))
+    }
+
     private class Rig(bindGate: Boolean = true, withFlags: Boolean = false, queueCallbacks: Boolean = false, acknowledgeEvents: Boolean = false) : AutoCloseable {
         val clock = Clock()
         val worker = Worker()
         val gate = V2ConfigAuthorityGate()
         var body = resource("contracts/v2/fixtures/config-enabled.json")
         val source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
-        val driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+        val driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker,
+            onRetainedRefresh = ::retainedRefresh)
         val backing = FakeRuntimeQueueBacking()
         val databaseClosed = java.util.concurrent.CountDownLatch(1)
         @Volatile var onRead: (() -> Unit)? = null
         @Volatile var onWrite: (() -> Unit)? = null
         @Volatile var ownerWall: Long? = null
         @Volatile var lastFlagRequest: JSONObject? = null
+        val flagCalls = java.util.concurrent.atomic.AtomicInteger()
         @Volatile var networkCalls = 0
         val firstNetworkCall = java.util.concurrent.CountDownLatch(1)
         val sentEvents = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
@@ -636,6 +668,7 @@ class V2ConfigCompositionTest {
             FlagTransport { request ->
                 val json = JSONObject(String(request.canonicalBody))
                 lastFlagRequest = json
+                flagCalls.incrementAndGet()
                 val response = JSONObject().put("schemaVersion", 1).put("requestId", json.getString("requestId"))
                     .put("contextRevision", json.getLong("contextRevision"))
                     .put("identityRevision", json.getJSONObject("identity").getLong("revision"))
@@ -652,6 +685,7 @@ class V2ConfigCompositionTest {
             open = { StandaloneStack(runtime, owner, flags) }, deliverCallback = { if (queueCallbacks) callbacks.add(it) else it.run() }, wallClock = { clock.wall },
             configurationGate = if (bindGate) gate else null, onCloseRequested = { driver.close(); gate.close() },
         ).also { it.start() }
+        private fun retainedRefresh(token: V2ConfigLifecycleUpdate) { facade.configurationRefreshed(token) }
         fun enable() { driver.start(); worker.runNext(); facade.configurationChanged(); settle(); assertTrue(facade.state() is EluFacadeState.Enabled) }
         fun settle() { facade.settled().get(2, TimeUnit.SECONDS) }
         fun settleFlags() {

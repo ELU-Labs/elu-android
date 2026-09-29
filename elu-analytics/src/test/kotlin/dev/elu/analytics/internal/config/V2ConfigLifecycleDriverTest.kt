@@ -8,6 +8,7 @@ import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -293,11 +294,54 @@ class V2ConfigLifecycleDriverTest {
         assertTrue(rig.updates.last().consume { assertNull(it) })
     }
 
+    @Test fun `long lease refreshes within five minutes and same body success never renews authority`() {
+        val rig = Rig()
+        rig.body = rig.config().put("issuedAt", "2026-08-05T00:01:00Z")
+            .put("expiresAt", "2026-08-05T00:11:00Z").toString()
+        rig.driver.start(); rig.worker.runNext()
+        val original = rig.updates.last()
+        assertEquals(listOf(300_000_000_000L, 600_000_000_000L), rig.scheduler.activeDelays())
+        val count = rig.updates.size
+        rig.advance(300_000_000_000L); rig.scheduler.runDue(); rig.worker.runNext()
+        assertEquals(listOf(original), rig.refreshes)
+        assertEquals(count, rig.updates.size)
+        assertSame(original, rig.updates.last())
+        // Original absolute deadline is retained even though this HTTP response succeeded.
+        rig.advance(300_000_000_000L); rig.scheduler.runDue()
+        assertFalse(original.consume {})
+        rig.driver.close()
+    }
+
+    @Test fun `stale successful HTTP response is not a successful retained refresh`() {
+        val rig = Rig()
+        rig.driver.start(); rig.worker.runNext()
+        val original = rig.updates.single()
+        rig.fetch = { V2ConfigHttpResponse(200, rig.config().put("issuedAt", "2026-08-04T23:59:59.000Z").toString()) }
+        rig.driver.refresh(); rig.worker.runNext()
+        assertTrue(rig.refreshes.isEmpty())
+        assertTrue(original.consume { assertEquals(rig.body, it) })
+        rig.driver.close()
+    }
+
+    @Test fun `unchanged refresh cannot escape background or terminal close`() {
+        val rig = Rig(); rig.driver.start(); rig.worker.runNext()
+        rig.driver.refresh()
+        rig.driver.onBackground()
+        rig.worker.runNext()
+        assertTrue(rig.refreshes.isEmpty())
+        rig.driver.onForeground(); rig.worker.runNext()
+        val before = rig.refreshes.size
+        rig.driver.refresh(); rig.driver.close()
+        if (rig.worker.queued.isNotEmpty()) rig.worker.runNext()
+        assertEquals(before, rig.refreshes.size)
+    }
+
     private class Rig(consumeImmediately: Boolean = true) {
         val clock = FakeClock()
         val scheduler = ManualScheduler(clock)
         val worker = ManualWorker()
         val updates = mutableListOf<V2ConfigLifecycleUpdate>()
+        val refreshes = mutableListOf<V2ConfigLifecycleUpdate>()
         val deliveries = mutableListOf<String?>()
         var body = config().toString()
         var calls = 0
@@ -306,7 +350,7 @@ class V2ConfigLifecycleDriverTest {
         val driver = V2ConfigLifecycleDriver(source, { update ->
             updates.add(update)
             if (consumeImmediately) update.consume { deliveries.add(it) }
-        }, clock, scheduler, worker)
+        }, clock, scheduler, worker, onRetainedRefresh = { refreshes += it })
         fun advance(nanos: Long) { clock.nanos += nanos; clock.wall += nanos / 1_000_000 }
         fun config(): JSONObject = JSONObject(checkNotNull(javaClass.classLoader?.getResourceAsStream("contracts/v2/fixtures/config-enabled.json")).bufferedReader().use { it.readText() })
     }

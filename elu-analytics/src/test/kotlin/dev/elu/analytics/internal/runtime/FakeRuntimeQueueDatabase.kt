@@ -52,6 +52,18 @@ private class FakeRuntimeQueueDatabase(
         }
     }
 
+    override fun ensureExposureSchema() = synchronized(backing) {
+        check(!closed)
+        val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
+        if (backing.databaseSchemaVersion <= RUNTIME_EXPOSURE_SCHEMA_OFFSET) {
+            check(backing.databaseSchemaVersion > RUNTIME_PERSON_SCHEMA_OFFSET)
+            val core = checkNotNull(backing.core)
+            backing.core = core.copy(exposures = RuntimeFlagExposureState.initial(CoreStateCodec.decode(core.stateJson)))
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_EXPOSURE_SCHEMA_OFFSET
+            backing.advanceCommittedMutationGeneration()
+        }
+    }
+
     override fun ensurePersonSchema() = synchronized(backing) {
         check(!closed)
         val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())

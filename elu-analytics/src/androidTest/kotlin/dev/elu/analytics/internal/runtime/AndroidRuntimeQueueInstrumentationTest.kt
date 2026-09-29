@@ -799,14 +799,15 @@ class AndroidRuntimeQueueInstrumentationTest {
         assertEquals(reset, reopened.snapshot().await())
         reopened.closeAsync().await(); owners.remove(reopened)
         SQLiteDatabase.openDatabase(AndroidRuntimeQueue.databaseFileFor(context, key).path, null,
-            SQLiteDatabase.OPEN_READONLY).use { sqlite -> assertEquals(31, sqlite.version) }
+            SQLiteDatabase.OPEN_READONLY).use { sqlite -> assertEquals(37, sqlite.version) }
     }
 
     @Test
-    fun personMetadataMigratesAllEighteenOwnedFamiliesWithoutRewritingQueuedBytes() {
-        for (offset in listOf(0, 6, 24)) for (base in 1..6) {
+    fun exposureMetadataMigratesAllTwentyFourOwnedFamiliesWithoutRewritingQueuedBytes() {
+        for (offset in listOf(0, 6, 24, 30)) for (base in 1..6) {
             val file = databaseFile()
-            val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState, trustedSiteKey = "elu_pk_test_capture")
+            val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState, trustedSiteKey = "elu_pk_test_capture",
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY.takeIf { offset == 30 })
             appendEvents(owner, event("retained-before-person"))
             if (base in listOf(2, 4, 6)) owner.ensureFeatureFlagRuntime().await()
             if (base >= 3) owner.ensurePreparedReplayStorage().await()
@@ -816,6 +817,10 @@ class AndroidRuntimeQueueInstrumentationTest {
             val before = owner.peek(10, Long.MAX_VALUE).await()
             val identity = owner.snapshot().await().state.identity
             owner.closeAsync().await(); owners.remove(owner)
+            if (offset == 30) SQLiteDatabase.openDatabase(file.path, null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sqlite ->
+                sqlite.execSQL("DROP TABLE flag_exposure_state"); executePragma(sqlite, "PRAGMA user_version = ${base + 30}")
+            }
             if (offset == 0) SQLiteDatabase.openDatabase(file.path, null,
                 SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sqlite ->
                 sqlite.execSQL("DROP TABLE replay_audience"); executePragma(sqlite, "PRAGMA user_version = $base")
@@ -830,9 +835,13 @@ class AndroidRuntimeQueueInstrumentationTest {
             assertEquals(identity.anonymousId, migrated.snapshot().await().person!!.deviceId)
             migrated.closeAsync().await(); owners.remove(migrated)
             SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-                assertEquals((base + 30).toLong(), pragmaLong(sqlite, "PRAGMA user_version"))
+                assertEquals((base + 36).toLong(), pragmaLong(sqlite, "PRAGMA user_version"))
                 assertEquals(RuntimePersonState(STREAM_ID, identity.anonymousId), RuntimePersonState.decode(
                     singleBlob(sqlite, "SELECT payload FROM person_state WHERE singleton_id=1")))
+                val exposures = RuntimeFlagExposureState.decode(singleBlob(sqlite, "SELECT payload FROM flag_exposure_state WHERE singleton_id=1"))
+                assertEquals(STREAM_ID, exposures.streamId)
+                assertEquals(identity.anonymousId, exposures.anonymousId)
+                assertTrue(exposures.digests.isEmpty())
             }
             // Nullable raw conformance cannot read production metadata and emit old wire identity.
             assertFutureCause(RuntimeQueueCorruptionException::class.java) {
@@ -880,7 +889,7 @@ class AndroidRuntimeQueueInstrumentationTest {
 
     @Test
     fun personSchemaRefusesMissingCorruptForeignAndFutureMetadataWithoutRecovery() {
-        for (wal in listOf(false, true)) for (damage in listOf("missing", "corrupt", "foreign", "table", "future")) {
+        for (wal in listOf(false, true)) for (damage in listOf("missing", "corrupt", "foreign", "table", "future", "exposure-missing", "exposure-corrupt", "exposure-foreign", "exposure-table")) {
             val file = databaseFile()
             val familySuffixes = listOf("", "-wal", "-shm", "-journal")
             fun databaseFamily(): Map<String, ByteArray> = familySuffixes
@@ -903,7 +912,12 @@ class AndroidRuntimeQueueInstrumentationTest {
                     "corrupt" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf("{}".toByteArray()))
                     "foreign" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf(RuntimePersonState("foreign", "device").encode()))
                     "table" -> sqlite.execSQL("ALTER TABLE person_state ADD COLUMN unknown TEXT")
-                    "future" -> executePragma(sqlite, "PRAGMA user_version=37")
+                    "future" -> executePragma(sqlite, "PRAGMA user_version=43")
+                    "exposure-missing" -> sqlite.execSQL("DELETE FROM flag_exposure_state")
+                    "exposure-corrupt" -> sqlite.execSQL("UPDATE flag_exposure_state SET payload=?", arrayOf("{}".toByteArray()))
+                    "exposure-foreign" -> sqlite.execSQL("UPDATE flag_exposure_state SET payload=?", arrayOf(RuntimeFlagExposureState.initial(
+                        freshState().copy(identity = freshState().identity.copy(anonymousId = "foreign"))).encode()))
+                    "exposure-table" -> sqlite.execSQL("ALTER TABLE flag_exposure_state ADD COLUMN unknown TEXT")
                 }
                 if (wal) {
                     retainedWal = databaseFamily()
@@ -934,6 +948,69 @@ class AndroidRuntimeQueueInstrumentationTest {
             val after = databaseFamily()
             assertEquals(originalBytes.keys, after.keys)
             for ((name, bytes) in originalBytes) assertArrayEquals("$damage WAL=$wal changed $name", bytes, after.getValue(name))
+        }
+    }
+
+    @Test
+    fun exposureEventAndVisitorLedgerShareRealSQLiteCommitReconciliationAndReopen() {
+        for (ambiguous in listOf(false, true)) {
+            val file = databaseFile(); val faults = RecordingFaults(); val identifiers = CountingIdentifiers()
+            val wall = Instant.parse("2026-08-05T00:01:00Z").toEpochMilli()
+            val clock = FixedCaptureClock(wall, 1_000_000_000L)
+            val config = JSONObject(captureConfig()).apply { getJSONObject("features").put("flags", true) }.toString()
+            val owner = open(file, identifiers, faults, ::freshState, "elu_pk_test_capture", clock,
+                dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            fun client(current: RuntimeQueueOwner) = dev.elu.analytics.internal.flags.AndroidFeatureFlagClient(
+                current, versions(), dev.elu.analytics.internal.flags.FlagTransport { request ->
+                    val body = JSONObject(String(request.canonicalBody, Charsets.UTF_8))
+                    val response = JSONObject().put("schemaVersion", 1).put("requestId", body.getString("requestId"))
+                        .put("contextRevision", body.getLong("contextRevision"))
+                        .put("identityRevision", body.getJSONObject("identity").getLong("revision"))
+                        .put("flagsRevision", "native-flags").put("evaluatedAt", "2026-08-05T00:01:00.000Z")
+                        .put("expiresAt", "2026-08-05T00:04:00.000Z")
+                        .put("flags", JSONObject().put("variant", false)).put("payloads", JSONObject())
+                    dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(response.toString().toByteArray())
+                }, object : dev.elu.analytics.internal.flags.FlagClock {
+                    override fun wallNowEpochMillis() = wall
+                    override fun monotonicNowNanos() = 1_000_000_000L
+                }, dev.elu.analytics.internal.flags.FlagOpaqueIdSource { UUID.randomUUID().toString() },
+                dev.elu.analytics.internal.flags.FlagOpaqueIdSource { UUID.randomUUID().toString() })
+            fun exposure(client: dev.elu.analytics.internal.flags.AndroidFeatureFlagClient): RuntimeCaptureCommand {
+                val read = client.read("variant").await() as dev.elu.analytics.internal.flags.FlagReadResult.Found
+                val report = checkNotNull(RuntimeFlagExposureCapture.from("variant", read, false) {
+                    client.isCacheLeaseCurrent(read.cacheLeaseToken)
+                })
+                return RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$feature_flag_called",
+                    "2026-08-05T00:01:00.000Z", report.properties(), versions(), flagExposure = report)
+            }
+            var acceptedId: String? = null
+            client(owner).use { client ->
+                assertTrue(owner.submitCaptureAuthority(config, capturePrivacy()).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
+                client.applyConfiguration(config).await()
+                assertTrue(client.reload().await() is dev.elu.analytics.internal.flags.FlagReloadResult.Updated)
+                val command = exposure(client)
+                val commits = faults.beforeCommitCalls.get()
+                if (ambiguous) faults.failAfterCommit.set(true) else faults.failBeforeCommit.set(true)
+                val result = owner.capture(command).await() as RuntimeCaptureResult.Accepted
+                assertEquals(commits + if (ambiguous) 1 else 2, faults.beforeCommitCalls.get())
+                assertEquals(1, result.snapshot.queuedCount)
+                assertEquals(1, result.snapshot.exposures!!.digests.size)
+                acceptedId = result.record.record.eventId
+                val duplicate = owner.capture(command).await() as RuntimeCaptureResult.Rejected
+                assertEquals(RuntimeCaptureRejection.EXPOSURE_ALREADY_REPORTED, duplicate.reason)
+            }
+            owner.closeAsync().await(); owners.remove(owner)
+            val reopened = open(file, identifiers, RecordingFaults(), { error("Must use owned SQLite") },
+                "elu_pk_test_capture", clock, dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            assertEquals(1, reopened.snapshot().await().exposures!!.digests.size)
+            assertEquals(acceptedId, reopened.peek(10, Long.MAX_VALUE).await().single().recordId)
+            client(reopened).use { client ->
+                reopened.submitCaptureAuthority(config, capturePrivacy()).await()
+                client.applyConfiguration(config).await()
+                val duplicate = reopened.capture(exposure(client)).await() as RuntimeCaptureResult.Rejected
+                assertEquals(RuntimeCaptureRejection.EXPOSURE_ALREADY_REPORTED, duplicate.reason)
+                assertEquals(1, reopened.snapshot().await().queuedCount)
+            }
         }
     }
 

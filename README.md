@@ -369,6 +369,29 @@ Every method is safe to call at any time — before setup, while config is
 loading, or when analytics is disabled — it never throws and never blocks.
 Behavioral details: [`CONTRACT.md`](./CONTRACT.md).
 
+## Flag exposure and refresh
+
+Flag reads report `$feature_flag_called` once per anonymous visitor, key and typed
+reported value. Accepted reports and their deduplication markers commit together.
+The durable ledger survives process restart, sign-in, consent changes, config refresh
+and queue acknowledgement; reset starts a new visitor ledger. At 4096 distinct
+reports it suppresses new exposures without evicting earlier entries; ordinary
+analytics and flag getters remain available. Quota, revoked authority or rolled-back
+writes do not consume a report.
+
+Reports include the evaluation's original request ID and evaluated-at milliseconds.
+The compatibility `$used_bootstrap_value` property means the current evaluation was
+read from cache rather than freshly received in this SDK process; it does not claim
+customer bootstrap injection. Bootstrapped response/payload properties are null.
+A valid evaluation missing a key reports `flag_missing`; unavailable or expired
+caches do not fabricate a missing-key exposure.
+
+Foreground config refresh is capped at five minutes and retains the original
+immutable expiry. A successful unchanged response reevaluates flags without
+republishing authority. Failed flag loads retry after 5, 10, 20, 40, 80 and 160 seconds
+plus up to 20% jitter, then wait for ordinary refresh or an explicit reload. Background,
+consent, context and close fences still apply. No new public API is needed.
+
 ## Consent and properties
 
 ```kotlin

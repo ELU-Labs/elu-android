@@ -253,6 +253,10 @@ internal class StandaloneRuntime(
             ),
         )
 
+    internal fun captureFlagExposure(exposure: RuntimeFlagExposureCapture, occurredAt: String): Future<RuntimeCaptureResult> =
+        submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$feature_flag_called", occurredAt,
+            exposure.properties(), versions, flagExposure = exposure))
+
     fun screen(
         name: String,
         properties: Map<String, Any?> = emptyMap(),

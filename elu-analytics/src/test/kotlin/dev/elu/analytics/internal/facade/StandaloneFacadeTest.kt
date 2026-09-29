@@ -247,8 +247,8 @@ class StandaloneFacadeTest {
     }
 
     @Test
-    fun `a flag read reports the stored value and exposes it once per identity`() {
-        val harness = harness()
+    fun `a flag read reports once per visitor and typed value across identify reload and reset`() {
+        val harness = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
         harness.facade.applyConfiguration(config())
         harness.settle()
 
@@ -267,6 +267,12 @@ class StandaloneFacadeTest {
         assertEquals(1, exposures.size)
         assertEquals("variant", exposures.single()["\$feature_flag"])
         assertEquals("variant-a", exposures.single()["\$feature_flag_response"])
+        assertTrue((exposures.single()["\$feature_flag_request_id"] as String).startsWith("flags_request_"))
+        assertEquals(NOW_MS, exposures.single()["\$feature_flag_evaluated_at"])
+        assertEquals(false, exposures.single()["\$used_bootstrap_value"])
+        assertTrue(exposures.single().containsKey("\$feature_flag_bootstrapped_response"))
+        assertNull(exposures.single()["\$feature_flag_bootstrapped_response"])
+        assertNull(exposures.single()["\$feature_flag_bootstrapped_payload"])
 
         harness.facade.getFeatureFlag("variant")
         harness.settle()
@@ -276,6 +282,13 @@ class StandaloneFacadeTest {
         harness.settle()
         harness.facade.getFeatureFlag("variant")
         harness.settle()
+        assertEquals(1, harness.exposures().size)
+        harness.facade.reloadFeatureFlags {}; harness.settle()
+        harness.facade.getFeatureFlag("variant"); harness.settle()
+        assertEquals(1, harness.exposures().size)
+        harness.facade.reset(); harness.settle()
+        harness.facade.getFeatureFlag("variant"); harness.settle()
+        harness.facade.getFeatureFlag("variant"); harness.settle()
         assertEquals(2, harness.exposures().size)
     }
 
@@ -780,6 +793,192 @@ class StandaloneFacadeTest {
         }
     }
 
+    @Test fun `accepted exposure survives reopen and cached missing flag keeps original evaluation metadata`() {
+        val backing = FakeRuntimeQueueBacking()
+        fun selected(transport: RespondingFlagTransport = RespondingFlagTransport()) = harness(backing = backing,
+            suppliedFlagTransport = transport, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        val first = selected(); first.facade.applyConfiguration(config()); first.settle()
+        first.facade.getFeatureFlag("variant"); first.settle()
+        first.facade.getFeatureFlag("variant"); first.settle()
+        assertEquals(1, first.exposures().size)
+        val originalRequest = first.exposures().first()["\$feature_flag_request_id"]
+        first.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val transport = RespondingFlagTransport().apply { failing = true }
+        val reopened = selected(transport); reopened.facade.applyConfiguration(config()); reopened.settle()
+        reopened.facade.getFeatureFlag("variant"); reopened.settle()
+        assertEquals("variant-a", reopened.facade.getFeatureFlag("variant")); reopened.settle()
+        assertEquals(1, reopened.exposures().size)
+        reopened.facade.getFeatureFlag("not-in-evaluation"); reopened.settle()
+        assertNull(reopened.facade.getFeatureFlag("not-in-evaluation")); reopened.settle()
+        val missing = reopened.exposures().last()
+        assertEquals(2, reopened.exposures().size)
+        assertEquals("flag_missing", missing["\$feature_flag_error"])
+        assertFalse(missing.containsKey("\$feature_flag_response"))
+        assertEquals(true, missing["\$used_bootstrap_value"])
+        assertEquals(NOW_MS, missing["\$feature_flag_evaluated_at"])
+        assertEquals(originalRequest, missing["\$feature_flag_request_id"])
+        transport.failing = false
+        reopened.facade.reloadFeatureFlags {}; reopened.settle()
+        reopened.facade.getFeatureFlag("bool-false"); reopened.settle()
+        reopened.facade.getFeatureFlag("bool-false"); reopened.settle()
+        assertEquals(false, reopened.exposures().last()["\$feature_flag_response"])
+        assertEquals(false, reopened.exposures().last()["\$used_bootstrap_value"])
+    }
+
+    @Test fun `exposure rejection and rollback do not consume durable visitor report`() {
+        for (ambiguous in listOf(false, true)) {
+            val backing = FakeRuntimeQueueBacking()
+            val h = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            h.facade.applyConfiguration(config()); h.settle()
+            h.facade.getFeatureFlag("variant"); h.settle()
+            val attempts = backing.mutatedTransactionAttempts
+            if (ambiguous) backing.ambiguousNextCommit = dev.elu.analytics.internal.runtime.FakeAmbiguousOutcome.ROLLBACK
+            else backing.failNextKnownCommit = java.io.IOException("known rollback")
+            h.facade.getFeatureFlag("variant"); h.settle()
+            if (ambiguous) {
+                // Exact reconciliation proves the first attempt rolled back and retries once.
+                // If the first attempt had consumed the marker, this retry could not report.
+                assertEquals(attempts + 2, backing.mutatedTransactionAttempts)
+                assertEquals(1, h.exposures().size)
+            } else {
+                assertTrue(h.exposures().isEmpty())
+                assertTrue(h.owner.snapshot().get().exposures!!.digests.isEmpty())
+                h.facade.getFeatureFlag("variant"); h.settle()
+            }
+            assertEquals(1, h.exposures().size)
+            assertEquals(1, h.owner.snapshot().get().exposures!!.digests.size)
+        }
+        val small = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+            limits = RuntimeQueueLimits(10, 1))
+        small.facade.applyConfiguration(config()); small.settle()
+        small.facade.getFeatureFlag("variant"); small.settle()
+        small.facade.getFeatureFlag("variant"); small.settle()
+        assertTrue(small.owner.snapshot().get().exposures!!.digests.isEmpty())
+    }
+
+    @Test fun `ambiguous committed exposure is reconciled and duplicate does not allocate again`() {
+        val backing = FakeRuntimeQueueBacking()
+        val h = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        backing.ambiguousNextCommit = dev.elu.analytics.internal.runtime.FakeAmbiguousOutcome.COMMIT
+        h.facade.getFeatureFlag("variant"); h.settle()
+        val before = h.owner.snapshot().get()
+        repeat(3) { h.facade.getFeatureFlag("variant") }; h.settle()
+        assertEquals(1, h.exposures().size)
+        assertEquals(before, h.owner.snapshot().get())
+    }
+
+    @Test fun `flag failures use bounded backoff and stale retry cannot run after optout or close`() {
+        val scheduler = ManualFlagRetryScheduler()
+        val transport = RespondingFlagTransport().apply { failing = true }
+        val h = harness(suppliedFlagTransport = transport, retryScheduler = scheduler,
+            personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        for (seconds in listOf(5L, 10L, 20L, 40L, 80L, 160L)) {
+            assertEquals(seconds * 1_000_000_000L, scheduler.entries.last().delay)
+            scheduler.entries.last().task(); h.settle()
+        }
+        assertEquals(7, transport.requests.size)
+        assertEquals(6, scheduler.entries.size)
+        transport.failing = false
+        h.facade.reloadFeatureFlags {}; h.settle()
+        transport.failing = true
+        h.facade.reloadFeatureFlags {}; h.settle()
+        assertEquals(5_000_000_000L, scheduler.entries.last().delay)
+        val stale = scheduler.entries.last().task
+        h.facade.optOut(); h.settle()
+        val before = transport.requests.size
+        stale(); h.settle()
+        assertEquals(before, transport.requests.size)
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        stale()
+        assertTrue(scheduler.closed)
+        assertEquals(before, transport.requests.size)
+    }
+
+    @Test fun `boolean and same-spelled string variants receive different durable reports`() {
+        val transport = RespondingFlagTransport().apply { variant = false }
+        val h = harness(suppliedFlagTransport = transport, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        assertEquals(false, h.facade.getFeatureFlag("variant")); h.settle()
+        transport.variant = "false"
+        h.facade.reloadFeatureFlags {}; h.settle()
+        assertEquals("false", h.facade.getFeatureFlag("variant")); h.settle()
+        assertEquals(listOf(false, "false"), h.exposures().map { it["\$feature_flag_response"] })
+        assertEquals(2, h.owner.snapshot().get().exposures!!.digests.size)
+    }
+
+    @Test fun `acknowledgement and optout optin retain accepted report without advancing session on duplicate`() {
+        val h = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        val ledger = h.owner.snapshot().get().exposures
+        val record = h.records().single()
+        h.owner.acknowledge(dev.elu.analytics.internal.runtime.RuntimeAcknowledgement("stream_facade", listOf(
+            dev.elu.analytics.internal.runtime.RuntimeRecordReference(record.sequence, record.kind, record.recordId)))).get(5, TimeUnit.SECONDS)
+        h.facade.optOut(); h.settle(); h.facade.optIn(null, null); h.settle()
+        val before = h.owner.snapshot().get()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        assertTrue(h.exposures().isEmpty())
+        assertEquals(ledger, h.owner.snapshot().get().exposures)
+        assertEquals(before.state.identity.session, h.owner.snapshot().get().state.identity.session)
+    }
+
+    @Test fun `consent revocation after exposure write rolls back both event and ledger`() {
+        var afterInsert: () -> Unit = {}
+        val h = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+            databaseDecorator = { database -> object : dev.elu.analytics.internal.runtime.RuntimeQueueDatabase by database {
+                override fun <T> transaction(block: (dev.elu.analytics.internal.runtime.RuntimeQueueTransaction) -> T): T =
+                    database.transaction { transaction -> block(object : dev.elu.analytics.internal.runtime.RuntimeQueueTransaction by transaction {
+                        override fun insertRecord(record: dev.elu.analytics.internal.runtime.RuntimeStoredRecord) {
+                            transaction.insertRecord(record); afterInsert()
+                        }
+                    }) }
+            } })
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        afterInsert = { h.facade.optOut() }
+        h.facade.getFeatureFlag("variant"); h.settle()
+        assertTrue(h.exposures().isEmpty())
+        assertTrue(h.owner.snapshot().get().exposures!!.digests.isEmpty())
+        assertTrue(h.facade.isOptedOut())
+    }
+
+    @Test fun `saturated exposure ledger retains old reports while ordinary capture and getters remain usable`() {
+        val backing = FakeRuntimeQueueBacking()
+        val initial = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        initial.settle(); initial.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        var ledger = backing.core!!.exposures!!
+        repeat(dev.elu.analytics.internal.runtime.MAX_RUNTIME_FLAG_EXPOSURES) {
+            ledger = ledger.adding(dev.elu.analytics.internal.runtime.RuntimeFlagExposureState.digest("old-$it", true))!!
+        }
+        backing.core = backing.core!!.copy(exposures = ledger)
+        val h = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.getFeatureFlag("variant"); h.settle()
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant")); h.settle()
+        assertTrue(h.exposures().isEmpty())
+        assertEquals(ledger, h.owner.snapshot().get().exposures)
+        h.facade.capture("ordinary", null, Date(NOW_MS)); h.settle()
+        assertEquals(listOf("event:ordinary"), h.queued())
+    }
+
+    private class ManualFlagRetryScheduler : dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler {
+        data class Entry(val delay: Long, val task: () -> Unit, var canceled: Boolean = false)
+        val entries = mutableListOf<Entry>()
+        var closed = false
+        override fun schedule(delayNanos: Long, task: () -> Unit): dev.elu.analytics.internal.config.V2ConfigLifecycleTask {
+            check(!closed)
+            val entry = Entry(delayNanos, task); entries += entry
+            return dev.elu.analytics.internal.config.V2ConfigLifecycleTask { entry.canceled = true }
+        }
+        override fun close() { closed = true; entries.forEach { it.canceled = true } }
+    }
+
     // ---- harness -------------------------------------------------------------
 
     @Test
@@ -850,11 +1049,14 @@ class StandaloneFacadeTest {
         networkApiHost: String? = null,
         onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
         personProfiles: dev.elu.analytics.EluPersonProfilesMode? = null,
+        suppliedFlagTransport: RespondingFlagTransport = RespondingFlagTransport(),
+        retryScheduler: dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler = ManualFlagRetryScheduler(),
+        limits: RuntimeQueueLimits = RuntimeQueueLimits(10_000, 16_777_216),
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
                 ownershipKey = "facade-${keyCounter.incrementAndGet()}",
-                limits = RuntimeQueueLimits(10_000, 16_777_216),
+                limits = limits,
                 databaseFactory = { databaseDecorator(backing.connection()) },
                 legacyStateLoader = ::initialState,
                 personProfiles = personProfiles,
@@ -874,7 +1076,7 @@ class StandaloneFacadeTest {
                 transportFactory = { transport },
                 deviceInEuTimezone = { deviceInEu },
             )
-        val flagTransport = RespondingFlagTransport()
+        val flagTransport = suppliedFlagTransport
         val flags =
             AndroidFeatureFlagClient(
                 owner,
@@ -892,6 +1094,8 @@ class StandaloneFacadeTest {
                 bufferLimit = bufferLimit,
                 onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
                 lane = facadeLane,
+                flagRetryScheduler = retryScheduler,
+                flagRetryJitter = { 0.0 },
                 networkConfigHost = networkConfigHost,
                 networkApiHost = networkApiHost,
                 onCloseSettled = onCloseSettled,
@@ -953,11 +1157,14 @@ class StandaloneFacadeTest {
         val requests = mutableListOf<JSONObject>()
         val requestIds = AtomicInteger()
         val revisions = AtomicInteger()
+        @Volatile var failing = false
+        @Volatile var variant: Any = "variant-a"
 
         @Synchronized
         override fun send(request: dev.elu.analytics.internal.flags.FlagTransportRequest): SdkFuture<ByteArray> {
             val body = JSONObject(String(request.canonicalBody, StandardCharsets.UTF_8))
             requests += body
+            if (failing) return SdkFuture<ByteArray>().also { it.completeExceptionally(java.io.IOException("offline")) }
             val response =
                 JSONObject()
                     .put("schemaVersion", 1)
@@ -970,7 +1177,7 @@ class StandaloneFacadeTest {
                     .put(
                         "flags",
                         JSONObject()
-                            .put("variant", "variant-a")
+                            .put("variant", variant)
                             .put("bool-false", false),
                     )
                     .put("payloads", JSONObject().put("variant", JSONObject().put("buttonColor", "violet")))

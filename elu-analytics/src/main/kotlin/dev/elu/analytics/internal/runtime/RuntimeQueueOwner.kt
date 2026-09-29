@@ -74,6 +74,7 @@ internal data class RuntimeQueueSnapshot(
     /** The first queued sequence, or nextSequence when the queue is empty. */
     val headSequence: Long,
     val person: RuntimePersonState? = null,
+    val exposures: RuntimeFlagExposureState? = null,
 )
 
 internal enum class RuntimeAppendRejection {
@@ -2053,6 +2054,21 @@ internal class RuntimeQueueOwner private constructor(
             ?: corrupt("Runtime core disappeared during person metadata initialization")
         if (current.person != expected) corrupt("Person metadata migration diverged")
         loaded = current
+        initializeExposureState()
+    }
+
+    private fun initializeExposureState() {
+        val before = requireLoaded()
+        val expected = before.exposures ?: RuntimeFlagExposureState.initial(before.state)
+        try {
+            database().ensureExposureSchema()
+        } catch (ambiguous: AmbiguousRuntimeCommitException) {
+            if (reopenValidated(ambiguous)?.exposures != expected) throw ambiguous
+        }
+        val current = database().transaction { loadValidated(it, validatePayloads = true) }
+            ?: corrupt("Runtime core disappeared during exposure initialization")
+        if (current.exposures != expected) corrupt("Exposure metadata migration diverged")
+        loaded = current
     }
 
     private fun normalizeLegacyOptedOutSession(
@@ -2372,8 +2388,25 @@ internal class RuntimeQueueOwner private constructor(
                             )
                         }
                         val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
+                        fun exposureMatches(): Boolean {
+                            val exposure = command.flagExposure ?: return true
+                            if (!exposure.isCurrent() || featureFlagClockPoisoned || !flagConfigurationIsCurrent()) return false
+                            val flagAuthority = currentFlagAuthorization() ?: return false
+                            return FlagDurableStore.read(transaction, flagAuthority, before.state, command.versions,
+                                exposure.key, captureClock.wallNowEpochMillis()) == exposure.read && exposure.isCurrent()
+                        }
+                        if (!exposureMatches()) return@transaction CaptureCommit(
+                            RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
+                        val nextExposures = command.flagExposure?.let { exposure ->
+                            val ledger = before.exposures ?: return@transaction CaptureCommit(
+                                RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
+                            if (ledger.contains(exposure.digest)) return@transaction CaptureCommit(
+                                RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EXPOSURE_ALREADY_REPORTED, before.publicSnapshot), null)
+                            ledger.adding(exposure.digest) ?: return@transaction CaptureCommit(
+                                RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.QUEUE_LIMIT, before.publicSnapshot), null)
+                        }
                         val session = planCaptureSession(before.state, command.occurredAt, authority)
-                        fun originalContextMatches(): Boolean = (command.expectation?.let { expected ->
+                        fun originalContextMatches(): Boolean = exposureMatches() && (command.expectation?.let { expected ->
                             before.state.identity.revision == expected.identityRevision &&
                                 before.state.identity.contextRevision == expected.contextRevision &&
                                 before.state.identity.session?.lifecycle == SessionLifecycle.ACTIVE &&
@@ -2438,6 +2471,7 @@ internal class RuntimeQueueOwner private constructor(
                             created = created.copy(after = created.after.copy(diagnostics = before.diagnostics.copy(
                                 lastLaunchUptimeNanos = measurement.launchUptimeNanos)))
                         }
+                        if (nextExposures != null) created = created.copy(after = created.after.copy(exposures = nextExposures))
                         prepared = created
                         // This is the final check after SQLite has begun its transaction and
                         // immediately before the first queue/core write.
@@ -2608,6 +2642,9 @@ internal class RuntimeQueueOwner private constructor(
     private fun isValidCaptureCommand(command: RuntimeCaptureCommand): Boolean {
         // Diagnostic events are runtime-internal and never admitted through a capture command.
         if (command.kind == RuntimeEventKind.DIAGNOSTIC) return false
+        if (command.flagExposure != null && (command.kind != RuntimeEventKind.CAPTURE || command.name != "\$feature_flag_called" ||
+                command.expectation != null || command.networkExpectation != null || command.startupMeasurement != null ||
+                command.properties != command.flagExposure.properties())) return false
         if (command.expectation != null && ((command.name != "\$performance_sample" && command.startupMeasurement == null) || command.kind != RuntimeEventKind.CAPTURE)) return false
         if (command.startupMeasurement != null && (command.expectation == null || command.networkExpectation != null ||
                 command.kind != RuntimeEventKind.CAPTURE || command.name != "\$native_launch" ||
@@ -2944,6 +2981,8 @@ internal class RuntimeQueueOwner private constructor(
                     (request is AppendRequest.Local && request.change is RuntimeLocalStateChange.SetOptedOut))
                     RuntimeDiagnosticsState() else before.diagnostics,
                 person = transitionedPerson,
+                exposures = if (before.exposures != null && before.state.identity.anonymousId != committedState.identity.anonymousId)
+                    RuntimeFlagExposureState.initial(committedState) else before.exposures,
             )
         return PreparedAppend(before, after, records, rejection = null)
     }
@@ -3228,6 +3267,11 @@ internal class RuntimeQueueOwner private constructor(
             if (personProfiles == null) corrupt("Person metadata requires a selected profile mode")
             if (it.streamId != state.stream.streamId) corrupt("Person metadata does not match owned stream")
         }
+        core.exposures?.let {
+            if (personProfiles == null) corrupt("Exposure metadata requires production person mode")
+            if (it.streamId != state.stream.streamId || it.anonymousId != state.identity.anonymousId)
+                corrupt("Exposure metadata does not match owned visitor")
+        }
         core.diagnostics.epoch?.let { epoch ->
             if (epoch.streamId != state.stream.streamId || epoch.identityRevision != state.identity.revision || state.identity.optedOut)
                 corrupt("Diagnostics epoch does not match owned identity")
@@ -3238,7 +3282,7 @@ internal class RuntimeQueueOwner private constructor(
             corrupt("Stored queue count exceeds the allocated sequence range")
         }
         val head = Math.subtractExact(state.stream.nextSequence, core.queueCount)
-        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics, core.person)
+        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics, core.person, core.exposures)
         if (validatePayloads) {
             validateAllRecords(transaction, loaded)
             ReplayQueueStore.validate(transaction, ownerNamespaceHash)
@@ -3875,7 +3919,7 @@ internal class RuntimeQueueOwner private constructor(
         left.queuedCount == right.queuedCount &&
             left.queuedBytes == right.queuedBytes &&
             left.headSequence == right.headSequence &&
-            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience && left.diagnostics == right.diagnostics && left.person == right.person
+            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience && left.diagnostics == right.diagnostics && left.person == right.person && left.exposures == right.exposures
 
     private fun storedRecordsEqual(
         left: RuntimeStoredRecord,
@@ -3993,11 +4037,12 @@ internal class RuntimeQueueOwner private constructor(
         val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
         val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
         val person: RuntimePersonState? = null,
+        val exposures: RuntimeFlagExposureState? = null,
     ) {
         val publicSnapshot: RuntimeQueueSnapshot
-            get() = RuntimeQueueSnapshot(state, queuedCount, queuedBytes, headSequence, person)
+            get() = RuntimeQueueSnapshot(state, queuedCount, queuedBytes, headSequence, person, exposures)
 
-        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience, diagnostics, person)
+        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience, diagnostics, person, exposures)
     }
 
     private data class PreparedAppend(

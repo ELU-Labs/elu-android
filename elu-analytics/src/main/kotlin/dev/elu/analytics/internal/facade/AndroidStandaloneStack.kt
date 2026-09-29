@@ -77,6 +77,10 @@ internal object AndroidStandaloneStack {
                     facade.configurationChanged()
                 }
             } catch (_: java.util.concurrent.RejectedExecutionException) { gate.close() }
+        }, onRetainedRefresh = { token ->
+            // No gate publication or lease renewal. Recheck the same original token on the facade lane.
+            try { notifications.execute { facade.configurationRefreshed(token) } }
+            catch (_: java.util.concurrent.RejectedExecutionException) { gate.close() }
         })
         facade = StandaloneFacade(
             open = {
