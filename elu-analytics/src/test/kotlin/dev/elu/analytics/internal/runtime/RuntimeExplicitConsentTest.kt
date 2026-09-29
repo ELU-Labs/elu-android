@@ -184,7 +184,7 @@ class RuntimeExplicitConsentTest {
 
     private fun state() = PersistedCoreState(identity = IdentityState(revision = 0, contextRevision = 0,
         anonymousId = "anon_${UUID.randomUUID()}", userId = null, groups = emptyMap(), superProperties = emptyMap(),
-        session = null, optedOut = false, updatedAt = at), stream = StreamState("stream_${UUID.randomUUID()}", 0),
+        session = null, optedOut = false, updatedAt = at), stream = StreamState(streamId = "stream_${UUID.randomUUID()}", nextSequence = 0),
         flagContext = FlagContextState(personProperties = emptyMap(), groupProperties = emptyMap()))
 
     private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
