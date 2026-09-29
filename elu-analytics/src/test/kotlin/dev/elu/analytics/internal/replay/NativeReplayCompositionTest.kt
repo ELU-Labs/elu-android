@@ -96,6 +96,9 @@ class NativeReplayCompositionTest {
     private fun NativeReplayComposition.currentCapture(): NativeReplayCaptureOwner =
         checkNotNull(NativeReplayComposition::class.java.getDeclaredField("capture").also { it.isAccessible = true }
             .get(this) as NativeReplayCaptureOwner?)
+    private fun NativeReplayComposition.currentDelivery(): ReplayDeliveryCoordinator =
+        checkNotNull(NativeReplayComposition::class.java.getDeclaredField("delivery").also { it.isAccessible = true }
+            .get(this) as ReplayDeliveryCoordinator?)
     private fun awaitCondition(message: String, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(5)
@@ -147,10 +150,21 @@ class NativeReplayCompositionTest {
 
     @Test fun `missing root observes no text or repeated SQL preparation and resumes without public hint`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
-        val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+        val platform = Platform(rig, access); val ticks = platform.manualTicks(); val wire = Transport(hold = true)
+        val owner = composition(rig, life, platform, wire)
         try {
             owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
             val first = rig.rows().single().prepared
+            // Finish the original delivery before measuring root-only observation. Its lawful
+            // queue reconciliation also reads native accounting and is not a root polling tick.
+            assertTrue(wire.entered.await(3, TimeUnit.SECONDS))
+            val delivery = owner.flushSealed()
+            wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
+            assertEquals(ReplayDeliveryPass(1, 1), delivery.get(3, TimeUnit.SECONDS))
+            assertEquals(1, wire.requests.size)
+            // A coalesced flush may already have scheduled another claim after this pass. Join
+            // that original delivery owner as well; this test exercises root recovery, not egress.
+            owner.currentDelivery().closeAndWait().get(3, TimeUnit.SECONDS)
             access.rootAvailable = false; ticks.release(); awaitCondition("original root observer") { owner.observingRoot() }
             assertFalse(owner.recordingStarted()); assertNull(rig.state().session?.activeEpoch)
             val reads = access.rootReads.get(); val nativeReads = AtomicInteger()
@@ -163,7 +177,10 @@ class NativeReplayCompositionTest {
             val second = rig.rows().last().prepared
             assertNotEquals(first.replayId, second.replayId); assertEquals(first.sessionId, second.sessionId)
             assertFalse(owner.observingRoot())
-        } finally { rig.onNativeRead = null; owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally {
+            rig.onNativeRead = null; wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
+            owner.closeAndWait().get(3, TimeUnit.SECONDS)
+        }
     } }
 
     @Test fun `missing root observer cannot survive local stop source consent identity or privacy withdrawal`() = run {

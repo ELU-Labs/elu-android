@@ -232,11 +232,16 @@ class NativeReplayCaptureQueueTest {
                 val otherGeneration = NativeReplayProtocol.values().single { it != protocol }.generation
                 val crossed = PreparedReplayRequest.parse(request.copyBytes(), otherGeneration)
                 assertTrue(rig.owner.appendNativeReplay(crossed, admission, session.use).get() is NativeReplayAppendOutcome.Rejected)
-                Rig(protocol).use { foreign ->
+                val foreignState = initial().let { state -> state.copy(identity = state.identity.copy(
+                    anonymousId = "foreign-anonymous", userId = "foreign-user")) }
+                Rig(protocol, foreignState).use { foreign ->
                     foreign.activate(); Session(foreign).use { other ->
                         other.begin(); val foreignAdmission = other.admission()
                         assertTrue(rig.owner.appendNativeReplay(request, foreignAdmission, session.use).get() is NativeReplayAppendOutcome.Rejected)
-                        assertTrue(rig.owner.appendNativeReplay(other.request(foreignAdmission), admission, session.use).get() is NativeReplayAppendOutcome.Rejected)
+                        val foreignRequest = other.request(foreignAdmission)
+                        assertNotEquals(request.anonymousId, foreignRequest.anonymousId)
+                        assertNotEquals(request.userId, foreignRequest.userId)
+                        assertTrue(rig.owner.appendNativeReplay(foreignRequest, admission, session.use).get() is NativeReplayAppendOutcome.Rejected)
                     }
                 }
                 assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
@@ -628,7 +633,8 @@ class NativeReplayCaptureQueueTest {
         failure { rig.openSame().get(3, TimeUnit.SECONDS) }
         assertArrayEquals(before, rig.row().payload)
     }
-    private class Rig(val protocol: NativeReplayProtocol = NativeReplayProtocol.V1) : AutoCloseable {
+    private class Rig(val protocol: NativeReplayProtocol = NativeReplayProtocol.V1,
+        private val initialState: PersistedCoreState = initial()) : AutoCloseable {
         val clock = Clock(); val worker = Worker(); val gate = V2ConfigAuthorityGate()
         var body = ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json")
         val source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
@@ -676,7 +682,7 @@ class NativeReplayCaptureQueueTest {
                         return result
                     }
                 }
-            }, legacyStateLoader = { initial() }, trustedSiteKey = KEY,
+            }, legacyStateLoader = { initialState }, trustedSiteKey = KEY,
             captureClock = object : RuntimeCaptureClock {
                 override fun wallNowEpochMillis(): Long {
                     onOwnerClock?.also { onOwnerClock = null }?.invoke()
