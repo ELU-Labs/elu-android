@@ -813,9 +813,9 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory) {
                 throw IOException("Could not create runtime database directory")
             }
-            // The original owner already holds the process/file lease. Refuse unsupported
-            // schema or person metadata before a writable open can change the journal header.
-            if (file.exists()) validateExistingReadOnly(file)
+            // The original owner already holds the process/file lease. Even SQLite READONLY
+            // can rewrite original SHM; validate a private DB/WAL/journal copy first.
+            if (file.exists()) AndroidRuntimeDatabasePreflight.withSnapshot(file) { validateExistingSnapshot(it) }
             val sqlite =
                 SQLiteDatabase.openDatabase(
                     file.absolutePath,
@@ -849,9 +849,11 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             throw RuntimeQueueCorruptionException("Runtime SQLite corruption refused without recovery")
         }
 
-        private fun validateExistingReadOnly(file: File) {
+        private fun validateExistingSnapshot(file: File) {
+            // Writable recovery is confined to the disposable copy so a valid interrupted
+            // rollback-journal transaction can be recovered before its strict metadata checks.
             SQLiteDatabase.openDatabase(file.absolutePath, null,
-                SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
                 REFUSE_CORRUPTION_RECOVERY).use { readOnly ->
                 validateIntegrity(readOnly)
                 val version = pragmaLong(readOnly, "PRAGMA user_version")

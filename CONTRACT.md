@@ -121,6 +121,25 @@ preserve it. `flush` schedules work; it cannot guarantee network completion
 before Android stops the process. Queue and age limits can prevent admission
 or retire expired records; the SDK does not promise unlimited offline retention.
 
+Existing-store preflight runs under the original process/file ownership lease.
+Before SQLite opens the original, the SDK streams its database and any WAL or
+rollback journal into a private per-store snapshot. Original SHM is never read by
+SQLite during preflight: even a read-only SQLite connection can change WAL read
+marks. Recovery and strict integrity/schema/identity checks run on the copy;
+refusal preserves every original family member. Successful admission then opens
+and revalidates the original normally. Scratch recovery removes only the exact
+known regular files in that store's reserved directory; unknown entries or links
+refuse startup.
+
+This adds linear read/write I/O and temporary storage equal to the existing
+physical database plus copied WAL/journal, with additional SQLite scratch sidecars.
+There is no new fixed store-size ceiling. Admission checks that the copy's exact
+minimum space is available, but later exhaustion still fails closed and cleans up;
+it cannot guarantee space against concurrent app writes. Logical queue quotas do
+not bound previously allocated SQLite pages or this temporary footprint. A process
+interrupted during preflight leaves at most that one reserved snapshot; the next
+original lease reclaims it before another copy. Fresh stores need no snapshot.
+
 The unused 0.1.0 preview and unpublished aggregate-file builds have no supported
 persisted-data import. Clean setup starts a fresh owned installation without
 opening or deleting their old data. Retired import checkpoints are refused,
