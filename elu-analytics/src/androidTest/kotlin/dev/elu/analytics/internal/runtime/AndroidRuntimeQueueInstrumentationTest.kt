@@ -816,7 +816,8 @@ class AndroidRuntimeQueueInstrumentationTest {
             val before = owner.peek(10, Long.MAX_VALUE).await()
             val identity = owner.snapshot().await().state.identity
             owner.closeAsync().await(); owners.remove(owner)
-            if (offset == 0) SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { sqlite ->
+            if (offset == 0) SQLiteDatabase.openDatabase(file.path, null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sqlite ->
                 sqlite.execSQL("DROP TABLE replay_audience"); executePragma(sqlite, "PRAGMA user_version = $base")
             }
             SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
@@ -879,12 +880,24 @@ class AndroidRuntimeQueueInstrumentationTest {
 
     @Test
     fun personSchemaRefusesMissingCorruptForeignAndFutureMetadataWithoutRecovery() {
-        for (damage in listOf("missing", "corrupt", "foreign", "table", "future")) {
+        for (wal in listOf(false, true)) for (damage in listOf("missing", "corrupt", "foreign", "table", "future")) {
             val file = databaseFile()
+            val familySuffixes = listOf("", "-wal", "-shm", "-journal")
+            fun databaseFamily(): Map<String, ByteArray> = familySuffixes
+                .map { suffix -> File(file.path + suffix) }.filter { it.exists() }
+                .associate { it.name to it.readBytes() }
             val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
                 personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
             original.closeAsync().await(); owners.remove(original)
-            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { sqlite ->
+            var retainedWal: Map<String, ByteArray>? = null
+            SQLiteDatabase.openDatabase(file.path, null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { sqlite ->
+                // Deliberately retain a rollback-journal file. Refusal must happen before the
+                // production open could rewrite header byte18 to WAL, including on API35+.
+                if (wal) {
+                    assertTrue(sqlite.enableWriteAheadLogging())
+                    executePragma(sqlite, "PRAGMA wal_autocheckpoint = 0")
+                } else sqlite.disableWriteAheadLogging()
                 when (damage) {
                     "missing" -> sqlite.execSQL("DELETE FROM person_state")
                     "corrupt" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf("{}".toByteArray()))
@@ -892,16 +905,35 @@ class AndroidRuntimeQueueInstrumentationTest {
                     "table" -> sqlite.execSQL("ALTER TABLE person_state ADD COLUMN unknown TEXT")
                     "future" -> executePragma(sqlite, "PRAGMA user_version=37")
                 }
+                if (wal) {
+                    retainedWal = databaseFamily()
+                    assertTrue(retainedWal!!.containsKey(file.name + "-wal"))
+                    assertTrue(retainedWal!!.containsKey(file.name + "-shm"))
+                }
             }
-            val originalBytes = file.readBytes()
+            // Retain actual uncheckpointed SQLite bytes, as a process interruption would;
+            // closing the fixture connection normally checkpoints/removes these sidecars.
+            retainedWal?.let { retained ->
+                for (suffix in familySuffixes) {
+                    val member = File(file.path + suffix)
+                    val bytes = retained[member.name]
+                    if (bytes == null) { if (member.exists()) assertTrue(member.delete()) }
+                    else member.writeBytes(bytes)
+                }
+            }
+            val originalBytes = databaseFamily()
+            val faults = RecordingFaults()
             try {
-                open(file, CountingIdentifiers(), RecordingFaults(), { error("Must not recover invalid metadata") },
+                open(file, CountingIdentifiers(), faults, { error("Must not recover invalid metadata") },
                     personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
                 fail("Must refuse $damage")
             } catch (expected: ExecutionException) {
                 assertTrue(expected.cause is RuntimeQueueCorruptionException || expected.cause is UnsupportedRuntimeStorageSchemaException)
             }
-            assertArrayEquals(originalBytes, file.readBytes())
+            assertTrue("$damage WAL=$wal reached writable connection configuration", faults.connectionSettings.isEmpty())
+            val after = databaseFamily()
+            assertEquals(originalBytes.keys, after.keys)
+            for ((name, bytes) in originalBytes) assertArrayEquals("$damage WAL=$wal changed $name", bytes, after.getValue(name))
         }
     }
 

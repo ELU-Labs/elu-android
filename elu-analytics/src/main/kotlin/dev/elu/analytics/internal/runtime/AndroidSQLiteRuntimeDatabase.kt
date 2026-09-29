@@ -5,6 +5,7 @@ import dev.elu.analytics.internal.core.CoreStateCodec
 
 import android.content.ContentValues
 import android.database.Cursor
+import android.database.DatabaseErrorHandler
 import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import java.io.File
@@ -812,6 +813,9 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory) {
                 throw IOException("Could not create runtime database directory")
             }
+            // The original owner already holds the process/file lease. Refuse unsupported
+            // schema or person metadata before a writable open can change the journal header.
+            if (file.exists()) validateExistingReadOnly(file)
             val sqlite =
                 SQLiteDatabase.openDatabase(
                     file.absolutePath,
@@ -819,7 +823,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     SQLiteDatabase.OPEN_READWRITE or
                         SQLiteDatabase.CREATE_IF_NECESSARY or
                         SQLiteDatabase.NO_LOCALIZED_COLLATORS,
-            )
+                    REFUSE_CORRUPTION_RECOVERY,
+                )
             try {
                 // Android 15 can safely execute row-returning PRAGMAs on every pooled connection.
                 // Older releases stay single-connection so these durability settings cannot
@@ -837,6 +842,36 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             } catch (error: Throwable) {
                 sqlite.close()
                 throw error
+            }
+        }
+
+        private val REFUSE_CORRUPTION_RECOVERY = DatabaseErrorHandler {
+            throw RuntimeQueueCorruptionException("Runtime SQLite corruption refused without recovery")
+        }
+
+        private fun validateExistingReadOnly(file: File) {
+            SQLiteDatabase.openDatabase(file.absolutePath, null,
+                SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+                REFUSE_CORRUPTION_RECOVERY).use { readOnly ->
+                validateIntegrity(readOnly)
+                val version = pragmaLong(readOnly, "PRAGMA user_version")
+                if (version == 0L) {
+                    if (applicationSchemaObjects(readOnly).isNotEmpty())
+                        corrupt("Unversioned runtime database contains unexpected schema objects")
+                    return
+                }
+                validateSchemaObjects(readOnly, version)
+                if (version > RUNTIME_PERSON_SCHEMA_OFFSET) {
+                    val person = readPerson(readOnly) ?: corrupt("Missing person state")
+                    val state = readOnly.rawQuery("SELECT state_json FROM core_state WHERE singleton_id = 1 LIMIT 2", null).use { cursor ->
+                        if (!cursor.moveToFirst()) corrupt("Person state exists without an owned core")
+                        val parsed = try { CoreStateCodec.decode(cursor.requiredBlob(0, "core_state.state_json")) }
+                        catch (error: Exception) { throw RuntimeQueueCorruptionException("Invalid person core binding", error) }
+                        if (cursor.moveToNext()) corrupt("Runtime database contains duplicate core rows")
+                        parsed
+                    }
+                    if (person.streamId != state.stream.streamId) corrupt("Person state stream binding differs")
+                }
             }
         }
 
