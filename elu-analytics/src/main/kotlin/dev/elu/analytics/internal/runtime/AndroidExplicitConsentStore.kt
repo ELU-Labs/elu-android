@@ -92,8 +92,11 @@ internal class AndroidExplicitConsentStore(
     private fun <T> withDirectory(block: (StructStat, FileDescriptor) -> T): T {
         val original = stat(directory) ?: throw IOException("Explicit consent namespace is missing")
         requireDirectory(original)
-        return withDescriptor(Os.open(directory.path, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY or OsConstants.O_NOFOLLOW, 0)) { fd ->
+        // O_DIRECTORY is not public Android API. Nonblocking open also avoids waiting
+        // on a substituted FIFO; validate the owned directory on the actual descriptor.
+        return withDescriptor(Os.open(directory.path, OsConstants.O_RDONLY or OsConstants.O_NONBLOCK or OsConstants.O_NOFOLLOW, 0)) { fd ->
             val actual = Os.fstat(fd)
+            requireDirectory(actual)
             if (actual.st_dev != original.st_dev || actual.st_ino != original.st_ino) throw IOException("Explicit consent namespace changed")
             block(original, fd)
         }
