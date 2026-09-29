@@ -326,6 +326,9 @@ dev.elu.analytics.internal.performance.NativePerformanceSampler
 dev.elu.analytics.internal.replay.AndroidNativeReplayCapturePlatform
 dev.elu.analytics.internal.replay.AndroidNativeReplaySelectionAccess
 dev.elu.analytics.internal.replay.AndroidNativeReplaySelectionAccess$watch$attachment$1
+dev.elu.analytics.internal.replay.AndroidReplayTouchObserver
+dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$5
+dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$settled$1
 dev.elu.analytics.internal.replay.AndroidViewReplayCollector
 dev.elu.analytics.internal.replay.AndroidViewReplayCollectorKt
 dev.elu.analytics.internal.replay.NativeAncestorFailure
@@ -355,6 +358,7 @@ dev.elu.analytics.internal.replay.NativeMaskingCompatibility
 dev.elu.analytics.internal.replay.NativeMaskingProfile
 dev.elu.analytics.internal.replay.NativeMaskingProfile$Companion
 dev.elu.analytics.internal.replay.NativeMaskingRetention
+dev.elu.analytics.internal.replay.NativeProjectedTouch
 dev.elu.analytics.internal.replay.NativeRect
 dev.elu.analytics.internal.replay.NativeReplayAccounting
 dev.elu.analytics.internal.replay.NativeReplayAppendOutcome
@@ -460,6 +464,15 @@ dev.elu.analytics.internal.replay.NativeReplayV2Entry
 dev.elu.analytics.internal.replay.NativeReplayV2Geometry
 dev.elu.analytics.internal.replay.NativeSolidColor
 dev.elu.analytics.internal.replay.NativeStyle
+dev.elu.analytics.internal.replay.NativeTouchAction
+dev.elu.analytics.internal.replay.NativeTouchInput
+dev.elu.analytics.internal.replay.NativeTouchLocation
+dev.elu.analytics.internal.replay.NativeTouchObservation
+dev.elu.analytics.internal.replay.NativeTouchObservationCore
+dev.elu.analytics.internal.replay.NativeTouchProjection
+dev.elu.analytics.internal.replay.NativeTouchWorkBudget
+dev.elu.analytics.internal.replay.NativeTouchWorkBudget$Companion
+dev.elu.analytics.internal.replay.NativeTouchWorkObservation
 dev.elu.analytics.internal.replay.NativeViewAnnotation
 dev.elu.analytics.internal.replay.NativeViewPrivacy
 dev.elu.analytics.internal.replay.NativeViewPrivacy$Snapshot
