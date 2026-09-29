@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import android.content.Context
 import android.os.SystemClock
 import dev.elu.analytics.internal.config.V1ReplayTransport
@@ -36,9 +37,10 @@ internal object AndroidRuntimeQueue {
         readbackProvenReplayTransports: Set<V1ReplayTransport> = emptySet(),
         supportedReplayProtocolGenerations: Set<String> = emptySet(),
         assertStartupCurrent: () -> Unit = {},
+        endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
     ): Future<RuntimeQueueOwner> {
         val applicationContext = context.applicationContext ?: context
-        val databaseFile = databaseFileFor(applicationContext, constructorSiteKey).canonicalFile
+        val databaseFile = databaseFileFor(applicationContext, constructorSiteKey, endpointPolicy).canonicalFile
         val identifiers = UuidCoreIdentifierGenerator
         return RuntimeQueueOwner.open(
             ownershipKey = databaseFile.path,
@@ -54,6 +56,7 @@ internal object AndroidRuntimeQueue {
             readbackProvenReplayTransports = readbackProvenReplayTransports,
             supportedReplayProtocolGenerations = supportedReplayProtocolGenerations,
             assertStartupCurrent = assertStartupCurrent,
+            endpointPolicy = endpointPolicy,
         )
     }
 
@@ -102,8 +105,9 @@ internal object AndroidRuntimeQueue {
     internal fun databaseFileFor(
         context: Context,
         constructorSiteKey: String,
+        endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
     ): File {
-        val siteDirectory = RuntimeSiteNamespace.directory(constructorSiteKey)
+        val siteDirectory = RuntimeSiteNamespace.directory(constructorSiteKey, endpointPolicy)
         return File(File(File(context.noBackupFilesDir, "elu-analytics/runtime"), siteDirectory), "queue-v1.sqlite")
     }
 

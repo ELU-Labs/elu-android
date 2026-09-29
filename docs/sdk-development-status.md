@@ -3,6 +3,16 @@
 This branch is an implementation checkpoint, not a released standalone SDK.
 The source candidate is 0.2.0; the published Maven version remains 0.1.0.
 
+The current self-host source slice carries the locally validated `apiHost` through
+v2 config loading, queue authorization and actual events/flags/replay transports.
+It retains exact role paths, configuration/consent guards and redirect denial,
+and isolates custom-origin stores while preserving the existing Cloud directory.
+All current Kotlin runtime/test source compiles in the cached host toolchain, and
+160 focused JVM tests pass, including actual transport construction and flag-cache,
+identity and queue isolation. The new real SQLite isolation case is authored but
+not yet compiled or run. Exact package, emulator and end-to-end results remain
+required; the earlier artifact receipts below do not cover this routing slice.
+
 The current source also implements configuration-v2 `replayAudience: "new-devices"`
 using first committed capture-session history that survives restart, identity,
 consent and reset. Existing owned stores without history are conservatively

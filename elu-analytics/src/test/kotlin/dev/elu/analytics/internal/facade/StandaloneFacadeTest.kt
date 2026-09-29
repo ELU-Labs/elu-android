@@ -732,10 +732,11 @@ class StandaloneFacadeTest {
     }
 
     @Test fun `network process cap is shared by observations and not renewed by reset or consent`() {
-        val h = harness(networkConfigHost = "localhost"); h.facade.applyConfiguration(config()); h.settle()
+        val h = harness(networkConfigHost = "localhost", networkApiHost = "analytics.example.com"); h.facade.applyConfiguration(config()); h.settle()
         assertNull(h.facade.beginNetworkObservation("elu.dev"))
         assertNull(h.facade.beginNetworkObservation("ingest.elu.dev"))
         assertNull(h.facade.beginNetworkObservation("localhost"))
+        assertNull(h.facade.beginNetworkObservation("analytics.example.com"))
         repeat(200) { checkNotNull(h.facade.beginNetworkObservation("customer.example")) }
         assertNull(h.facade.beginNetworkObservation("customer.example"))
         h.facade.reset(); h.facade.optOut(); h.facade.optIn(null, null); h.settle()
@@ -780,6 +781,7 @@ class StandaloneFacadeTest {
         databaseDecorator: (dev.elu.analytics.internal.runtime.RuntimeQueueDatabase) -> dev.elu.analytics.internal.runtime.RuntimeQueueDatabase = { it },
         facadeLane: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor(),
         networkConfigHost: String? = null,
+        networkApiHost: String? = null,
         onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
     ): Harness {
         val owner =
@@ -823,6 +825,7 @@ class StandaloneFacadeTest {
                 onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
                 lane = facadeLane,
                 networkConfigHost = networkConfigHost,
+                networkApiHost = networkApiHost,
                 onCloseSettled = onCloseSettled,
             )
         facades += facade

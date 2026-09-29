@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import android.app.Application
 import android.content.Context
 import android.content.pm.ApplicationInfo
@@ -37,15 +38,17 @@ internal object AndroidStandaloneStack {
 
     fun facade(appContext: Context, siteKey: String, configHost: String = "https://elu.dev",
         performanceOptions: dev.elu.analytics.EluPerformanceOptions = dev.elu.analytics.EluPerformanceOptions(),
-        diagnosticsOptions: dev.elu.analytics.EluDiagnosticsOptions = dev.elu.analytics.EluDiagnosticsOptions()): StandaloneFacade {
+        diagnosticsOptions: dev.elu.analytics.EluDiagnosticsOptions = dev.elu.analytics.EluDiagnosticsOptions(),
+        apiHost: String? = null): StandaloneFacade {
+        val endpointPolicy = LocalEndpointPolicy.fromApiHost(apiHost)
         // Capture fresh identity chronology before Elu.setup can publish this facade.
         val freshIdentityStartedAt = SystemCoreEpochClock.nowEpochMillis()
         val mainThread = Handler(Looper.getMainLooper())
         val application = appContext as? Application
         val gate = V2ConfigAuthorityGate()
-        val flagTransport = V2ConfigBoundFlagTransport(siteKey, gate)
+        val flagTransport = V2ConfigBoundFlagTransport(siteKey, gate, endpointPolicy)
         val debuggable = (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-        val source = V2ConfigSource(configHost, siteKey, debuggable = debuggable)
+        val source = V2ConfigSource(configHost, siteKey, debuggable = debuggable, endpointPolicy = endpointPolicy)
         val runtimeRef = AtomicReference<StandaloneRuntime?>()
         val performanceRef = AtomicReference<dev.elu.analytics.internal.performance.AndroidPerformanceMonitor?>()
         val performanceClose = AtomicReference(dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(Unit))
@@ -83,6 +86,7 @@ internal object AndroidStandaloneStack {
                 val owner = AndroidRuntimeQueue.open(appContext, siteKey, LIMITS, freshIdentityStartedAt,
                     readbackProvenReplayTransports = nativeReplayTransports,
                     supportedReplayProtocolGenerations = nativeReplayGenerations,
+                    endpointPolicy = endpointPolicy,
                     assertStartupCurrent = { check(!closing.get()) { "Standalone stack is closed" } }).get()
                 var native: NativeReplayComposition? = null
                 try {
@@ -135,6 +139,7 @@ internal object AndroidStandaloneStack {
             deliverCallback = { callback -> mainThread.post(callback) },
             configurationGate = gate,
             networkConfigHost = java.net.URI(configHost).host,
+            networkApiHost = endpointPolicy.apiHost,
             onOpened = {
                 if (performanceOptions.enabled && !closing.get()) {
                     val monitor = dev.elu.analytics.internal.performance.AndroidPerformanceMonitor(

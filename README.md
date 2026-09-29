@@ -125,8 +125,7 @@ subdomains) in every build. A debuggable build may also use a loopback origin
 (`localhost`, `127.0.0.1`, `[::1]`, or the emulator host alias `10.0.2.2`, over
 HTTP or HTTPS, on any port). A declared self-hosted origin is described below.
 Any other value makes `Elu.setup` log a warning
-and leave the SDK idle, so a release build cannot be pointed at a third-party
-endpoint.
+and leave the SDK idle. Release builds refuse undeclared third-party origins.
 
 ### Self-hosted ELU instance
 
@@ -147,8 +146,18 @@ credentials, path, query or fragment. Anything else (plain HTTP, another port,
 a subdomain, a trailing-dot host) makes `Elu.setup` log a warning and leave the
 SDK idle, as for any unapproved override. The instance serves the same
 `/sdk/v2/<siteKey>/config` contract as ELU Cloud. Declaring an origin does not
-bypass configuration or delivery authorization. The owned self-hosted delivery
-path still requires separate release qualification.
+bypass configuration or delivery authorization. The selected API origin is used
+only for the maintained `/v1/events`, `/v1/flags` and `/v2/replay` paths (and the
+optional `/sdk/` asset role). Remote configuration cannot select another origin,
+fall back to Cloud, or follow redirects. An invalid explicit `apiHost` is refused
+even when `configHost` itself is an approved Cloud or debug origin.
+
+Cloud retains its existing on-device store. Each explicitly declared API origin
+and site key has a separate identity, event/replay queue, consent and flag store.
+Changing the API origin therefore starts a separate installation; it does not
+move or delete the old store. Equivalent case/trailing-slash spellings normalize
+to the same origin. The owned self-hosted delivery path still requires fresh
+exact-package and end-to-end release qualification.
 
 An `http://` loopback origin also needs the app to permit cleartext traffic,
 which Android 9 and later block by default: add

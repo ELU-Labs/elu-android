@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import dev.elu.analytics.internal.concurrent.SdkFuture
 
 import dev.elu.analytics.internal.config.V1ChannelAuthorizationStatus
@@ -135,6 +136,7 @@ internal class RuntimeQueueOwner private constructor(
     private val replayMaskingAdmission: ReplayMaskingAdmission,
     private val supportedReplayProtocolGenerations: Set<String>,
     private val assertStartupCurrent: () -> Unit,
+    val endpointPolicy: LocalEndpointPolicy,
 ) {
     private var database: RuntimeQueueDatabase? = null
         set(value) { field = value; nativeCaptureResources?.updateDatabase(value) }
@@ -160,6 +162,7 @@ internal class RuntimeQueueOwner private constructor(
             readbackProvenReplayTransports = readbackProvenReplayTransports,
             trustedFlagSiteKey = trustedSiteKey,
             trustedFlagNamespaceDigest = trustedSiteKey?.let(RuntimeSiteNamespace::digest),
+            endpointPolicy = endpointPolicy,
         )
     private val ownerNamespaceHash: String? = trustedSiteKey?.let(RuntimeSiteNamespace::digest)
     private var pinnedConfigSiteId: String? = null
@@ -4030,6 +4033,7 @@ internal class RuntimeQueueOwner private constructor(
             replayMaskingAdmission: ReplayMaskingAdmission = ReplayMaskingAdmission { _, _ -> false },
             supportedReplayProtocolGenerations: Set<String> = emptySet(),
             assertStartupCurrent: () -> Unit = {},
+            endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
         ): Future<RuntimeQueueOwner> {
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
             lateinit var worker: Thread
@@ -4071,6 +4075,7 @@ internal class RuntimeQueueOwner private constructor(
                                 replayMaskingAdmission,
                                 Collections.unmodifiableSet(LinkedHashSet(supportedReplayProtocolGenerations)),
                                 assertStartupCurrent,
+                                endpointPolicy,
                             )
                         owner.initialize()
                         owner

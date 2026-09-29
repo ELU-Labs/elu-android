@@ -35,6 +35,7 @@ internal object EluConfigHostPolicy {
         debuggable: Boolean,
         apiHost: String? = null,
     ): String? {
+        val declaredApiOrigin = apiHost?.let { selfHostedOrigin(it) ?: return null }
         val uri = parseOrigin(configHost) ?: return null
         val scheme = uri.scheme.lowercase()
         val host = uri.host.lowercase()
@@ -47,13 +48,13 @@ internal object EluConfigHostPolicy {
             return if (uri.port == -1) "$scheme://$host" else "$scheme://$host:${uri.port}"
         }
 
-        val selfHosted = apiHost?.let { selfHostedOrigin(it) }
+        val selfHosted = declaredApiOrigin
         if (selfHosted != null && selfHostedOrigin(configHost) == selfHosted) return selfHosted
         return null
     }
 
     /** `https://host` for an HTTPS origin on the default port with a plain, non-loopback host, else null. */
-    private fun selfHostedOrigin(value: String): String? {
+    internal fun selfHostedOrigin(value: String): String? {
         val uri = parseOrigin(value) ?: return null
         val host = uri.host.lowercase()
         if (uri.scheme.lowercase() != "https" || uri.port != -1) return null

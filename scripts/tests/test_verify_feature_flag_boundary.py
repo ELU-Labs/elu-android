@@ -45,6 +45,25 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_local_endpoint_binding_rejects_lost_transport_and_namespace_policy(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        for relative, before, after in [
+            ("EluConfigHostPolicy.kt", "selfHostedOrigin(it) ?: return null", "selfHostedOrigin(it)"),
+            ("internal/config/V2ConfigSource.kt", "boundEndpoint = endpoint", "boundEndpoint = null"),
+            ("internal/config/V2ConfigTransport.kt", "endpoint == boundEndpoint", "true"),
+            ("internal/config/V1ConfigManager.kt", "endpointPolicy.matchesRole(uri, role, schemaVersion)", "true"),
+            ("internal/runtime/AndroidRuntimeQueue.kt", "constructorSiteKey, endpointPolicy).canonicalFile", "constructorSiteKey).canonicalFile"),
+            ("internal/runtime/StandaloneRuntime.kt", "endpointPolicy = owner.endpointPolicy", "endpointPolicy = LocalEndpointPolicy.CLOUD"),
+            ("internal/replay/NativeReplayComposition.kt", "NativeReplayHttpRouter(queue.endpointPolicy)", "NativeReplayHttpRouter(LocalEndpointPolicy.CLOUD)"),
+            ("internal/flags/HttpURLConnectionFlagTransport.kt", "requireApprovedEndpoint(endpoint, endpointPolicy)", "requireApprovedEndpoint(endpoint)"),
+        ]:
+            with self.subTest(relative=relative):
+                path = base / relative; original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("local endpoint", self.run_guard().stderr)
+                path.write_text(original)
+
     def test_startup_observer_rejects_privacy_lifecycle_and_durable_boundary_bypasses(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
         for relative, before, after in [

@@ -1,12 +1,13 @@
 package dev.elu.analytics.internal.flags
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
+import dev.elu.analytics.internal.config.V1EndpointRole
 import dev.elu.analytics.internal.config.AndroidV2ConfigClock
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URI
-import java.net.URLDecoder
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.util.Timer
@@ -43,6 +44,7 @@ internal class HttpURLConnectionFlagTransport(
     },
     private val connectionFactory: (URI) -> HttpURLConnection = { it.toURL().openConnection() as HttpURLConnection },
     private val diagnostic: FlagDiagnosticObserver = FlagDiagnosticObserver.NONE,
+    private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
 ) : FlagTransport, AutoCloseable {
     private val authorization: String
     private val closed = AtomicBoolean(false)
@@ -50,7 +52,7 @@ internal class HttpURLConnectionFlagTransport(
 
     init {
         require(Regex("elu_pk_(live|test)_[A-Za-z0-9]{22,64}").matches(siteKey)) { "Invalid ELU site key" }
-        requireApprovedEndpoint(endpoint)
+        requireApprovedEndpoint(endpoint, endpointPolicy)
         require(connectTimeoutMillis in 1..30_000 && readTimeoutMillis in 1..30_000 && requestTimeoutMillis in 1..30_000)
         require(maximumResponseBytes in 1..FLAG_MAX_WIRE_BYTES)
         authorization = "Bearer $siteKey"
@@ -223,17 +225,8 @@ internal class HttpURLConnectionFlagTransport(
 
     private companion object {
         /** Mirrors the frozen config manager's flags role, including non-credential routing query. */
-        fun requireApprovedEndpoint(uri: URI) {
-            val raw = uri.toString()
-            require(raw.all { it.code in 0x21..0x7e } && uri.isAbsolute && uri.scheme == "https" &&
-                uri.host?.lowercase(java.util.Locale.US) == "ingest.elu.dev" && uri.rawPath == "/v1/flags" &&
-                uri.rawUserInfo == null && uri.rawFragment == null && (uri.port == -1 || uri.port == 443)
-            ) { "Untrusted flag endpoint" }
-            uri.rawQuery?.split('&')?.forEach { part ->
-                require(URLDecoder.decode(part.substringBefore('='), Charsets.UTF_8.name()) != "site_key") {
-                    "Flag endpoint contains reserved authorization state"
-                }
-            }
+        fun requireApprovedEndpoint(uri: URI, endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD) {
+            endpointPolicy.requireApproved(uri, V1EndpointRole.FLAGS)
         }
     }
 }

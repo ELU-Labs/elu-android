@@ -63,10 +63,11 @@ internal class V2ConfigSource(
     transport: V2ConfigTransport? = null,
     private val clock: V2ConfigClock = AndroidV2ConfigClock,
     debuggable: Boolean = false,
+    private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
 ) : AutoCloseable {
-    private val endpoint = V2ConfigEndpoint.build(configHost, siteKey, debuggable)
-    private val transport = transport ?: HttpURLConnectionV2ConfigTransport(debuggable = debuggable)
-    private val manager = V1ConfigManager()
+    private val endpoint = V2ConfigEndpoint.build(configHost, siteKey, debuggable, endpointPolicy.apiOrigin)
+    private val transport = transport ?: HttpURLConnectionV2ConfigTransport(debuggable = debuggable, endpointPolicy = endpointPolicy, boundEndpoint = endpoint)
+    private val manager = V1ConfigManager(endpointPolicy = endpointPolicy)
     private val lock = Any()
     private var generation = 0L
     private var closed = false

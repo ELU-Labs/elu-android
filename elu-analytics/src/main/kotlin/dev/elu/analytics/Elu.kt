@@ -68,7 +68,7 @@ public object Elu {
                     return
                 }
                 val key = siteKey.trim()
-                val facade = AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics)
+                val facade = AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost)
                 // Publish before starting so calls made during startup are held rather than lost.
                 consent.install(facade, facade::start)
             } catch (t: Throwable) {

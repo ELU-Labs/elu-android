@@ -227,6 +227,7 @@ internal class StandaloneRuntime(
                             expiresAt = config.expiresAt,
                             eventBatchCount = limits.eventBatchCount,
                             eventBatchBytes = limits.eventBatchBytes,
+                            endpointPolicy = owner.endpointPolicy,
                         ),
                         configurationWitness,
                     )

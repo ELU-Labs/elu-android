@@ -140,6 +140,7 @@ internal class StandaloneFacade(
     private val startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
     private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
     private val networkConfigHost: String? = null,
+    private val networkApiHost: String? = null,
     private val lane: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "elu-facade").apply { isDaemon = true }
     },
@@ -604,7 +605,7 @@ internal class StandaloneFacade(
     }
 
     override fun beginNetworkObservation(host: String): dev.elu.analytics.internal.network.NativeNetworkObservation? {
-        fun eligibleHost(value: String): Boolean = value != networkConfigHost &&
+        fun eligibleHost(value: String): Boolean = value != networkConfigHost && value != networkApiHost &&
             !dev.elu.analytics.internal.network.NativeNetworkInterceptor.isOwnedSdkHost(value)
         if (!eligibleHost(host)) return null
         val original = synchronized(projectionLock) {

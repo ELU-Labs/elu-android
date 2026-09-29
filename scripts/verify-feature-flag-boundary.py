@@ -20,7 +20,7 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "d0f5a9278c9b9e2c50b4ec5d8e2500055d6cdc1a942bfb75e55414bc1a2d8b07",
+        "84539645b2e3395a75bce986e8cd85085498525ebc87a9b5d439074bf55c4d1d",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
@@ -145,7 +145,7 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("private val consent = EluConsentHandoff()" not in public or
         "private val sink get() = consent.sink" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
         errors.append("public setup must publish the exact owned sink through the consent handoff")
@@ -231,7 +231,7 @@ def verify_no_wiring(root: pathlib.Path, errors: list[str]) -> None:
         errors.append("required internal configuration-bound transport is missing or public")
     if len(re.findall(r"\bFlagTransport\b", router)) != 1 or router.count(ROUTER_NAME) != 1:
         errors.append("configuration-bound transport must contain one internal conformer only")
-    if router.count(TRANSPORT_NAME) != 4 or len(re.findall(r"\b" + TRANSPORT_NAME + r"\s*\(", router)) != 1:
+    if router.count(TRANSPORT_NAME) != 5 or len(re.findall(r"\b" + TRANSPORT_NAME + r"\s*\(", router)) != 2:
         errors.append("native flag transport construction must remain inside the exact router factory")
     if not re.search(r"internal\s+object\s+AndroidStandaloneStack\b", stack):
         errors.append("required standalone composition must remain internal")
@@ -751,8 +751,38 @@ def verify_startup_observer_boundary(root: pathlib.Path, errors: list[str]) -> N
             errors.append("startup observation must retain durable authority, atomic dedupe and failed-close ownership")
 
 
+def verify_local_endpoint_binding(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    required = {
+        "EluConfigHostPolicy.kt": ["val declaredApiOrigin = apiHost?.let { selfHostedOrigin(it) ?: return null }"],
+        "internal/config/LocalEndpointPolicy.kt": ["internal class LocalEndpointPolicy private constructor", "EluConfigHostPolicy.selfHostedOrigin(apiHost)", "endpoint.rawUserInfo == null", '!= "site_key"'],
+        "internal/config/V2ConfigSource.kt": ["endpointPolicy.apiOrigin", "boundEndpoint = endpoint", "V1ConfigManager(endpointPolicy = endpointPolicy)"],
+        "internal/config/V2ConfigTransport.kt": ["endpoint == boundEndpoint", "endpointPolicy.apiOrigin == null || boundEndpoint != null", "connection.instanceFollowRedirects = false"],
+        "internal/config/V1ConfigManager.kt": ["endpointPolicy.matchesRole(uri, role, schemaVersion)"],
+        "internal/facade/AndroidStandaloneStack.kt": ["LocalEndpointPolicy.fromApiHost(apiHost)", "V2ConfigBoundFlagTransport(siteKey, gate, endpointPolicy)", "networkApiHost = endpointPolicy.apiHost", "endpointPolicy = endpointPolicy"],
+        "internal/runtime/AndroidRuntimeQueue.kt": ["databaseFileFor(applicationContext, constructorSiteKey, endpointPolicy)", "RuntimeSiteNamespace.directory(constructorSiteKey, endpointPolicy)", "endpointPolicy = endpointPolicy"],
+        "internal/runtime/RuntimeQueueOwner.kt": ["val endpointPolicy: LocalEndpointPolicy", "endpointPolicy = endpointPolicy"],
+        "internal/runtime/StandaloneRuntime.kt": ["endpointPolicy = owner.endpointPolicy"],
+        "internal/runtime/delivery/BatchDeliveryModels.kt": ["endpointPolicy.requireApproved(this.eventsEndpoint, V1EndpointRole.EVENTS)"],
+        "internal/flags/V2ConfigBoundFlagTransport.kt": ["HttpURLConnectionFlagTransport(key, endpoint, endpointPolicy = endpointPolicy)"],
+        "internal/flags/HttpURLConnectionFlagTransport.kt": ["requireApprovedEndpoint(endpoint, endpointPolicy)", "endpointPolicy.requireApproved(uri, V1EndpointRole.FLAGS)"],
+        "internal/replay/NativeReplayComposition.kt": ["NativeReplayHttpRouter(queue.endpointPolicy)", "claim.authorization.endpoint, endpointPolicy = endpointPolicy"],
+        "internal/replay/OkHttpReplayTransport.kt": ["endpointPolicy.requireApproved(endpoint, V1EndpointRole.REPLAY)"],
+        "internal/facade/StandaloneFacade.kt": ["value != networkConfigHost && value != networkApiHost"],
+        "internal/runtime/CaptureAuthority.kt": ['endpointPolicy.apiOrigin ?: return "site-$keyDigest"', '"elu-runtime-selfhost-v1\\u0000$origin\\u0000$keyDigest"'],
+    }
+    for relative, tokens in required.items():
+        source = load_text(root, base / relative)
+        if any(token not in source for token in tokens):
+            errors.append("local endpoint binding must preserve immutable origin, role, transport and storage ownership: " + relative)
+    for path in (root / base).rglob("*.kt"):
+        if "LocalEndpointPolicy.fromApiHost(" in path.read_text() and path.name != "AndroidStandaloneStack.kt":
+            errors.append("local endpoint policy can only be minted at original application composition")
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_local_endpoint_binding(root, errors)
     verify_pins(root, errors)
     verify_contract_status(root, errors)
     verify_no_wiring(root, errors)

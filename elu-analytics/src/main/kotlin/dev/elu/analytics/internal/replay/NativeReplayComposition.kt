@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.replay
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import dev.elu.analytics.internal.runtime.NativeStartTrace
 import dev.elu.analytics.internal.runtime.NativeStartPhase
 import dev.elu.analytics.internal.runtime.BoundedNativeStartObserver
@@ -44,7 +45,7 @@ internal class NativeReplayComposition(
     private val deviceInEuTimezone: () -> Boolean,
     private val intakeAllowed: () -> Boolean,
     private val platform: NativeReplayCapturePlatform = AndroidNativeReplayCapturePlatform,
-    private val transport: ReplayDeliveryTransport = NativeReplayHttpRouter(),
+    private val transport: ReplayDeliveryTransport = NativeReplayHttpRouter(queue.endpointPolicy),
     private val worker: ExecutorService = Executors.newSingleThreadExecutor { task ->
         Thread(task, "elu-native-composition").apply { isDaemon = true }
     },
@@ -399,12 +400,12 @@ internal class NativeReplayComposition(
 }
 
 /** Every physical request receives an exact constructor-bound client; no endpoint or credential rebinding. */
-private class NativeReplayHttpRouter : ReplayDeliveryTransport, AutoCloseable {
+private class NativeReplayHttpRouter(private val endpointPolicy: LocalEndpointPolicy) : ReplayDeliveryTransport, AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val active = AtomicReference<Flight?>()
     override fun start(claim: ReplayDeliveryClaim, authorizeIo: () -> Boolean): ReplayTransportOperation {
         check(!closed.get()) { "Native delivery is closed" }
-        val flight = Flight(OkHttpReplayTransport(claim.authorization.siteKey, claim.authorization.endpoint))
+        val flight = Flight(OkHttpReplayTransport(claim.authorization.siteKey, claim.authorization.endpoint, endpointPolicy = endpointPolicy))
         if (!active.compareAndSet(null, flight)) { flight.client.close(); error("Native delivery is occupied") }
         if (closed.get()) flight.cancel()
         flight.start(claim, authorizeIo)

@@ -18,21 +18,21 @@ internal const val V2_CONFIG_MAXIMUM_RESPONSE_BYTES: Int = 65_536
 internal object V2ConfigEndpoint {
     private val SITE_KEY = Regex("elu_pk_(live|test)_[A-Za-z0-9]{22,64}")
 
-    fun build(configHost: String, siteKey: String, debuggable: Boolean = false): URI {
+    fun build(configHost: String, siteKey: String, debuggable: Boolean = false, apiHost: String? = null): URI {
         require(SITE_KEY.matches(siteKey)) { "Invalid ELU site key" }
-        val origin = requireNotNull(EluConfigHostPolicy.resolve(configHost, debuggable)) {
+        val origin = requireNotNull(EluConfigHostPolicy.resolve(configHost, debuggable, apiHost)) {
             "Configuration requires an approved application config origin"
         }
         return URI("$origin/sdk/v2/$siteKey/config")
     }
 
-    fun requireApproved(endpoint: URI, debuggable: Boolean = false) {
+    fun requireApproved(endpoint: URI, debuggable: Boolean = false, apiHost: String? = null) {
         val components = endpoint.rawPath?.split('/') ?: emptyList()
         require(components.size == 5 && components[1] == "sdk" && components[2] == "v2" && components[4] == "config") {
             "Invalid v2 config endpoint"
         }
         val origin = "${endpoint.scheme}://${endpoint.rawAuthority}"
-        require(endpoint == build(origin, components[3], debuggable)) { "Invalid v2 config endpoint" }
+        require(endpoint == build(origin, components[3], debuggable, apiHost)) { "Invalid v2 config endpoint" }
     }
 }
 
@@ -61,8 +61,12 @@ internal class HttpURLConnectionV2ConfigTransport(
     },
     private val connectionFactory: (URI) -> HttpURLConnection = { it.toURL().openConnection() as HttpURLConnection },
     private val debuggable: Boolean = false,
+    private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
+    private val boundEndpoint: URI? = null,
 ) : V2ConfigTransport {
     init {
+        require(endpointPolicy.apiOrigin == null || boundEndpoint != null) { "Custom config transport requires its original endpoint" }
+        boundEndpoint?.let { V2ConfigEndpoint.requireApproved(it, debuggable, endpointPolicy.apiOrigin) }
         require(connectTimeoutMillis in 1..30_000)
         require(readTimeoutMillis in 1..30_000)
         require(requestTimeoutMillis in 1..30_000)
@@ -70,7 +74,8 @@ internal class HttpURLConnectionV2ConfigTransport(
     }
 
     override fun fetch(endpoint: URI): V2ConfigHttpResponse {
-        V2ConfigEndpoint.requireApproved(endpoint, debuggable)
+        V2ConfigEndpoint.requireApproved(endpoint, debuggable, endpointPolicy.apiOrigin)
+        require(boundEndpoint == null || endpoint == boundEndpoint) { "Config endpoint differs from its original binding" }
         val started = elapsedRealtimeNanos()
         val connection = connectionFactory(endpoint)
         val timedOut = AtomicBoolean(false)

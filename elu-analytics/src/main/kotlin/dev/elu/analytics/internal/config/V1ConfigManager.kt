@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.LinkedHashSet
-import java.util.Locale
 import java.util.TreeMap
 
 /**
@@ -25,6 +24,7 @@ internal class V1ConfigManager(
     readbackProvenReplayTransports: Set<V1ReplayTransport> = emptySet(),
     private val trustedFlagSiteKey: String? = null,
     private val trustedFlagNamespaceDigest: String? = null,
+    private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
 ) {
     private val readbackProvenReplayTransports: Set<V1ReplayTransport> =
         Collections.unmodifiableSet(LinkedHashSet(readbackProvenReplayTransports))
@@ -657,8 +657,7 @@ internal class V1ConfigManager(
         if (uri.rawFragment != null) unauthorized("$role endpoint must not contain a fragment")
         if (uri.port != -1 && uri.port != 443) unauthorized("$role endpoint uses an untrusted port")
 
-        val authority = endpointAuthority(role, schemaVersion)
-        if (uri.host.lowercase(Locale.US) != authority.host || uri.rawPath != authority.path) {
+        if (!endpointPolicy.matchesRole(uri, role, schemaVersion)) {
             unauthorized("$role endpoint is outside its ELU role allowlist")
         }
         if (containsReservedSiteKey(uri.rawQuery)) unauthorized("$role endpoint contains reserved authorization state")
@@ -713,11 +712,6 @@ internal class V1ConfigManager(
         cause: Throwable? = null,
     ): Nothing = throw V1EndpointAuthorizationException(message, cause)
 
-    private data class EndpointAuthority(
-        val host: String,
-        val path: String,
-    )
-
     private data class ParsedEndpointSet(
         val events: URI,
         val replay: URI?,
@@ -737,23 +731,6 @@ internal class V1ConfigManager(
     )
 
     private companion object {
-        /** Contract v1 roles. Replay v1 is the only role whose path changes under contract v2. */
-        val ENDPOINT_AUTHORITIES =
-            mapOf(
-                V1EndpointRole.EVENTS to EndpointAuthority("ingest.elu.dev", "/v1/events"),
-                V1EndpointRole.REPLAY to EndpointAuthority("ingest.elu.dev", "/v1/replay"),
-                V1EndpointRole.FLAGS to EndpointAuthority("ingest.elu.dev", "/v1/flags"),
-                V1EndpointRole.ASSETS to EndpointAuthority("assets.elu.dev", "/sdk/"),
-            )
-        val V2_ENDPOINT_AUTHORITIES =
-            ENDPOINT_AUTHORITIES + (V1EndpointRole.REPLAY to EndpointAuthority("ingest.elu.dev", "/v2/replay"))
-
-        fun endpointAuthority(
-            role: V1EndpointRole,
-            schemaVersion: Int,
-        ): EndpointAuthority =
-            (if (schemaVersion == V2_CONFIG_SCHEMA_VERSION) V2_ENDPOINT_AUTHORITIES else ENDPOINT_AUTHORITIES).getValue(role)
-
         val RECOGNIZED_ANDROID_MASKING_DIALECTS: Set<String> = emptySet()
         const val SITE_KEY_QUERY_PARAMETER = "site_key"
     }

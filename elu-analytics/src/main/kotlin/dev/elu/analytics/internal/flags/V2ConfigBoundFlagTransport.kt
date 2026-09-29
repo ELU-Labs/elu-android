@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.flags
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import dev.elu.analytics.internal.config.V1ConfigJson
 import dev.elu.analytics.internal.config.V1ConfigStatus
 import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
@@ -22,6 +23,8 @@ internal class V2ConfigBoundFlagTransport(
             HttpURLConnectionFlagTransport(key, endpoint)
         },
     ) : this(siteKey, gate, open, FlagDiagnosticObserver.NONE)
+    constructor(siteKey: String, gate: V2ConfigAuthorityGate, endpointPolicy: LocalEndpointPolicy) :
+        this(siteKey, gate, { key, endpoint -> HttpURLConnectionFlagTransport(key, endpoint, endpointPolicy = endpointPolicy) })
     private val lock = Any()
     private var closed = false
     private var current: Binding? = null

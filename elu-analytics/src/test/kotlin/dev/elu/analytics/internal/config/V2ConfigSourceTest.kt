@@ -13,6 +13,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class V2ConfigSourceTest {
+    @Test fun `selfhost source keeps declared role authority through refresh and rejects server origin widening`() {
+        val origin = "https://analytics.example.com"
+        val policy = LocalEndpointPolicy.fromApiHost(origin)
+        val key = "elu_pk_test_${"A".repeat(26)}"
+        var body = config().toString().replace("https://ingest.elu.dev", origin).replace("https://assets.elu.dev", origin)
+        val source = V2ConfigSource(origin, key, transport = V2ConfigTransport { endpoint ->
+            assertEquals("$origin/sdk/v2/$key/config", endpoint.toString()); ok(body)
+        }, clock = FakeClock(), endpointPolicy = policy)
+        try {
+            assertTrue(source.refresh() is V2ConfigSourceResult.Document)
+            assertEquals(body, source.currentDocument())
+            body = config().put("issuedAt", "2026-08-05T00:00:01Z").toString()
+            assertTrue(source.refresh() is V2ConfigSourceResult.Unavailable)
+            assertNull(source.currentDocument())
+        } finally { source.close() }
+    }
+
     @Test
     fun `debug config source accepts approved loopback but retains original data endpoint restrictions`() {
         val key = "elu_pk_test_${"A".repeat(26)}"

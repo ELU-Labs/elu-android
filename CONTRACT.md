@@ -20,6 +20,17 @@ origin: HTTPS with no explicit port, credentials, path beyond `/`, query, fragme
 or trailing-dot hostname. Undeclared origins are refused before runtime setup.
 This origin declaration does not itself authorize configuration or ingestion;
 the owned runtime's endpoint and configuration authority checks still apply.
+The immutable local declaration reaches config validation, queue authorization
+and the physical event, flag and replay transports. Every role retains its exact
+contract path; remote documents cannot widen the origin. Config fetching binds
+the exact original site-key URI, and all transports refuse redirects. Local
+customer HTTP telemetry excludes both selected SDK configuration and API hosts.
+
+Cloud keeps the previous site-key storage namespace. Custom API origins use a
+domain-separated hash of their canonical origin and exact site-key hash. Identity,
+consent, event/replay queues and flag cache never migrate between origins. Opening
+an equivalent normalized origin reuses its original store. The protocol's
+site-key hash is unchanged; no remote credential or history identity is invented.
 
 Configuration can independently restrict features, endpoints, privacy, session
 limits and replay formats. Refresh, foreground/background transitions and

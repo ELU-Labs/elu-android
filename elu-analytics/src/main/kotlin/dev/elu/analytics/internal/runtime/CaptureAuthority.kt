@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import dev.elu.analytics.internal.config.V1ExactTimestamp
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -147,5 +148,10 @@ internal object RuntimeSiteNamespace {
         }
     }
 
-    fun directory(exactConstructorSiteKey: String): String = "site-${digest(exactConstructorSiteKey)}"
+    fun directory(exactConstructorSiteKey: String, endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD): String {
+        val keyDigest = digest(exactConstructorSiteKey)
+        val origin = endpointPolicy.apiOrigin ?: return "site-$keyDigest" // Preserve all owned cloud upgrades.
+        val material = "elu-runtime-selfhost-v1\u0000$origin\u0000$keyDigest"
+        return "host-${digest(material)}"
+    }
 }

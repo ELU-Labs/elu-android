@@ -1,10 +1,11 @@
 package dev.elu.analytics.internal.replay
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
+import dev.elu.analytics.internal.config.V1EndpointRole
 import dev.elu.analytics.internal.config.AndroidV2ConfigClock
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.URI
-import java.net.URLDecoder
 import java.util.Timer
 import java.util.TimerTask
 import dev.elu.analytics.internal.concurrent.SdkFuture
@@ -45,6 +46,7 @@ internal class OkHttpReplayTransport(
     private val executor: Executor = Executors.newSingleThreadExecutor { work ->
         Thread(work, "elu-replay-http").apply { isDaemon = true }
     },
+    private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
     private val callFactory: (OkHttpClient, Request) -> Call = { client, request -> client.newCall(request) },
 ) : ReplayDeliveryTransport, AutoCloseable {
     private val closed = AtomicBoolean(false)
@@ -52,7 +54,7 @@ internal class OkHttpReplayTransport(
 
     init {
         require(Regex("elu_pk_(live|test)_[A-Za-z0-9]{22,64}").matches(siteKey)) { "Invalid ELU site key" }
-        requireApprovedEndpoint(endpoint)
+        endpointPolicy.requireApproved(endpoint, V1EndpointRole.REPLAY)
         require(requestTimeoutMillis in 1..30_000 && connectTimeoutMillis in 1..30_000 && readTimeoutMillis in 1..30_000)
         require(maximumResponseBytes in 1..REPLAY_MAX_RESPONSE_BYTES)
     }
@@ -236,14 +238,4 @@ internal class OkHttpReplayTransport(
         fun cancelCall() { try { call.get()?.cancel() } catch (_: Exception) { } }
     }
 
-    private companion object {
-        fun requireApprovedEndpoint(uri: URI) {
-            require(uri.toString().all { it.code in 0x21..0x7e } && uri.isAbsolute && uri.scheme == "https" &&
-                uri.host?.lowercase(java.util.Locale.US) == "ingest.elu.dev" && uri.rawPath == "/v2/replay" &&
-                uri.rawUserInfo == null && uri.rawFragment == null && (uri.port == -1 || uri.port == 443)) { "Untrusted replay endpoint" }
-            uri.rawQuery?.split('&')?.forEach { part ->
-                require(URLDecoder.decode(part.substringBefore('='), Charsets.UTF_8.name()) != "site_key") { "Reserved replay authorization query" }
-            }
-        }
-    }
 }
