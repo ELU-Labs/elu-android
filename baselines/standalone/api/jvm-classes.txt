@@ -324,10 +324,11 @@ dev.elu.analytics.internal.performance.NativePerformanceActivityLifecycle$Select
 dev.elu.analytics.internal.performance.NativePerformanceContext
 dev.elu.analytics.internal.performance.NativePerformanceSampler
 dev.elu.analytics.internal.replay.AndroidNativeReplayCapturePlatform
+dev.elu.analytics.internal.replay.AndroidNativeReplayCapturePlatform$createCollector$4
 dev.elu.analytics.internal.replay.AndroidNativeReplaySelectionAccess
 dev.elu.analytics.internal.replay.AndroidNativeReplaySelectionAccess$watch$attachment$1
 dev.elu.analytics.internal.replay.AndroidReplayTouchObserver
-dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$5
+dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$7
 dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$settled$1
 dev.elu.analytics.internal.replay.AndroidViewReplayCollector
 dev.elu.analytics.internal.replay.AndroidViewReplayCollectorKt
@@ -376,6 +377,7 @@ dev.elu.analytics.internal.replay.NativeReplayCapabilities
 dev.elu.analytics.internal.replay.NativeReplayCaptureAdmission
 dev.elu.analytics.internal.replay.NativeReplayCaptureAdmission$Companion
 dev.elu.analytics.internal.replay.NativeReplayCaptureCollector
+dev.elu.analytics.internal.replay.NativeReplayCaptureCollector$DefaultImpls
 dev.elu.analytics.internal.replay.NativeReplayCaptureCompletion
 dev.elu.analytics.internal.replay.NativeReplayCaptureEnrollment
 dev.elu.analytics.internal.replay.NativeReplayCaptureEnrollment$Companion
@@ -391,12 +393,15 @@ dev.elu.analytics.internal.replay.NativeReplayCapturePhysicalUse$Companion
 dev.elu.analytics.internal.replay.NativeReplayCapturePlatform
 dev.elu.analytics.internal.replay.NativeReplayCapturePlatform$DefaultImpls
 dev.elu.analytics.internal.replay.NativeReplayCaptureResources
+dev.elu.analytics.internal.replay.NativeReplayCaptureTouch
+dev.elu.analytics.internal.replay.NativeReplayCaptureWake
 dev.elu.analytics.internal.replay.NativeReplayClockAnchor
 dev.elu.analytics.internal.replay.NativeReplayClockAnchor$Sample
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$Captured
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$CollectorDeadline
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$LocalStop
+dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$TouchBoundary
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$UnsupportedGeometry
 dev.elu.analytics.internal.replay.NativeReplayCompletedCaptureSnapshot
 dev.elu.analytics.internal.replay.NativeReplayComposition
@@ -439,8 +444,9 @@ dev.elu.analytics.internal.replay.NativeReplaySealingException
 dev.elu.analytics.internal.replay.NativeReplaySealingFailure
 dev.elu.analytics.internal.replay.NativeReplaySelection
 dev.elu.analytics.internal.replay.NativeReplaySelection$Companion
+dev.elu.analytics.internal.replay.NativeReplaySelection$closeOriginalTouchObserver$joined$1
 dev.elu.analytics.internal.replay.NativeReplaySelection$closeResult$1
-dev.elu.analytics.internal.replay.NativeReplaySelection$consumeOriginalRoot$result$1
+dev.elu.analytics.internal.replay.NativeReplaySelection$consumeOriginalWindow$result$1
 dev.elu.analytics.internal.replay.NativeReplaySelectionAccess
 dev.elu.analytics.internal.replay.NativeReplaySelectionAccess$DefaultImpls
 dev.elu.analytics.internal.replay.NativeReplaySessionObservation
