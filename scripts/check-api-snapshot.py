@@ -26,7 +26,7 @@ PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions",
                   "dev.elu.analytics.EluFeatureFlagResult", "dev.elu.analytics.EluPerformanceOptions",
                   "dev.elu.analytics.EluOkHttpInterceptor", "dev.elu.analytics.EluFrameMetricsOptions",
                   "dev.elu.analytics.EluDiagnosticsOptions", "dev.elu.analytics.EluPersonProfilesMode",
-                  "dev.elu.analytics.EluPersistenceMode")
+                  "dev.elu.analytics.EluPersistenceMode", "dev.elu.analytics.EluRateLimitingOptions")
 
 ACC_PUBLIC = 0x0001
 ACC_SYNTHETIC = 0x1000

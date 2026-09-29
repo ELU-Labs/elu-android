@@ -16,6 +16,7 @@ dev.elu.analytics.EluPersistenceMode
 dev.elu.analytics.EluPersonProfilesMode
 dev.elu.analytics.EluPrivacyConfig
 dev.elu.analytics.EluPrivacyConfig$Companion
+dev.elu.analytics.EluRateLimitingOptions
 dev.elu.analytics.EluRemoteConfig
 dev.elu.analytics.EluRemoteConfig$Companion
 dev.elu.analytics.EluReplayBudgetPolicy
@@ -562,6 +563,14 @@ dev.elu.analytics.internal.runtime.RuntimeCaptureAuthorityUpdateResult$Terminate
 dev.elu.analytics.internal.runtime.RuntimeCaptureClock
 dev.elu.analytics.internal.runtime.RuntimeCaptureCommand
 dev.elu.analytics.internal.runtime.RuntimeCaptureExpectation
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateAttempt
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateBucket
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateDecision
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateLimiter
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateLimiterKt
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateState
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateState$Companion
+dev.elu.analytics.internal.runtime.RuntimeCaptureRateStorageUnavailable
 dev.elu.analytics.internal.runtime.RuntimeCaptureRejection
 dev.elu.analytics.internal.runtime.RuntimeCaptureResult
 dev.elu.analytics.internal.runtime.RuntimeCaptureResult$Accepted
