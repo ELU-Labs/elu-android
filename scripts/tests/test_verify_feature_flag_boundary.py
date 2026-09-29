@@ -60,6 +60,30 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
                 self.assertIn("native continuity lost original", self.run_guard().stderr)
                 path.write_text(original)
 
+    def test_native_v2_buffer_borrows_only_exact_capacity_constants(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayV2Buffer.kt"
+        original = path.read_text()
+        self.assertEqual(self.run_guard().returncode, 0)
+        for reference in ["NativeReplayFrameBuffer(0)", "NativeReplayFrameBuffer::class", "NativeReplayFrameBuffer.UNKNOWN_LIMIT"]:
+            with self.subTest(reference=reference):
+                path.write_text(original + "\nfun escaped() = " + reference + "\n")
+                self.assertIn("native v2 buffer may borrow only exact existing capacity constants", self.run_guard().stderr)
+        path.write_text(original)
+
+    def test_native_v2_buffer_cannot_enter_original_authority_queue_or_lifecycle(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayV2Buffer.kt"
+        original = path.read_text()
+        for reference in ["RuntimeQueueOwner", "RuntimeQueueDatabase", "NativeReplayAuthority", "NativeReplayLifecycle", "android.view.View"]:
+            with self.subTest(reference=reference):
+                path.write_text(original + "\nval escaped: " + reference + "? = null\n")
+                self.assertIn("native v2 buffer must not enter authority queue lifecycle or platform APIs", self.run_guard().stderr)
+        path.write_text(original)
+        for call in ["beginNativeReplayAuthority", "appendNativeReplay", "consumeOriginalRoot"]:
+            with self.subTest(call=call):
+                path.write_text(original + "\nfun escaped() = queue." + call + "()\n")
+                self.assertNotEqual(self.run_guard().returncode, 0)
+        path.write_text(original)
+
     def test_native_root_observer_cannot_renew_or_poll_durable_state(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayComposition.kt"
         original = path.read_text()

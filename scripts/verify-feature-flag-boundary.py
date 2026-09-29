@@ -398,7 +398,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     allowed = {
         "NativeReplayComposition": {composition, STACK, runtime / "StandaloneRuntime.kt"},
         "NativeReplayAuthority": {authority, loop, composition},
-        "NativeReplayFrameBuffer": {replay / "NativeReplayFrameBuffer.kt", loop},
+        "NativeReplayFrameBuffer": {replay / "NativeReplayFrameBuffer.kt", loop, replay / "NativeReplayV2Buffer.kt"},
         "NativeReplayLifecycle": {lifecycle, initializer, composition},
         "NativeReplaySelection": {lifecycle, authority, composition},
         "NativeReplayPermit": {authority, OWNER, loop},
@@ -434,6 +434,13 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         "NativeReplayCaptureAdmission": (authority, OWNER),
     }
     for relative, text in sources.items():
+        if relative == replay / "NativeReplayV2Buffer.kt":
+            # This pure buffer shares only existing size/time ceilings, never the physical owner.
+            constants_only = re.sub(r"\bNativeReplayFrameBuffer\s*\.\s*(?:MAXIMUM_ESTIMATED_BYTES|MAXIMUM_FRAME_NODES|MAXIMUM_FRAMES|MAXIMUM_NODES|FLUSH_NANOSECONDS)\b", "", text)
+            if re.search(r"\bNativeReplayFrameBuffer\b", constants_only):
+                errors.append("native v2 buffer may borrow only exact existing capacity constants")
+            if re.search(r"\b(?:RuntimeQueueOwner|RuntimeQueueDatabase|NativeReplayAuthority|NativeReplayLifecycle|NativeReplayCaptureOwner)\b|\b(?:android|androidx)\.", text):
+                errors.append("native v2 buffer must not enter authority queue lifecycle or platform APIs")
         for symbol, permitted in allowed.items():
             if re.search(r"\b" + symbol + r"\b", text) and relative not in permitted:
                 errors.append(f"native authority reference escaped its exact seam: {symbol}: {relative}")

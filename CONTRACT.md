@@ -6,6 +6,22 @@ or production qualification. See [README.md](./README.md) for installation and
 public Kotlin APIs, and [development status](./docs/sdk-development-status.md)
 for outstanding release gates.
 
+The internal, unadvertised native-v2 interaction candidate is currently a pure
+value/encoding/buffering slice. It uses the exact `elu-native-wireframe-v2` Meta
+discriminator, primary-pointer start/end and coordinate-free root cancellation,
+and coalesced movement with at most ten samples per second. Samples must join
+live lawful encoded leaf IDs and their positive clips; masked/input/placeholder
+or layout-only targets are refused. Changed existing geometry uses FullSnapshot;
+removal or masking of an active target requires an earlier real cancellation.
+Movement chunks include the earliest logical sample in their time span and charge
+each position once. Every geometry event retains the decoder's 200 ms wire-clock
+spacing, independently of the monotonic capture clock. Existing frame, node, byte and minimum-duration limits remain;
+capacity requests an early seal only after the original initial prefix was known
+committed. The pure commit seam is descriptive and does not prove durability.
+Window observation, current hierarchy privacy, original queue/sealer admission,
+active collection scheduling, tuple selection and final
+reader/player qualification are not wired by this slice. Native v1 is unchanged.
+
 ## Configuration and collection authority
 
 `Elu.setup(applicationContext, siteKey)` starts the owned runtime. Configuration
