@@ -772,7 +772,11 @@ def verify_local_endpoint_binding(root: pathlib.Path, errors: list[str]) -> None
         "internal/runtime/CaptureAuthority.kt": ['endpointPolicy.apiOrigin ?: return "site-$keyDigest"', '"elu-runtime-selfhost-v1\\u0000$origin\\u0000$keyDigest"'],
     }
     for relative, tokens in required.items():
-        source = load_text(root, base / relative)
+        try:
+            source = load_text(root, base / relative)
+        except ValueError as error:
+            errors.append(str(error))
+            continue
         if any(token not in source for token in tokens):
             errors.append("local endpoint binding must preserve immutable origin, role, transport and storage ownership: " + relative)
     for path in (root / base).rglob("*.kt"):

@@ -751,6 +751,15 @@ internal class WiredTransport : FlagTransport {
         result = self.run_guard()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("approved internal flag transport source is missing", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_local_endpoint_policy_fails_with_required_file_diagnostic(self) -> None:
+        relative = BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/config/LocalEndpointPolicy.kt"
+        (self.root / relative).unlink()
+        result = self.run_guard()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(f"required file is missing: {relative}", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_removed_provider_wrappers_cannot_return(self) -> None:
         for relative in BOUNDARY.REMOVED_RUNTIME_FILES:
@@ -764,7 +773,7 @@ internal class WiredTransport : FlagTransport {
     def test_public_setup_cannot_bypass_owned_sink_or_validated_host(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
-        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
+        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
                          ("consent.install(facade, facade::start)", "facade.start()")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))
@@ -819,6 +828,7 @@ internal class WiredTransport : FlagTransport {
         result = self.run_guard()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("required internal configuration-bound transport", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_lifecycle_initializer_must_not_be_exported(self) -> None:
         manifest = self.root / "elu-analytics/src/main/AndroidManifest.xml"
