@@ -782,6 +782,60 @@ class StandaloneFacadeTest {
 
     // ---- harness -------------------------------------------------------------
 
+    @Test
+    fun `selected profile mode reaches runtime events and reset through real facade stack`() {
+        val harness = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        harness.facade.applyConfiguration(config()); harness.settle()
+        val originalDevice = harness.owner.snapshot().get().person!!.deviceId
+        harness.facade.setPersonPropertiesForFlags(mapOf("plan" to "flags-only")); harness.settle()
+        harness.facade.capture("anonymous", mapOf("\$device_id" to "spoof", "\$process_person_profile" to true, "\$epp" to true), Date(NOW_MS))
+        harness.settle()
+        val anonymous = (harness.records().last() as RuntimeQueuedRecord.Event).record
+        assertEquals(originalDevice, anonymous.properties["\$device_id"])
+        assertEquals(false, anonymous.properties["\$process_person_profile"])
+        assertFalse(anonymous.properties.containsKey("\$epp"))
+        harness.facade.identify("customer", null); harness.settle()
+        harness.facade.screen("Home", null)
+        harness.facade.captureException(IllegalStateException("handled"), null)
+        harness.settle()
+        harness.records().filterIsInstance<RuntimeQueuedRecord.Event>().drop(1).forEach {
+            assertEquals(originalDevice, it.record.properties["\$device_id"])
+            assertEquals(true, it.record.properties["\$is_identified"])
+            assertEquals(true, it.record.properties["\$process_person_profile"])
+        }
+        harness.facade.reset(); harness.settle()
+        assertEquals(originalDevice, harness.owner.snapshot().get().person!!.deviceId)
+        assertFalse(harness.owner.snapshot().get().person!!.processingEnabled)
+        harness.facade.reset(true); harness.settle()
+        val rotated = harness.owner.snapshot().get()
+        assertEquals(rotated.state.identity.anonymousId, rotated.person!!.deviceId)
+        assertTrue(originalDevice != rotated.person.deviceId)
+    }
+
+    @Test
+    fun `never profile ignores person APIs before optimistic identity projection and buffering`() {
+        val harness = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.NEVER)
+        harness.facade.applyConfiguration(config()); harness.settle()
+        val before = harness.owner.snapshot().get()
+        val original = harness.facade.distinctId()
+        // A separate pending facade is deterministic: no actor task can run before explicit start.
+        val pending = harness(autoStart = false, personProfiles = dev.elu.analytics.EluPersonProfilesMode.NEVER)
+        val pendingIdentity = pending.facade.distinctId()
+        pending.facade.identify("forbidden", mapOf("plan" to "paid"))
+        pending.facade.alias("forbidden-alias")
+        pending.facade.setPersonProperties(mapOf("role" to "admin"))
+        assertEquals(pendingIdentity, pending.facade.distinctId())
+        pending.facade.start(); pending.facade.applyConfiguration(config()); pending.settle()
+        assertTrue(pending.records().isEmpty())
+        assertEquals(0, pending.diagnostics().buffered)
+        harness.facade.identify("forbidden", null)
+        assertEquals(original, harness.facade.distinctId())
+        harness.settle()
+        assertEquals(before.state.identity, harness.owner.snapshot().get().state.identity)
+        harness.facade.capture("still-anonymous", null, Date(NOW_MS)); harness.settle()
+        assertEquals(false, (harness.records().last() as RuntimeQueuedRecord.Event).record.properties["\$process_person_profile"])
+    }
+
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
@@ -795,6 +849,7 @@ class StandaloneFacadeTest {
         networkConfigHost: String? = null,
         networkApiHost: String? = null,
         onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
+        personProfiles: dev.elu.analytics.EluPersonProfilesMode? = null,
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -802,6 +857,7 @@ class StandaloneFacadeTest {
                 limits = RuntimeQueueLimits(10_000, 16_777_216),
                 databaseFactory = { databaseDecorator(backing.connection()) },
                 legacyStateLoader = ::initialState,
+                personProfiles = personProfiles,
                 trustedSiteKey = SITE_KEY,
                 captureClock = object : RuntimeCaptureClock {
                     override fun wallNowEpochMillis() = wall()
@@ -839,6 +895,7 @@ class StandaloneFacadeTest {
                 networkConfigHost = networkConfigHost,
                 networkApiHost = networkApiHost,
                 onCloseSettled = onCloseSettled,
+                personProfiles = personProfiles ?: dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
             )
         facades += facade
         if (autoStart) facade.start()

@@ -198,7 +198,7 @@ internal sealed interface RuntimeLocalStateChange {
 
     data class ResetGroups(override val occurredAt: String) : RuntimeLocalStateChange
 
-    data class ResetIdentity(override val occurredAt: String) : RuntimeLocalStateChange
+    data class ResetIdentity(override val occurredAt: String, val resetDeviceId: Boolean = false) : RuntimeLocalStateChange
 
     data class RegisterSuperProperties(
         val properties: Map<String, Any?>,

@@ -774,6 +774,137 @@ class AndroidRuntimeQueueInstrumentationTest {
         assertEquals(safePayload.length, (event.properties.getValue("payload") as String).length)
     }
 
+    @Test
+    fun productionOpenerDefaultsToPersonMetadataAndReopensTheSameDevice() {
+        val original = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = databaseFile().parentFile!!
+        val context = object : ContextWrapper(original) {
+            override fun getApplicationContext(): Context = this
+            override fun getNoBackupFilesDir(): File = root
+        }
+        val key = "elu_pk_test_${"P".repeat(26)}"
+        fun production() = AndroidRuntimeQueue.open(context, key, RuntimeQueueLimits(100, 1_000_000))
+            .await().also { owners += it }
+        val first = production()
+        val before = first.snapshot().await()
+        assertEquals(before.state.identity.anonymousId, before.person!!.deviceId)
+        assertFalse(before.person.processingEnabled)
+        val at = RuntimeWallTimestamps.rfc3339(System.currentTimeMillis())
+        first.applyLocal(RuntimeLocalStateChange.ResetIdentity(at)).await()
+        val reset = first.snapshot().await()
+        assertEquals(before.person.deviceId, reset.person!!.deviceId)
+        assertNotEquals(before.state.identity.anonymousId, reset.state.identity.anonymousId)
+        first.closeAsync().await(); owners.remove(first)
+        val reopened = production()
+        assertEquals(reset, reopened.snapshot().await())
+        reopened.closeAsync().await(); owners.remove(reopened)
+        SQLiteDatabase.openDatabase(AndroidRuntimeQueue.databaseFileFor(context, key).path, null,
+            SQLiteDatabase.OPEN_READONLY).use { sqlite -> assertEquals(31, sqlite.version) }
+    }
+
+    @Test
+    fun personMetadataMigratesAllEighteenOwnedFamiliesWithoutRewritingQueuedBytes() {
+        for (offset in listOf(0, 6, 24)) for (base in 1..6) {
+            val file = databaseFile()
+            val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState, trustedSiteKey = "elu_pk_test_capture")
+            appendEvents(owner, event("retained-before-person"))
+            if (base in listOf(2, 4, 6)) owner.ensureFeatureFlagRuntime().await()
+            if (base >= 3) owner.ensurePreparedReplayStorage().await()
+            if (base >= 5) owner.ensureNativeReplayAccounting().await()
+            if (offset == 24) owner.configureDiagnostics(RuntimeDiagnosticsConfiguration(true, false),
+                RuntimeDiagnosticsClock { null }).await()
+            val before = owner.peek(10, Long.MAX_VALUE).await()
+            val identity = owner.snapshot().await().state.identity
+            owner.closeAsync().await(); owners.remove(owner)
+            if (offset == 0) SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { sqlite ->
+                sqlite.execSQL("DROP TABLE replay_audience"); executePragma(sqlite, "PRAGMA user_version = $base")
+            }
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+                assertEquals((base + offset).toLong(), pragmaLong(sqlite, "PRAGMA user_version"))
+            }
+            val migrated = open(file, CountingIdentifiers(), RecordingFaults(), { error("No legacy import") },
+                trustedSiteKey = "elu_pk_test_capture", personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            assertEquals(before, migrated.peek(10, Long.MAX_VALUE).await())
+            assertEquals(identity, migrated.snapshot().await().state.identity)
+            assertEquals(identity.anonymousId, migrated.snapshot().await().person!!.deviceId)
+            migrated.closeAsync().await(); owners.remove(migrated)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+                assertEquals((base + 30).toLong(), pragmaLong(sqlite, "PRAGMA user_version"))
+                assertEquals(RuntimePersonState(STREAM_ID, identity.anonymousId), RuntimePersonState.decode(
+                    singleBlob(sqlite, "SELECT payload FROM person_state WHERE singleton_id=1")))
+            }
+            // Nullable raw conformance cannot read production metadata and emit old wire identity.
+            assertFutureCause(RuntimeQueueCorruptionException::class.java) {
+                open(file, CountingIdentifiers(), RecordingFaults(), { error("No import") })
+            }
+        }
+    }
+
+    @Test
+    fun personMigrationRollbackAndAmbiguousCommitPreserveOriginalState() {
+        val file = databaseFile()
+        val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
+        appendEvents(original, event("old-queue"))
+        val before = original.snapshot().await()
+        original.closeAsync().await(); owners.remove(original)
+        val faults = RecordingFaults().apply { failBeforeCommit.set(true) }
+        assertFutureCause(IOException::class.java) {
+            open(file, CountingIdentifiers(), faults, { error("No import") },
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.ALWAYS)
+        }
+        SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            assertEquals(7, sqlite.version)
+            sqlite.rawQuery("SELECT name FROM sqlite_master WHERE name IN ('person_state','native_diagnostics')", null).use {
+                assertFalse(it.moveToFirst())
+            }
+        }
+        faults.failAfterCommit.set(true)
+        val selected = open(file, CountingIdentifiers(), faults, { error("No import") },
+            personProfiles = dev.elu.analytics.EluPersonProfilesMode.ALWAYS)
+        assertEquals(before.state, selected.snapshot().await().state)
+        assertEquals(before.queuedBytes, selected.snapshot().await().queuedBytes)
+        assertFalse(selected.snapshot().await().person!!.processingEnabled)
+        faults.failBeforeCommit.set(true)
+        assertFutureCause(IOException::class.java) { appendEvents(selected, event("rolled-back-sticky")) }
+        assertFalse(selected.snapshot().await().person!!.processingEnabled)
+        faults.failAfterCommit.set(true)
+        appendEvents(selected, event("committed-sticky"))
+        assertTrue(selected.snapshot().await().person!!.processingEnabled)
+        faults.failAfterCommit.set(true)
+        selected.applyLocal(RuntimeLocalStateChange.ResetIdentity(NOW, true)).await()
+        val reset = selected.snapshot().await()
+        assertEquals(reset.state.identity.anonymousId, reset.person!!.deviceId)
+        assertFalse(reset.person.processingEnabled)
+    }
+
+    @Test
+    fun personSchemaRefusesMissingCorruptForeignAndFutureMetadataWithoutRecovery() {
+        for (damage in listOf("missing", "corrupt", "foreign", "table", "future")) {
+            val file = databaseFile()
+            val original = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState,
+                personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            original.closeAsync().await(); owners.remove(original)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { sqlite ->
+                when (damage) {
+                    "missing" -> sqlite.execSQL("DELETE FROM person_state")
+                    "corrupt" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf("{}".toByteArray()))
+                    "foreign" -> sqlite.execSQL("UPDATE person_state SET payload=?", arrayOf(RuntimePersonState("foreign", "device").encode()))
+                    "table" -> sqlite.execSQL("ALTER TABLE person_state ADD COLUMN unknown TEXT")
+                    "future" -> executePragma(sqlite, "PRAGMA user_version=37")
+                }
+            }
+            val originalBytes = file.readBytes()
+            try {
+                open(file, CountingIdentifiers(), RecordingFaults(), { error("Must not recover invalid metadata") },
+                    personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+                fail("Must refuse $damage")
+            } catch (expected: ExecutionException) {
+                assertTrue(expected.cause is RuntimeQueueCorruptionException || expected.cause is UnsupportedRuntimeStorageSchemaException)
+            }
+            assertArrayEquals(originalBytes, file.readBytes())
+        }
+    }
+
     private fun open(
         file: File,
         identifiers: CountingIdentifiers,
@@ -781,6 +912,7 @@ class AndroidRuntimeQueueInstrumentationTest {
         stateLoader: () -> PersistedCoreState,
         trustedSiteKey: String? = null,
         captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
+        personProfiles: dev.elu.analytics.EluPersonProfilesMode? = null,
     ): RuntimeQueueOwner {
         val owner =
             AndroidRuntimeQueue.openForTesting(
@@ -791,6 +923,7 @@ class AndroidRuntimeQueueInstrumentationTest {
                 faults = faults,
                 trustedSiteKey = trustedSiteKey,
                 captureClock = captureClock,
+                personProfiles = personProfiles,
             ).await()
         owners += owner
         return owner

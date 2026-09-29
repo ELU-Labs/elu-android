@@ -68,7 +68,7 @@ public object Elu {
                     return
                 }
                 val key = siteKey.trim()
-                val facade = AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost)
+                val facade = AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles)
                 // Publish before starting so calls made during startup are held rather than lost.
                 consent.install(facade, facade::start)
             } catch (t: Throwable) {
@@ -128,6 +128,12 @@ public object Elu {
     @JvmStatic
     public fun reset() {
         sink?.reset()
+    }
+
+    /** Logout keeps device continuity by default; true rotates device and anonymous identity together. */
+    @JvmStatic
+    public fun reset(resetDeviceId: Boolean) {
+        sink?.reset(resetDeviceId)
     }
 
     @JvmStatic

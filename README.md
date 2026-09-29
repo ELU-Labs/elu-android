@@ -387,6 +387,33 @@ calls also accept a separate set-once map. Flag results contain `key`, `enabled`
 `variant` and `payload`; unavailable or expired results are null. Account/context
 changes invalidate prior flag results immediately.
 
+Profile processing is selected locally at setup:
+
+```kotlin
+Elu.setup(this, siteKey, EluOptions(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY))
+// Other choices: ALWAYS or NEVER.
+Elu.reset()     // New anonymous identity; retain the installation device ID and consent.
+Elu.reset(true) // New anonymous identity and device ID together; retain consent.
+```
+
+`IDENTIFIED_ONLY` is the default. Accepted identify, alias and person-property
+mutations enable profile processing. Associated groups enable it for an accepted
+event; that committed event makes the decision sticky even after `resetGroups()`.
+`ALWAYS` processes every accepted event. `NEVER` disables profile processing and
+ignores identify, alias and person-property APIs before changing the local identity.
+It does not erase a previously stored identified user; use reset on logout.
+Explicit `ForFlags` properties still work and do not themselves enable profiles.
+A reset clears the sticky decision. Consent changes and ordinary restarts retain it.
+
+Every newly accepted event, including exceptions, flag exposures, network and
+performance/OS observations, receives SDK-owned `$device_id`, `$is_identified`
+and `$process_person_profile` properties. Customer values cannot override them;
+`$epp` is internal and is never emitted. The device ID starts as the owned anonymous
+ID and is stored independently thereafter. Existing owned stores initialize it
+from their current anonymous ID; earlier reset history cannot be reconstructed.
+Previously queued bytes retain their original identity and properties. No state
+is imported from the unused preview or provider stores.
+
 If consent is initially denied, call `Elu.optOut()` before `Elu.setup(...)`.
 Before setup, the latest valid `optOut()`/`optIn(...)` choice is retained in
 memory; setup commits it before lifecycle collection begins. A choice made

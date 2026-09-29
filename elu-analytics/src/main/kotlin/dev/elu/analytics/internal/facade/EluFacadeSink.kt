@@ -34,6 +34,8 @@ internal interface EluFacadeSink {
 
     fun reset()
 
+    fun reset(resetDeviceId: Boolean) = reset()
+
     fun optOut()
 
     fun optIn(captureEventName: String?, properties: Map<String, Any>?)

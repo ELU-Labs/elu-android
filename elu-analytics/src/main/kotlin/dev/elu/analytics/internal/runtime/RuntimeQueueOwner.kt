@@ -1,5 +1,7 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.EluPersonProfilesMode
+
 import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import dev.elu.analytics.internal.concurrent.SdkFuture
 
@@ -71,6 +73,7 @@ internal data class RuntimeQueueSnapshot(
     val queuedBytes: Long,
     /** The first queued sequence, or nextSequence when the queue is empty. */
     val headSequence: Long,
+    val person: RuntimePersonState? = null,
 )
 
 internal enum class RuntimeAppendRejection {
@@ -137,6 +140,7 @@ internal class RuntimeQueueOwner private constructor(
     private val supportedReplayProtocolGenerations: Set<String>,
     private val assertStartupCurrent: () -> Unit,
     val endpointPolicy: LocalEndpointPolicy,
+    private val personProfiles: EluPersonProfilesMode?,
 ) {
     private var database: RuntimeQueueDatabase? = null
         set(value) { field = value; nativeCaptureResources?.updateDatabase(value) }
@@ -1989,6 +1993,7 @@ internal class RuntimeQueueOwner private constructor(
         if (existing != null) {
             loaded = existing
             database().ensureReplayAudienceSchema()
+            initializePersonState()
             interruptNativeEpochOnOpen()
             return
         }
@@ -2028,8 +2033,26 @@ internal class RuntimeQueueOwner private constructor(
             }
             assertStartupCurrent()
             check(!Thread.currentThread().isInterrupted) { "Runtime startup was interrupted" }
+            initializePersonState()
             return
         }
+    }
+
+    private fun initializePersonState() {
+        // Null is only the raw frozen-protocol conformance seam. Production always selects a mode.
+        if (personProfiles == null) return
+        val before = requireLoaded()
+        val expected = before.person ?: RuntimePersonState.initial(before.state)
+        try {
+            database().ensurePersonSchema()
+        } catch (ambiguous: AmbiguousRuntimeCommitException) {
+            val reopened = reopenValidated(ambiguous)
+            if (reopened?.person != expected) throw ambiguous
+        }
+        val current = database().transaction { loadValidated(it, validatePayloads = true) }
+            ?: corrupt("Runtime core disappeared during person metadata initialization")
+        if (current.person != expected) corrupt("Person metadata migration diverged")
+        loaded = current
     }
 
     private fun normalizeLegacyOptedOutSession(
@@ -2824,6 +2847,10 @@ internal class RuntimeQueueOwner private constructor(
         request: AppendRequest,
         replay: ReplayStoredState? = null,
     ): PreparedAppend {
+        if (personProfiles == EluPersonProfilesMode.NEVER && request is AppendRequest.Mutations &&
+            request.drafts.any { isPersonMutation(it.change) }) {
+            return PreparedAppend.rejected(before, RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE)
+        }
         val countAfter = before.queuedCount.toLong() + request.recordCount
         if (request.recordCount > 0 && countAfter + (replay?.count ?: 0L) > limits.maximumCount) {
             return PreparedAppend.rejected(before, RuntimeAppendRejection.COUNT_LIMIT)
@@ -2837,13 +2864,14 @@ internal class RuntimeQueueOwner private constructor(
         val records = ArrayList<RuntimeStoredRecord>(request.recordCount)
         var bytesAfter = before.queuedBytes
         var transitionedState = before.state
+        var transitionedPerson = before.person
 
         fun addRecord(
             state: PersistedCoreState,
             sequence: Long,
             draft: RuntimeRecordDraft,
         ): PreparedAppend? {
-            val record = encodeDraft(state, sequence, draft)
+            val record = encodeDraft(state, sequence, draft, transitionedPerson)
             if (record.internalPayload.size > MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) {
                 return PreparedAppend.rejected(before, RuntimeAppendRejection.RECORD_TOO_LARGE)
             }
@@ -2871,10 +2899,16 @@ internal class RuntimeQueueOwner private constructor(
                     addRecord(canonicalEventState, sequence, draft)?.let { return it }
                 }
                 transitionedState = canonicalEventState
+                if (personProfiles != null && checkNotNull(transitionedPerson).processes(canonicalEventState.identity, personProfiles)) {
+                    transitionedPerson = checkNotNull(transitionedPerson).copy(processingEnabled = true)
+                }
             }
             is AppendRequest.Mutations -> {
                 request.drafts.forEachIndexed { index, draft ->
                     transitionedState = canonicalState(applyMutation(transitionedState, draft)).first
+                    if (personProfiles != null && isPersonMutation(draft.change)) {
+                        transitionedPerson = checkNotNull(transitionedPerson).copy(processingEnabled = true)
+                    }
                     validateStateInvariants(transitionedState)
                     val sequence = Math.addExact(before.state.stream.nextSequence, index.toLong())
                     addRecord(transitionedState, sequence, draft)?.let { return it }
@@ -2882,6 +2916,12 @@ internal class RuntimeQueueOwner private constructor(
             }
             is AppendRequest.Local -> {
                 transitionedState = canonicalState(applyLocalChange(before.state, request.change)).first
+                if (request.change is RuntimeLocalStateChange.ResetIdentity && personProfiles != null) {
+                    transitionedPerson = checkNotNull(transitionedPerson).copy(
+                        deviceId = if (request.change.resetDeviceId) transitionedState.identity.anonymousId else checkNotNull(transitionedPerson).deviceId,
+                        processingEnabled = false,
+                    )
+                }
                 validateStateInvariants(transitionedState)
             }
         }
@@ -2903,9 +2943,14 @@ internal class RuntimeQueueOwner private constructor(
                     before.state.stream.streamId != committedState.stream.streamId || committedState.identity.optedOut ||
                     (request is AppendRequest.Local && request.change is RuntimeLocalStateChange.SetOptedOut))
                     RuntimeDiagnosticsState() else before.diagnostics,
+                person = transitionedPerson,
             )
         return PreparedAppend(before, after, records, rejection = null)
     }
+
+    private fun isPersonMutation(change: RuntimeMutationChange): Boolean =
+        change is RuntimeMutationChange.Identify || change is RuntimeMutationChange.LinkAlias ||
+            change is RuntimeMutationChange.SetPersonProperties
 
     private fun currentQueueByteLimit(): Long {
         val body = configurationGate?.snapshot()?.body ?: return limits.maximumBytes
@@ -2935,6 +2980,7 @@ internal class RuntimeQueueOwner private constructor(
         state: PersistedCoreState,
         sequence: Long,
         draft: RuntimeRecordDraft,
+        person: RuntimePersonState?,
     ): RuntimeStoredRecord {
         val identity = state.identity
         return when (draft) {
@@ -2957,7 +3003,11 @@ internal class RuntimeQueueOwner private constructor(
                         occurredAt = draft.occurredAt,
                         identity = RuntimeEventIdentity(identity.anonymousId, identity.userId, identity.revision),
                         sessionId = session.id,
-                        properties = draft.properties,
+                        properties = if (personProfiles == null) draft.properties else
+                            LinkedHashMap(draft.properties).apply {
+                                remove("\$epp")
+                                putAll(checkNotNull(person).stamps(identity, personProfiles))
+                            },
                         groups = if (draft.nativeDiagnostic) emptyMap() else identity.groups,
                         versions = draft.versions,
                     )
@@ -3174,6 +3224,10 @@ internal class RuntimeQueueOwner private constructor(
         val canonicalState = CoreStateCodec.encode(state)
         if (!canonicalState.contentEquals(core.stateJson)) corrupt("Stored core state is not canonical")
         validateStateInvariants(state)
+        core.person?.let {
+            if (personProfiles == null) corrupt("Person metadata requires a selected profile mode")
+            if (it.streamId != state.stream.streamId) corrupt("Person metadata does not match owned stream")
+        }
         core.diagnostics.epoch?.let { epoch ->
             if (epoch.streamId != state.stream.streamId || epoch.identityRevision != state.identity.revision || state.identity.optedOut)
                 corrupt("Diagnostics epoch does not match owned identity")
@@ -3184,7 +3238,7 @@ internal class RuntimeQueueOwner private constructor(
             corrupt("Stored queue count exceeds the allocated sequence range")
         }
         val head = Math.subtractExact(state.stream.nextSequence, core.queueCount)
-        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics)
+        val loaded = LoadedSnapshot(state, core.stateJson.copyOf(), count, core.queueBytes, head, core.replayAudience, core.diagnostics, core.person)
         if (validatePayloads) {
             validateAllRecords(transaction, loaded)
             ReplayQueueStore.validate(transaction, ownerNamespaceHash)
@@ -3483,7 +3537,8 @@ internal class RuntimeQueueOwner private constructor(
                         state.identity.copy(
                             revision = increment(state.identity.revision, "identity revision"),
                             contextRevision = increment(state.identity.contextRevision, "identity context revision"),
-                            anonymousId = nextAnonymousId(state.identity.anonymousId),
+                            anonymousId = nextAnonymousId(state.identity.anonymousId,
+                                requireLoaded().person?.deviceId.takeIf { change.resetDeviceId }),
                             userId = null,
                             groups = emptyMap(),
                             superProperties = emptyMap(),
@@ -3753,11 +3808,11 @@ internal class RuntimeQueueOwner private constructor(
             putAll(set)
         }
 
-    private fun nextAnonymousId(excluding: String): String {
+    private fun nextAnonymousId(excluding: String, excludingDevice: String? = null): String {
         repeat(MAX_ID_GENERATION_ATTEMPTS) {
             val candidate = identifiers.next("anon_")
             val length = candidate.codePointCount(0, candidate.length)
-            if (length in 1..256 && candidate != excluding) return candidate
+            if (length in 1..256 && candidate != excluding && candidate != excludingDevice) return candidate
         }
         throw IllegalStateException("Identifier generator could not rotate the anonymous ID")
     }
@@ -3820,7 +3875,7 @@ internal class RuntimeQueueOwner private constructor(
         left.queuedCount == right.queuedCount &&
             left.queuedBytes == right.queuedBytes &&
             left.headSequence == right.headSequence &&
-            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience && left.diagnostics == right.diagnostics
+            left.stateJson.contentEquals(right.stateJson) && left.replayAudience == right.replayAudience && left.diagnostics == right.diagnostics && left.person == right.person
 
     private fun storedRecordsEqual(
         left: RuntimeStoredRecord,
@@ -3937,11 +3992,12 @@ internal class RuntimeQueueOwner private constructor(
         val headSequence: Long,
         val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
         val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
+        val person: RuntimePersonState? = null,
     ) {
         val publicSnapshot: RuntimeQueueSnapshot
-            get() = RuntimeQueueSnapshot(state, queuedCount, queuedBytes, headSequence)
+            get() = RuntimeQueueSnapshot(state, queuedCount, queuedBytes, headSequence, person)
 
-        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience, diagnostics)
+        fun storedCore(): RuntimeStoredCore = RuntimeStoredCore(stateJson.copyOf(), queuedCount.toLong(), queuedBytes, replayAudience, diagnostics, person)
     }
 
     private data class PreparedAppend(
@@ -4034,6 +4090,8 @@ internal class RuntimeQueueOwner private constructor(
             supportedReplayProtocolGenerations: Set<String> = emptySet(),
             assertStartupCurrent: () -> Unit = {},
             endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
+            // Raw frozen wire conformance only. Every Android production opener passes a nonnull mode.
+            personProfiles: EluPersonProfilesMode? = null,
         ): Future<RuntimeQueueOwner> {
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
             lateinit var worker: Thread
@@ -4076,6 +4134,7 @@ internal class RuntimeQueueOwner private constructor(
                                 Collections.unmodifiableSet(LinkedHashSet(supportedReplayProtocolGenerations)),
                                 assertStartupCurrent,
                                 endpointPolicy,
+                                personProfiles,
                             )
                         owner.initialize()
                         owner

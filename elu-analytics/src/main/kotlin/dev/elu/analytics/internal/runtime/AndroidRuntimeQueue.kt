@@ -1,6 +1,7 @@
 package dev.elu.analytics.internal.runtime
 
 import dev.elu.analytics.internal.config.LocalEndpointPolicy
+import dev.elu.analytics.EluPersonProfilesMode
 import android.content.Context
 import android.os.SystemClock
 import dev.elu.analytics.internal.config.V1ReplayTransport
@@ -38,6 +39,7 @@ internal object AndroidRuntimeQueue {
         supportedReplayProtocolGenerations: Set<String> = emptySet(),
         assertStartupCurrent: () -> Unit = {},
         endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
+        personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
     ): Future<RuntimeQueueOwner> {
         val applicationContext = context.applicationContext ?: context
         val databaseFile = databaseFileFor(applicationContext, constructorSiteKey, endpointPolicy).canonicalFile
@@ -57,6 +59,7 @@ internal object AndroidRuntimeQueue {
             supportedReplayProtocolGenerations = supportedReplayProtocolGenerations,
             assertStartupCurrent = assertStartupCurrent,
             endpointPolicy = endpointPolicy,
+            personProfiles = personProfiles,
         )
     }
 
@@ -68,6 +71,7 @@ internal object AndroidRuntimeQueue {
         faults: AndroidRuntimeDatabaseFaults = AndroidRuntimeDatabaseFaults.None,
         trustedSiteKey: String? = null,
         captureClock: RuntimeCaptureClock = JvmRuntimeCaptureClock,
+        personProfiles: EluPersonProfilesMode? = null,
     ): Future<RuntimeQueueOwner> {
         val canonical = databaseFile.canonicalFile
         return RuntimeQueueOwner.open(
@@ -79,6 +83,7 @@ internal object AndroidRuntimeQueue {
             leaseFactory = { AndroidFileOwnershipLease.acquire(File(canonical.path + ".lock")) },
             trustedSiteKey = trustedSiteKey,
             captureClock = captureClock,
+            personProfiles = personProfiles,
         )
     }
 

@@ -52,6 +52,18 @@ private class FakeRuntimeQueueDatabase(
         }
     }
 
+    override fun ensurePersonSchema() = synchronized(backing) {
+        check(!closed)
+        val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
+        if (backing.databaseSchemaVersion <= RUNTIME_PERSON_SCHEMA_OFFSET) {
+            check(backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+            val core = checkNotNull(backing.core)
+            backing.core = core.copy(person = RuntimePersonState.initial(CoreStateCodec.decode(core.stateJson)))
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_PERSON_SCHEMA_OFFSET
+            backing.advanceCommittedMutationGeneration()
+        }
+    }
+
     override fun ensureDiagnosticsSchema() = synchronized(backing) {
         check(!closed)
         val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())

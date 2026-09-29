@@ -57,9 +57,36 @@ The SDK creates an installation-specific anonymous identity. Customer code
 calls `identify` when the user is known and `reset` on logout. Group associations,
 super properties and flag-evaluation context belong to that identity context;
 reset clears customer identity, groups, super properties and flag context.
+The independent device ID is initially the owned anonymous ID. `reset()` preserves
+it; `reset(true)` rotates it with the new anonymous ID in the same transaction.
+Both preserve consent and capture-session audience history.
 Captured records retain their original identity and session through offline
 storage and retries. New account/context changes cannot expose a prior
 account's cached flag result.
+
+`EluOptions.personProfiles` defaults to `IDENTIFIED_ONLY`; `ALWAYS` and `NEVER`
+are explicit local alternatives. Accepted identify/alias/person-property mutations
+persist the processing marker. Any accepted processing-enabled event also persists
+it, so group → event → resetGroups remains enabled, while group → resetGroups
+without an accepted event does not. Always-mode events retain this decision on a
+later identified-only reopen. Never-mode refuses person mutations before facade
+projection and again at durable owner admission; flag-only context is separate.
+All event categories receive the final authoritative `$device_id`, `$is_identified`
+and `$process_person_profile` properties; `$epp` is removed. Numeric telemetry
+input whitelists are unchanged. OS observations retain their historical interval
+semantics, omit customer groups/super properties, and use receipt identity stamps.
+Quota refusal, rollback and uncommitted writes cannot advance the marker or device.
+Reset clears the marker; consent, ACK, flags, replay and restart preserve it.
+
+Production openers explicitly select a mode and validate a stream-bound singleton
+metadata row. The raw internal frozen-protocol conformance seam cannot reopen a
+store containing this metadata. Owned families 1–6, 7–12 and 25–30 upgrade to 31–36,
+preserving core and queued bytes, audience, flags, replay and diagnostics. Device
+identity begins from the current anonymous ID on upgrade; prior person mutations
+cannot be inferred from flag context. Existing user/group state can enable the
+next accepted event. Missing, malformed, foreign-stream or extended metadata is
+refused. Versions 13–24 and 37+ remain refused; older binaries refuse 31–36.
+Downgrading the owned store is unsupported.
 
 `optOut` immediately fences new collection and delivery work, then persists the
 choice asynchronously. It purges pending replay. Previously queued events stay
@@ -237,9 +264,11 @@ The dedupe watermark commits with the event; rollback and ambiguous completion
 reconcile against exact durable state. Metadata-only interval changes do not
 change identity/context/session or create capture-session audience history.
 
-Explicit opt-in lazily upgrades owned schema families 1–6/7–12 to 25–30 after full
-validation, preserving queued data and starting closed. Versions 13–24 and 31+
-remain refused. Older binaries refuse the new schema; downgrade is unsupported.
+The raw pre-profile runtime lazily upgrades diagnostics to families 25–30 after
+full validation. Production profile families 31–36 include the diagnostics table
+in a closed state; creating the table does not enable diagnostics. Existing queued
+data and diagnostics intervals are preserved by the profile migration, then the
+normal current-option/continuity checks apply. Downgrade is unsupported.
 A failed interval closure suppresses observation and cannot release the original
 store lease as a successful shutdown. It retries once only after proven rollback;
 unresolved failure retains process-local resource ownership. No durable guarantee

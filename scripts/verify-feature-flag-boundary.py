@@ -20,11 +20,11 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "84539645b2e3395a75bce986e8cd85085498525ebc87a9b5d439074bf55c4d1d",
+        "bcbb7b245249f196834f48691e3f54e10fd363e1250dc9fe796470cd30325b5f",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "8ad0087d711919c6c2d837247f3aa30ea4dd30dafd79aa14ec0d965ba2483d55",
+        "b3d4595a46f758fe69af442983e88bb09e942bcbf8e083a0995c7f5e48c0c660",
     "elu-analytics/build.gradle.kts":
         "5078f447f6432ce825a48366df0b02086029db510037cd8c2c9fb2e48feebbe5",
     "elu-analytics/consumer-rules.pro":
@@ -145,7 +145,7 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("private val consent = EluConsentHandoff()" not in public or
         "private val sink get() = consent.sink" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
         errors.append("public setup must publish the exact owned sink through the consent handoff")
@@ -784,9 +784,42 @@ def verify_local_endpoint_binding(root: pathlib.Path, errors: list[str]) -> None
             errors.append("local endpoint policy can only be minted at original application composition")
 
 
+def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    required = {
+        "EluOptions.kt": ["personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
+        "Elu.kt": ["options.apiHost, options.personProfiles)", "fun reset(resetDeviceId: Boolean)"],
+        "internal/facade/AndroidStandaloneStack.kt": ["personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY"],
+        "internal/runtime/AndroidRuntimeQueue.kt": ["personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
+        "internal/runtime/RuntimeQueueOwner.kt": [
+            'if (personProfiles == null) corrupt("Person metadata requires a selected profile mode")',
+            'if (it.streamId != state.stream.streamId) corrupt("Person metadata does not match owned stream")',
+            "person = transitionedPerson", "left.person == right.person",
+            "request.drafts.any { isPersonMutation(it.change) }", "putAll(checkNotNull(person).stamps(identity, personProfiles))"],
+        "internal/runtime/AndroidSQLiteRuntimeDatabase.kt": [
+            "version !in 1L..12L && version !in 25L..36L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
+            'readPerson(sqlite) ?: corrupt("Missing person state")'],
+    }
+    for relative, tokens in required.items():
+        try:
+            text = load_text(root, base / relative)
+        except ValueError as error:
+            errors.append(str(error)); continue
+        if any(token not in text for token in tokens):
+            errors.append("person selection must bind production mode, durable metadata and final event identity: " + relative)
+    queue = load_text(root, base / "internal/runtime/AndroidRuntimeQueue.kt")
+    stack = load_text(root, base / "internal/facade/AndroidStandaloneStack.kt")
+    if queue.count("personProfiles = personProfiles,") != 2 or stack.count("personProfiles = personProfiles,") != 2:
+        errors.append("person selection must reach both production owners and the test-only opener explicitly")
+    for path in (root / base).rglob("*.kt"):
+        if "RuntimeQueueOwner.open(" in path.read_text() and path.name != "AndroidRuntimeQueue.kt":
+            errors.append("person selection forbids another production raw owner opener")
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
     verify_local_endpoint_binding(root, errors)
+    verify_person_selection(root, errors)
     verify_pins(root, errors)
     verify_contract_status(root, errors)
     verify_no_wiring(root, errors)

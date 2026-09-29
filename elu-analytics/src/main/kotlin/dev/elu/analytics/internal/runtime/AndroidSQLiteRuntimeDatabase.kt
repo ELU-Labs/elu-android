@@ -32,6 +32,39 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val ownerThread: Thread,
     private val faults: AndroidRuntimeDatabaseFaults,
 ) : RuntimeQueueDatabase {
+    override fun ensurePersonSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (version > RUNTIME_PERSON_SCHEMA_OFFSET) return
+        check(version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) { "Person metadata requires validated audience schema" }
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            val core = SQLiteTransaction(sqlite).readCore() ?: error("Person metadata requires an owned core")
+            check(core.person == null)
+            if (version <= RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) {
+                sqlite.execSQL(CREATE_DIAGNOSTICS)
+                writeDiagnostics(sqlite, RuntimeDiagnosticsState(), insert = true)
+            }
+            sqlite.execSQL(CREATE_PERSON)
+            writePerson(sqlite, RuntimePersonState.initial(CoreStateCodec.decode(core.stateJson)), insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_PERSON_SCHEMA_OFFSET}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain person schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain person schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_PERSON_SCHEMA_OFFSET)
+    }
+
     override fun initialReplayAudienceState(): RuntimeReplayAudienceState {
         assertOwnerThread()
         val version = pragmaLong(sqlite, "PRAGMA user_version")
@@ -281,6 +314,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         corrupt("Audience history exists without an owned core")
                     if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET && readDiagnostics(sqlite) != null)
                         corrupt("Diagnostics history exists without an owned core")
+                    if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_PERSON_SCHEMA_OFFSET && readPerson(sqlite) != null)
+                        corrupt("Person state exists without an owned core")
                     return null
                 }
                 val core =
@@ -293,6 +328,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                             else RuntimeReplayAudienceState.Unknown,
                         diagnostics = if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET)
                             readDiagnostics(sqlite) ?: corrupt("Missing diagnostics state") else RuntimeDiagnosticsState(),
+                        person = if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_PERSON_SCHEMA_OFFSET)
+                            readPerson(sqlite) ?: corrupt("Missing person state") else null,
                     )
                 if (cursor.moveToNext()) corrupt("Runtime database contains duplicate core rows")
                 return core
@@ -318,6 +355,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             writeAudience(sqlite, core.replayAudience, insert = true)
             if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) writeDiagnostics(sqlite, core.diagnostics, insert = true)
             else check(core.diagnostics == RuntimeDiagnosticsState())
+            if (version > RUNTIME_PERSON_SCHEMA_OFFSET) writePerson(sqlite, checkNotNull(core.person), insert = true)
+            else check(core.person == null)
             mutated = true
         }
 
@@ -349,6 +388,9 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET)
                 writeDiagnostics(sqlite, core.diagnostics, insert = false)
             else check(core.diagnostics == RuntimeDiagnosticsState())
+            if (pragmaLong(sqlite, "PRAGMA user_version") > RUNTIME_PERSON_SCHEMA_OFFSET)
+                writePerson(sqlite, checkNotNull(core.person), insert = false)
+            else check(core.person == null)
             mutated = true
         }
 
@@ -607,6 +649,29 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     }
 
     internal companion object {
+        private const val PERSON_TABLE = "person_state"
+        private val CREATE_PERSON = """
+            CREATE TABLE person_state (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 4096)
+            )
+        """.trimIndent()
+
+        private fun readPerson(sqlite: SQLiteDatabase): RuntimePersonState? =
+            sqlite.query(PERSON_TABLE, arrayOf("payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val result = RuntimePersonState.decode(cursor.requiredBlob(0, "person_state.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate person state")
+                result
+            }
+
+        private fun writePerson(sqlite: SQLiteDatabase, state: RuntimePersonState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("payload", state.encode()) }
+            if (insert) sqlite.insertOrThrow(PERSON_TABLE, null, values)
+            else if (sqlite.update(PERSON_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Person update did not affect exactly one row")
+        }
+
         private const val DIAGNOSTICS_TABLE = "native_diagnostics"
         private val CREATE_DIAGNOSTICS = """
             CREATE TABLE native_diagnostics (
@@ -864,7 +929,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version !in 1L..12L && version !in 25L..30L ->
+                version !in 1L..12L && version !in 25L..36L ->
                     throw UnsupportedRuntimeStorageSchemaException(version)
             }
             validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
@@ -877,6 +942,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             val expected = mutableSetOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
             if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) expected += "table:$AUDIENCE_TABLE"
             if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) expected += "table:$DIAGNOSTICS_TABLE"
+            if (version > RUNTIME_PERSON_SCHEMA_OFFSET) expected += "table:$PERSON_TABLE"
             if (flagsPresent) expected += "table:$FLAG_CACHE_TABLE"
             if (replayPresent) expected += "table:$REPLAY_TABLE"
             val objects = applicationSchemaObjects(sqlite)
@@ -885,6 +951,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             validateTableSql(sqlite, QUEUE_TABLE, CREATE_QUEUE)
             if (version > RUNTIME_AUDIENCE_SCHEMA_OFFSET) validateTableSql(sqlite, AUDIENCE_TABLE, CREATE_AUDIENCE)
             if (version > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) validateTableSql(sqlite, DIAGNOSTICS_TABLE, CREATE_DIAGNOSTICS)
+            if (version > RUNTIME_PERSON_SCHEMA_OFFSET) validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)
             if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
             if (replayPresent) validateTableSql(sqlite, REPLAY_TABLE, CREATE_REPLAY)
         }

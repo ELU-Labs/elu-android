@@ -27,9 +27,19 @@ public class EluOptions
     private var selfHostedApiHost: String? = null
     private var performanceOptions = EluPerformanceOptions()
     private var diagnosticsOptions = EluDiagnosticsOptions()
+    private var personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY
     public val performance: EluPerformanceOptions get() = performanceOptions
     public val diagnostics: EluDiagnosticsOptions get() = diagnosticsOptions
     public val apiHost: String? get() = selfHostedApiHost
+    public val personProfiles: EluPersonProfilesMode get() = personProfilesMode
+
+    /** Adds profile selection without replacing any previously published constructor. */
+    @JvmOverloads
+    public constructor(personProfiles: EluPersonProfilesMode, diagnostics: EluDiagnosticsOptions = EluDiagnosticsOptions(),
+        performance: EluPerformanceOptions = EluPerformanceOptions(), configHost: String = "https://elu.dev",
+        apiHost: String? = null) : this(diagnostics, performance, configHost, apiHost) {
+        personProfilesMode = personProfiles
+    }
 
     /** Keeps every original setup constructor available to compiled callers. */
     @JvmOverloads

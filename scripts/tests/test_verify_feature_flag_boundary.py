@@ -41,6 +41,24 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_person_mode_cannot_be_omitted_from_production_or_raw_reopen(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        changes = [
+            ("internal/facade/AndroidStandaloneStack.kt", "personProfiles = personProfiles,", "personProfiles = dev.elu.analytics.EluPersonProfilesMode.ALWAYS,"),
+            ("internal/runtime/AndroidRuntimeQueue.kt", "personProfiles = personProfiles,", "personProfiles = null,"),
+            ("internal/runtime/RuntimeQueueOwner.kt", 'if (personProfiles == null) corrupt("Person metadata requires a selected profile mode")', "Unit"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "person = transitionedPerson", "person = before.person"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "putAll(checkNotNull(person).stamps(identity, personProfiles))", "putAll(draft.properties)"),
+            ("internal/runtime/AndroidSQLiteRuntimeDatabase.kt", 'readPerson(sqlite) ?: corrupt("Missing person state")', "readPerson(sqlite)"),
+        ]
+        for relative, before, after in changes:
+            with self.subTest(relative=relative, before=before):
+                path = base / relative; original = path.read_text()
+                self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("person selection", self.run_guard().stderr)
+                path.write_text(original)
+
     def test_clean_internal_transport_boundary_passes(self) -> None:
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)

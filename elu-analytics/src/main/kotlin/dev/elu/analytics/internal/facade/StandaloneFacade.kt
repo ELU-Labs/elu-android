@@ -1,5 +1,7 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluPersonProfilesMode
+
 import dev.elu.analytics.EluFeatureFlagResult
 import dev.elu.analytics.internal.runtime.NativeStartTrace
 import dev.elu.analytics.internal.runtime.NativeStartPhase
@@ -141,6 +143,7 @@ internal class StandaloneFacade(
     private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
     private val networkConfigHost: String? = null,
     private val networkApiHost: String? = null,
+    private val personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
     private val lane: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "elu-facade").apply { isDaemon = true }
     },
@@ -425,6 +428,7 @@ internal class StandaloneFacade(
         userProperties: Map<String, Any>?,
         userPropertiesOnce: Map<String, Any>?,
     ) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (!isUsableIdentifier(distinctId) || distinctId == "distinct_id") {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
@@ -437,6 +441,7 @@ internal class StandaloneFacade(
     }
 
     override fun alias(alias: String) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (!isUsableIdentifier(alias)) {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
@@ -453,13 +458,15 @@ internal class StandaloneFacade(
         }
     }
 
-    override fun reset() {
+    override fun reset() = reset(false)
+
+    override fun reset(resetDeviceId: Boolean) {
         // The owner mints the replacement anonymous id, so the facade cannot name it in advance;
         // until the reset commits, the getter reports no identity rather than the ended one.
         val occurredAt = now()
         val projected = projectIdentity(ProjectedIdentity(null))
         dispatch(OperationKind.RESET, projected, affectsFlags = true) {
-            applyLocalChange(RuntimeLocalStateChange.ResetIdentity(occurredAt))
+            applyLocalChange(RuntimeLocalStateChange.ResetIdentity(occurredAt, resetDeviceId))
             cachedPersonProperties = null
             clearFlags()
             if (state is EluFacadeState.Enabled) startFlagReload()
@@ -692,6 +699,7 @@ internal class StandaloneFacade(
     override fun setPersonProperties(properties: Map<String, Any>) = setPersonProperties(properties, emptyMap())
 
     override fun setPersonProperties(properties: Map<String, Any>, propertiesOnce: Map<String, Any>) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (properties.isEmpty() && propertiesOnce.isEmpty()) return
         val set = properties.toMap()
         val setOnce = propertiesOnce.toMap()
@@ -1188,6 +1196,7 @@ internal class StandaloneFacade(
         occurredAt: String,
         setOnce: Map<String, Any?> = emptyMap(),
     ) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (userId != persistedDistinctId()) {
             appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, setOnce)), occurredAt)
             cachedPersonProperties = personPropertiesKey(userId, set, setOnce)
@@ -1203,6 +1212,7 @@ internal class StandaloneFacade(
         occurredAt: String,
         setOnce: Map<String, Any?> = emptyMap(),
     ) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         val key = personPropertiesKey(persistedDistinctId(), set, setOnce)
         // Repeating exactly the previous person-property call for the same identity changes nothing.
         if (cachedPersonProperties == key) return
@@ -1557,7 +1567,7 @@ internal class StandaloneFacade(
                 "\$session_id",
                 "\$window_id",
                 "\$groups",
-                "\$is_identified",
+                "\$is_identified", "\$process_person_profile", "\$epp",
             )
 
         /** Prefix of the version properties the runtime stamps on every record. */

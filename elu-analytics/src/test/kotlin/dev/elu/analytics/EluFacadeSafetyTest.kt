@@ -15,6 +15,7 @@ class EluFacadeSafetyTest {
         Elu.capture("event", mapOf("value" to 1))
         Elu.identify("user", mapOf("plan" to "test"))
         Elu.reset()
+        Elu.reset(true)
         Elu.alias("alias")
         Elu.screen("Home", mapOf("source" to "test"))
         Elu.captureException(IllegalStateException("test"), mapOf("handled" to true))
