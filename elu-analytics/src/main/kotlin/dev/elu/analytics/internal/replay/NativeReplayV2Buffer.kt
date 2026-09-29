@@ -100,7 +100,8 @@ internal class NativeReplayV2Buffer(
     /** The exact prefix identity is necessary, not sufficient proof: only original known durable admission may call this. */
     fun committed(prefix: List<NativeReplayV2Entry>) {
         try {
-            checked(!terminal && prefix === sealedPrefix && prefix.isNotEmpty(), NativeReplayBufferFailure.FRAME_ORDER)
+            checked(!terminal, NativeReplayBufferFailure.WITHDRAWN)
+            checked(prefix === sealedPrefix && prefix.isNotEmpty(), NativeReplayBufferFailure.FRAME_ORDER)
             val lastFrame = prefix.filterIsInstance<NativeReplayV2Geometry>().lastOrNull()
             if (lastFrame != null) nextOrdinal = lastFrame.frame.ordinal + 1
             checked(firstCommitted || lastFrame != null, NativeReplayBufferFailure.FRAME_ORDER)
