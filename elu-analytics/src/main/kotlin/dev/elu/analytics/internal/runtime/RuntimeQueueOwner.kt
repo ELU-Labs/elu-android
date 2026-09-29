@@ -142,10 +142,15 @@ internal class RuntimeQueueOwner private constructor(
     private val assertStartupCurrent: () -> Unit,
     val endpointPolicy: LocalEndpointPolicy,
     private val personProfiles: EluPersonProfilesMode?,
+    private val memoryOnly: Boolean,
+    private val explicitConsentStore: RuntimeExplicitConsentStore?,
 ) {
     private var database: RuntimeQueueDatabase? = null
         set(value) { field = value; nativeCaptureResources?.updateDatabase(value) }
     private var lease: RuntimeOwnershipLease? = null
+    private var startupExplicitConsent: RuntimeExplicitConsent? = null
+    private var consentStorageUncertain = false
+    private var memorySettlementUncertain = false
     private val nativeScope = NativeReplayScope(captureClock)
     private var nativeScopeReconciliation = false
     private var loaded: LoadedSnapshot? = null
@@ -157,7 +162,10 @@ internal class RuntimeQueueOwner private constructor(
         }
     private var poison: Throwable? = null
         set(value) {
-            if (value != null) { nativeScope.close(); nativeCaptureEnrollment?.retainQuarantine() }
+            if (value != null) {
+                nativeScope.close(); nativeCaptureEnrollment?.retainQuarantine()
+                if (memoryOnly) memorySettlementUncertain = true
+            }
             field = value
         }
     private val lifecycleLock = Any()
@@ -323,11 +331,22 @@ internal class RuntimeQueueOwner private constructor(
 
     fun applyLocal(change: RuntimeLocalStateChange): Future<RuntimeAppendResult> =
         submit(revokeNative = true) {
-            appendOnWorker(AppendRequest.Local(change)).also { result ->
+            val append = if (change is RuntimeLocalStateChange.SetOptedOut && explicitConsentStore != null)
+                applyExplicitConsentOnWorker(change) else appendOnWorker(AppendRequest.Local(change))
+            append.also { result ->
                 if (result is RuntimeAppendResult.Accepted && change !is RuntimeLocalStateChange.MarkBackgrounded) {
                     invalidateAuthorizedContext()
                 }
             }
+        }
+
+    /** Explicit facade intent also persists repeated choices without inventing a context change. */
+    internal fun applyConsent(change: RuntimeLocalStateChange.SetOptedOut): Future<RuntimeAppendResult> =
+        submit(revokeNative = true) {
+            val result = if (explicitConsentStore == null) applyConsentStateOnWorker(change)
+                else applyExplicitConsentOnWorker(change)
+            if (result is RuntimeAppendResult.Accepted) invalidateAuthorizedContext()
+            result
         }
 
     /** Local flag context only, admitted against transaction-current flag/source authority. */
@@ -1942,6 +1961,10 @@ internal class RuntimeQueueOwner private constructor(
     private fun finishCloseOnWorker() {
         assertWorkerThread()
         try {
+            if (consentStorageUncertain || memorySettlementUncertain) {
+                quarantineConsentResources()
+                throw IllegalStateException("Original memory/consent settlement is unresolved")
+            }
             if (diagnosticsMayRemain || diagnosticsClosurePending) {
                 diagnosticsClosurePending = true
                 diagnosticsProjection = null
@@ -1964,13 +1987,14 @@ internal class RuntimeQueueOwner private constructor(
             if (diagnosticsClosurePending) quarantineDiagnosticsResources()
             throw error
         } finally {
-            if (!nativeSettlementUncertain && !diagnosticsClosurePending) synchronized(OWNERSHIP_KEYS) { OWNERSHIP_KEYS.remove(ownershipKey) }
+            if (!nativeSettlementUncertain && !diagnosticsClosurePending && !consentStorageUncertain && !memorySettlementUncertain) synchronized(OWNERSHIP_KEYS) { OWNERSHIP_KEYS.remove(ownershipKey) }
         }
     }
 
     private fun initialize() {
         assertWorkerThread()
         lease = leaseFactory()
+        prepareExplicitConsentOnWorker()
         database = databaseFactory()
         val existing =
             try {
@@ -2036,6 +2060,86 @@ internal class RuntimeQueueOwner private constructor(
             check(!Thread.currentThread().isInterrupted) { "Runtime startup was interrupted" }
             initializePersonState()
             return
+        }
+    }
+
+    private fun prepareExplicitConsentOnWorker() {
+        val store = explicitConsentStore ?: return
+        val existing = store.read()
+        startupExplicitConsent = existing
+        if (memoryOnly) {
+            val record = existing?.copy(persistentReconciled = false)
+                ?: RuntimeExplicitConsent.PENDING_DENIAL.takeIf { store.priorAnalyticsPresent() }
+            if (record != null) {
+                consentStorageUncertain = true
+                store.write(record)
+                consentStorageUncertain = false
+                startupExplicitConsent = record
+            }
+        }
+    }
+
+    private fun reconcileExplicitConsentOnWorker() {
+        val store = explicitConsentStore ?: return
+        var record = startupExplicitConsent ?: return
+        val before = requireLoaded()
+        if (!memoryOnly && record.persistentReconciled && before.state.identity.optedOut != record.deniesCollection) {
+            // A failed sidecar write may coexist with a successfully committed durable denial.
+            // An old supposedly reconciled grant can never override that evidence on reopen.
+            consentStorageUncertain = true
+            record = RuntimeExplicitConsent.PENDING_DENIAL
+            store.write(record)
+        }
+        if (memoryOnly || !record.persistentReconciled || before.state.identity.optedOut != record.deniesCollection) {
+            consentStorageUncertain = true
+            // First perform the real privacy barrier. This retires old session/replay/diagnostic
+            // coverage even when a memory opt-out/opt-in cycle ends at the old persisted bit.
+            val time = before.state.identity.updatedAt
+            val denied = appendOnWorker(AppendRequest.Local(RuntimeLocalStateChange.SetOptedOut(true, time)))
+            check(denied is RuntimeAppendResult.Accepted) { "Explicit consent privacy barrier was rejected" }
+            if (!record.deniesCollection) {
+                val allowed = appendOnWorker(AppendRequest.Local(RuntimeLocalStateChange.SetOptedOut(false, time)))
+                check(allowed is RuntimeAppendResult.Accepted) { "Explicit consent restoration was rejected" }
+            }
+            if (!memoryOnly) store.write(record.copy(persistentReconciled = true))
+            consentStorageUncertain = false
+        }
+    }
+
+    private fun applyExplicitConsentOnWorker(change: RuntimeLocalStateChange.SetOptedOut): RuntimeAppendResult {
+        assertUsable()
+        val store = checkNotNull(explicitConsentStore)
+        consentStorageUncertain = true
+        var pendingFailure: Throwable? = null
+        try { store.write(RuntimeExplicitConsent(change.optedOut, settled = false, persistentReconciled = false)) }
+        catch (error: Throwable) {
+            // A failed consent sidecar must never prevent a changed durable denial. Grants,
+            // however, cannot reach the analytics transaction without a durable pending marker.
+            if (!change.optedOut) poisonAndThrow(error)
+            pendingFailure = error
+        }
+        try {
+            val result = applyConsentStateOnWorker(change)
+            check(result is RuntimeAppendResult.Accepted) { "Explicit consent mutation was rejected" }
+            pendingFailure?.let { throw it }
+            store.write(RuntimeExplicitConsent(change.optedOut, settled = true, persistentReconciled = !memoryOnly))
+            consentStorageUncertain = false
+            return result
+        } catch (error: Throwable) {
+            if (pendingFailure != null && pendingFailure !== error) error.addSuppressed(pendingFailure)
+            poisonAndThrow(error)
+        }
+    }
+
+    private fun applyConsentStateOnWorker(change: RuntimeLocalStateChange.SetOptedOut): RuntimeAppendResult {
+        assertUsable()
+        if (requireLoaded().state.identity.optedOut != change.optedOut) return appendOnWorker(AppendRequest.Local(change))
+        // Same-choice intent ends diagnostics coverage without changing identity/context or
+        // minting a new session. The exact original core is read again before consent settles.
+        clearDiagnosticsOnWorker()
+        return database().transaction { transaction ->
+            val current = requireCurrent(transaction)
+            RuntimeAppendResult.Accepted(emptyList(), current.publicSnapshot)
         }
     }
 
@@ -3399,12 +3503,19 @@ internal class RuntimeQueueOwner private constructor(
         // cannot revive a retained native guard; only explicit held paths prove continuity.
         if (!holdNativeScope) nativeScope.invalidate()
         return try {
-            try { database?.close() } catch (closeError: Throwable) { cause.addSuppressed(closeError) }
-            database = null
             loaded = null
-            database = databaseFactory()
+            if (memoryOnly) {
+                // Closing :memory: destroys the only transaction evidence. Retain the original
+                // connection and prove that SQLite has fully left its transaction before reading.
+                memorySettlementUncertain = true
+                database().validateMemoryReconciliation()
+            } else {
+                try { database?.close() } catch (closeError: Throwable) { cause.addSuppressed(closeError) }
+                database = null
+                database = databaseFactory()
+            }
             database().transaction { transaction -> loadValidated(transaction, validatePayloads = true) }
-                .also { reopened -> loaded = reopened }
+                .also { reopened -> loaded = reopened; memorySettlementUncertain = false }
         } catch (error: Throwable) {
             error.addSuppressed(cause)
             poisonAndThrow(error)
@@ -3959,6 +4070,10 @@ internal class RuntimeQueueOwner private constructor(
     private fun poisonAndThrow(error: Throwable): Nothing {
         poison = error
         nativeCaptureEnrollment?.notifyQuarantineIfPhysicallyFinished()
+        if (memoryOnly || consentStorageUncertain) {
+            memorySettlementUncertain = memorySettlementUncertain || memoryOnly
+            throw error
+        }
         try {
             database?.close()
         } catch (closeError: Throwable) {
@@ -3985,7 +4100,18 @@ internal class RuntimeQueueOwner private constructor(
         database = null; lease = null; loaded = null
     }
 
+    private fun quarantineConsentResources() {
+        synchronized(CONSENT_QUARANTINED_RESOURCES) {
+            if (database != null || lease != null) CONSENT_QUARANTINED_RESOURCES += database to lease
+        }
+        database = null; lease = null; loaded = null
+    }
+
     private fun closeResources() {
+        if (consentStorageUncertain || memorySettlementUncertain) {
+            quarantineConsentResources()
+            throw IllegalStateException("Original memory/consent resources remain quarantined")
+        }
         try {
             database?.close()
         } finally {
@@ -4110,6 +4236,7 @@ internal class RuntimeQueueOwner private constructor(
     }
 
     internal companion object {
+        private val CONSENT_QUARANTINED_RESOURCES = mutableListOf<Pair<RuntimeQueueDatabase?, RuntimeOwnershipLease?>>()
         private val DIAGNOSTICS_QUARANTINED_RESOURCES = mutableListOf<Pair<RuntimeQueueDatabase?, RuntimeOwnershipLease?>>()
         private val NATIVE_QUARANTINED_RESOURCES = mutableListOf<Pair<RuntimeQueueDatabase?, RuntimeOwnershipLease?>>()
 
@@ -4137,6 +4264,8 @@ internal class RuntimeQueueOwner private constructor(
             endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
             // Raw frozen wire conformance only. Every Android production opener passes a nonnull mode.
             personProfiles: EluPersonProfilesMode? = null,
+            memoryOnly: Boolean = false,
+            explicitConsentStore: RuntimeExplicitConsentStore? = null,
         ): Future<RuntimeQueueOwner> {
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
             lateinit var worker: Thread
@@ -4180,8 +4309,11 @@ internal class RuntimeQueueOwner private constructor(
                                 assertStartupCurrent,
                                 endpointPolicy,
                                 personProfiles,
+                                memoryOnly,
+                                explicitConsentStore,
                             )
                         owner.initialize()
+                        owner.reconcileExplicitConsentOnWorker()
                         owner
                     } catch (error: Throwable) {
                         try {
@@ -4189,7 +4321,7 @@ internal class RuntimeQueueOwner private constructor(
                         } catch (closeError: Throwable) {
                             error.addSuppressed(closeError)
                         } finally {
-                            if (claimedOwnership) {
+                            if (claimedOwnership && owner?.consentStorageUncertain != true && owner?.memorySettlementUncertain != true) {
                                 synchronized(OWNERSHIP_KEYS) { OWNERSHIP_KEYS.remove(ownershipKey) }
                             }
                             executor.shutdown()

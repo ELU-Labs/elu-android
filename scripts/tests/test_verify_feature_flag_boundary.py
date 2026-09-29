@@ -252,7 +252,8 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_clean_setup_cannot_reopen_preview_storage(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/AndroidRuntimeQueue.kt"
         original = path.read_text()
-        for injected in ["applicationContext.filesDir", "applicationContext.cacheDir", "AndroidCoreStateStore.forProduction(file)"]:
+        for injected in ["applicationContext.filesDir", "applicationContext.cacheDir", "AndroidCoreStateStore.forProduction(file)",
+                         "legacy.readBytes()", "legacy.readText()", "legacy.inputStream()"]:
             with self.subTest(injected=injected):
                 path.write_text(original + "\n" + injected)
                 self.assertIn("clean setup must not read or import", self.run_guard().stderr)
@@ -811,7 +812,7 @@ internal class WiredTransport : FlagTransport {
     def test_public_setup_cannot_bypass_owned_sink_or_validated_host(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
-        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
+        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
                          ("consent.install(facade, facade::start)", "facade.start()")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))

@@ -125,6 +125,9 @@ internal interface RuntimeQueueTransaction {
 }
 
 internal interface RuntimeQueueDatabase : Closeable {
+    /** Memory owners must reconcile on this exact connection; replacing it would erase evidence. */
+    fun validateMemoryReconciliation() { error("This database is not an original memory connection") }
+
     /** Validated owned upgrade; device continuity starts at the existing anonymous identity. */
     fun ensurePersonSchema()
 

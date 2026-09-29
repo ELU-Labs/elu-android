@@ -131,7 +131,7 @@ exists; a result contains its key, enabled state, variant and payload.
 
 ## Durable delivery and restarts
 
-After admission, analytics and mutation records use an app-private, bounded
+With default `EluPersistenceMode.PERSISTENT`, admitted analytics and mutation records use an app-private, bounded
 SQLite queue scoped to the exact site key. Identity changes and their queued
 records commit together. Delivery uses stable stream/sequence-derived record
 identities, bounded batches and retries. A validated acknowledgement must match
@@ -168,6 +168,51 @@ persisted-data import. Clean setup starts a fresh owned installation without
 opening or deleting their old data. Retired import checkpoints are refused,
 not rewritten as fresh state. This differs from the iOS owned-file recovery
 path; Android supports current owned SQLite reopen and schema upgrades.
+
+## Memory storage and explicit consent
+
+`EluOptions.persistence` defaults to `PERSISTENT`. `MEMORY` selects a real
+`:memory:` SQLite connection with memory journal and temp storage, using the same
+closed schemas, admission rules and logical quotas. No analytics database,
+WAL/journal/SHM, preflight copy or analytics temporary file is created in this mode.
+Every identity/session/device field, queue, flag cache/exposure ledger, replay
+state and diagnostics epoch disappears when the original connection closes.
+Restart therefore cannot deliver its prior offline data or historical diagnostics.
+These logical quotas do not establish a process RSS ceiling.
+
+The same canonical site/API namespace and process/file lease govern both modes.
+A separate, at-most-128-byte `explicit-consent-v1.json` contains only version 1,
+`optedOut`, `settled` and `persistentReconciled`. A private pending replacement is
+also at most 128 bytes. Either an unsettled record or an interrupted replacement
+denies collection. Unknown versions, malformed bytes, links, nonprivate files or
+foreign ownership refuse startup. Writes retain an existing pending inode through
+truncation, sync it and its parent, then atomically rename and verify the result;
+there is no unlink-before-replacement grant window.
+
+Memory entry never opens old analytics for consent. No record plus any current
+database family, abandoned owned preflight or retired owned aggregate-file presence
+becomes pending denial; a genuinely fresh namespace retains its initial default.
+An existing explicit record is marked not reconciled with persistent analytics.
+On persistent return, the original queue commits a real opt-out privacy barrier
+before restoring a settled explicit grant, even if its final bit equals the old
+database bit. Only after that commit is persistent reconciliation recorded. The
+barrier retires prior session/replay/diagnostic coverage, preserving event records
+with their original identities. Ordinary reset cannot change consent.
+
+Each explicit choice first writes pending consent, then commits through the owned
+queue, then marks the choice settled. A pending-write error cannot prevent a
+changed durable opt-out, but no grant proceeds after that error. Any unsettled
+storage outcome denies the owner and retains its original namespace lease. A
+memory commit reported ambiguous is read back only on that same original, fully
+settled connection; exact existing state/record comparisons still apply. Failure
+never substitutes a new memory database. Consent is asynchronous after setup;
+process death before its writes run, or complete rejection of all filesystem
+writes to the separate consent store, cannot be represented as a durable
+acknowledged choice. Persistent reopen treats any supposedly reconciled record/DB
+disagreement as denial. Memory mode cannot inspect a newer old-DB denial after
+complete sidecar-write rejection; it retains only the last successfully recorded
+explicit choice. Applications requiring a newly denied choice on every launch
+must supply `optOut` before setup as well.
 
 ## Replay audience
 

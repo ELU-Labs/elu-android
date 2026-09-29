@@ -526,13 +526,17 @@ internal class StandaloneFacade(
 
     private fun applyConsentOnLane(intent: ConsentIntent) {
         if (stack == null || appliedConsentRevision >= intent.revision || !isCurrentConsent(intent)) return
-        if (identity?.optedOut != intent.optedOut) {
-            // Consent and its diagnostics withdrawal already share this durable
-            // mutation. Optional metadata work must not prevent a changed denial.
-            applyLocalChange(RuntimeLocalStateChange.SetOptedOut(intent.optedOut, now()))
-        } else {
-            // Repeated same-choice intent still ends the previous coverage interval.
-            requireStack().owner.withdrawDiagnosticsCoverage().await()
+        try {
+            // Every explicit choice, including a repeated value, settles the consent-only
+            // record and closes the old coverage interval through the original owner.
+            when (val result = requireStack().owner.applyConsent(RuntimeLocalStateChange.SetOptedOut(intent.optedOut, now())).await()) {
+                is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
+                is RuntimeAppendResult.Rejected -> countDrop(EluFacadeDropReason.STORAGE)
+            }
+        } catch (error: Throwable) {
+            synchronized(projectionLock) { requestedOptOut = true }
+            requireStack().runtime.restrictForConsent()
+            throw error
         }
         if (identity?.optedOut != intent.optedOut) return
         appliedConsentRevision = intent.revision

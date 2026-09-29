@@ -2,6 +2,8 @@ package dev.elu.analytics.internal.runtime
 
 import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import dev.elu.analytics.EluPersonProfilesMode
+import dev.elu.analytics.EluPersistenceMode
+import dev.elu.analytics.internal.core.AndroidCoreStateStore
 import android.content.Context
 import android.os.SystemClock
 import dev.elu.analytics.internal.config.V1ReplayTransport
@@ -40,6 +42,7 @@ internal object AndroidRuntimeQueue {
         assertStartupCurrent: () -> Unit = {},
         endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
         personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
+        persistence: EluPersistenceMode = EluPersistenceMode.PERSISTENT,
     ): Future<RuntimeQueueOwner> {
         val applicationContext = context.applicationContext ?: context
         val databaseFile = databaseFileFor(applicationContext, constructorSiteKey, endpointPolicy).canonicalFile
@@ -47,7 +50,17 @@ internal object AndroidRuntimeQueue {
         return RuntimeQueueOwner.open(
             ownershipKey = databaseFile.path,
             limits = limits,
-            databaseFactory = { AndroidSQLiteRuntimeDatabase.open(databaseFile) },
+            databaseFactory = {
+                if (persistence == EluPersistenceMode.MEMORY) AndroidSQLiteRuntimeDatabase.openMemory()
+                else AndroidSQLiteRuntimeDatabase.open(databaseFile)
+            },
+            memoryOnly = persistence == EluPersistenceMode.MEMORY,
+            explicitConsentStore = AndroidExplicitConsentStore(databaseFile,
+                // The retired aggregate store is presence-only and belongs to the old cloud namespace.
+                if (endpointPolicy == LocalEndpointPolicy.CLOUD) {
+                    val legacy = AndroidCoreStateStore.fileFor(applicationContext, constructorSiteKey)
+                    listOf(legacy, File(legacy.path + ".bak"), File(legacy.path + ".new"))
+                } else emptyList()),
             legacyStateLoader = {
                 freshState(identifiers, SystemCoreEpochClock, freshIdentityStartedAt)
             },
@@ -84,6 +97,25 @@ internal object AndroidRuntimeQueue {
             trustedSiteKey = trustedSiteKey,
             captureClock = captureClock,
             personProfiles = personProfiles,
+        )
+    }
+
+    /** Real SQLite fault coverage with the same namespace/file lease and consent store. */
+    internal fun openMemoryForTesting(
+        databaseFile: File,
+        limits: RuntimeQueueLimits,
+        faults: AndroidRuntimeDatabaseFaults = AndroidRuntimeDatabaseFaults.None,
+    ): Future<RuntimeQueueOwner> {
+        val canonical = databaseFile.canonicalFile
+        return RuntimeQueueOwner.open(
+            ownershipKey = canonical.path,
+            limits = limits,
+            databaseFactory = { AndroidSQLiteRuntimeDatabase.openMemory(faults) },
+            legacyStateLoader = { freshState() },
+            leaseFactory = { AndroidFileOwnershipLease.acquire(File(canonical.path + ".lock")) },
+            personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            memoryOnly = true,
+            explicitConsentStore = AndroidExplicitConsentStore(canonical),
         )
     }
 

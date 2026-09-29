@@ -451,6 +451,37 @@ previously queued events remain paused until explicit opt-in. A logout/reset
 never opts a visitor back in. `flush()` schedules delivery; it does not promise
 network completion before Android terminates the process.
 
+## Memory-only analytics storage
+
+Persistent storage remains the default. To discard analytics when the SDK owner
+closes or the process exits, select memory storage during setup:
+
+```kotlin
+Elu.setup(this, siteKey, EluOptions(persistence = EluPersistenceMode.MEMORY))
+```
+
+Memory mode uses an actual in-memory SQLite database for identity, device ID,
+properties, events, flags, exposure deduplication, replay and diagnostics. It does
+not load, migrate, delete or write an existing analytics database. Restart creates
+a fresh analytics identity and loses unsent data, cached flags and capture-session
+history. Normal queue limits still apply; those logical limits are not a total
+process-memory ceiling. Replay and configuration permissions are unchanged.
+
+A small consent-only file and the namespace lock remain on disk. The consent file
+contains only its schema version and Boolean choice/settlement fields, with no
+analytics identifiers or timestamps. Explicit opt-out and opt-in survive a
+successful settlement in either mode. If old analytics files exist without this
+separate record, memory mode starts denied until an explicit new opt-in; it does
+not inspect the old files to infer permission. Interrupted consent writes deny
+collection. A storage failure can leave the original owner unusable until process
+restart; permission is never recovered by replacing its memory database.
+
+Switching back to persistent mode preserves its prior identity and event backlog,
+but applies the consent privacy barrier before collection resumes: prior session,
+replay and diagnostics coverage cannot be revived by a memory opt-out/opt-in cycle.
+Only one mode can own a site/API namespace at a time. An explicit choice made before
+setup still cannot survive process death before its asynchronous persistence runs.
+
 ## Native replay privacy and supported UI
 
 Replay captures supported Android Views when the current server configuration

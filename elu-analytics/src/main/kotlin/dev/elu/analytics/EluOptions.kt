@@ -28,10 +28,20 @@ public class EluOptions
     private var performanceOptions = EluPerformanceOptions()
     private var diagnosticsOptions = EluDiagnosticsOptions()
     private var personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY
+    private var persistenceMode = EluPersistenceMode.PERSISTENT
+    public val persistence: EluPersistenceMode get() = persistenceMode
     public val performance: EluPerformanceOptions get() = performanceOptions
     public val diagnostics: EluDiagnosticsOptions get() = diagnosticsOptions
     public val apiHost: String? get() = selfHostedApiHost
     public val personProfiles: EluPersonProfilesMode get() = personProfilesMode
+
+    /** Selects memory storage without replacing any previous constructor descriptor. */
+    @JvmOverloads
+    public constructor(persistence: EluPersistenceMode, personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
+        diagnostics: EluDiagnosticsOptions = EluDiagnosticsOptions(), performance: EluPerformanceOptions = EluPerformanceOptions(),
+        configHost: String = "https://elu.dev", apiHost: String? = null) : this(personProfiles, diagnostics, performance, configHost, apiHost) {
+        persistenceMode = persistence
+    }
 
     /** Adds profile selection without replacing any previously published constructor. */
     @JvmOverloads

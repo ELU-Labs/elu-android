@@ -32,6 +32,7 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val sqlite: SQLiteDatabase,
     private val ownerThread: Thread,
     private val faults: AndroidRuntimeDatabaseFaults,
+    private val memoryOnly: Boolean = false,
 ) : RuntimeQueueDatabase {
     override fun ensureExposureSchema() {
         assertOwnerThread()
@@ -310,6 +311,13 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             }
             throw error
         }
+    }
+
+    override fun validateMemoryReconciliation() {
+        assertOwnerThread()
+        check(memoryOnly && sqlite.isOpen && !sqlite.inTransaction()) { "Original memory transaction has not settled" }
+        validateIntegrity(sqlite)
+        validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
     }
 
     override fun close() {
@@ -902,6 +910,32 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                 return AndroidSQLiteRuntimeDatabase(sqlite, Thread.currentThread(), faults)
             } catch (error: Throwable) {
                 sqlite.close()
+                throw error
+            }
+        }
+
+        /** Public SQLite open API recognizes :memory: on every supported Android version. */
+        internal fun openMemory(faults: AndroidRuntimeDatabaseFaults = AndroidRuntimeDatabaseFaults.None): AndroidSQLiteRuntimeDatabase {
+            val sqlite = SQLiteDatabase.openDatabase(":memory:", null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.CREATE_IF_NECESSARY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+                REFUSE_CORRUPTION_RECOVERY)
+            try {
+                sqlite.disableWriteAheadLogging()
+                executePragma(sqlite, "PRAGMA temp_store = MEMORY")
+                executePragma(sqlite, "PRAGMA journal_mode = MEMORY")
+                executePragma(sqlite, "PRAGMA synchronous = FULL")
+                executePragma(sqlite, "PRAGMA busy_timeout = $SQLITE_BUSY_TIMEOUT_MILLIS")
+                val settings = AndroidRuntimeConnectionSettings(pragmaString(sqlite, "PRAGMA journal_mode").lowercase(),
+                    pragmaLong(sqlite, "PRAGMA synchronous"), pragmaLong(sqlite, "PRAGMA busy_timeout"))
+                check(sqlite.path == ":memory:" && settings.journalMode == "memory" &&
+                    pragmaLong(sqlite, "PRAGMA temp_store") == 2L && settings.synchronous == SQLITE_SYNCHRONOUS_FULL &&
+                    settings.busyTimeoutMillis == SQLITE_BUSY_TIMEOUT_MILLIS) { "SQLite memory-only settings were not applied" }
+                faults.connectionConfigured(settings)
+                validateIntegrity(sqlite)
+                initializeOrValidateSchema(sqlite)
+                return AndroidSQLiteRuntimeDatabase(sqlite, Thread.currentThread(), faults, memoryOnly = true)
+            } catch (error: Throwable) {
+                try { sqlite.close() } catch (closeFailure: Throwable) { error.addSuppressed(closeFailure) }
                 throw error
             }
         }

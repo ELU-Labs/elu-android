@@ -20,11 +20,11 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "bcbb7b245249f196834f48691e3f54e10fd363e1250dc9fe796470cd30325b5f",
+        "9ef4ddbea1b05b87004397386ce7c799bca7626e6ad7ad439a607181d4367bf0",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "b3d4595a46f758fe69af442983e88bb09e942bcbf8e083a0995c7f5e48c0c660",
+        "a941024ae21449673784eb09c4ea5b847f7daa440141ddfae59ce3e1068c2c86",
     "elu-analytics/build.gradle.kts":
         "5078f447f6432ce825a48366df0b02086029db510037cd8c2c9fb2e48feebbe5",
     "elu-analytics/consumer-rules.pro":
@@ -145,7 +145,7 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("private val consent = EluConsentHandoff()" not in public or
         "private val sink get() = consent.sink" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
         errors.append("public setup must publish the exact owned sink through the consent handoff")
@@ -349,7 +349,11 @@ def verify_prepared_replay_boundary(root: pathlib.Path, errors: list[str]) -> No
             errors.append("owned startup must retain exact capability forwarding: " + required)
     if any((root / MAIN_KOTLIN / "dev/elu/analytics/internal/compat").glob("*.kt")):
         errors.append("retired preview import readers must remain absent")
-    if any(token in queue for token in ("AndroidCoreStateStore", "getSharedPreferences", ".filesDir", ".cacheDir", "bootstrapFromLegacy", "startupMigration")):
+    # Memory consent may locate the exact retired owned file, but never open/import it.
+    # Strip only this one pure path lookup; every other legacy-store use still fails.
+    path_only_queue = queue.replace("import dev.elu.analytics.internal.core.AndroidCoreStateStore", "", 1).replace(
+        "AndroidCoreStateStore.fileFor(applicationContext, constructorSiteKey)", "", 1)
+    if any(token in path_only_queue for token in ("AndroidCoreStateStore", "getSharedPreferences", ".filesDir", ".cacheDir", "bootstrapFromLegacy", "startupMigration", ".readBytes(", ".readText(", ".inputStream(")):
         errors.append("clean setup must not read or import preview storage")
     if "freshState(identifiers, SystemCoreEpochClock, freshIdentityStartedAt)" not in queue:
         errors.append("clean setup must create isolated owned state")
@@ -788,7 +792,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
     base = MAIN_KOTLIN / "dev/elu/analytics"
     required = {
         "EluOptions.kt": ["personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
-        "Elu.kt": ["options.apiHost, options.personProfiles)", "fun reset(resetDeviceId: Boolean)"],
+        "Elu.kt": ["options.apiHost, options.personProfiles, options.persistence)", "fun reset(resetDeviceId: Boolean)"],
         "internal/facade/AndroidStandaloneStack.kt": ["personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/AndroidRuntimeQueue.kt": ["personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/RuntimeQueueOwner.kt": [
