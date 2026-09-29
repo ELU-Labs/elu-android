@@ -85,6 +85,56 @@ class NativeExceptionIntakeTest {
         intake.offer(NativeExceptionObservation.from(Error()))
         assertEquals(0, spool.publications)
     }
+    @Test fun `publication observation timeout retains original work and later acknowledgement is not cancellation`() {
+        val clock = Clock(); val spool = Spool(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        val intake = NativeExceptionIntake(reservation(), spool, NativeExceptionPolicyLease("b".repeat(64)), clock,
+            clock.mono, 1_000_000_000, sourceIsCurrent = { true })
+        owned += intake; intake.start()
+        try {
+            assertEquals(NativeExceptionPublication.UNCONFIRMED, intake.offerAndObserve(NativeExceptionObservation.from(Error())))
+            assertTrue(entered.await(2, TimeUnit.SECONDS)); assertFalse(intake.reportSettlement.isDone)
+            assertFalse(intake.reportSettlement.cancel(true)); assertFalse(intake.settlement.isDone)
+            assertEquals(NativeExceptionPublication.NOT_ADMITTED, intake.offerAndObserve(NativeExceptionObservation.from(Error())))
+        } finally { release.countDown() }
+        intake.reportSettlement.get(2, TimeUnit.SECONDS)
+        assertTrue(intake.published); assertNotNull(spool.report)
+    }
+    @Test fun `interrupted publication observation restores flag without abandoning original held write`() {
+        val clock = Clock(); val spool = Spool(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        val intake = NativeExceptionIntake(reservation(), spool, NativeExceptionPolicyLease("b".repeat(64)), clock,
+            clock.mono, 1_000_000_000, sourceIsCurrent = { true })
+        owned += intake; intake.start()
+        try {
+            Thread.currentThread().interrupt()
+            assertEquals(NativeExceptionPublication.UNCONFIRMED, intake.offerAndObserve(NativeExceptionObservation.from(Error())))
+            assertTrue(Thread.currentThread().isInterrupted)
+        } finally { Thread.interrupted() }
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS)); assertFalse(intake.reportSettlement.isDone)
+            intake.invalidate()
+        } finally { release.countDown() }
+        intake.reportSettlement.get(2, TimeUnit.SECONDS); assertNull(spool.report)
+    }
+    @Test fun `original admission snapshot cannot adopt a replacement arm and completed results stay per arm`() {
+        val clock = Clock(); val spool = Spool(); val intake = NativeExceptionIntake(reservation(), spool,
+            NativeExceptionPolicyLease("b".repeat(64)), clock, clock.mono, 1_000_000_000, sourceIsCurrent = { true })
+        owned += intake; intake.start()
+        val old = checkNotNull(intake.snapshotForPublication())
+        intake.invalidate(); intake.reportSettlement.get(2, TimeUnit.SECONDS)
+        intake.rearm(reservation().copy(id = "22222222-2222-2222-2222-222222222222"), NativeExceptionPolicyLease("b".repeat(64)),
+            clock.mono, 1_000_000_000, sourceIsCurrent = { true })
+        assertFalse(old.allowsObservation()); old.offer(NativeExceptionObservation.from(Error()))
+        assertNull(spool.report); assertTrue(intake.allowsObservation())
+        // Real writer completion is observed under the exact new arm; neither this call nor
+        // an old snapshot can consume another future reservation.
+        val outcome = intake.offerAndObserve(NativeExceptionObservation.from(IllegalStateException()))
+        assertTrue(outcome == NativeExceptionPublication.PUBLISHED || outcome == NativeExceptionPublication.UNCONFIRMED)
+        intake.reportSettlement.get(2, TimeUnit.SECONDS)
+        assertEquals("22222222-2222-2222-2222-222222222222", spool.report!!.reservation.id)
+        assertEquals(1, spool.publications)
+    }
     @Test fun `canonical bounded state refuses extra or changed namespace and malformed report`() {
         val state = RuntimeExceptionState("stream", reservation())
         assertEquals(state, RuntimeExceptionState.decode(state.encode()))

@@ -374,6 +374,45 @@ class AndroidUncaughtExceptionOwnerTest {
         assertEquals(0, offers)
     }
 
+    @Test
+    fun `original admission snapshot survives source replacement without adopting newer permission`() {
+        val registry = Registry(Thread.UncaughtExceptionHandler { _, _ -> })
+        var snapshots = 0; var originalOffers = 0; var latestOffers = 0
+        var current = true
+        val old = object : NativeUncaughtExceptionAdmission {
+            override fun allowsObservation() = current
+            override fun offer(observation: NativeExceptionObservation) { originalOffers += 1 }
+        }
+        val boundary = object : NativeUncaughtExceptionAdmission {
+            override fun snapshot(): NativeUncaughtExceptionAdmission? { snapshots += 1; current = false; return old }
+            override fun offer(observation: NativeExceptionObservation) { latestOffers += 1 }
+        }
+        val owner = AndroidUncaughtExceptionOwner(registry, boundary)
+        assertTrue(owner.install()); registry.handler!!.uncaughtException(Thread(), Error())
+        assertEquals(1, snapshots); assertEquals(0, originalOffers); assertEquals(0, latestOffers)
+        assertTrue(owner.close())
+    }
+
+    @Test
+    fun `restoration failure leaves retained wrapper unable even to query admission but still delegates exactly once`() {
+        val calls = ArrayList<Pair<Thread, Throwable>>()
+        val registry = Registry(Thread.UncaughtExceptionHandler { t, e -> calls += t to e })
+        var reads = 0; var offers = 0
+        val boundary = object : NativeUncaughtExceptionAdmission {
+            override fun allowsObservation(): Boolean { reads += 1; return true }
+            override fun offer(observation: NativeExceptionObservation) { offers += 1 }
+        }
+        val owner = AndroidUncaughtExceptionOwner(registry, boundary)
+        assertTrue(owner.install()); val wrapper = registry.handler!!
+        registry.write = { throw IllegalStateException("restoration failed") }
+        assertFalse(owner.close())
+        val thread = Thread(); val error = Error("PRIVATE")
+        wrapper.uncaughtException(thread, error)
+        assertEquals(0, reads); assertEquals(0, offers); assertEquals(1, calls.size)
+        assertSame(thread, calls.single().first); assertSame(error, calls.single().second)
+        registry.write = { registry.handler = it }; assertTrue(owner.close())
+    }
+
     private class Registry(@Volatile var handler: Thread.UncaughtExceptionHandler?) : NativeUncaughtExceptionRegistry {
         var reads = 0
         var writes = 0

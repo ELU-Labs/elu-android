@@ -319,10 +319,39 @@ that does not settle also fails close instead of claiming physical cleanup. Thes
 checks do not promise a hard filesystem or OS-query latency bound. A total
 storage-write failure followed by process death cannot be made durable.
 
-This option does not install automatic crash/ANR or uncaught-exception collection.
+Launch timing alone does not install automatic exception collection.
 Manual `captureException` remains available. The linked startup event requires
 privacy disclosure. Current OS delivery, upgraded SQLite behavior and overhead
 remain exact-artifact emulator and Lab release gates.
+
+### Optional automatic JVM exception reports
+
+On API 23+, enable `EluDiagnosticsOptions(enabled = true, crashReports = true)`
+inside your existing `EluOptions(diagnostics = ...)`. This is independent of API 35
+launch timing. Reporting remains disabled by default and also requires persistent
+storage, current consent and an enabled v2 server `captureExceptions` grant with
+an empty `suppressionRules` array. Absent/false grants deny reporting; recognized
+nonempty suppression rules deny it because this client does not evaluate them.
+Memory-only analytics does not write a crash file or install the handler.
+
+The SDK retains the host's original default uncaught handler and forwards its exact
+thread and throwable once, even if collection fails. It records only the bounded
+JVM exception class name and mechanism: no message, stack, cause, thread name or
+customer properties. Native crashes, ANRs, handled coroutine errors and arbitrary
+per-thread handlers are outside this capability. Arrange default-handler setup and
+shutdown serially with SDK setup/shutdown; Java's get/set API cannot atomically
+restore a handler against concurrent registrations by other libraries.
+
+An already-started writer gets at most 100 ms of publication observation before
+original-handler delegation. Timeout or interruption does not claim success or
+cancel the retained work; slow storage can outlive that observation. A single report
+can survive process death and is imported under the same owned identity and current
+grant after an actual foreground session exists. It neither reconstructs a historical
+crash session nor guarantees delivery before the OS terminates the process. Consent,
+identity and permission changes can discard it. Returning custom handlers allow the
+same writer to import and rearm; no queue, main-thread task or network completion is
+awaited on the crash callback. Rich exception detail parity and exact-artifact crash/
+restart qualification are still pending.
 
 ## Identity
 

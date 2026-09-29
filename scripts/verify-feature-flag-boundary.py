@@ -1040,7 +1040,7 @@ def verify_exception_intake(root: pathlib.Path, errors: list[str]) -> None:
         "runtime/RuntimeQueueOwner.kt": ["if (memoryOnly || exceptionSpoolFactory == null", "exceptionIntake?.let { barriers += it.close() }",
             "exceptionIntake?.joinClosedWriter()", "val sourceIsCurrent = { !sourceRequired || originalSource?.isCurrent() == true }",
             "left.exceptions == right.exceptions", "consumedDigest = imported.report.digest()", "exceptionImport = imported", "spool.clear()",
-            "if (!it.reportSettlement.isDone) return@submit null", "original.rearm(reservation, policy, mono, remaining, sourceIsCurrent)",
+            "if (!it.reportSettlement.isDone) return null", "original.rearm(reservation, policy, mono, remaining, sourceIsCurrent)",
             'require(command.exceptionImport == null)', "consentStorageUncertain = true; poisonAndThrow(error)",
             "current.state.identity.contextRevision, policy.policyHash, wall, expiry"],
         "diagnostics/NativeExceptionIntake.kt": ["original.claimed.compareAndSet(false, true)", "pending.compareAndSet(null, work)",
@@ -1064,10 +1064,46 @@ def verify_exception_intake(root: pathlib.Path, errors: list[str]) -> None:
     for path in (root / MAIN_KOTLIN).rglob("*.kt"):
         text = path.read_text()
         if path.name != "RuntimeQueueOwner.kt" and "prepareExceptionIntake(" in text:
-            errors.append("exception intake production installation remains disabled")
+            errors.append("exception intake raw policy entry escaped its original queue")
+    activation = {
+        "runtime/RuntimeQueueOwner.kt": ["configurationGate != null && source?.isCurrent() == true",
+            "parsed.captureExceptions?.allowsUncaughtReports == true", "authority?.configSemanticHash == parsed.configSemanticHash",
+            "originalIntent() && originalSource.isCurrent() && originalIntent()", "if (pending != null) return@submit RuntimeExceptionIntakeUpdate(pending = pending)",
+            "exceptionProductionPolicy?.revoke()", "spool.clear()\n                retireExceptionReservationOnWorker()"],
+        "runtime/StandaloneRuntime.kt": ["diagnosticsOptions.enabled && diagnosticsOptions.crashReports",
+            "exceptionAdmission.getAndSet(null)?.invalidate()", "exceptionEpoch.get() === epoch", "!exceptionSuspended.get()",
+            "exceptionAdmission.get()?.snapshotForPublication()", "exceptionHandler = handler\n            if (!handler.install())",
+            "exceptionHandler?.close() != false", "owner.closeAsync().awaitExact()", "pending.whenComplete { _, _ -> requestAutomaticExceptions() }"],
+        "facade/AndroidStandaloneStack.kt": ["diagnosticsOptions = diagnosticsOptions, automaticExceptionAllowed = facade::automaticExceptionIntakeAllowed"],
+        "facade/StandaloneFacade.kt": ["internal fun automaticExceptionIntakeAllowed()", "pendingIdentityOperations == 0 && pendingFlagOperations == 0",
+            "nativeLifecycleEligible && hasCurrentConfiguration()", "stack?.runtime?.withdrawAutomaticExceptions(retire = true)",
+            "stack?.runtime?.requestAutomaticExceptions()"],
+        "diagnostics/AndroidUncaughtExceptionOwner.kt": ["val originalAdmission = admission.snapshot() ?: return",
+            "if (!originalAdmission.allowsObservation()) return", "originalAdmission.offer(observation)"],
+        "diagnostics/NativeExceptionIntake.kt": ["original.completion.get(100, TimeUnit.MILLISECONDS)",
+            "Thread.currentThread().interrupt(); return NativeExceptionPublication.UNCONFIRMED",
+            "return if (original.published)", "observePublication(observation, original)"],
+        "config/V1ConfigJson.kt": ['parseCaptureExceptions(root, schemaVersion)', 'if (raw == false) return V1CaptureExceptions(false)',
+            'if (schema != V2_CONFIG_SCHEMA_VERSION || root.opt("status") != "enabled")',
+            'expectFields(policy, setOf("suppressionRules"), emptySet(), path)', 'return V1CaptureExceptions(rules.length() == 0)'],
+    }
+    for relative, tokens in activation.items():
+        text = load_text(root, base / relative)
+        if any(token not in text for token in tokens):
+            errors.append("automatic exception activation lost original policy, admission or close fencing: " + relative)
+    for path in (root / MAIN_KOTLIN).rglob("*.kt"):
+        text = path.read_text()
+        if path.name not in ("RuntimeQueueOwner.kt", "StandaloneRuntime.kt") and "updateAutomaticExceptionIntake(" in text:
+            errors.append("automatic exception selection escaped the original runtime control lane")
+    options = load_text(root, MAIN_KOTLIN / "dev/elu/analytics/EluDiagnosticsOptions.kt")
+    if "private var reportUncaught = false" not in options:
+        errors.append("automatic exception option must remain disabled by default")
     # The worker may not use the queue, SQLite, HTTP or the manual detail serializer.
     intake = load_text(root, base / "diagnostics/NativeExceptionIntake.kt")
-    if any(name in intake for name in ("RuntimeQueueOwner", "SQLiteDatabase", "ExceptionSerializer", "HttpURLConnection", "Thread.sleep", ".get(100")):
+    waits = re.findall(r"\.get\([^()]*,\s*TimeUnit\.[A-Z]+\)", intake)
+    if waits != [".get(100, TimeUnit.MILLISECONDS)"]:
+        errors.append("exception publication observation must remain the one bounded original-arm wait")
+    if any(name in intake for name in ("RuntimeQueueOwner", "SQLiteDatabase", "ExceptionSerializer", "HttpURLConnection", "Thread.sleep")):
         errors.append("exception callback/writer escaped its detached one-slot boundary")
 
 def verify(root: pathlib.Path) -> list[str]:

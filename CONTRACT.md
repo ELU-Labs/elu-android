@@ -321,9 +321,9 @@ Request telemetry preserves an existing session's last activity and cannot
 extend its idle timeout. An originally sessionless request may create the first
 actual capture session; a later session or expired original session rejects it.
 
-`captureException` is explicit reporting. This candidate does not install an
-automatic uncaught-exception/crash handler. Exception messages, stacks and
-customer properties can contain sensitive data; callers control what they send.
+`captureException` is explicit reporting. Its messages, stacks and customer
+properties can contain sensitive data; callers control what they send. The separate
+automatic JVM option below never invokes those Throwable detail getters.
 
 Native performance sampling is disabled by default and needs both local opt-in
 and current remote authorization. While a valid foreground session exists, it
@@ -400,7 +400,8 @@ A failed interval closure suppresses observation and cannot release the original
 store lease as a successful shutdown. It retries once only after proven rollback;
 unresolved failure retains process-local resource ownership. No durable guarantee
 is possible if all storage writes fail and the process then dies. Automatic
-uncaught/crash/ANR collection remains unimplemented; manual exceptions are separate.
+launch timing does not authorize automatic JVM reports; native-crash/ANR collection
+remains unimplemented and manual exceptions are separate.
 
 ## Local capture budget
 
@@ -498,3 +499,48 @@ and authority run again. Close/local/restrictive withdrawal invalidates admissio
 synchronously, and the serial worker joins any already-submitted main observation
 before replacement or close completes. JVM controls are authored but unrun;
 actual Android/window behavior and exact-artifact player transitions remain gates.
+
+
+## Automatic JVM exception intake
+
+`diagnostics.enabled && diagnostics.crashReports` is an independent default-false
+API 23+ opt-in. Persistent storage, an original current enabled v2 configuration,
+canonical general capture permission and `captureExceptions: {suppressionRules: []}`
+are all required. Missing/false denies; known nonempty browser rules are parsed with
+closed bounded shapes but deny native automatic reporting rather than being ignored.
+Malformed/unknown rules fail configuration validation, including the flag boundary.
+There is no details option which does nothing, no implicit API 35 dependency and no
+claim of message/stack/native-crash/ANR or handled-error parity.
+
+The original queue commits one identity/namespace/policy reservation before handler
+installation. Its prestarted writer uses one atomic slot. The callback freezes an
+original arm before bounded type inspection and rechecks that arm's source token,
+local intent, wall expiry and monotonic budget before publication. Same-body source
+replacement cannot renew an old observation. Publication observation waits at most
+100 ms on only that arm's completion; timeout/interruption means unconfirmed and
+never releases the original writer, file or queue lease. No SQL, queue task, main
+thread or network completion is awaited by the callback. General latency/deadlock
+claims do not extend to arbitrary host handlers, injected code or scheduler stalls.
+
+Remote withdrawal, local background/identity/consent intent and close synchronously
+disarm. Current foreground permission can rearm the same settled writer under a new
+committed reservation; it cannot adopt unfinished old work. Restrictive policy/identity
+retirement waits for that work, clears the physical slot durably, then retires SQL.
+A valid retained report needs a current original source and an actual current session
+at import; no session is created by import, and its activity clock is not extended.
+The event and consumed digest commit atomically. Known rollback retries the same
+candidate; unknown COMMIT retains the existing storage quarantine. Only then are the
+file and reservation retired in that order, so acknowledged bytes cannot duplicate.
+Memory-only mode creates neither this durable schema nor a spool/handler.
+
+Close retains the original registration handle, denies observation first and attempts
+restoration only while still current. Restoration failure is reported; an inert
+retained wrapper still delegates exact original arguments and does not itself require
+storage quarantine. The original queue close worker physically joins its writer even
+if a synchronous completion listener is still running, then applies existing storage
+closure/quarantine rules. Host default-handler registrations must be setup-serialized:
+public Java get/set offers no compare-and-set protection against foreign races.
+
+Activation's facade/source/queue/writer JVM tests are authored but uncompiled/unrun
+in this source packet. Earlier one-slot durability tests and hosted suites are separate
+evidence; real exact-artifact process-death/restart and canonical delivery remain gates.

@@ -3,7 +3,7 @@ package dev.elu.analytics.internal.diagnostics
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Dormant until explicitly installed; no runtime caller, worker, storage, or network integration.
+ * Inert until explicitly installed after original runtime admission.
  * Retains the exact original handler before any registration side effect. Construction is inert
  * so the caller already owns this cleanup handle if a setter fails after changing the registry.
  *
@@ -101,8 +101,10 @@ internal class AndroidUncaughtExceptionOwner(
                     accepting.set(false)
                     return
                 }
+                val originalAdmission = admission.snapshot() ?: return
+                if (!originalAdmission.allowsObservation()) return
                 val observation = NativeExceptionObservation.from(throwable)
-                if (!stopped.get() && accepting.get()) admission.offer(observation)
+                if (!stopped.get() && accepting.get() && originalAdmission.allowsObservation()) originalAdmission.offer(observation)
             } catch (_: Throwable) {
                 // Never format, inspect or report an SDK failure from a dying thread.
                 // A failed registry read also withdraws observation until normal explicit setup.

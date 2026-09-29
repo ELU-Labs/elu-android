@@ -76,6 +76,7 @@ internal object AndroidStandaloneStack {
             // Only the source token is published under the lifecycle lock. Storage, cancellation
             // and facade work run afterward; every consumer checks the token again at use.
             gate.update(token)
+            runtimeRef.get()?.withdrawAutomaticExceptions()
             try {
                 notifications.execute {
                     flagTransport.retireSuperseded()
@@ -118,7 +119,8 @@ internal object AndroidStandaloneStack {
                     // Preparation concerns storage only and must finish before runtime publication.
                     // Private component capability; current source, privacy, session and physical guards still apply.
                     native.ready().get()
-                    val runtime = StandaloneRuntime(owner = owner, siteKey = siteKey, configurationGate = gate, nativeReplay = native)
+                    val runtime = StandaloneRuntime(owner = owner, siteKey = siteKey, configurationGate = gate, nativeReplay = native,
+                        diagnosticsOptions = diagnosticsOptions, automaticExceptionAllowed = facade::automaticExceptionIntakeAllowed)
                     runtimeRef.set(runtime)
                     val flags = AndroidFeatureFlagClient(
                         owner, StandaloneRuntime.defaultVersions(), flagTransport,
@@ -176,6 +178,7 @@ internal object AndroidStandaloneStack {
                 closing.set(true)
                 closePerformance()
                 startupRef.getAndSet(null)?.let { startupClose.set(it.closeAndWait()) }
+                runtimeRef.get()?.withdrawAutomaticExceptions()
                 runtimeRef.get()?.withdrawNativeReplay(restrictive = true)
                 driver.close()
                 gate.close()

@@ -7,16 +7,18 @@ import dev.elu.analytics.internal.runtime.RuntimeExceptionReservation
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.LockSupport
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
-/** Original closed-policy lifetime supplied by the future config consumer, not a JSON pass flag.
- * This internal seam is currently uninstalled. Revocation is monotonic and does not call SDK code.
- */
-internal class NativeExceptionPolicyLease(val policyHash: String) {
+/** Queue-selected closed policy plus original restrictive intent; neither replaces source proof. */
+internal class NativeExceptionPolicyLease(val policyHash: String, private val originalCurrent: () -> Boolean = { true }) {
     private val live = AtomicBoolean(true)
     init { require(policyHash.matches(Regex("[0-9a-f]{64}"))) }
     fun revoke() { live.set(false) }
-    fun isCurrent(): Boolean = live.get()
+    fun isCurrent(): Boolean = live.get() && originalCurrent() && live.get()
 }
+
+internal enum class NativeExceptionPublication { NOT_ADMITTED, PUBLISHED, NOT_PUBLISHED, UNCONFIRMED }
 
 /** Single fixed namespace slot. All operations run off the crash callback under the queue lease. */
 internal interface NativeExceptionSpool {
@@ -46,6 +48,7 @@ internal class NativeExceptionIntake(
         val started: Long, val budget: Long, val sourceIsCurrent: () -> Boolean) {
         val accepting = AtomicBoolean(true)
         val claimed = AtomicBoolean(false)
+        @Volatile var published = false
         val completion = object : SdkFuture<Unit>() { override fun cancel(mayInterruptIfRunning: Boolean) = false }
         init { require(started >= 0 && budget > 0) }
     }
@@ -106,13 +109,39 @@ internal class NativeExceptionIntake(
         return wall >= original.reservation.issuedWall && wall < original.reservation.expiresWall &&
             elapsed >= 0 && elapsed < original.budget
     }
-    override fun offer(observation: NativeExceptionObservation) {
+    override fun allowsObservation(): Boolean = arm.get().let { !it.claimed.get() && current(it) }
+
+    override fun offer(observation: NativeExceptionObservation) { submit(observation) }
+
+    internal fun snapshotForPublication(): NativeUncaughtExceptionAdmission? {
         val original = arm.get()
-        if (!current(original) || !original.claimed.compareAndSet(false, true)) return
+        if (!current(original) || original.claimed.get()) return null
+        return object : NativeUncaughtExceptionAdmission {
+            override fun allowsObservation() = !original.claimed.get() && current(original)
+            override fun offer(observation: NativeExceptionObservation) { observePublication(observation, original) }
+        }
+    }
+
+    /** Observe only the exact offered arm, never queue/network/main work or writer termination.
+     * Timeout is not failure/cleanup proof: original work and its queue lease remain retained.
+     */
+    fun offerAndObserve(observation: NativeExceptionObservation): NativeExceptionPublication = observePublication(observation, arm.get())
+
+    private fun observePublication(observation: NativeExceptionObservation, selected: Arm): NativeExceptionPublication {
+        val original = submit(observation, selected) ?: return NativeExceptionPublication.NOT_ADMITTED
+        if (Thread.currentThread() === writer) return NativeExceptionPublication.UNCONFIRMED
+        try { original.completion.get(100, TimeUnit.MILLISECONDS) }
+        catch (_: InterruptedException) { Thread.currentThread().interrupt(); return NativeExceptionPublication.UNCONFIRMED }
+        catch (_: TimeoutException) { return NativeExceptionPublication.UNCONFIRMED }
+        return if (original.published) NativeExceptionPublication.PUBLISHED else NativeExceptionPublication.NOT_PUBLISHED
+    }
+
+    private fun submit(observation: NativeExceptionObservation, original: Arm = arm.get()): Arm? {
+        if (!current(original) || !original.claimed.compareAndSet(false, true)) return null
         var submitted = false
         try {
             val report = RuntimeExceptionReport(original.reservation, clock.wallNowEpochMillis(), observation.type, observation.typeTruncated)
-            if (!current(original)) return
+            if (!current(original)) return null
             val work = Work(original, report)
             check(pending.compareAndSet(null, work))
             submitted = true
@@ -120,6 +149,7 @@ internal class NativeExceptionIntake(
             // Retract that late offer; if already taken, the original writer checks again.
             if (!current(original) && pending.compareAndSet(work, null)) submitted = false
             LockSupport.unpark(writer)
+            return original.takeIf { submitted }
         } finally {
             if (!submitted) { original.accepting.set(false); original.completion.complete(Unit) }
         }
@@ -130,7 +160,10 @@ internal class NativeExceptionIntake(
                 val work = pending.getAndSet(null)
                 if (work != null) {
                     try {
-                        if (current(work.arm)) published = spool.publish(work.report) { current(work.arm) }
+                        if (current(work.arm)) {
+                            work.arm.published = spool.publish(work.report) { current(work.arm) }
+                            published = work.arm.published
+                        }
                     } catch (error: Throwable) { failure = error }
                     finally { work.arm.accepting.set(false); work.arm.completion.complete(Unit) }
                 }

@@ -207,21 +207,70 @@ internal class RuntimeQueueOwner private constructor(
     private var diagnosticsConfiguration = RuntimeDiagnosticsConfiguration()
     private var diagnosticsClock: RuntimeDiagnosticsClock? = null
 
-    /** Dormant internal integration seam. No production opener installs a handler or policy yet.
-     * The supplied future policy lifetime is necessary but never sufficient: the original queue
-     * independently checks general capture authority, persisted consent, identity and deadlines.
-     */
+    private var exceptionProductionSource: V2ConfigAuthorityWitness? = null // owner lane only
+    private var exceptionProductionPolicy: NativeExceptionPolicyLease? = null
+
+    /** Original source selection, never permission inferred from a caller Boolean or saved report. */
+    internal fun updateAutomaticExceptionIntake(versions: RuntimeVersions, originalIntent: () -> Boolean,
+        retire: Boolean = false): Future<RuntimeExceptionIntakeUpdate> = submit {
+        assertUsable()
+        if (memoryOnly || exceptionSpoolFactory == null) return@submit RuntimeExceptionIntakeUpdate()
+        val source = captureConfiguration
+        val parsed = source?.let { runCatching { V1ConfigJson.parseConfig(it.body) }.getOrNull() }
+        val authority = captureAuthority as? RuntimeCaptureAuthorityState.Authorized
+        val allowed = !retire && originalIntent() && configurationGate != null && source?.isCurrent() == true &&
+            parsed?.schemaVersion == 2 && parsed.status == V1ConfigStatus.ENABLED &&
+            parsed.captureExceptions?.allowsUncaughtReports == true &&
+            authority?.configSemanticHash == parsed.configSemanticHash && captureAuthorityRejection(requireLoaded()) == null
+        if (!allowed) {
+            exceptionProductionPolicy?.revoke()
+            exceptionIntake?.invalidate()
+            val pending = exceptionIntake?.reportSettlement?.takeUnless { it.isDone }
+            if (pending != null) return@submit RuntimeExceptionIntakeUpdate(pending = pending)
+            // Do not manufacture a directory/schema for an installation which never opted in.
+            if (exceptionSpool != null || requireLoaded().exceptions?.reservation != null) {
+                val spool = exceptionSpool ?: exceptionSpoolFactory.invoke().also { exceptionSpool = it }
+                spool.clear()
+                retireExceptionReservationOnWorker()
+            }
+            exceptionProductionSource = null; exceptionProductionPolicy = null
+            return@submit RuntimeExceptionIntakeUpdate()
+        }
+        val retained = exceptionIntake
+        if (exceptionProductionSource?.token === source?.token && exceptionProductionPolicy?.isCurrent() == true &&
+            retained?.allowsObservation() == true) return@submit RuntimeExceptionIntakeUpdate(intake = retained)
+        exceptionProductionPolicy?.revoke()
+        val originalSource = checkNotNull(source)
+        val policy = NativeExceptionPolicyLease(exceptionDigest(
+            "elu-android-uncaught-type-v1\u0000{\"suppressionRules\":[]}".toByteArray(Charsets.UTF_8))) {
+            originalIntent() && originalSource.isCurrent() && originalIntent()
+        }
+        val before = requireLoaded().state.stream.nextSequence
+        val intake = prepareExceptionIntakeOnWorker(policy, versions)
+        val imported = requireLoaded().state.stream.nextSequence > before
+        if (intake != null && policy.isCurrent()) {
+            exceptionProductionSource = originalSource; exceptionProductionPolicy = policy
+            RuntimeExceptionIntakeUpdate(intake, imported = imported)
+        } else {
+            policy.revoke(); intake?.invalidate()
+            RuntimeExceptionIntakeUpdate(pending = exceptionIntake?.reportSettlement?.takeUnless { it.isDone }, imported = imported)
+        }
+    }
+
+    /** Low-level storage seam; production uses updateAutomaticExceptionIntake and its original source. */
     internal fun prepareExceptionIntake(
         policy: NativeExceptionPolicyLease,
         versions: RuntimeVersions,
-    ): Future<NativeExceptionIntake?> = submit {
+    ): Future<NativeExceptionIntake?> = submit { prepareExceptionIntakeOnWorker(policy, versions) }
+
+    private fun prepareExceptionIntakeOnWorker(policy: NativeExceptionPolicyLease, versions: RuntimeVersions): NativeExceptionIntake? {
         assertUsable()
         check(personProfiles != null) { "Exception intake requires an explicit production profile selection" }
         exceptionIntake?.let {
             it.invalidate()
-            if (!it.reportSettlement.isDone) return@submit null
+            if (!it.reportSettlement.isDone) return null
         }
-        if (memoryOnly || exceptionSpoolFactory == null || !policy.isCurrent() || captureAuthorityRejection(requireLoaded()) != null) return@submit null
+        if (memoryOnly || exceptionSpoolFactory == null || !policy.isCurrent() || captureAuthorityRejection(requireLoaded()) != null) return null
         try {
             database().ensureExceptionSchema()
         } catch (ambiguous: AmbiguousRuntimeCommitException) {
@@ -242,9 +291,9 @@ internal class RuntimeQueueOwner private constructor(
                 if (row.consumedDigest != null) {
                     if (row.consumedDigest != retained.digest()) corrupt("Consumed exception bytes changed")
                 } else {
-                    if (captureClock.wallNowEpochMillis() < retained.occurredWall) return@submit null
+                    if (captureClock.wallNowEpochMillis() < retained.occurredWall) return null
                     val identity = requireLoaded().state.identity
-                    val session = identity.session ?: return@submit null
+                    val session = identity.session ?: return null
                     val imported = RuntimeExceptionImport(retained) { policy.isCurrent() }
                     val result = try { captureOnWorker(RuntimeCaptureCommand(RuntimeEventKind.EXCEPTION, ExceptionSerializer.EVENT_NAME,
                         RuntimeWallTimestamps.rfc3339(captureClock.wallNowEpochMillis()), retained.properties(), versions,
@@ -256,7 +305,7 @@ internal class RuntimeQueueOwner private constructor(
                         }
                         throw error
                     }
-                    if (result !is RuntimeCaptureResult.Accepted) return@submit null
+                    if (result !is RuntimeCaptureResult.Accepted) return null
                 }
             }
         }
@@ -265,7 +314,7 @@ internal class RuntimeQueueOwner private constructor(
         spool.clear()
         retireExceptionReservationOnWorker()
         val current = requireLoaded()
-        if (!policy.isCurrent() || captureAuthorityRejection(current) != null) return@submit null
+        if (!policy.isCurrent() || captureAuthorityRejection(current) != null) return null
         val authority = captureAuthority as RuntimeCaptureAuthorityState.Authorized
         // Capture this exact source now. Callback/writer never look up a replacement on the
         // owner lane; a same-body new token cannot keep an old arm alive. Raw conformance
@@ -277,14 +326,14 @@ internal class RuntimeQueueOwner private constructor(
         val mono = captureClock.elapsedRealtimeNanos()
         val expiry = authority.configExpiresAt.toEpochMillisFloor()
         val remaining = authority.monotonicBudget - (mono - authority.monotonicStartedAt)
-        if (wall < 0 || wall >= expiry || mono < authority.monotonicStartedAt || remaining <= 0) return@submit null
+        if (wall < 0 || wall >= expiry || mono < authority.monotonicStartedAt || remaining <= 0) return null
         val reservation = RuntimeExceptionReservation(java.util.UUID.randomUUID().toString(), exceptionNamespace,
             current.state.stream.streamId, current.state.identity.anonymousId, current.state.identity.revision,
             current.state.identity.contextRevision, policy.policyHash, wall, expiry)
         updateExceptionStateOnWorker(checkNotNull(current.exceptions).copy(reservation = reservation))
-        if (!policy.isCurrent() || captureAuthorityRejection(requireLoaded()) != null) return@submit null
-        synchronized(lifecycleLock) {
-            if (!acceptingTasks || !policy.isCurrent()) return@submit null
+        if (!policy.isCurrent() || captureAuthorityRejection(requireLoaded()) != null) return null
+        return synchronized(lifecycleLock) {
+            if (!acceptingTasks || !policy.isCurrent()) return null
             val original = exceptionIntake
             if (original != null) {
                 original.rearm(reservation, policy, mono, remaining, sourceIsCurrent)
@@ -4625,3 +4674,10 @@ private fun V1FlagProjectionRejection.toFlagRestrictionReason(): FlagRestriction
         V1FlagProjectionRejection.STORAGE -> FlagRestrictionReason.WALL_ROLLBACK
         V1FlagProjectionRejection.TERMINAL -> FlagRestrictionReason.TERMINAL
     }
+
+/** Descriptive completion from the original owner; contains no independent configuration grant. */
+internal data class RuntimeExceptionIntakeUpdate(
+    val intake: NativeExceptionIntake? = null,
+    val pending: SdkFuture<Unit>? = null,
+    val imported: Boolean = false,
+)

@@ -5,6 +5,14 @@ import dev.elu.analytics.internal.replay.awaitExact
 
 import dev.elu.analytics.EluEuGuard
 import dev.elu.analytics.EluVersion
+import dev.elu.analytics.EluDiagnosticsOptions
+import dev.elu.analytics.internal.diagnostics.AndroidUncaughtExceptionOwner
+import dev.elu.analytics.internal.diagnostics.AndroidUncaughtExceptionRegistry
+import dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionRegistry
+import dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionAdmission
+import dev.elu.analytics.internal.diagnostics.NativeExceptionObservation
+import dev.elu.analytics.internal.diagnostics.NativeExceptionIntake
+import java.util.concurrent.atomic.AtomicReference
 import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
 import dev.elu.analytics.internal.config.V2ConfigAuthorityWitness
 import dev.elu.analytics.internal.config.V1ConfigJson
@@ -156,6 +164,9 @@ internal class StandaloneRuntime(
     private val nativeReplay: NativeReplayComposition? = null,
     private val startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
     private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
+    diagnosticsOptions: EluDiagnosticsOptions = EluDiagnosticsOptions(),
+    private val exceptionRegistry: NativeUncaughtExceptionRegistry = AndroidUncaughtExceptionRegistry,
+    private val automaticExceptionAllowed: () -> Boolean = { true },
 ) : AutoCloseable {
     private val transport: BatchHTTPTransport = transportFactory()
     private val deliveryQueue = RuntimeQueueOwnerDeliveryQueue(owner)
@@ -171,6 +182,100 @@ internal class StandaloneRuntime(
     }
     private val flushTimerArmed = AtomicBoolean(false)
     private var flushTimer: BatchScheduledTask? = null
+
+    private val exceptionsEnabled = diagnosticsOptions.enabled && diagnosticsOptions.crashReports
+    private val exceptionEpoch = AtomicReference(Any())
+    private val exceptionAdmission = AtomicReference<NativeExceptionIntake?>()
+    private val exceptionRetirement = AtomicReference<Any?>()
+    private val exceptionUpdateRequested = AtomicBoolean(false)
+    private val exceptionUpdateScheduled = AtomicBoolean(false)
+    private val exceptionSuspended = AtomicBoolean(false)
+    private val exceptionStopped = AtomicBoolean(false)
+    private var exceptionHandler: AndroidUncaughtExceptionOwner? = null // control lane; retained before install
+    private var exceptionWaiting: SdkFuture<Unit>? = null // at most one original unfinished report
+    private var exceptionFailure: Throwable? = null // control lane; no retry after unknown failure
+
+    /** Restriction only. Never waits for storage or refreshes an original source lease. */
+    internal fun withdrawAutomaticExceptions(retire: Boolean = false) {
+        if (!exceptionsEnabled) return
+        exceptionEpoch.set(Any())
+        exceptionAdmission.getAndSet(null)?.invalidate()
+        if (retire) {
+            exceptionRetirement.set(Any())
+            requestAutomaticExceptions()
+        }
+    }
+
+    /** Coalesced on the existing runtime control lane, with no periodic queue/schema polling. */
+    internal fun requestAutomaticExceptions() {
+        if (!exceptionsEnabled || exceptionStopped.get()) return
+        exceptionUpdateRequested.set(true)
+        if (!exceptionUpdateScheduled.compareAndSet(false, true)) return
+        try { controlExecutor.execute {
+            exceptionUpdateRequested.set(false)
+            try { updateAutomaticExceptionsOnControl() }
+            catch (error: Throwable) {
+                exceptionFailure = error
+                exceptionStopped.set(true)
+                withdrawAutomaticExceptions()
+            } finally {
+                exceptionUpdateScheduled.set(false)
+                if (exceptionUpdateRequested.get() && !exceptionStopped.get()) requestAutomaticExceptions()
+            }
+        } } catch (_: RejectedExecutionException) { exceptionUpdateScheduled.set(false) }
+    }
+
+    private fun updateAutomaticExceptionsOnControl() {
+        if (exceptionStopped.get()) return
+        val epoch = exceptionEpoch.get()
+        fun current() = !exceptionStopped.get() && !exceptionSuspended.get() && !consentRestricted.get() &&
+            exceptionEpoch.get() === epoch && automaticExceptionAllowed() && exceptionEpoch.get() === epoch
+        val retirement = exceptionRetirement.get()
+        if (retirement == null && !current()) return
+        val update = owner.updateAutomaticExceptionIntake(versions, ::current, retire = retirement != null).await()
+        if (update.imported) armFlushTimer()
+        val pending = update.pending
+        if (pending != null) {
+            if (exceptionWaiting !== pending) {
+                exceptionWaiting = pending
+                pending.whenComplete { _, _ -> requestAutomaticExceptions() }
+            }
+            return
+        }
+        if (retirement != null) {
+            exceptionRetirement.compareAndSet(retirement, null)
+            if (current()) requestAutomaticExceptions()
+            return
+        }
+        val intake = update.intake ?: return
+        if (!current() || !intake.allowsObservation()) { intake.invalidate(); return }
+        exceptionAdmission.set(intake)
+        if (!current()) { exceptionAdmission.compareAndSet(intake, null); intake.invalidate(); return }
+        if (exceptionHandler == null) {
+            val handler = AndroidUncaughtExceptionOwner(exceptionRegistry, object : NativeUncaughtExceptionAdmission {
+                override fun allowsObservation(): Boolean = !exceptionStopped.get() &&
+                    exceptionAdmission.get()?.allowsObservation() == true
+                override fun snapshot(): NativeUncaughtExceptionAdmission? =
+                    if (exceptionStopped.get()) null else exceptionAdmission.get()?.snapshotForPublication()
+                override fun offer(observation: NativeExceptionObservation) {
+                    // Owner must use its exact original snapshot, never adopt a newer arm.
+                    error("An original exception admission snapshot is required")
+                }
+            })
+            exceptionHandler = handler
+            if (!handler.install()) {
+                exceptionStopped.set(true); withdrawAutomaticExceptions()
+                check(handler.close()) { "Original exception handler restoration is unresolved" }
+            }
+        }
+        // Returning custom handlers may leave the process alive. Import/rearm only after the
+        // exact original arm settles; the callback merely schedules this existing worker.
+        val completion = intake.reportSettlement
+        if (exceptionWaiting !== completion) {
+            exceptionWaiting = completion
+            completion.whenComplete { _, _ -> requestAutomaticExceptions() }
+        }
+    }
 
     init {
         require(
@@ -189,10 +294,13 @@ internal class StandaloneRuntime(
      * expiry, and batch limits; anything else retires delivery.
      */
     fun applyConfiguration(configBody: String?): Future<RuntimeCaptureAuthorityUpdateResult> {
+        withdrawAutomaticExceptions()
         nativeReplay?.withdrawAll()
         return submitControl {
             val configurationWitness = configurationGate?.snapshotFor(configBody)
             val parsed = parseConfig(configBody)
+            if (exceptionsEnabled && (parsed?.captureExceptions?.allowsUncaughtReports != true ||
+                    configurationWitness?.isCurrent() != true)) exceptionRetirement.set(Any())
             val privacyBody =
                 parsed?.takeIf { config -> config.status == V1ConfigStatus.ENABLED }?.let { config ->
                     val identity = owner.snapshot().await().state.identity
@@ -232,8 +340,12 @@ internal class StandaloneRuntime(
                         configurationWitness,
                     )
                 }
-                is RuntimeCaptureAuthorityUpdateResult.Terminated -> retireDelivery()
+                is RuntimeCaptureAuthorityUpdateResult.Terminated -> {
+                    retireDelivery()
+                    if (exceptionsEnabled) exceptionRetirement.set(Any())
+                }
             }
+            requestAutomaticExceptions()
             result
         }
     }
@@ -302,6 +414,7 @@ internal class StandaloneRuntime(
         driver: dev.elu.analytics.internal.config.V2ConfigLifecycleDriver,
         occurredAt: String,
     ): Future<RuntimeAppendResult>? {
+        exceptionSuspended.set(true); withdrawAutomaticExceptions()
         nativeReplay?.withdrawFresh()
         val result = owner.applicationBackgrounded(driver, occurredAt, versions)
         if (result != null) lifecycleAdapter.onBackgrounded()
@@ -310,20 +423,27 @@ internal class StandaloneRuntime(
 
     /** Persists the background transition first, then schedules one bounded delivery pass. */
     fun markBackgrounded(occurredAt: String = now()): Future<RuntimeAppendResult> {
+        exceptionSuspended.set(true); withdrawAutomaticExceptions()
         nativeReplay?.withdrawFresh()
         val result = owner.markBackgrounded(occurredAt)
         lifecycleAdapter.onBackgrounded()
         return result
     }
 
-    fun markForegrounded(): Boolean = lifecycleAdapter.onForegrounded()
+    fun markForegrounded(): Boolean {
+        exceptionSuspended.set(false)
+        requestAutomaticExceptions()
+        return lifecycleAdapter.onForegrounded()
+    }
 
     /** Triggers delivery immediately; without an activated authority nothing is sent. */
     fun flush(): SdkFuture<BatchDeliveryPassResult> {
         nativeReplay?.flushSealed()
         val active = synchronized(deliveryLock) { coordinator }
-        return active?.trigger()
-            ?: SdkFuture.completedFuture(BatchDeliveryPassResult(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE))
+        return (active?.trigger()
+            ?: SdkFuture.completedFuture(BatchDeliveryPassResult(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE))).also {
+                it.whenComplete { _, error -> if (error == null) requestAutomaticExceptions() }
+            }
     }
 
     fun lifecycleSink(): RuntimeLifecycleSink = LifecycleSink()
@@ -349,6 +469,7 @@ internal class StandaloneRuntime(
 
     /** Retains exact native completion before queue close; no facade/main thread waits here. */
     internal fun closeAndWait(): SdkFuture<Unit> {
+        exceptionStopped.set(true); withdrawAutomaticExceptions()
         synchronized(deliveryLock) {
             if (closed) return closeResult
             closed = true
@@ -360,10 +481,11 @@ internal class StandaloneRuntime(
         deliveryExecutor.shutdown(); scheduler.shutdownNow()
         try {
             controlExecutor.execute {
-                var failure: Throwable? = null
+                var failure: Throwable? = exceptionFailure
                 fun attempt(action: () -> Unit) { try { action() } catch (error: Throwable) {
                     if (failure == null) failure = error else if (failure !== error) failure!!.addSuppressed(error)
                 } }
+                attempt { check(exceptionHandler?.close() != false) { "Original exception handler restoration is unresolved" } }
                 attempt { originalNativeClose?.awaitExact() }
                 // Attempt close even after a settled native quarantine: queue retains resources,
                 // reports uncertainty and terminates its worker without releasing the lease.
@@ -407,9 +529,10 @@ internal class StandaloneRuntime(
     }
 
     /** Stop scheduling promptly; every composed send also checks its original source witness. */
-    internal fun configurationChanged() { nativeReplay?.withdrawAll(); retireDelivery() }
+    internal fun configurationChanged() { withdrawAutomaticExceptions(); nativeReplay?.withdrawAll(); retireDelivery() }
 
     internal fun restrictForConsent() {
+        withdrawAutomaticExceptions(retire = true)
         consentRestricted.set(true)
         nativeReplay?.withdrawAll()
         retireDelivery()
@@ -452,7 +575,9 @@ internal class StandaloneRuntime(
         // Each send still rechecks the original source witness, current privacy and expiry.
         if (configurationGate == null || witness?.isCurrent() == true) {
             synchronized(deliveryLock) {
-                if (!closed && coordinator === replacement) replacement.trigger()
+                if (!closed && coordinator === replacement) replacement.trigger().whenComplete { _, error ->
+                    if (error == null) requestAutomaticExceptions()
+                }
             }
         }
     }

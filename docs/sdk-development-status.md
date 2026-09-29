@@ -13,8 +13,11 @@ hosted component tests. Original capture/accounting/watchers must settle before
 recovery; each new replay ID reuses the original session/sample/time budget, and
 missing-root observation cannot renew source permission. The latest source change
 shares one immutable v1/v2 installed selection between the public runtime's queue
-and composition, retaining exact remote tuple admission and v1 fallback. Its five
-new facade JVM methods are authored but uncompiled/unrun. Fresh exact-artifact
+and composition, retaining exact remote tuple admission and v1 fallback. Installed
+v2 selection has subsequent hosted coverage. The new automatic JVM report activation
+is source-only here: its default-false opt-in, closed server grant, original handler,
+one-slot writer and passive current-session import still need fresh compilation and
+hosted/real process-death checks. Fresh exact-artifact
 emulator, canonical engine/player and resource qualification remain pending.
 
 Hosted CI run `36581976453` tested PR head `d48cca2` through its synthetic merge
@@ -26,12 +29,18 @@ has 777 JVM classes. That artifact still selects v1 in the public runtime; it do
 not qualify the subsequent installed-v2 selection or the final release. API
 snapshots must come from actual compiled bytes, with old public descriptors preserved.
 
+The later durability run `36609453116` at `e06aa9e` executed 1,117 JVM tests, with one
+unrelated first-activity watcher-reuse assertion failing; all 22 added durability
+methods passed. Both API 29 and API 35 instrumentation jobs succeeded. This does
+not cover the subsequent activation source or establish final Lab qualification.
+
 Views replay still enforces API 29+. API 26–28 readable replay remains an unresolved
 support requirement; the privacy transition guard has not been weakened. Generic
 Compose/custom-drawn content remains opaque. Frame metrics require API 26+, while
 startup requires API 35+ and an observed incomplete-to-first-frame transition with
 proven continuity. Already-complete/ambiguous startup history is omitted. Automatic
-fatal crash/ANR capture remains unimplemented. Native touch source supports only
+native-crash/ANR capture remains unimplemented; optional automatic JVM reporting
+currently captures type only, leaving richer detail parity unresolved. Native touch source supports only
 single-finger observations over lawful encoded Views; real drag/scroll, privacy
 crossing, rotation and customer-player rendering still require exact-artifact Lab
 qualification. Manual exceptions and explicit screen reporting remain available.

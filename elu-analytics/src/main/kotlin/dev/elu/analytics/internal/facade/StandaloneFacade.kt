@@ -285,6 +285,7 @@ internal class StandaloneFacade(
      * then loads flags once, so the initial evaluation sees the identity those calls established.
      */
     fun applyConfiguration(configBody: String?) {
+        stack?.runtime?.withdrawAutomaticExceptions()
         val token = acceptNativeChange(restrictive = true)
         val accepted = submit {
             try {
@@ -299,6 +300,7 @@ internal class StandaloneFacade(
 
     /** Gate publication already revokes the old source; this original local epoch never renews it. */
     internal fun configurationChanged() {
+        stack?.runtime?.withdrawAutomaticExceptions()
         val token = acceptNativeChange(restrictive = true)
         val accepted = submit {
             try { if (!closed) { hasConfigDecision = true; renewAuthority(token?.epoch) } }
@@ -317,6 +319,7 @@ internal class StandaloneFacade(
 
     /** Actual lifecycle facts still come from the sole observer. True is only a reevaluation request. */
     internal fun nativeReplayLifecycleChanged(eligible: Boolean) {
+        if (!eligible) stack?.runtime?.withdrawAutomaticExceptions()
         nativeStartTrace.mark(NativeStartPhase.FACADE_LIFECYCLE, eligible)
         val token = acceptNativeChange(restrictive = true, lifecycleEligible = eligible) ?: return
         val accepted = submit {
@@ -358,6 +361,13 @@ internal class StandaloneFacade(
         !closeRequested.get() && !closed && !isOptedOut() && pendingNativeOperations == 0 && nativeLifecycleEligible
     }
 
+    /** Consent/context and foreground fence, independent of the local replay recording switch. */
+    internal fun automaticExceptionIntakeAllowed(): Boolean = synchronized(projectionLock) {
+        !closeRequested.get() && !closed && state is EluFacadeState.Enabled && !isOptedOut() &&
+            pendingNativeOperations == 0 && pendingIdentityOperations == 0 && pendingFlagOperations == 0 &&
+            nativeLifecycleEligible && hasCurrentConfiguration()
+    }
+
     fun state(): EluFacadeState = if (isOptedOut() && state !is EluFacadeState.Closed) {
         EluFacadeState.Disabled(EluFacadeDisabledReason.OPTED_OUT)
     } else if (state is EluFacadeState.Enabled && !hasCurrentConfiguration()) {
@@ -388,6 +398,7 @@ internal class StandaloneFacade(
 
     internal fun closeAndWait(): SdkFuture<Unit> {
         if (!closeRequested.compareAndSet(false, true)) return closeResult
+        stack?.runtime?.withdrawAutomaticExceptions()
         flagRetryScheduler.close()
         synchronized(projectionLock) { nativeIntentEpoch = Any() }
         stack?.runtime?.withdrawNativeReplay(restrictive = true)
@@ -953,7 +964,10 @@ internal class StandaloneFacade(
         if (token == null || !token.settled.compareAndSet(false, true)) return
         val last = synchronized(projectionLock) { pendingNativeOperations -= 1; pendingNativeOperations == 0 }
         if (!last) return
-        val action = { requestNativeEvaluation(token.epoch, force = true) }
+        val action: () -> Unit = {
+            requestNativeEvaluation(token.epoch, force = true)
+            stack?.runtime?.requestAutomaticExceptions()
+        }
         if (onLane) action() else submit(action)
     }
 
@@ -973,6 +987,7 @@ internal class StandaloneFacade(
     ) {
         // A later opt-in must never backfill activity submitted during a denial.
         val deniedAtCall = kind == OperationKind.ACTIVITY && isOptedOut()
+        if (affectsFlags) stack?.runtime?.withdrawAutomaticExceptions(retire = true)
         if (affectsFlags) synchronized(projectionLock) {
             pendingFlagOperations += 1
             flagIntentRevision = Math.incrementExact(flagIntentRevision)
@@ -1041,6 +1056,7 @@ internal class StandaloneFacade(
             } finally {
                 settleOperation(operation, onLane = true)
                 requestNativeEvaluation(operation.nativeEpoch, force = false)
+                stack?.runtime?.requestAutomaticExceptions()
                 executingNativeEpoch = previousNativeEpoch
             }
         }
@@ -1157,6 +1173,7 @@ internal class StandaloneFacade(
         transition(next)
         if (flagsAuthorized && (!wasEnabled || !flagsLoaded)) startFlagReload()
         nativeEpoch?.let { requestNativeEvaluation(it, force = true) }
+        open.runtime.requestAutomaticExceptions()
     }
 
     private fun disabledReasonFor(reason: RuntimeCaptureAuthorityTerminalReason): EluFacadeDisabledReason =
@@ -1560,6 +1577,7 @@ internal class StandaloneFacade(
 
     private fun projectIdentity(projection: ProjectedIdentity): Boolean {
         if (state !is EluFacadeState.Enabled) return false
+        stack?.runtime?.withdrawAutomaticExceptions(retire = true)
         synchronized(projectionLock) {
             pendingIdentityOperations += 1
             projectedIdentity = projection

@@ -160,6 +160,9 @@ internal enum class V1ReplayAudience { NEW_DEVICES }
 
 internal data class V1CapturePerformance(val memory: Boolean, val longTasks: Boolean, val sampleIntervalMillis: Int)
 
+/** Recognized suppression rules are validated but cannot authorize type-only native reporting. */
+internal data class V1CaptureExceptions(val allowsUncaughtReports: Boolean)
+
 internal data class V1ParsedConfig(
     val schemaVersion: Int,
     val revision: String,
@@ -181,6 +184,7 @@ internal data class V1ParsedConfig(
     val policySourceHash: String?,
     val capturePerformance: V1CapturePerformance? = null,
     val replayAudience: V1ReplayAudience? = null,
+    val captureExceptions: V1CaptureExceptions? = null,
 )
 
 /** Trusted ordering envelope retained even when the document body fails a nested policy check. */

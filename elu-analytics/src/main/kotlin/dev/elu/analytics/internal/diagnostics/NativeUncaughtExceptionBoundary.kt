@@ -30,5 +30,9 @@ internal object AndroidUncaughtExceptionRegistry : NativeUncaughtExceptionRegist
  * Future asynchronous storage must separately own and revalidate its original admission permit.
  */
 internal fun interface NativeUncaughtExceptionAdmission {
+    /** Cheap original admission check before even detached type inspection. No queue/SQL hop. */
+    fun allowsObservation(): Boolean = true
+    /** Freeze the original intake for this invocation; a later arm must not adopt its observation. */
+    fun snapshot(): NativeUncaughtExceptionAdmission? = takeIf { allowsObservation() }
     fun offer(observation: NativeExceptionObservation)
 }

@@ -64,10 +64,35 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             self.assertIn("exception intake lost exact schema", self.run_guard().stderr)
             path.write_text(original)
 
-    def test_exception_intake_is_not_installed_by_public_stack(self) -> None:
+    def test_exception_raw_policy_cannot_bypass_production_selection(self) -> None:
         path = self.root / BOUNDARY.STACK
         path.write_text(path.read_text() + "\nfun escaped() = queue.prepareExceptionIntake()\n")
-        self.assertIn("exception intake production installation remains disabled", self.run_guard().stderr)
+        self.assertIn("exception intake raw policy entry escaped its original queue", self.run_guard().stderr)
+
+    def test_automatic_exceptions_require_original_closed_grant_and_bounded_observation(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal"
+        cases = [
+            ("runtime/RuntimeQueueOwner.kt", "parsed.captureExceptions?.allowsUncaughtReports == true", "true"),
+            ("runtime/RuntimeQueueOwner.kt", "originalIntent() && originalSource.isCurrent() && originalIntent()", "true"),
+            ("runtime/StandaloneRuntime.kt", "diagnosticsOptions.enabled && diagnosticsOptions.crashReports", "true"),
+            ("runtime/StandaloneRuntime.kt", "!exceptionSuspended.get()", "true"),
+            ("runtime/StandaloneRuntime.kt", "exceptionAdmission.get()?.snapshotForPublication()", "exceptionAdmission.get()"),
+            ("runtime/StandaloneRuntime.kt", "exceptionHandler = handler\n            if (!handler.install())", "if (!handler.install())"),
+            ("runtime/StandaloneRuntime.kt", "exceptionHandler?.close() != false", "true"),
+            ("diagnostics/NativeExceptionIntake.kt", "original.completion.get(100, TimeUnit.MILLISECONDS)", "original.completion.get(1000, TimeUnit.MILLISECONDS)"),
+            ("diagnostics/AndroidUncaughtExceptionOwner.kt", "if (!originalAdmission.allowsObservation()) return", "Unit"),
+            ("config/V1ConfigJson.kt", "return V1CaptureExceptions(rules.length() == 0)", "return V1CaptureExceptions(true)"),
+        ]
+        self.assertEqual(self.run_guard().returncode, 0)
+        for relative, before, after in cases:
+            with self.subTest(relative=relative, before=before):
+                path = base / relative; original = path.read_text(); self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn("automatic exception activation lost", self.run_guard().stderr)
+                path.write_text(original)
+        options = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/EluDiagnosticsOptions.kt"
+        options.write_text(options.read_text().replace("private var reportUncaught = false", "private var reportUncaught = true"))
+        self.assertIn("disabled by default", self.run_guard().stderr)
 
     def test_native_touch_observer_has_only_exact_projection_access(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/AndroidReplayTouchObserver.kt"
