@@ -564,8 +564,33 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
             "taken = true; NativeReplayCapturePhysicalUse.issue(this)" not in account):
         errors.append("native physical use must retain one-shot original-use checks")
     owner = sources.get(OWNER, "")
-    if not re.search(r'if\s*\(request\.transport\.codec\s*==\s*"elu-native-wireframe-v1"\)\s*return@submit\s+ReplayAppendResult\.Rejected\(ReplayAppendRejection\.AUTHORITY\)', owner):
+    if not re.search(r'if\s*\(NativeReplayProtocol\.isNativeCodec\(request\.transport\.codec\)\)\s*return@submit\s+ReplayAppendResult\.Rejected\(ReplayAppendRejection\.AUTHORITY\)', owner):
         errors.append("generic replay append must reject native codec without original capture admission")
+    protocol = sources.get(replay / "NativeReplayProtocol.kt", "")
+    tuples = re.findall(r'V([0-9]+)\("([^"]+)", "([^"]+)", "([^"]+)"\)', protocol)
+    if tuples != [("1", "elu-native-wireframe-v1", "protocol-generation-v1", "elu-native-replay-chunk-v1"),
+                  ("2", "elu-native-wireframe-v2", "protocol-generation-v2", "elu-native-replay-chunk-v2")]:
+        errors.append("native protocol must retain only the two closed codec generation domains")
+    checks = [
+        (protocol, "values().firstOrNull { it.transport == transport && it.generation == generation }"),
+        (protocol, "Collections.unmodifiableMap(values().associate { it.transport to it.generation })"),
+        (protocol, "values().any { it.codec == codec }"),
+        (owner, "replayTransportGenerations = NativeReplayProtocol.generationBindings()"),
+        (owner, "NativeReplayProtocol.match(projection.transport, projection.protocolGeneration) == null"),
+        (owner, "NativeReplayProtocol.match(request.transport, request.captureProtocolGeneration) != null"),
+        (owner, "request.transport == admission.permit.prepared.projection.privacy.transport"),
+        (auth, "it in transports && NativeReplayProtocol.match(it, generation) != null"),
+    ]
+    manager = sources.get(MAIN_KOTLIN / "dev/elu/analytics/internal/config/V1ConfigManager.kt", "")
+    checks += [(manager, token) for token in (
+        "replayTransportGenerations: Map<V1ReplayTransport, String> = emptyMap()",
+        "Collections.unmodifiableMap(LinkedHashMap(replayTransportGenerations))",
+        "pair !in replayTransportGenerations || replayTransportGenerations[pair] == generation",
+        "pair !in readbackProvenReplayTransports || !generationMatches(pair, generation)",
+        "!generationMatches(selectedPair, replayCapabilities.replayProtocolGeneration)",
+    )]
+    if any(token not in text for text, token in checks):
+        errors.append("native tuple negotiation lost exact original generation or independent proof restriction")
     for parameter in [r"transports:\s*Set<V1ReplayTransport>\s*=\s*emptySet\(\)",
                       r"generations:\s*Set<String>\s*=\s*emptySet\(\)"]:
         if not re.search(parameter, auth):

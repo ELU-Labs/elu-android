@@ -83,7 +83,7 @@ class StandaloneNativeReplayTest {
             return operation
         }
     }
-    private fun proof() = NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(ReplayFixtures.GENERATION))
+    private fun proof() = NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(NativeReplayProtocol.V1.generation))
     private fun Rig.minimum() = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", 0) }
     private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(3, TimeUnit.SECONDS)
     private fun awaitCondition(message: String, condition: () -> Boolean) {
@@ -229,7 +229,7 @@ class StandaloneNativeReplayTest {
         var owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
         fun openSame() = RuntimeQueueOwner.open(ownership, RuntimeQueueLimits(100, MAX_RUNTIME_QUEUE_BYTES),
             readbackProvenReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
-            supportedReplayProtocolGenerations = setOf(ReplayFixtures.GENERATION),
+            supportedReplayProtocolGenerations = setOf(NativeReplayProtocol.V1.generation),
             databaseFactory = {
                 onConnection?.also { onConnection = null }?.invoke()
                 val db = backing.connection()
@@ -269,6 +269,7 @@ class StandaloneNativeReplayTest {
             .also { it.isAccessible = true }.get(owner) as java.util.concurrent.ExecutorService
         fun configure(change: (JSONObject) -> Unit) { val json = JSONObject(body); change(json); body = json.toString() }
         fun activate() {
+            configure { it.getJSONObject("capabilities").getJSONObject("replay").put("replayProtocolGeneration", NativeReplayProtocol.V1.generation) }
             configure { it.getJSONObject("capabilities").getJSONObject("replay").getJSONArray("transports").put(
                 JSONObject().put("codec", "elu-native-wireframe-v1").put("compression", "gzip")) }
             configure { it.getJSONObject("privacy").getJSONObject("replay").let { policy ->

@@ -44,12 +44,17 @@ internal class NativeReplaySealer(
     private val originalVersions: Value
     private val protocolGeneration: String
     private val maximumRequestBytes: Int
-    private var encoder = NativeWireframeEncoder(limits, maskingProfile = profile)
+    private val protocol: NativeReplayProtocol
+    private var encoder: NativeWireframeEncoder? = null
+    private var interactionEncoder: NativeWireframeV2Encoder? = null
 
     init {
         CoreStateCodec.encodeIdentity(identity)
         RuntimeRecordCodec.encodeBatchVersions(versions)
-        val pair = V1ReplayTransport(CODEC, V1ReplayCompression.GZIP)
+        protocol = NativeReplayProtocol.match(authorization.negotiatedReplayTransport,
+            authorization.replayCapabilities.replayProtocolGeneration)
+            ?: throw NativeReplaySealingException(NativeReplaySealingFailure.INVALID_BINDING)
+        val pair = protocol.transport
         val session = identity.session
         binding(session != null && !identity.optedOut && authorization.schemaVersion == 2 &&
             authorization.captureAuthorization.status == V1ChannelAuthorizationStatus.AUTHORIZED &&
@@ -65,7 +70,7 @@ internal class NativeReplaySealer(
             original == authorization.effectivePrivacy && original.policyRevision == authorization.privacy.revision &&
             original.contextRevision == identity.contextRevision && original.captureAllowed && original.replayAllowed &&
             original.replaySampled && original.maskingValidated && original.replaySessionEligible && !original.identityOptedOut &&
-            original.replayBudgetRemainingSeconds > 0 && original.replayTransport?.codec == CODEC &&
+            original.replayBudgetRemainingSeconds > 0 && original.replayTransport?.codec == protocol.codec &&
             original.replayTransport.compression == V1ReplayCompression.GZIP && original.replayTransport.advertised &&
             original.effectiveMasking.secureInputsMasked &&
             (profile === NativeMaskingProfile.blanketMask() ||
@@ -92,21 +97,41 @@ internal class NativeReplaySealer(
         protocolGeneration = checkedString(checkNotNull(authorization.replayCapabilities.replayProtocolGeneration), 128)
         maximumRequestBytes = minOf(authorization.limits.replayChunkBytes, MAX_REPLAY_REQUEST_BYTES)
         binding(maximumRequestBytes > 0)
+        when (protocol) {
+            NativeReplayProtocol.V1 -> encoder = NativeWireframeEncoder(limits, maskingProfile = profile)
+            NativeReplayProtocol.V2 -> interactionEncoder = NativeWireframeV2Encoder(limits, maskingProfile = profile)
+        }
     }
 
     /** Only a fully validated prepared request commits encoder history; limits and binding never change. */
     @Synchronized
     fun seal(snapshots: List<NativeMaskedSnapshot>): PreparedReplayRequest {
-        val next = encoder.fork()
-        val chunk = next.encode(snapshots)
+        binding(protocol == NativeReplayProtocol.V1)
+        val next = checkNotNull(encoder).fork()
+        val prepared = prepare(next.encode(snapshots))
+        encoder = next
+        return prepared
+    }
+
+    /** Still descriptive: only the original queue's known commit may arm a later observer. */
+    @Synchronized
+    fun sealV2(entries: List<NativeReplayV2Entry>): PreparedReplayRequest {
+        binding(protocol == NativeReplayProtocol.V2)
+        val next = checkNotNull(interactionEncoder).fork()
+        val prepared = prepare(next.encode(entries))
+        interactionEncoder = next
+        return prepared
+    }
+
+    private fun prepare(chunk: NativeEncodedChunk): PreparedReplayRequest {
         val chunkId = "chunk_" + digest(V1StrictCanonicalJson.canonicalBytes(obj(
-            "domain" to text("elu-native-replay-chunk-v1"), "replayId" to text(replayId), "sequence" to integer(chunk.sequence))))
+            "domain" to text(protocol.chunkDomain), "replayId" to text(replayId), "sequence" to integer(chunk.sequence))))
         val startedAt = timestamp(chunk.firstTimestamp)
         val endedAt = timestamp(chunk.lastTimestamp)
         fun value(payload: String) = obj("schemaVersion" to integer(2), "replayId" to text(replayId),
             "sessionId" to text(sessionId), "chunkId" to text(chunkId), "sequence" to integer(chunk.sequence),
             "startedAt" to text(startedAt), "endedAt" to text(endedAt), "identity" to originalIdentity,
-            "contextRevision" to integer(contextRevision), "codec" to text(CODEC), "compression" to text("gzip"),
+            "contextRevision" to integer(contextRevision), "codec" to text(protocol.codec), "compression" to text("gzip"),
             "contentEncoding" to text("base64"), "payload" to text(payload), "privacy" to originalPrivacy, "versions" to originalVersions)
         val overhead = V1StrictCanonicalJson.canonicalBytes(envelope(value(""), "request_" + "0".repeat(64))).size
         requestLimit(overhead < maximumRequestBytes)
@@ -119,13 +144,10 @@ internal class NativeReplaySealer(
         val requestId = "request_" + digest(material)
         val body = V1StrictCanonicalJson.canonicalBytes(envelope(chunkValue, requestId))
         requestLimit(body.size <= maximumRequestBytes)
-        val prepared = PreparedReplayRequest.parse(body, protocolGeneration, maximumRequestBytes)
-        encoder = next
-        return prepared
+        return PreparedReplayRequest.parse(body, protocolGeneration, maximumRequestBytes)
     }
 
     private companion object {
-        const val CODEC = "elu-native-wireframe-v1"
         fun binding(allowed: Boolean) { if (!allowed) throw NativeReplaySealingException(NativeReplaySealingFailure.INVALID_BINDING) }
         fun requestLimit(allowed: Boolean) { if (!allowed) throw NativeReplaySealingException(NativeReplaySealingFailure.REQUEST_LIMIT) }
         fun obj(vararg pairs: Pair<String, Value>) = Value.ObjectValue(pairs.toList())

@@ -175,6 +175,7 @@ internal class RuntimeQueueOwner private constructor(
     private val configManager =
         V1ConfigManager(
             readbackProvenReplayTransports = readbackProvenReplayTransports,
+            replayTransportGenerations = NativeReplayProtocol.generationBindings(),
             trustedFlagSiteKey = trustedSiteKey,
             trustedFlagNamespaceDigest = trustedSiteKey?.let(RuntimeSiteNamespace::digest),
             endpointPolicy = endpointPolicy,
@@ -700,7 +701,7 @@ internal class RuntimeQueueOwner private constructor(
         if (nativeKey(current, old) != observation.session.key || projection.transport !in readbackProvenReplayTransports ||
             projection.protocolGeneration !in supportedReplayProtocolGenerations ||
             projection.protocolGeneration != config.replayCapabilities?.replayProtocolGeneration ||
-            projection.transport.codec != "elu-native-wireframe-v1" ||
+            NativeReplayProtocol.match(projection.transport, projection.protocolGeneration) == null ||
             NativeMaskingProfile.select(checkNotNull(config.privacy).masking, dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID).compatibility(config.privacy?.masking,
                 dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) != NativeMaskingCompatibility.COMPATIBLE) return@submitNative null
         val privacy = try { V1ConfigJson.parseEffectivePrivacy(projection.body) } catch (_: Exception) { return@submitNative null }
@@ -1090,7 +1091,8 @@ internal class RuntimeQueueOwner private constructor(
         return receipt.namespaceHash == ownerNamespaceHash && receipt.streamId == disk.state.stream.streamId &&
             session.key == receipt.key && session.firstStartAt == receipt.firstStartAt && session.activeEpoch == receipt.epoch &&
             !session.clockDenied && !session.interrupted && session.remainingMicroseconds > 0 &&
-            request.transport.codec == "elu-native-wireframe-v1" &&
+            NativeReplayProtocol.match(request.transport, request.captureProtocolGeneration) != null &&
+            request.transport == admission.permit.prepared.projection.privacy.transport &&
             !request.startedAtInstant.isLeapSecond && request.startedAtInstant.fractionalDigits.length <= 3 &&
             !request.endedAtInstant.isLeapSecond && request.endedAtInstant.fractionalDigits.length <= 3 &&
             request.replayId == receipt.replayId && request.startedAtInstant >= V1ConfigJson.parseExactTimestamp(receipt.firstStartAt) &&
@@ -1103,7 +1105,7 @@ internal class RuntimeQueueOwner private constructor(
     internal fun appendPreparedReplay(request: PreparedReplayRequest, profile: ReplayMaskingProfile,
         effectivePrivacyBody: String?): Future<ReplayAppendResult> = submit {
         assertUsable()
-        if (request.transport.codec == "elu-native-wireframe-v1") return@submit ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
+        if (NativeReplayProtocol.isNativeCodec(request.transport.codec)) return@submit ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
         appendPreparedReplayOnWorker(request, profile, effectivePrivacyBody)
     }
 

@@ -6,8 +6,8 @@ or production qualification. See [README.md](./README.md) for installation and
 public Kotlin APIs, and [development status](./docs/sdk-development-status.md)
 for outstanding release gates.
 
-The internal, unadvertised native-v2 interaction candidate is currently a pure
-value/encoding/buffering slice. It uses the exact `elu-native-wireframe-v2` Meta
+The internal, unadvertised native-v2 interaction candidate has detached
+value/encoding/buffering and internal exact-tuple durable admission paths. It uses the exact `elu-native-wireframe-v2` Meta
 discriminator, primary-pointer start/end and coordinate-free root cancellation,
 and coalesced movement with at most ten samples per second. Samples must join
 live lawful encoded leaf IDs and their positive clips; masked/input/placeholder
@@ -18,9 +18,20 @@ each position once. Every geometry event retains the decoder's 200 ms wire-clock
 spacing, independently of the monotonic capture clock. Existing frame, node, byte and minimum-duration limits remain;
 capacity requests an early seal only after the original initial prefix was known
 committed. The pure commit seam is descriptive and does not prove durability.
-Window observation, current hierarchy privacy, original queue/sealer admission,
-active collection scheduling, tuple selection and final
-reader/player qualification are not wired by this slice. Native v1 is unchanged.
+The original internal authority and queue recognize only `elu-native-wireframe-v1` / gzip /
+`protocol-generation-v1` and `elu-native-wireframe-v2` / gzip /
+`protocol-generation-v2`. Those definitions also restrict current config and sealed
+delivery negotiation: mixed advertisements cannot pair a codec with the other
+generation, and the restrictive map does not add local readback evidence. The
+sealer retains one matching encoder, independent chunk domain and original privacy,
+identity and version wrapper; a failed envelope does not advance its encoder.
+Both codecs refuse generic append and require the original current physical use,
+capture admission, source and durable accounting transaction. An ambiguous append
+retains the same prepared bytes through reconciliation; unknown outcomes quarantine
+the original owner. These paths do not arm a collector or supply release proof.
+Window observation, current hierarchy privacy, active collection scheduling and
+final reader/player qualification remain unwired. Production selects v1 only;
+existing v1 encoder/buffer bytes and its chunk domain remain unchanged.
 
 ## Configuration and collection authority
 

@@ -19,17 +19,23 @@ class NativeReplayCaptureQueueTest {
         val facts = NativeReplayLifecycle(TestSelectionAccess())
         val activity = Any(); val root = Any()
         val selection = run { facts.resumed(activity); checkNotNull(facts.select(activity, root).get()) }
-        val authority = NativeReplayAuthority(rig.owner, NativeReplayCapabilities(setOf(
-            V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(ReplayFixtures.GENERATION)), { false })
+        val authority = NativeReplayAuthority(rig.owner, NativeReplayCapabilities(setOf(rig.protocol.transport),
+            setOf(rig.protocol.generation)), { false })
         val prepared = checkNotNull(authority.prepare(selection).get())
         val enrollment = checkNotNull(rig.owner.enrollNativeReplayCapture().get())
         val use = checkNotNull(enrollment.takePhysicalUse())
         var permit: NativeReplayPermit? = null
         fun begin(): NativeReplayPermit = checkNotNull(authority.start(prepared, use).get()).also { permit = it }
         fun admission() = checkNotNull(authority.captureAdmission(checkNotNull(permit), use).get())
-        fun request(admission: NativeReplayCaptureAdmission) = NativeReplaySealer(checkNotNull(permit).replayId,
-            admission.identity, admission.authorization, admission.privacy, admission.profile, StandaloneRuntime.defaultVersions())
-            .seal(listOf(NativeMaskedSnapshot(0, rig.clock.wall, NativeViewport(320, 480), emptyList())))
+        fun request(admission: NativeReplayCaptureAdmission): PreparedReplayRequest {
+            val sealer = NativeReplaySealer(checkNotNull(permit).replayId, admission.identity,
+                admission.authorization, admission.privacy, admission.profile, StandaloneRuntime.defaultVersions())
+            val frame = NativeMaskedSnapshot(0, rig.clock.wall, NativeViewport(320, 480), emptyList())
+            return when (rig.protocol) {
+                NativeReplayProtocol.V1 -> sealer.seal(listOf(frame))
+                NativeReplayProtocol.V2 -> sealer.sealV2(listOf(NativeReplayV2Geometry(frame)))
+            }
+        }
         override fun close() {
             use.settle()
             runCatching { authority.stop().get(1, TimeUnit.SECONDS) }
@@ -38,7 +44,7 @@ class NativeReplayCaptureQueueTest {
         }
     }
     @Test fun `sealed native policy survives fresh retirement while original source and current privacy still govern IO`() {
-        for (mode in listOf("retired", "unsampled", "exhausted", "background", "interrupted", "reset", "withdrawn", "expired", "empty-proof")) Rig().use { rig ->
+        for (mode in listOf("retired", "unsampled", "exhausted", "background", "interrupted", "reset", "withdrawn", "expired", "empty-proof")) for (protocol in NativeReplayProtocol.values()) Rig(protocol).use { rig ->
             rig.activate()
             val request = Session(rig).use { session ->
                 session.begin(); val admission = session.admission(); val bytes = session.request(admission)
@@ -55,7 +61,7 @@ class NativeReplayCaptureQueueTest {
                 "expired" -> { rig.clock.wall += 600_000; rig.clock.nanos += 600_000_000_000L }
             }
             val proof = if (mode == "empty-proof") NativeReplayCapabilities() else NativeReplayCapabilities(
-                setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(ReplayFixtures.GENERATION))
+                setOf(rig.protocol.transport), setOf(rig.protocol.generation))
             val delivery = rig.owner.openReplayDeliveryQueue(PrivacyStateProjector.nativeSealedDeliveryPolicy(proof) { false }).get()
             val claim = delivery.claim()
             if (mode in listOf("withdrawn", "expired", "empty-proof")) {
@@ -103,7 +109,7 @@ class NativeReplayCaptureQueueTest {
         }
         val delivery = rig.owner.openReplayDeliveryQueue(PrivacyStateProjector.nativeSealedDeliveryPolicy(
             NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
-                setOf(ReplayFixtures.GENERATION))) { false }).get()
+                setOf(NativeReplayProtocol.V1.generation))) { false }).get()
         val claim = checkNotNull(delivery.claim())
         delivery.abandon(claim) // Release the lease so denial below must come from renewed privacy.
         rig.renew { it.getJSONObject("privacy").getJSONObject("masking").put("text", "all") }
@@ -203,7 +209,7 @@ class NativeReplayCaptureQueueTest {
             val reopened = rig.openSame().get(); reopened.closeAsync().get(); Unit
         }
     }
-    @Test fun `actual native sealer bytes require opaque admission and preserve exact stored body`() = Rig().use { rig ->
+    @Test fun `actual native sealer bytes require opaque admission and preserve exact stored body`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
         rig.activate(); Session(rig).use { session ->
             session.begin(); val admission = session.admission(); val request = session.request(admission)
             assertEquals(ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY), rig.owner.appendPreparedReplay(request,
@@ -215,9 +221,46 @@ class NativeReplayCaptureQueueTest {
             assertArrayEquals(request.copyBytes(), row.prepared.copyBytes())
             assertEquals(admission.identity.session!!.id, row.prepared.sessionId)
             assertEquals(request.captureProtocolGeneration, row.captureProtocolGeneration)
+            assertEquals(protocol.transport, row.prepared.transport)
+            assertEquals(protocol.generation, row.captureProtocolGeneration)
+        }
+    } }
+    @Test fun `native tuple mismatch and foreign admission cannot append even well formed original bytes`() {
+        for (protocol in NativeReplayProtocol.values()) Rig(protocol).use { rig ->
+            rig.activate(); Session(rig).use { session ->
+                session.begin(); val admission = session.admission(); val request = session.request(admission)
+                val otherGeneration = NativeReplayProtocol.values().single { it != protocol }.generation
+                val crossed = PreparedReplayRequest.parse(request.copyBytes(), otherGeneration)
+                assertTrue(rig.owner.appendNativeReplay(crossed, admission, session.use).get() is NativeReplayAppendOutcome.Rejected)
+                Rig(protocol).use { foreign ->
+                    foreign.activate(); Session(foreign).use { other ->
+                        other.begin(); val foreignAdmission = other.admission()
+                        assertTrue(rig.owner.appendNativeReplay(request, foreignAdmission, session.use).get() is NativeReplayAppendOutcome.Rejected)
+                        assertTrue(rig.owner.appendNativeReplay(other.request(foreignAdmission), admission, session.use).get() is NativeReplayAppendOutcome.Rejected)
+                    }
+                }
+                assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
+                assertTrue(admission.isCurrent())
+                assertTrue(rig.owner.appendNativeReplay(request, admission, session.use).get() is NativeReplayAppendOutcome.Committed)
+            }
         }
     }
-    @Test fun `known commit then withdrawal keeps sealed bytes and distinct completion`() = Rig().use { rig ->
+
+    @Test fun `ambiguous native append reconciles exact request without resealing or duplicate row`() {
+        for (protocol in NativeReplayProtocol.values()) for (outcome in listOf(FakeAmbiguousOutcome.COMMIT, FakeAmbiguousOutcome.ROLLBACK)) Rig(protocol).use { rig ->
+            rig.activate(); Session(rig).use { session ->
+                session.begin(); val admission = session.admission(); val request = session.request(admission)
+                rig.onReplayWrite = { rig.backing.ambiguousNextCommit = outcome }
+                assertTrue(rig.owner.appendNativeReplay(request, admission, session.use).get() is NativeReplayAppendOutcome.Committed)
+                assertArrayEquals(request.copyBytes(), rig.owner.storedPreparedReplayForTesting().get().single().prepared.copyBytes())
+                assertTrue(admission.isCurrent())
+                assertTrue(rig.owner.appendNativeReplay(request, admission, session.use).get() is NativeReplayAppendOutcome.Committed)
+                assertEquals(1, rig.owner.storedPreparedReplayForTesting().get().size)
+            }
+        }
+    }
+
+    @Test fun `known commit then withdrawal keeps sealed bytes and distinct completion`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
         rig.activate(); Session(rig).use { session ->
             session.begin(); val admission = session.admission(); val request = session.request(admission)
             rig.afterReplayCommit = { session.authority.withdraw() }
@@ -226,8 +269,8 @@ class NativeReplayCaptureQueueTest {
             assertFalse(admission.isCurrent())
             assertTrue(rig.owner.appendNativeReplay(request, admission, session.use).get() is NativeReplayAppendOutcome.Rejected)
         }
-    }
-    @Test fun `withdrawal during row write rolls back exact bytes and keeps original accounting`() = Rig().use { rig ->
+    } }
+    @Test fun `withdrawal during row write rolls back exact bytes and keeps original accounting`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
         rig.activate(); Session(rig).use { session ->
             session.begin(); val admission = session.admission(); val request = session.request(admission)
             rig.onReplayWrite = { session.authority.withdraw() }
@@ -235,9 +278,9 @@ class NativeReplayCaptureQueueTest {
             assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
             assertNotNull(rig.state().session!!.activeEpoch)
         }
-    }
+    } }
     @Test fun `actual source context and physical settlement deny retained append`() {
-        for (mode in 0..2) Rig().use { rig ->
+        for (mode in 0..2) for (protocol in NativeReplayProtocol.values()) Rig(protocol).use { rig ->
             rig.activate(); Session(rig).use { session ->
                 session.begin(); val admission = session.admission(); val request = session.request(admission)
                 when (mode) { 0 -> rig.driver.onBackground(); 1 -> rig.owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("plan" to "changed"), rig.now())).get(); 2 -> session.use.settle() }
@@ -271,7 +314,7 @@ class NativeReplayCaptureQueueTest {
             assertNotNull(rig.state().session!!.activeEpoch)
         }
     }
-    @Test fun `unknown append quarantines original prepared request without releasing occupancy`() = Rig().use { rig ->
+    @Test fun `unknown append quarantines original prepared request without releasing occupancy`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
         rig.activate(); Session(rig).use { session ->
             session.begin(); val admission = session.admission(); val request = session.request(admission)
             rig.onReplayWrite = { rig.backing.ambiguousNextCommit = FakeAmbiguousOutcome.DIVERGE }
@@ -280,7 +323,7 @@ class NativeReplayCaptureQueueTest {
             assertEquals(NativeReplayCaptureFinish.ACCOUNTING_PENDING, rig.owner.finishNativeReplayCapture(session.enrollment).get())
             failure { rig.openSame().get() }
         }
-    }
+    } }
     @Test fun `canonical native projection is installed admitted and sealed without changing full hash`() = Rig().use { rig ->
         rig.activate(); Session(rig).use { session ->
             val projection = session.prepared.projection
@@ -317,7 +360,7 @@ class NativeReplayCaptureQueueTest {
         }
     }
     @Test fun `recovery never revives source close or queued context withdrawal and never redraws`() {
-        for (outcome in listOf(FakeAmbiguousOutcome.COMMIT, FakeAmbiguousOutcome.ROLLBACK)) for (mode in 0..2) Rig().use { rig ->
+        for (outcome in listOf(FakeAmbiguousOutcome.COMMIT, FakeAmbiguousOutcome.ROLLBACK)) for (mode in 0..2) for (protocol in NativeReplayProtocol.values()) Rig(protocol).use { rig ->
             rig.activate(); Session(rig).use { session ->
                 var pending: java.util.concurrent.Future<*>? = null
                 rig.onConnection = {
@@ -585,7 +628,7 @@ class NativeReplayCaptureQueueTest {
         failure { rig.openSame().get(3, TimeUnit.SECONDS) }
         assertArrayEquals(before, rig.row().payload)
     }
-    private class Rig : AutoCloseable {
+    private class Rig(val protocol: NativeReplayProtocol = NativeReplayProtocol.V1) : AutoCloseable {
         val clock = Clock(); val worker = Worker(); val gate = V2ConfigAuthorityGate()
         var body = ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json")
         val source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
@@ -604,8 +647,8 @@ class NativeReplayCaptureQueueTest {
         @Volatile var databaseCloses = 0
         var owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
         fun openSame() = RuntimeQueueOwner.open(ownership, RuntimeQueueLimits(100, MAX_RUNTIME_QUEUE_BYTES),
-            readbackProvenReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
-            supportedReplayProtocolGenerations = setOf(ReplayFixtures.GENERATION),
+            readbackProvenReplayTransports = setOf(protocol.transport),
+            supportedReplayProtocolGenerations = setOf(protocol.generation),
             databaseFactory = {
                 onConnection?.also { onConnection = null }?.invoke()
                 val db = backing.connection()
@@ -645,8 +688,9 @@ class NativeReplayCaptureQueueTest {
             .also { it.isAccessible = true }.get(owner) as java.util.concurrent.ExecutorService
         fun configure(change: (JSONObject) -> Unit) { val json = JSONObject(body); change(json); body = json.toString() }
         fun activate() {
+            configure { it.getJSONObject("capabilities").getJSONObject("replay").put("replayProtocolGeneration", protocol.generation) }
             configure { it.getJSONObject("capabilities").getJSONObject("replay").getJSONArray("transports").put(
-                JSONObject().put("codec", "elu-native-wireframe-v1").put("compression", "gzip")) }
+                JSONObject().put("codec", protocol.codec).put("compression", "gzip")) }
             configure { it.getJSONObject("privacy").getJSONObject("replay").let { policy ->
                 if (policy.getDouble("sampleRate") != 0.0) policy.put("sampleRate", 1.0)
             } }

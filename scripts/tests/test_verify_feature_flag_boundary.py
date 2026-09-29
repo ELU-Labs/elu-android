@@ -654,12 +654,38 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_native_generic_append_cannot_bypass_original_admission(self) -> None:
         path = self.root / BOUNDARY.OWNER
         original = path.read_text()
-        refusal = 'if (request.transport.codec == "elu-native-wireframe-v1") return@submit ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)'
+        refusal = 'if (NativeReplayProtocol.isNativeCodec(request.transport.codec)) return@submit ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)'
         self.assertIn(refusal, original)
         path.write_text(original.replace(refusal, ""))
         result = self.run_guard()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("generic replay append must reject native codec", result.stderr)
+
+    def test_native_tuples_cannot_cross_generation_or_bypass_independent_proof(self) -> None:
+        replay = BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+        manager = BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/config/V1ConfigManager.kt"
+        cases = [
+            (replay / "NativeReplayProtocol.kt", '"protocol-generation-v2"', '"protocol-generation-v1"'),
+            (replay / "NativeReplayProtocol.kt", 'it.transport == transport && it.generation == generation', 'it.transport == transport'),
+            (replay / "NativeReplayProtocol.kt", 'values().any { it.codec == codec }', 'codec == "elu-native-wireframe-v1"'),
+            (BOUNDARY.OWNER, 'replayTransportGenerations = NativeReplayProtocol.generationBindings(),', ''),
+            (BOUNDARY.OWNER, 'NativeReplayProtocol.match(request.transport, request.captureProtocolGeneration) != null', 'true'),
+            (BOUNDARY.OWNER, 'NativeReplayProtocol.match(projection.transport, projection.protocolGeneration) == null', 'false'),
+            (BOUNDARY.OWNER, 'request.transport == admission.permit.prepared.projection.privacy.transport', 'true'),
+            (manager, '!generationMatches(selectedPair, replayCapabilities.replayProtocolGeneration)', 'false'),
+            (manager, '!generationMatches(pair, generation)', 'false'),
+            (manager, 'pair !in readbackProvenReplayTransports || !generationMatches(pair, generation)', '!generationMatches(pair, generation)'),
+            (replay / "NativeReplayAuthority.kt", 'it in transports && NativeReplayProtocol.match(it, generation) != null', 'it in transports'),
+        ]
+        for relative, old, new in cases:
+            with self.subTest(relative=relative, old=old):
+                path = self.root / relative; original = path.read_text()
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new))
+                result = self.run_guard()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("native", result.stderr)
+                path.write_text(original)
 
     def test_native_physical_use_cannot_drop_one_shot_or_original_identity(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayAccounting.kt"

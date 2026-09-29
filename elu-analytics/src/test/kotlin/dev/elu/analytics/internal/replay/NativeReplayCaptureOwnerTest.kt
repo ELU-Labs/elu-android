@@ -40,7 +40,7 @@ class NativeReplayCaptureOwnerTest {
         val activity = Any(); val root = Any()
         val selection = run { lifecycle.resumed(activity); checkNotNull(lifecycle.select(activity, root).get()) }
         val authority = NativeReplayAuthority(rig.owner, proof ?: NativeReplayCapabilities(setOf(
-            V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(ReplayFixtures.GENERATION)), { false })
+            V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(NativeReplayProtocol.V1.generation)), { false })
         fun prepare() = authority.prepare(selection).get(3, TimeUnit.SECONDS)
         fun start(prepared: NativeReplayPreparedAuthority, platform: Platform, trace: NativeStartTrace = NativeStartTrace.NONE): NativeReplayCaptureOwner =
             checkNotNull(NativeReplayCaptureOwner.start(rig.owner, authority, prepared, StandaloneRuntime.defaultVersions(), platform, trace))
@@ -875,7 +875,7 @@ class NativeReplayCaptureOwnerTest {
         var owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
         fun openSame() = RuntimeQueueOwner.open(ownership, RuntimeQueueLimits(100, MAX_RUNTIME_QUEUE_BYTES),
             readbackProvenReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
-            supportedReplayProtocolGenerations = setOf(ReplayFixtures.GENERATION),
+            supportedReplayProtocolGenerations = setOf(NativeReplayProtocol.V1.generation),
             databaseFactory = {
                 onConnection?.also { onConnection = null }?.invoke()
                 val db = backing.connection()
@@ -915,6 +915,7 @@ class NativeReplayCaptureOwnerTest {
             .also { it.isAccessible = true }.get(owner) as java.util.concurrent.ExecutorService
         fun configure(change: (JSONObject) -> Unit) { val json = JSONObject(body); change(json); body = json.toString() }
         fun activate() {
+            configure { it.getJSONObject("capabilities").getJSONObject("replay").put("replayProtocolGeneration", NativeReplayProtocol.V1.generation) }
             configure { it.getJSONObject("capabilities").getJSONObject("replay").getJSONArray("transports").put(
                 JSONObject().put("codec", "elu-native-wireframe-v1").put("compression", "gzip")) }
             configure { it.getJSONObject("privacy").getJSONObject("replay").let { policy ->

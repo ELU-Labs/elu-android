@@ -162,18 +162,69 @@ class NativeReplaySealerTest {
         assertNotEquals(first.effectivePolicyHash, next.effectivePolicyHash)
         assertNotEquals(first.requestId, next.requestId)
     }
-    private data class Binding(val identity: IdentityState, val config: V1AuthorizedConfig, val privacy: ByteArray, val versions: RuntimeVersions) {
-        fun sealer(identity: IdentityState = this.identity, privacy: ByteArray = this.privacy, versions: RuntimeVersions = this.versions,
-                   replayId: String = "replay-sealer") = NativeReplaySealer(replayId, identity, config, privacy, NativeMaskingProfile.blanketMask(), versions)
+    @Test fun `v2 sealer preserves earliest movement span exact wrapper and independent sequence domain`() {
+        val binding = fixture(protocol = NativeReplayProtocol.V2, profile = NativeMaskingProfile.sensitiveMask())
+        val sealer = binding.sealer(); val twin = binding.sealer()
+        val time = Instant.parse(NOW).toEpochMilli()
+        val id = UUID(0, 1)
+        val bounds = NativeRect(10.0, 10.0, 80.0, 80.0)
+        val initial = NativeReplayV2Geometry(NativeMaskedSnapshot(0, time, NativeViewport(320, 480),
+            listOf(NativeMaskedNode(id, NativeMaskedKind.Rectangle, bounds, bounds))))
+        val first = sealer.sealV2(listOf(initial))
+        assertArrayEquals(first.copyBytes(), twin.sealV2(listOf(initial)).copyBytes())
+        assertEquals(NativeReplayProtocol.V2.transport, first.transport)
+        assertEquals(NativeReplayProtocol.V2.generation, first.captureProtocolGeneration)
+        assertEquals(NativeReplayProtocol.V2.codec, JSONArray(decoded(first).toString(Charsets.UTF_8))
+            .getJSONObject(0).getJSONObject("data").getString("codec"))
+        val start = NativeReplayInteraction.Start(NativeReplayTouchPoint(id, 20, 20, time))
+        assertArrayEquals(sealer.sealV2(listOf(start)).copyBytes(), twin.sealV2(listOf(start)).copyBytes())
+        val moves = NativeReplayInteraction.Moves(listOf(
+            NativeReplayTouchPoint(id, 21, 21, time + 100), NativeReplayTouchPoint(id, 22, 22, time + 200)))
+        val movement = sealer.sealV2(listOf(moves))
+        assertArrayEquals(movement.copyBytes(), twin.sealV2(listOf(moves)).copyBytes())
+        assertEquals(2L, movement.sequence)
+        assertEquals(time + 100, Instant.parse(movement.startedAt).toEpochMilli())
+        assertEquals(time + 200, Instant.parse(movement.endedAt).toEpochMilli())
+        assertArrayEquals(movement.copyBytes(), PreparedReplayRequest.parse(movement.copyBytes(), NativeReplayProtocol.V2.generation).copyBytes())
+        val v1 = fixture().sealer().seal(listOf(frame(0, timestamp = time)))
+        assertNotEquals(v1.chunkId, first.chunkId)
     }
-    private fun fixture(limit: Int = MAX_REPLAY_REQUEST_BYTES, mode: String = "allowed", userId: String = "user-sealer", context: Long = 7): Binding {
+
+    @Test fun `v2 failed envelope does not consume encoder history and formats cannot cross sealer entrypoints`() {
+        val clean = fixture(protocol = NativeReplayProtocol.V2).sealer()
+        val initial = NativeReplayV2Geometry(frame(0))
+        val expected = clean.sealV2(listOf(initial))
+        val bounded = fixture(protocol = NativeReplayProtocol.V2, limit = expected.byteCount).sealer()
+        rejectsLimit { bounded.sealV2(listOf(NativeReplayV2Geometry(frame(0, nodes = 120)))) }
+        assertArrayEquals(expected.copyBytes(), bounded.sealV2(listOf(initial)).copyBytes())
+        rejects { fixture().sealer().sealV2(listOf(initial)) }
+        rejects { fixture(protocol = NativeReplayProtocol.V2).sealer().seal(listOf(frame(0))) }
+        for (protocol in NativeReplayProtocol.values()) {
+            val original = fixture(protocol = protocol)
+            for (generation in NativeReplayProtocol.values().map { it.generation } + "unknown") {
+                if (generation == protocol.generation) continue
+                rejects { original.copy(config = original.config.copy(replayCapabilities =
+                    original.config.replayCapabilities.copy(replayProtocolGeneration = generation))).sealer() }
+            }
+        }
+    }
+
+    private data class Binding(val identity: IdentityState, val config: V1AuthorizedConfig, val privacy: ByteArray, val versions: RuntimeVersions, val profile: NativeMaskingProfile) {
+        fun sealer(identity: IdentityState = this.identity, privacy: ByteArray = this.privacy, versions: RuntimeVersions = this.versions,
+                   replayId: String = "replay-sealer") = NativeReplaySealer(replayId, identity, config, privacy, profile, versions)
+    }
+    private fun fixture(limit: Int = MAX_REPLAY_REQUEST_BYTES, mode: String = "allowed", userId: String = "user-sealer", context: Long = 7,
+                        protocol: NativeReplayProtocol = NativeReplayProtocol.V1,
+                        profile: NativeMaskingProfile = NativeMaskingProfile.blanketMask()): Binding {
         // Pure value fixture only: synthetic native pair proof, without runtime or codec activation.
         val document = System.getenv("ELU_SEALER_CONFIG")?.let { File(it).readText() }
             ?: checkNotNull(javaClass.classLoader?.getResourceAsStream("contracts/v2/fixtures/config-enabled.json"))
                 .bufferedReader().use { it.readText() }
         val root = JSONObject(document)
+        val pair = protocol.transport
+        root.getJSONObject("capabilities").getJSONObject("replay").put("replayProtocolGeneration", protocol.generation)
         root.getJSONObject("capabilities").getJSONObject("replay").put("transports", JSONArray().put(JSONObject()
-            .put("codec", if (mode == "no-advertisement") "elu-browser-dom-v1" else PAIR.codec).put("compression", "gzip")))
+            .put("codec", if (mode == "no-advertisement") "elu-browser-dom-v1" else pair.codec).put("compression", "gzip")))
         root.getJSONObject("limits").put("replayChunkBytes", limit)
         if (mode == "no-capture") root.getJSONObject("features").put("capture", false)
         val parsed = V1ConfigJson.parseConfig(root.toString())
@@ -182,13 +233,18 @@ class NativeReplaySealerTest {
                 lifecycle = SessionLifecycle.ACTIVE, backgroundedAt = null), optedOut = mode == "opt-out", updatedAt = NOW)
         val effective = PrivacyStateProjector.project(PrivacyProjectionInput(checkNotNull(parsed.privacy), checkNotNull(parsed.features),
             checkNotNull(parsed.replayCapabilities), identity, false, NOW,
-            PrivacyReplayInput(mode != "no-sample", true, true, if (mode == "no-budget") 0 else 60, PAIR)))
-        val privacy = canonical(JSONObject(PrivacyStateProjector.encode(effective)))
-        val manager = V1ConfigManager(if (mode == "no-proof") emptySet() else setOf(PAIR))
+            PrivacyReplayInput(mode != "no-sample", true, true, if (mode == "no-budget") 0 else 60, pair)))
+        val privacyJson = JSONObject(PrivacyStateProjector.encode(effective))
+        privacyJson.getJSONObject("effectiveMasking").put("text", if (profile === NativeMaskingProfile.sensitiveMask()) "sensitive" else "all")
+        privacyJson.remove("effectivePolicyHash")
+        privacyJson.put("effectivePolicyHash", ReplayJson.digest(canonical(privacyJson)))
+        val privacy = canonical(privacyJson)
+        val manager = V1ConfigManager(if (mode == "no-proof") emptySet() else setOf(pair),
+            replayTransportGenerations = NativeReplayProtocol.generationBindings())
         check(manager.install(root.toString(), Instant.parse(NOW).toEpochMilli()) is V1ConfigUpdateResult.Enabled)
         val authorized = manager.authorize(privacy.toString(Charsets.UTF_8), identity, Instant.parse(NOW).toEpochMilli()) as V1ConfigResolution.Authorized
         return Binding(identity, authorized.config, privacy, RuntimeVersions(platform = RuntimePlatform.ANDROID,
-            runtime = RuntimeVersionComponent("elu-android", "1.0.0"), facade = RuntimeVersionComponent("EluAnalytics", "1.0.0"), build = "fixture-build"))
+            runtime = RuntimeVersionComponent("elu-android", "1.0.0"), facade = RuntimeVersionComponent("EluAnalytics", "1.0.0"), build = "fixture-build"), profile)
     }
     private fun frame(ordinal: Long, timestamp: Long = Instant.parse("2026-08-05T00:01:00.123Z").toEpochMilli() + ordinal, nodes: Int = 0): NativeMaskedSnapshot {
         val items = (0 until nodes).map { index ->

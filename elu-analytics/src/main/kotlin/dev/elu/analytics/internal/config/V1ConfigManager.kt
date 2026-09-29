@@ -25,9 +25,17 @@ internal class V1ConfigManager(
     private val trustedFlagSiteKey: String? = null,
     private val trustedFlagNamespaceDigest: String? = null,
     private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
+    replayTransportGenerations: Map<V1ReplayTransport, String> = emptyMap(),
 ) {
     private val readbackProvenReplayTransports: Set<V1ReplayTransport> =
         Collections.unmodifiableSet(LinkedHashSet(readbackProvenReplayTransports))
+
+    // Optional restrictions only: this map cannot add a locally proven transport.
+    private val replayTransportGenerations: Map<V1ReplayTransport, String> =
+        Collections.unmodifiableMap(LinkedHashMap(replayTransportGenerations))
+
+    private fun generationMatches(pair: V1ReplayTransport, generation: String?): Boolean =
+        pair !in replayTransportGenerations || replayTransportGenerations[pair] == generation
 
     private var activeConfig: InstalledConfig? = null
     private var newestBoundary: V1ParsedConfigBoundary? = null
@@ -168,7 +176,7 @@ internal class V1ConfigManager(
         val selected = privacy.replayTransport ?: return null
         val pair = V1ReplayTransport(selected.codec, selected.compression)
         if (!selected.advertised || pair !in fresh.replayCapabilities.advertisedTransports ||
-            pair !in readbackProvenReplayTransports ||
+            pair !in readbackProvenReplayTransports || !generationMatches(pair, generation) ||
             !maskingIsEqualOrStricter(fresh.privacy.masking, privacy.effectiveMasking) ||
             (androidPlatformFallbackRequired(fresh.privacy.masking) && !privacy.effectiveMasking.platformFallbackApplied)) return null
         return V1SealedReplayDelivery(fresh, installed.endpoints.replay ?: return null, pair, generation)
@@ -583,7 +591,8 @@ internal class V1ConfigManager(
                 selectedPair == null -> restricted(V1ChannelAuthorizationReason.TRANSPORT_MISSING)
                 androidPlatformFallbackRequired(policy.masking) && !effective.effectiveMasking.platformFallbackApplied ->
                     restricted(V1ChannelAuthorizationReason.PLATFORM_FALLBACK_REQUIRED)
-                selectedPair !in readbackProvenReplayTransports ->
+                selectedPair !in readbackProvenReplayTransports ||
+                    !generationMatches(selectedPair, replayCapabilities.replayProtocolGeneration) ->
                     restricted(V1ChannelAuthorizationReason.LOCAL_TRANSPORT_UNPROVEN)
                 else -> authorized()
             }

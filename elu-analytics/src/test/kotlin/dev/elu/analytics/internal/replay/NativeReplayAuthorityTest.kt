@@ -19,6 +19,27 @@ class NativeReplayAuthorityTest {
         val privacy = checkNotNull(PrivacyStateProjector.projectNative(input, proof, false))
         return checkNotNull(rig.owner.prepareNativeReplayProjection(input, privacy).get())
     }
+    @Test fun `closed native capability tuples select original generation independent of advertisement order`() {
+        val protocols = NativeReplayProtocol.values().toList()
+        for (order in listOf(protocols, protocols.reversed())) {
+            for (generation in protocols.map { it.generation } + "unknown-native-generation") {
+                val body = JSONObject(ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json"))
+                body.getJSONObject("capabilities").getJSONObject("replay")
+                    .put("transports", org.json.JSONArray(order.map { JSONObject().put("codec", it.codec).put("compression", "gzip") }))
+                    .put("replayProtocolGeneration", generation)
+                val config = V1ConfigJson.parseConfig(body.toString())
+                val caps = NativeReplayCapabilities(protocols.map { it.transport }.toSet(), protocols.map { it.generation }.toSet())
+                assertEquals(protocols.firstOrNull { it.generation == generation }?.transport, caps.transport(config))
+                assertNull(NativeReplayCapabilities().transport(config))
+                for (candidate in protocols) {
+                    val crossed = NativeReplayCapabilities(setOf(candidate.transport), setOf(generation))
+                    assertEquals(candidate.transport.takeIf { candidate.generation == generation }, crossed.transport(config))
+                    assertNull(NativeReplayProtocol.match(V1ReplayTransport(candidate.codec, V1ReplayCompression.NONE), generation))
+                }
+            }
+        }
+    }
+
     @Test fun `native handoff installs original full privacy and exact immutable identity`() = Rig().use { rig ->
         rig.activate()
         val prepared = prepared(rig)
@@ -161,7 +182,7 @@ class NativeReplayAuthorityTest {
         val platform = TestSelectionAccess(); val facts = NativeReplayLifecycle(platform)
         val activity = Any(); val root = Any(); facts.resumed(activity)
         val selection = checkNotNull(facts.select(activity, root).get())
-        val capabilities = NativeReplayCapabilities(setOf(nativePair), setOf(ReplayFixtures.GENERATION))
+        val capabilities = NativeReplayCapabilities(setOf(nativePair), setOf(NativeReplayProtocol.V1.generation))
         val authority = NativeReplayAuthority(rig.owner, capabilities, { false })
         try {
             val prepared = checkNotNull(authority.prepare(selection).get())
@@ -188,7 +209,7 @@ class NativeReplayAuthorityTest {
         val selection = checkNotNull(facts.select(activity, root).get())
         val entered = CountDownLatch(1); var pending: (() -> Unit)? = null
         platform.hold = { pending = it; entered.countDown() }
-        val authority = NativeReplayAuthority(rig.owner, NativeReplayCapabilities(setOf(nativePair), setOf(ReplayFixtures.GENERATION)), { false })
+        val authority = NativeReplayAuthority(rig.owner, NativeReplayCapabilities(setOf(nativePair), setOf(NativeReplayProtocol.V1.generation)), { false })
         try {
             val prepare = authority.prepare(selection); assertTrue(entered.await(3, TimeUnit.SECONDS))
             val closing = authority.closeAndWait(); assertFalse(closing.isDone); assertFalse(closing.cancel(true))
@@ -214,7 +235,7 @@ class NativeReplayAuthorityTest {
         var owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
         fun openSame() = RuntimeQueueOwner.open(ownership, RuntimeQueueLimits(100, MAX_RUNTIME_QUEUE_BYTES),
             readbackProvenReplayTransports = setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),
-            supportedReplayProtocolGenerations = setOf(ReplayFixtures.GENERATION),
+            supportedReplayProtocolGenerations = setOf(NativeReplayProtocol.V1.generation),
             databaseFactory = {
                 val db = backing.connection()
                 object : RuntimeQueueDatabase by db {
@@ -244,6 +265,7 @@ class NativeReplayAuthorityTest {
             })
         fun configure(change: (JSONObject) -> Unit) { val json = JSONObject(body); change(json); body = json.toString() }
         fun activate() {
+            configure { it.getJSONObject("capabilities").getJSONObject("replay").put("replayProtocolGeneration", NativeReplayProtocol.V1.generation) }
             configure { it.getJSONObject("capabilities").getJSONObject("replay").getJSONArray("transports").put(
                 JSONObject().put("codec", "elu-native-wireframe-v1").put("compression", "gzip")) }
             configure { it.getJSONObject("privacy").getJSONObject("replay").let { policy ->

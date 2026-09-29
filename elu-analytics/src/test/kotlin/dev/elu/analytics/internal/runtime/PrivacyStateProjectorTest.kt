@@ -216,6 +216,8 @@ class PrivacyStateProjectorTest {
     @Test fun `native sealed policy supplies no fresh facts and works without any current session`() {
         val json = JSONObject(checkNotNull(javaClass.classLoader?.getResource("contracts/v2/fixtures/config-enabled.json")).readText())
         val pair = V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)
+        json.getJSONObject("capabilities").getJSONObject("replay").put("replayProtocolGeneration",
+            dev.elu.analytics.internal.replay.NativeReplayProtocol.V1.generation)
         json.getJSONObject("capabilities").getJSONObject("replay").getJSONArray("transports")
             .put(JSONObject().put("codec", pair.codec).put("compression", "gzip"))
         val parsed = V1ConfigJson.parseConfig(json.toString()); val now = Instant.parse("2026-08-05T00:01:06Z").toEpochMilli()

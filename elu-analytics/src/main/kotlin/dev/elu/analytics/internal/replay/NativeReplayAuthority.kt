@@ -16,13 +16,17 @@ internal class NativeReplayCapabilities(
 ) {
     private val transports = Collections.unmodifiableSet(HashSet(transports))
     private val generations = Collections.unmodifiableSet(HashSet(generations))
-    internal fun hasLocalEvidence(): Boolean =
-        V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP) in transports && generations.isNotEmpty()
+    internal fun hasLocalEvidence(): Boolean = NativeReplayProtocol.values().any {
+        it.transport in transports && it.generation in generations
+    }
     fun transport(config: V1ParsedConfig): V1ReplayTransport? {
-        val expected = V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)
         val capabilities = config.replayCapabilities ?: return null
         val generation = capabilities.replayProtocolGeneration ?: return null
-        return expected.takeIf { expected in transports && expected in capabilities.advertisedTransports && generation in generations }
+        if (generation !in generations) return null
+        // The two sets never form a Cartesian product: only a closed exact tuple can match.
+        return capabilities.advertisedTransports.firstOrNull {
+            it in transports && NativeReplayProtocol.match(it, generation) != null
+        }
     }
 }
 
