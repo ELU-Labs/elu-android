@@ -163,6 +163,9 @@ public final class dev.elu.analytics.EluDiagnosticsOptions {
   public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public final boolean getEnabled();
   public final boolean getLaunchTimings();
+  public final boolean getCrashReports();
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean, boolean);
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
   public dev.elu.analytics.EluDiagnosticsOptions(boolean);
   public dev.elu.analytics.EluDiagnosticsOptions();
 }

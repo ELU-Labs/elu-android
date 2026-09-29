@@ -42,6 +42,7 @@ dev.elu.analytics.internal.config.LocalEndpointPolicy$Companion
 dev.elu.analytics.internal.config.ScheduledV2ConfigLifecycleScheduler
 dev.elu.analytics.internal.config.ThreadedV2ConfigLifecycleWorker
 dev.elu.analytics.internal.config.V1AuthorizedConfig
+dev.elu.analytics.internal.config.V1CaptureExceptions
 dev.elu.analytics.internal.config.V1CapturePerformance
 dev.elu.analytics.internal.config.V1CapturePolicy
 dev.elu.analytics.internal.config.V1ChannelAuthorization
@@ -182,10 +183,12 @@ dev.elu.analytics.internal.diagnostics.AndroidUncaughtExceptionRegistry
 dev.elu.analytics.internal.diagnostics.NativeExceptionIntake
 dev.elu.analytics.internal.diagnostics.NativeExceptionIntake$Arm$completion$1
 dev.elu.analytics.internal.diagnostics.NativeExceptionIntake$settlement$1
+dev.elu.analytics.internal.diagnostics.NativeExceptionIntake$snapshotForPublication$1
 dev.elu.analytics.internal.diagnostics.NativeExceptionMechanism
 dev.elu.analytics.internal.diagnostics.NativeExceptionObservation
 dev.elu.analytics.internal.diagnostics.NativeExceptionObservation$Companion
 dev.elu.analytics.internal.diagnostics.NativeExceptionPolicyLease
+dev.elu.analytics.internal.diagnostics.NativeExceptionPublication
 dev.elu.analytics.internal.diagnostics.NativeExceptionSpool
 dev.elu.analytics.internal.diagnostics.NativeStartupContext
 dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement
@@ -196,6 +199,7 @@ dev.elu.analytics.internal.diagnostics.NativeStartupObservation$Companion
 dev.elu.analytics.internal.diagnostics.NativeStartupProcess
 dev.elu.analytics.internal.diagnostics.NativeStartupRecord
 dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionAdmission
+dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionAdmission$DefaultImpls
 dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionRegistry
 dev.elu.analytics.internal.facade.AndroidStandaloneStack
 dev.elu.analytics.internal.facade.AndroidStandaloneStack$facade$1$flags$1
@@ -648,6 +652,7 @@ dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate
 dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate$Preserve
 dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate$Replace
 dev.elu.analytics.internal.runtime.RuntimeExceptionImport
+dev.elu.analytics.internal.runtime.RuntimeExceptionIntakeUpdate
 dev.elu.analytics.internal.runtime.RuntimeExceptionReport
 dev.elu.analytics.internal.runtime.RuntimeExceptionReport$Companion
 dev.elu.analytics.internal.runtime.RuntimeExceptionReservation
@@ -754,6 +759,7 @@ dev.elu.analytics.internal.runtime.StandaloneLifecycleBinding
 dev.elu.analytics.internal.runtime.StandaloneRuntime
 dev.elu.analytics.internal.runtime.StandaloneRuntime$Companion
 dev.elu.analytics.internal.runtime.StandaloneRuntime$closeResult$1
+dev.elu.analytics.internal.runtime.StandaloneRuntime$updateAutomaticExceptionsOnControl$handler$1
 dev.elu.analytics.internal.runtime.StandaloneRuntimeKt
 dev.elu.analytics.internal.runtime.ThreadLocalRandomBatchJitter
 dev.elu.analytics.internal.runtime.UnsupportedRuntimeRecordSchemaException
