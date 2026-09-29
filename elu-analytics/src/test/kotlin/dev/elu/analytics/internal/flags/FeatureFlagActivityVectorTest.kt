@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.Base64
 import dev.elu.analytics.internal.concurrent.SdkFuture
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
@@ -745,7 +746,8 @@ class FeatureFlagActivityVectorTest {
         val owner = open(FakeRuntimeQueueBacking())
         val sent = AtomicInteger()
         val mutations = AtomicInteger()
-        val phases = mutableListOf<FlagDiagnosticRecord>()
+        // Completion can wake await() before the RELOAD_RESULT diagnostic is appended.
+        val phases = CopyOnWriteArrayList<FlagDiagnosticRecord>()
         val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val client =
             AndroidFeatureFlagClient(
@@ -759,7 +761,7 @@ class FeatureFlagActivityVectorTest {
                 FlagOpaqueIdSource { "pre_send_request" },
                 FlagOpaqueIdSource { "pre_send_epoch" },
                 diagnostic = FlagDiagnosticObserver { record ->
-                    phases += record
+                    phases.add(record)
                     if (record.phase == FlagDiagnosticPhase.BEGIN_RESULT && record.result == FlagDiagnosticResult.BEGUN) {
                         // Begin's durable request witness exists; the client's pre-send check has not run.
                         owner.appendMutations(
