@@ -225,10 +225,25 @@ class StandaloneAutomaticExceptionTest {
         Harness().use { h ->
             h.activity(); h.installed(); val wrapper = h.registry.handler
             h.facade.nativeReplayLifecycleChanged(false); h.runtime.markBackgrounded().await(); h.settle()
+            val background = h.owner.snapshot().await().state.identity
+            val backgroundSession = checkNotNull(background.session)
+            assertEquals(SessionLifecycle.BACKGROUND, backgroundSession.lifecycle)
             h.crash(); assertEquals(0, h.spool.writes.get())
             h.facade.nativeReplayLifecycleChanged(true); h.runtime.markForegrounded(); h.settle(); h.armed()
             assertSame(wrapper, h.registry.handler)
-            h.crash(); await("foreground report") { h.exceptions().size == 1 }
+            assertEquals(background, h.owner.snapshot().await().state.identity)
+            val publication = h.intake().reportSettlement
+            h.crash(); publication.get(3, TimeUnit.SECONDS); h.settle()
+            assertEquals(1, h.spool.writes.get()); assertNotNull(h.spool.report)
+            assertTrue(h.exceptions().isEmpty())
+            assertEquals(background, h.owner.snapshot().await().state.identity)
+            // Foregrounding rearms collection, but only real activity makes a session
+            // eligible for passive import; the exception must not invent that activity.
+            h.activity(); await("foreground report after real activity") { h.exceptions().size == 1 }
+            h.settle(); h.armed()
+            assertEquals(1, h.exceptions().size); assertNull(h.spool.report)
+            assertEquals(backgroundSession.id, h.exceptions().single().record.sessionId)
+            assertEquals(1, h.spool.writes.get()); assertSame(wrapper, h.registry.handler)
         }
     }
     @Test fun `retained process report imports once on next original stack and consumed bytes cannot duplicate`() {
