@@ -82,6 +82,9 @@ internal class NativeReplayComposition(
     private var retryIdentity: IdentityKey? = null // worker only
     private var retryIntent: Any? = null // worker only
     private var retryDelayMillis = NATIVE_REPLAY_CAPTURE_INTERVAL_MILLIS // worker only
+    private var rootRecoveryRequested = false // worker only; descriptive, never authority
+    private var rootObservation: RootObservation? = null // monitor; one original preparation
+    private var rootTimer: ScheduledFuture<*>? = null // monitor; callback queues only this worker
     private var retryFailure: Throwable? = null // worker only; original failure remains observable at close
     private var quarantined = false // worker only; cannot be reset by a newer config/session
     private val readyResult = noncancelable<Unit>()
@@ -157,6 +160,7 @@ internal class NativeReplayComposition(
             localStop?.takeIf { !recordingRequested }?.let { return it }
             recordingRequested = false; recordingGeneration = Any(); intent = Any(); requested = false; forceRequested = true
             deadlineRetryToken = null; deadlineRetry?.cancel(false); deadlineRetry = null
+            cancelRootObservation()
             original = capture
             result = noncancelable(); localStop = result
             // Reserve this worker turn before a concurrent start can enqueue its evaluation.
@@ -185,6 +189,7 @@ internal class NativeReplayComposition(
         synchronized(monitor) {
             intent = Any(); restrictionGeneration = Any(); requested = false; forceRequested = true
             deadlineRetryToken = null; deadlineRetry?.cancel(false); deadlineRetry = null
+            cancelRootObservation()
             if (includeDelivery) deliveryEpoch.set(null)
             old = capture; sending = if (includeDelivery) delivery else null
         }
@@ -220,6 +225,7 @@ internal class NativeReplayComposition(
             ?: SdkFuture.completedFuture(ReplayDeliveryPass(0, 0))
 
     private fun runEvaluation(result: SdkFuture<NativeReplayCompositionEvaluation>, original: Any, force: Boolean, acceptance: () -> Boolean) {
+        cancelRootObservation() // serialized worker; any earlier main observation has physically returned
         val originalRecording = synchronized(monitor) { recordingGeneration }
         val originalRestriction = synchronized(monitor) { restrictionGeneration }
         val nativeStartTrace = nativeStartObserver.begin()
@@ -275,6 +281,7 @@ internal class NativeReplayComposition(
                                             } && acceptance() && intakeAllowed() }) {
                                             weak.get()?.flushSealed()
                                         }
+                                        if (opened != null) rootRecoveryRequested = false
                                         synchronized(monitor) { capture = opened; captureDiagnosticPublished = false }
                                         if (!recordingEnabled()) opened?.stopRecording()
                                         nativeStartTrace.mark(NativeStartPhase.CAPTURE_OWNER_RESULT, opened != null)
@@ -282,7 +289,9 @@ internal class NativeReplayComposition(
                                             opened.finished().whenComplete { outcome, _ ->
                                                 weak.get()?.let {
                                                     it.publishCompletedCapture(opened)
-                                                    if (outcome == NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE)
+                                                    if (outcome == NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED)
+                                                        it.retrySettledRoot(opened, key, attempt, original, acceptance)
+                                                    else if (outcome == NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE)
                                                         it.retrySettledDeadline(opened, key, attempt, original, acceptance)
                                                     else if (acceptance() && it.current(original) && acceptance())
                                                         it.reevaluate(originalAcceptance = acceptance)
@@ -296,6 +305,8 @@ internal class NativeReplayComposition(
                         }
                         if (value != NativeReplayCompositionEvaluation.ACTIVE) {
                             retireFresh()
+                            if (rootRecoveryRequested && lastAttempt == null && !quarantined && accepted() && recordingEnabled())
+                                observeMissingRoot(key, original, acceptance)
                             value = if (quarantined) NativeReplayCompositionEvaluation.QUARANTINED
                                 else if (accepted()) NativeReplayCompositionEvaluation.INACTIVE
                                 else NativeReplayCompositionEvaluation.WITHDRAWN
@@ -347,6 +358,87 @@ internal class NativeReplayComposition(
                 observed.frames, observed.failure, observed.outcome)
             captureDiagnosticPublished = true
         }
+    }
+
+    /** A boundary hint is usable only after original capture accounting AND watcher disposal. */
+    private fun retrySettledRoot(opened: NativeReplayCaptureOwner, key: IdentityKey,
+        attempt: Any, original: Any, acceptance: () -> Boolean) {
+        try { worker.execute {
+            try {
+                if (captureAttempt !== attempt || !acceptance() || !current(original) || !recordingEnabled() || quarantined) return@execute
+                if (capture === opened) retireFresh()
+                if (capture != null || selection != null || quarantined || lastAttempt != key || !acceptance() ||
+                    !current(original) || !recordingEnabled()) return@execute
+                rootRecoveryRequested = true
+                lastAttempt = null
+                reevaluate(originalAcceptance = acceptance)
+            } catch (error: Throwable) { failDeadlineRetry(error) }
+        } } catch (_: java.util.concurrent.RejectedExecutionException) { /* Original close owns settlement. */ }
+    }
+
+    private class RootObservation(val key: IdentityKey, val intent: Any, val acceptance: () -> Boolean,
+        val prepared: NativeReplayPreparedProjection, val privacy: () -> Boolean)
+
+    /** Cancellation invalidates admission immediately; serial worker ordering joins any main hop. */
+    private fun cancelRootObservation() = synchronized(monitor) {
+        rootObservation = null; rootTimer?.cancel(false); rootTimer = null
+    }
+
+    private fun rootObservationCurrent(original: RootObservation): Boolean =
+        synchronized(monitor) { !closed && rootObservation === original } && original.acceptance() &&
+            current(original.intent) && recordingEnabled() && original.privacy() && original.prepared.isCurrent() &&
+            original.acceptance() && synchronized(monitor) { !closed && rootObservation === original }
+
+    private fun observeMissingRoot(key: IdentityKey, original: Any, acceptance: () -> Boolean) {
+        if (capture != null || selection != null || quarantined || !current(original) || !recordingEnabled() || !acceptance()) return
+        // One canonical observation/preparation. Ticks never poll SQLite or renew the source.
+        val input = queue.observeNativeReplayProjection().awaitExact() ?: return
+        if (IdentityKey(input.identity) != key || !input.isCurrent() || !current(original) || !acceptance()) return
+        val privacy = PrivacyStateProjector.projectNative(input, capabilities, deviceInEuTimezone()) ?: return
+        val prepared = queue.prepareNativeReplayProjection(input, privacy).awaitExact() ?: return
+        val observer = RootObservation(key, original, acceptance, prepared, platform.privacyWitness())
+        synchronized(monitor) {
+            if (closed || intent !== original || rootObservation != null) return
+            rootObservation = observer
+        }
+        if (!rootObservationCurrent(observer)) { cancelRootObservation(); return }
+        scheduleRootObservation(observer)
+    }
+
+    private fun scheduleRootObservation(original: RootObservation) {
+        val weak = WeakReference(this)
+        synchronized(monitor) {
+            if (closed || rootObservation !== original) return
+            try {
+                rootTimer = timer.schedule({
+                    weak.get()?.let { owner ->
+                        try { owner.worker.execute { owner.observeRoot(original) } }
+                        catch (_: java.util.concurrent.RejectedExecutionException) { /* No main work was submitted. */ }
+                    }
+                }, NATIVE_REPLAY_CAPTURE_INTERVAL_MILLIS, TimeUnit.MILLISECONDS)
+            } catch (_: java.util.concurrent.RejectedExecutionException) { rootObservation = null; rootTimer = null }
+        }
+    }
+
+    private fun observeRoot(original: RootObservation) {
+        // Old queued timer callbacks cannot clear or act on a newer observer.
+        if (synchronized(monitor) { rootObservation !== original }) return
+        try {
+            if (!rootObservationCurrent(original)) { cancelRootObservation(); return }
+            val readiness = lifecycle.observeRootReadiness { rootObservationCurrent(original) }.awaitExact()
+            if (!rootObservationCurrent(original)) { cancelRootObservation(); return }
+            when (readiness) {
+                NativeReplayRootReadiness.INACTIVE -> cancelRootObservation()
+                NativeReplayRootReadiness.WAITING -> scheduleRootObservation(original)
+                NativeReplayRootReadiness.AVAILABLE -> {
+                    cancelRootObservation()
+                    // No root or permission came back. Normal selection, current identity,
+                    // schema/profile/source/sample/remaining budget gates run again.
+                    lastAttempt = null
+                    reevaluate(originalAcceptance = original.acceptance)
+                }
+            }
+        } catch (error: Throwable) { cancelRootObservation(); failDeadlineRetry(error) }
     }
 
     /** A delayed scheduling opportunity only; every retry reacquires root and queue authority. */
@@ -418,6 +510,7 @@ internal class NativeReplayComposition(
         synchronized(monitor) {
             if (closed) return closeResult
             closed = true; intent = Any(); requested = false; deliveryEpoch.set(null)
+            cancelRootObservation()
             deadlineRetryToken = null; deadlineRetry?.cancel(false); deadlineRetry = null
             old = capture; sending = delivery
         }

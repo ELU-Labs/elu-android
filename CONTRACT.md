@@ -434,3 +434,27 @@ SQLite request or network operation occurs in the getter. Stop/start generations
 cannot adopt an old callback or begin replacement before original cleanup settles.
 These source contracts require actual compiled API, emulator and exact-artifact
 qualification; source controls alone do not establish those results.
+
+## Native root and viewport continuity
+
+A closed root/viewport boundary may request recovery only after original physical
+collection and durable accounting settle. Composition then joins the original
+watcher disposal before any new selection. Unknown cleanup quarantines the owner.
+Each replacement uses a new replay ID and sequence zero through existing queue
+authority, retaining session/sample/first-start/remaining-budget state. Changed
+viewport frames and unsealed boundary tails are never appended or used to satisfy
+initial minimum duration. The v1 fixed-viewport contract is unchanged.
+
+Only closed unsupported-geometry failures may retry the original collector after
+full selection and authority postvalidation. No failed frame, ordinal or projection
+is accepted. Existing bounded retry ticks check original consent/source/session,
+local privacy and recording intent; deadlines and budgets are never extended.
+
+After a settled root loss, at most one observer holds one canonical preparation
+and local privacy witness. Its main-thread ticks inspect only the sole resumed
+Activity's root/window facts. They do not select, watch, read content, poll SQLite
+or renew configuration. A ready observation grants nothing: ordinary selection
+and authority run again. Close/local/restrictive withdrawal invalidates admission
+synchronously, and the serial worker joins any already-submitted main observation
+before replacement or close completes. JVM controls are authored but unrun;
+actual Android/window behavior and exact-artifact player transitions remain gates.

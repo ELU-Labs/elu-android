@@ -50,6 +50,57 @@ internal class TestSelectionAccess : NativeReplaySelectionAccess {
 }
 
 class NativeReplayLifecycleTest {
+    @Test fun `root readiness observes sole original activity without selection or watcher`() {
+        val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any()
+        assertEquals(NativeReplayRootReadiness.INACTIVE, life.observeRootReadiness { true }.get())
+        life.resumed(activity)
+        assertEquals(NativeReplayRootReadiness.WAITING, life.observeRootReadiness { true }.get())
+        platform.discoveredRoot = Any()
+        assertEquals(NativeReplayRootReadiness.AVAILABLE, life.observeRootReadiness { true }.get())
+        platform.width = 0
+        assertEquals(NativeReplayRootReadiness.WAITING, life.observeRootReadiness { true }.get())
+        assertEquals(0, platform.watchers); assertEquals(0, platform.watcherClosed)
+        val reads = platform.rootReads
+        assertEquals(NativeReplayRootReadiness.INACTIVE, life.observeRootReadiness { false }.get())
+        assertEquals(reads, platform.rootReads)
+    }
+
+    @Test fun `root readiness physically joins held main and cannot adopt later lifecycle or authority`() {
+        for (lifecycleChange in listOf(false, true)) {
+            val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any()
+            life.resumed(activity); platform.discoveredRoot = Any(); var allowed = true
+            var pending: (() -> Unit)? = null; platform.hold = { pending = it }
+            val result = life.observeRootReadiness { allowed }
+            assertFalse(result.isDone); assertFalse(result.cancel(true))
+            if (lifecycleChange) life.resumed(Any()) else allowed = false
+            checkNotNull(pending).invoke()
+            assertEquals(NativeReplayRootReadiness.INACTIVE, result.get()); assertEquals(0, platform.rootReads)
+            assertEquals(0, platform.watchers)
+        }
+    }
+
+    @Test fun `root boundary is descriptive only and excludes caller failure and source withdrawal`() {
+        for (mode in listOf("root", "viewport", "source", "callback")) {
+            val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any()
+            life.resumed(activity); platform.discoveredRoot = Any()
+            val original = checkNotNull(life.selectCurrent().get()); var allowed = true
+            when (mode) {
+                "root" -> platform.discoveredRoot = Any()
+                "viewport" -> platform.width += 1
+                "source" -> allowed = false
+            }
+            val observed = original.consumeOriginalRoot({ allowed }) { _, _ ->
+                if (mode == "callback") error("Unknown callback failure")
+                NativeReplayCollectionAttempt.UnsupportedGeometry
+            }
+            if (mode == "callback") try { observed.get(); fail("callback must fail") } catch (_: java.util.concurrent.ExecutionException) { }
+            else assertNull(observed.get())
+            assertFalse(original.isCurrent())
+            assertEquals(mode == "root" || mode == "viewport", original.observedRootBoundary())
+            original.closeAndWait().get(); assertEquals(1, platform.watcherClosed)
+        }
+    }
+
     private class EqualActivity {
         override fun equals(other: Any?) = other is EqualActivity
         override fun hashCode() = 1

@@ -19,7 +19,8 @@ class NativeReplayCompositionTest {
     private class MainAccess : NativeReplaySelectionAccess, AutoCloseable {
         @Volatile var main: Thread? = null
         val executor = Executors.newSingleThreadExecutor { task -> Thread(task, "fixture-composition-main").also { main = it } }
-        val window = Any(); val token = Any(); val root = Any(); val activity = Any()
+        val window = Any(); val token = Any(); @Volatile var root = Any(); val activity = Any()
+        @Volatile var width = 100; @Volatile var height = 200
         val rootReads = AtomicInteger(); val watches = AtomicInteger(); val closes = AtomicInteger()
         @Volatile var rootAvailable = true
         @Volatile var factsAvailable = true
@@ -32,7 +33,7 @@ class NativeReplayCompositionTest {
         }
         override fun observe(activity: Any, root: Any, current: () -> Boolean): NativeReplayRootFacts? {
             check(Thread.currentThread() === main); onObserve?.also { onObserve = null }?.invoke()
-            return if (factsAvailable && current()) NativeReplayRootFacts(window, token, 100, 200, 1f, 36) else null
+            return if (factsAvailable && current()) NativeReplayRootFacts(window, token, width, height, 1f, 36) else null
         }
         override fun watch(root: Any, withdrawn: () -> Unit): AutoCloseable {
             check(Thread.currentThread() === main); watches.incrementAndGet()
@@ -45,17 +46,21 @@ class NativeReplayCompositionTest {
         val factories = AtomicInteger(); val collections = AtomicInteger(); val firstFrame = CountDownLatch(1)
         @Volatile var onCollect: (() -> Unit)? = null
         @Volatile var onFactory: (() -> Unit)? = null
+        @Volatile var onPause: ((CountDownLatch) -> Boolean)? = null
+        @Volatile var privacyRevision = Any()
+        override fun privacyWitness(): () -> Boolean = privacyRevision.let { original -> { privacyRevision === original } }
         override fun createCollector(): NativeReplayCaptureCollector {
             check(Thread.currentThread() === access.main); factories.incrementAndGet(); onFactory?.invoke()
             val identity = UUID.randomUUID()
             return NativeReplayCaptureCollector { root, ordinal, timestamp, _, current, unresolved ->
                 check(Thread.currentThread() === access.main); check(root === access.root); check(current()); check(!unresolved)
                 collections.incrementAndGet(); onCollect?.invoke(); check(current()); firstFrame.countDown()
-                NativeMaskedSnapshot(ordinal, timestamp, NativeViewport(100, 200), listOf(
+                NativeMaskedSnapshot(ordinal, timestamp, NativeViewport(access.width, access.height), listOf(
                     NativeMaskedNode(identity, NativeMaskedKind.Rectangle, NativeRect(0.0, 0.0, 10.0, 10.0), NativeRect(0.0, 0.0, 10.0, 10.0))))
             }
         }
         override fun awaitNext(withdrawn: CountDownLatch): Boolean {
+            onPause?.let { return it(withdrawn) }
             if (single) return false
             return !withdrawn.await(3, TimeUnit.SECONDS)
         }
@@ -101,6 +106,149 @@ class NativeReplayCompositionTest {
         capabilities: NativeReplayCapabilities = proof(), worker: ExecutorService = Executors.newSingleThreadExecutor()) =
         NativeReplayComposition(rig.owner, lifecycle, capabilities, StandaloneRuntime.defaultVersions(), { false }, allowed,
             platform, transport, worker)
+
+    private fun NativeReplayComposition.observingRoot(): Boolean {
+        val monitor = NativeReplayComposition::class.java.getDeclaredField("monitor").also { it.isAccessible = true }.get(this)
+        return synchronized(monitor) {
+            NativeReplayComposition::class.java.getDeclaredField("rootObservation").also { it.isAccessible = true }.get(this) != null
+        }
+    }
+    private fun Platform.manualTicks(): Semaphore = Semaphore(0).also { ticks ->
+        onPause = { stopped ->
+            var next = false
+            while (!stopped.await(5, TimeUnit.MILLISECONDS)) {
+                if (ticks.tryAcquire()) { next = true; break }
+            }
+            next
+        }
+    }
+
+    @Test fun `same activity root and viewport changes recover with new stream and original session budget`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+        try {
+            owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+            awaitCondition("first prefix") { rig.rows().size == 1 }
+            val first = rig.rows().single().prepared; val ledger = checkNotNull(rig.state().session)
+            rig.advance(); access.root = Any(); ticks.release()
+            awaitCondition("replacement root automatically captured") { rig.rows().size == 2 }
+            rig.advance(); access.width = 200; access.height = 100; ticks.release()
+            awaitCondition("viewport rollover automatically captured") { rig.rows().size == 3 }
+            val rows = rig.rows(); val after = checkNotNull(rig.state().session)
+            assertEquals(3, rows.map { it.prepared.replayId }.toSet().size)
+            assertTrue(rows.all { it.prepared.sessionId == first.sessionId && it.prepared.sequence == 0L })
+            assertEquals(ledger.firstStartAt, after.firstStartAt); assertEquals(ledger.samplingHash, after.samplingHash)
+            assertEquals(ledger.maximumDurationSeconds, after.maximumDurationSeconds)
+            assertTrue(after.elapsedFloorMicroseconds >= 2_000_000)
+            assertEquals(3, access.watches.get()); assertEquals(2, access.closes.get())
+        } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        assertEquals(access.watches.get(), access.closes.get())
+    } }
+
+    @Test fun `missing root observes no text or repeated SQL preparation and resumes without public hint`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+        try {
+            owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+            val first = rig.rows().single().prepared
+            access.rootAvailable = false; ticks.release(); awaitCondition("original root observer") { owner.observingRoot() }
+            assertFalse(owner.recordingStarted()); assertNull(rig.state().session?.activeEpoch)
+            val reads = access.rootReads.get(); val nativeReads = AtomicInteger()
+            fun countRead() { nativeReads.incrementAndGet(); rig.onNativeRead = ::countRead }
+            rig.onNativeRead = ::countRead
+            awaitCondition("root-only tick") { access.rootReads.get() > reads }
+            assertEquals(0, nativeReads.get()); assertEquals(1, platform.collections.get()); assertEquals(1, access.watches.get())
+            rig.onNativeRead = null; rig.advance(); access.root = Any(); access.rootAvailable = true
+            awaitCondition("observer automatically wakes fresh selection") { rig.rows().size == 2 }
+            val second = rig.rows().last().prepared
+            assertNotEquals(first.replayId, second.replayId); assertEquals(first.sessionId, second.sessionId)
+            assertFalse(owner.observingRoot())
+        } finally { rig.onNativeRead = null; owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+    } }
+
+    @Test fun `missing root observer cannot survive local stop source consent identity or privacy withdrawal`() = run {
+        for (mode in listOf("local", "source", "consent", "identity", "privacy")) Rig().use { rig -> MainAccess().use { access ->
+            rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+            try {
+                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+                access.rootAvailable = false; ticks.release(); awaitCondition("original observer") { owner.observingRoot() }
+                when (mode) {
+                    "local" -> owner.stopRecording().get(3, TimeUnit.SECONDS)
+                    "source" -> rig.source.withdraw()
+                    "consent" -> rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, rig.now())).get()
+                    "identity" -> rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get()
+                    else -> platform.privacyRevision = Any()
+                }
+                awaitCondition("observer ends after $mode") { !owner.observingRoot() }
+                val reads = access.rootReads.get(); access.rootAvailable = true
+                assertEquals(1, platform.factories.get()); assertEquals(1, access.watches.get())
+                assertFalse(owner.recordingStarted()); assertEquals(reads, access.rootReads.get())
+            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } }
+    }
+
+    @Test fun `replacement joins original watcher and unknown watcher cleanup quarantines`() = run {
+        for (unknown in listOf(false, true)) Rig().use { rig -> MainAccess().use { access ->
+            rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            try {
+                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+                access.onClose = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)); if (unknown) error("Unresolved original watcher") }
+                access.root = Any(); ticks.release(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+                assertEquals(1, platform.factories.get()); assertEquals(1, access.watches.get()); assertFalse(owner.observingRoot())
+                access.onClose = null; release.countDown()
+                if (unknown) {
+                    failure { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+                    assertEquals(1, platform.factories.get()); assertFalse(owner.observingRoot())
+                } else awaitCondition("replacement after original watcher close") { platform.factories.get() == 2 }
+            } finally { release.countDown(); runCatching { owner.closeAndWait().get(3, TimeUnit.SECONDS) } }
+        } }
+    }
+
+    @Test fun `root replacement waits for durable stop and unknown accounting cannot recover`() = run {
+        for (unknown in listOf(false, true)) Rig().use { rig -> MainAccess().use { access ->
+            rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            try {
+                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+                val original = owner.currentCapture()
+                rig.onWrite = {
+                    entered.countDown(); check(release.await(3, TimeUnit.SECONDS))
+                    if (unknown) {
+                        rig.backing.ambiguousNextCommit = FakeAmbiguousOutcome.COMMIT
+                        rig.onConnection = { throw java.io.IOException("Unresolved original stop readback") }
+                    }
+                }
+                access.root = Any(); ticks.release(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+                assertFalse(original.finished().isDone); assertEquals(1, platform.factories.get())
+                assertEquals(0, access.closes.get()); assertFalse(owner.observingRoot())
+                release.countDown()
+                if (unknown) {
+                    assertEquals(NativeReplayCaptureOutcome.QUARANTINED, original.finished().get(3, TimeUnit.SECONDS))
+                    failure { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+                    assertEquals(1, platform.factories.get()); assertFalse(owner.observingRoot())
+                } else awaitCondition("fresh capture after durable stop") { platform.factories.get() == 2 }
+            } finally { release.countDown(); runCatching { owner.closeAndWait().get(3, TimeUnit.SECONDS) } }
+        } }
+    }
+
+    @Test fun `close joins original held root readiness main hop and cannot publish replacement`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        try {
+            owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+            access.rootAvailable = false; ticks.release(); awaitCondition("original observer") { owner.observingRoot() }
+            access.onObserve = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }; access.rootAvailable = true
+            assertTrue(entered.await(3, TimeUnit.SECONDS)); val close = owner.closeAndWait()
+            assertFalse(close.isDone); assertFalse(close.cancel(true)); assertEquals(1, platform.factories.get())
+            release.countDown(); close.get(3, TimeUnit.SECONDS)
+            assertFalse(owner.observingRoot()); assertEquals(1, access.watches.get()); assertEquals(1, access.closes.get())
+        } finally { release.countDown(); owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+    } }
 
     @Test fun `status observes actual collector and stop start waits for original main settlement`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)

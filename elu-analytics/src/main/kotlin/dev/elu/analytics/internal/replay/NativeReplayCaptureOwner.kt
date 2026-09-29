@@ -84,7 +84,7 @@ internal class NativeCapturePassProfile {
 internal const val NATIVE_REPLAY_CAPTURE_INTERVAL_MILLIS = 1_000L
 internal const val NATIVE_REPLAY_MAXIMUM_DEADLINE_RETRY_MILLIS = 30_000L
 
-internal enum class NativeReplayCaptureOutcome { SETTLED, SETTLED_PASS_DEADLINE, QUARANTINED }
+internal enum class NativeReplayCaptureOutcome { SETTLED, SETTLED_PASS_DEADLINE, SETTLED_ROOT_CHANGED, QUARANTINED }
 
 /** Detached closed values only; no source, error, root, identity, profile or executable capability. */
 internal data class NativeReplayCaptureCompletion(
@@ -231,10 +231,12 @@ private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>,
 internal sealed class NativeReplayCollectionAttempt {
     class Captured(val frame: NativeMaskedSnapshot, val continuous: Long) : NativeReplayCollectionAttempt()
     object CollectorDeadline : NativeReplayCollectionAttempt()
+    object UnsupportedGeometry : NativeReplayCollectionAttempt()
     object LocalStop : NativeReplayCollectionAttempt()
 }
 
 private class NativeReplayLocalStop : IllegalStateException()
+private class NativeReplayRootBoundary : IllegalStateException()
 
 /** One independent run, never the handle; all main and durable Futures are observed exactly once. */
 private class NativeReplayCaptureRun(
@@ -258,7 +260,10 @@ private class NativeReplayCaptureRun(
         selection.isCurrent() && fence.isCurrent()
     private fun current(permit: NativeReplayPermit, admission: NativeReplayCaptureAdmission): Boolean =
         local() && admission.permit === permit && admission.isCurrent() && local()
-    private fun requireCurrent(value: Boolean) { check(value) { "Native capture withdrawn" } }
+    private fun requireCurrent(value: Boolean) {
+        if (!value && selection.observedRootBoundary()) throw NativeReplayRootBoundary()
+        check(value) { "Native capture withdrawn" }
+    }
 
     fun execute() {
         nativeStartTrace.mark(NativeStartPhase.CAPTURE_THREAD_ENTERED)
@@ -271,6 +276,8 @@ private class NativeReplayCaptureRun(
         var completedFrames = 0
         var passFailure: NativeCaptureFailureKind? = null
         var retryablePassDeadline = false
+        var recoverRoot = false
+        var originalPermit: NativeReplayPermit? = null
         var completedFailure: NativeCaptureFailureKind? = null
         fun complete(outcome: NativeReplayCaptureOutcome) {
             collectorCurrent.set(null)
@@ -293,6 +300,7 @@ private class NativeReplayCaptureRun(
             startSubmitted = true
             nativeStartTrace.mark(NativeStartPhase.START_BEGIN)
             val permit = authority.start(prepared, physicalUse).awaitExact().also { nativeStartTrace.mark(NativeStartPhase.START_RESULT, it != null) } ?: error("Native start denied")
+            originalPermit = permit
             requireCurrent(local() && permit.isCurrent() && local())
             nativeStartTrace.mark(NativeStartPhase.ADMISSION_BEGIN)
             val admission = authority.captureAdmission(permit, physicalUse).awaitExact().also { nativeStartTrace.mark(NativeStartPhase.ADMISSION_RESULT, it != null) } ?: error("Native admission denied")
@@ -329,6 +337,7 @@ private class NativeReplayCaptureRun(
                 frames.committed(prefix)
             }
             var discardTail = false
+            var viewport: NativeViewport? = null
             var collector: NativeReplayCaptureCollector? = null // implementation retains only weak View projections
             // Keep the existing capped exponential cadence across this original owner's attempts.
             // Successful frames do not reset it; no session/config/whole-run deadline is extended.
@@ -339,6 +348,7 @@ private class NativeReplayCaptureRun(
                 requireCurrent(current(permit, admission))
                 val ordinal = frames.nextFrameOrdinal
                 passFailure = null
+                var geometryFailure: NativeCollectionException? = null
                 diagnosticStage = NativeCaptureStage.ROOT_COLLECT
                 val captured = selection.consumeOriginalRoot({ current(permit, admission) }, fence::gracefulStopRequested) { root, rootCurrent ->
                     try {
@@ -381,6 +391,14 @@ private class NativeReplayCaptureRun(
                         } catch (error: NativeCollectionException) {
                             if (error.failure == NativeCollectionFailure.WITHDRAWN && fence.gracefulStopRequested() &&
                                 current(permit, admission)) return@consumeOriginalRoot NativeReplayCollectionAttempt.LocalStop
+                            if (error.failure == NativeCollectionFailure.UNSUPPORTED_GEOMETRY) {
+                                geometryFailure = error
+                                requireCurrent(rootCurrent() && current(permit, admission) && rootCurrent())
+                                // No failed frame/ordinal escapes; selection still performs its full postcheck.
+                                return@consumeOriginalRoot NativeReplayCollectionAttempt.UnsupportedGeometry
+                            }
+                            if (error.failure == NativeCollectionFailure.WITHDRAWN && selection.observedRootBoundary())
+                                throw NativeReplayRootBoundary()
                             // Only this known collector timeout may retain the original accepted buffer.
                             // The collector has not returned/committed a frame; no seal or append ran.
                             if (completedFrames == 0 || error.failure != NativeCollectionFailure.WITHDRAWN ||
@@ -395,7 +413,7 @@ private class NativeReplayCaptureRun(
                         requireCollection(withinPass())
                         NativeReplayCollectionAttempt.Captured(frame, continuous)
                     } catch (_: NativeReplayLocalStop) { NativeReplayCollectionAttempt.LocalStop }
-                }.awaitExact() ?: error("Native collection denied")
+                }.awaitExact() ?: run { requireCurrent(false); error("Native collection denied") }
                 requireCurrent(current(permit, admission))
                 if (captured === NativeReplayCollectionAttempt.LocalStop) {
                     // Local stop prevented exact View/privacy postvalidation of this callback.
@@ -406,7 +424,8 @@ private class NativeReplayCaptureRun(
                     break
                 }
                 if (fence.gracefulStopRequested()) break
-                if (captured === NativeReplayCollectionAttempt.CollectorDeadline) {
+                if (captured === NativeReplayCollectionAttempt.CollectorDeadline ||
+                    captured === NativeReplayCollectionAttempt.UnsupportedGeometry) {
                     // Same fence, enrollment, selection, sealer and buffer. Wait off main in the
                     // existing one-second cancellable ticks, checking original authority each time.
                     var remaining = collectorRetryDelayMillis
@@ -414,6 +433,7 @@ private class NativeReplayCaptureRun(
                         requireCurrent(current(permit, admission))
                         if (!platform.awaitNext(fence.withdrawn)) {
                             if (fence.gracefulStopRequested()) break@captureLoop
+                            geometryFailure?.let { throw it }
                             requireCurrent(false)
                         }
                         requireCurrent(current(permit, admission))
@@ -425,6 +445,8 @@ private class NativeReplayCaptureRun(
                 }
                 check(captured is NativeReplayCollectionAttempt.Captured)
                 diagnosticStage = NativeCaptureStage.FRAME_APPEND
+                if (viewport != null && viewport != captured.frame.viewport) throw NativeReplayRootBoundary()
+                viewport = captured.frame.viewport
                 if (!fence.acceptFrame { frames.append(captured.frame, captured.continuous) }) break
                 if (completedFrames < Int.MAX_VALUE) completedFrames += 1
                 if (frames.isReady) {
@@ -440,6 +462,13 @@ private class NativeReplayCaptureRun(
                 frames.beginDraining()?.let { prefix -> sealPrefix(prefix) }
             }
         } catch (error: Throwable) {
+            // Selection is intentionally excluded from this restrictive-only source check.
+            // The hint grants no authority and is published only after original settlement.
+            recoverRoot = runCatching {
+                error is NativeReplayRootBoundary && passFailure == null && pendingRequest == null &&
+                    privacyCurrent() && fence.mayCollect() && authority.belongsTo(queue, prepared) &&
+                    originalPermit?.started?.guard?.isCurrent() == true && privacyCurrent() && fence.mayCollect()
+            }.getOrDefault(false)
             // Only closed diagnostic values leave this catch; the original error is never serialized.
             val diagnosticFailure = if (error is NativeCollectionException) when (error.failure) {
                 NativeCollectionFailure.NOT_MAIN_THREAD -> NativeCaptureFailureKind.NOT_MAIN_THREAD
@@ -482,7 +511,8 @@ private class NativeReplayCaptureRun(
             // No-start still needs this exact lane to flush any original prepared-guard denial.
             if (queue.finishNativeReplayCapture(enrollment).awaitExact() == NativeReplayCaptureFinish.SETTLED) {
                 // Expose the hint only after the original physical and durable accounting settled.
-                complete(if (retryablePassDeadline) NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE
+                complete(if (recoverRoot) NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED
+                    else if (retryablePassDeadline) NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE
                     else NativeReplayCaptureOutcome.SETTLED)
                 return
             }

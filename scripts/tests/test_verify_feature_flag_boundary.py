@@ -41,6 +41,47 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_native_continuity_rejects_missing_original_guards(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+        cases = [
+            ("NativeReplayComposition.kt", "current(original.intent) && recordingEnabled() && original.privacy() && original.prepared.isCurrent()"),
+            ("NativeReplayComposition.kt", "if (capture === opened) retireFresh()"),
+            ("NativeReplayComposition.kt", "if (!rootObservationCurrent(original)) { cancelRootObservation(); return }"),
+            ("NativeReplayLifecycle.kt", "return actual === selectedRoot && allowed()"),
+            ("NativeReplayLifecycle.kt", "activity != null && allowed() && current(activity, original.second) && allowed()"),
+            ("NativeReplayCaptureOwner.kt", "originalPermit?.started?.guard?.isCurrent() == true && privacyCurrent() && fence.mayCollect()"),
+            ("NativeReplayCaptureOwner.kt", "if (viewport != null && viewport != captured.frame.viewport) throw NativeReplayRootBoundary()"),
+        ]
+        for name, token in cases:
+            with self.subTest(name=name, token=token):
+                path = base / name; original = path.read_text()
+                self.assertIn(token, original)
+                path.write_text(original.replace(token, "true"))
+                self.assertIn("native continuity lost original", self.run_guard().stderr)
+                path.write_text(original)
+
+    def test_native_root_observer_cannot_renew_or_poll_durable_state(self) -> None:
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayComposition.kt"
+        original = path.read_text()
+        for added in ["queue.observeNativeReplayProjection()", "queue.prepareNativeReplayProjection(input, privacy)",
+                      "queue.snapshot()", "authority.prepare(selection)", "observeMissingRoot(key, intent, acceptance)"]:
+            with self.subTest(added=added):
+                path.write_text(original.replace("private fun observeRoot(original: RootObservation) {",
+                    "private fun observeRoot(original: RootObservation) {\n" + added, 1))
+                self.assertIn("must not renew authority or poll SQLite", self.run_guard().stderr)
+        path.write_text(original)
+
+    def test_native_observation_allowance_does_not_grant_start_or_escape_composition(self) -> None:
+        composition = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayComposition.kt"
+        for path, methods in [(composition, ["beginNativeReplayAuthority", "flushNativeReplayClockDenial"]),
+                              (self.root / BOUNDARY.STACK, ["observeNativeReplayProjection", "prepareNativeReplayProjection"])]:
+            original = path.read_text()
+            for method in methods:
+                with self.subTest(path=path, method=method):
+                    path.write_text(original + "\nfun escaped() = queue." + method + "()\n")
+                    self.assertIn("native projection calls escaped authority/queue", self.run_guard().stderr)
+            path.write_text(original)
+
     def test_replay_controls_reject_status_shortcut_unguarded_tail_and_minimum_bypass(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
         changes = [
@@ -447,7 +488,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_discovered_root_identity_cannot_be_dropped_before_physical_collection(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayLifecycle.kt"
         original = path.read_text()
-        before = "access.currentRoot(selectedActivity, ::allowed) === selectedRoot"
+        before = "return actual === selectedRoot && allowed()"
         self.assertIn(before, original)
         path.write_text(original.replace(before, "true", 1))
         result = self.run_guard()

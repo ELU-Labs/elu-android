@@ -437,8 +437,12 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         for symbol, permitted in allowed.items():
             if re.search(r"\b" + symbol + r"\b", text) and relative not in permitted:
                 errors.append(f"native authority reference escaped its exact seam: {symbol}: {relative}")
-        if any(name in text for name in projection_methods) and relative not in {OWNER, authority}:
-            errors.append(f"native projection calls escaped authority/queue: {relative}")
+        for name in projection_methods:
+            permitted = {OWNER, authority}
+            if name in {"observeNativeReplayProjection", "prepareNativeReplayProjection"}:
+                permitted.add(composition)
+            if name in text and relative not in permitted:
+                errors.append(f"native projection calls escaped authority/queue: {relative}")
         for name, permitted in capture_methods.items():
             if re.search(r"\b" + name + r"\b", text) and relative not in permitted:
                 errors.append(f"native capture call escaped its exact seam: {name}: {relative}")
@@ -608,8 +612,9 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         if required not in lookup:
             errors.append("native current-root discovery must retain main original window and withdrawal checks")
     if ("!allowed() || !discoveredMatches()" not in life or
-            "access.currentRoot(selectedActivity, ::allowed) === selectedRoot" not in life or
-            "facts.apiLevel == api && discoveredMatches() && allowed()" not in life or
+            "val actual = access.currentRoot(selectedActivity, ::allowed)" not in life or
+            "return actual === selectedRoot && allowed()" not in life or
+            "facts.apiLevel == api" not in life or "return same && discoveredMatches() && allowed()" not in life or
             "matchesDiscovery(activity, root)" not in life or
             "matchesDiscovery(checkNotNull(activity), checkNotNull(root))" not in life or
             "NativeReplaySelection.issue(access, selectedActivity, selectedRoot, facts, discovered)" not in life):
@@ -873,6 +878,40 @@ def verify_replay_controls(root: pathlib.Path, errors: list[str]) -> None:
                 errors.append("replay controls lost original local-switch/status/tail boundary: " + relative + ": " + token)
 
 
+def verify_replay_continuity(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+    composition = load_text(root, base / "NativeReplayComposition.kt")
+    lifecycle = load_text(root, base / "NativeReplayLifecycle.kt")
+    capture = load_text(root, base / "NativeReplayCaptureOwner.kt")
+    required = {
+        "composition": (composition, ["if (capture === opened) retireFresh()", "capture != null || selection != null || quarantined",
+            "current(original.intent) && recordingEnabled() && original.privacy() && original.prepared.isCurrent()",
+            "lifecycle.observeRootReadiness { rootObservationCurrent(original) }.awaitExact()",
+            "if (!rootObservationCurrent(original)) { cancelRootObservation(); return }",
+            "rootObservation = null; rootTimer?.cancel(false); rootTimer = null"]),
+        "selection": (lifecycle, ["val actual = access.currentRoot(selectedActivity, ::allowed)",
+            "return actual === selectedRoot && allowed()", "return same && discoveredMatches() && allowed()",
+            "activity != null && allowed() && current(activity, original.second) && allowed()",
+            "if (!current()) NativeReplayRootReadiness.INACTIVE", "override fun cancel(mayInterruptIfRunning: Boolean) = false"]),
+        "capture": (capture, ["error is NativeReplayRootBoundary && passFailure == null && pendingRequest == null",
+            "privacyCurrent() && fence.mayCollect() && authority.belongsTo(queue, prepared)",
+            "originalPermit?.started?.guard?.isCurrent() == true && privacyCurrent() && fence.mayCollect()",
+            "if (viewport != null && viewport != captured.frame.viewport) throw NativeReplayRootBoundary()",
+            "queue.finishNativeReplayCapture(enrollment).awaitExact() == NativeReplayCaptureFinish.SETTLED",
+            "complete(if (recoverRoot) NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED"]),
+    }
+    for name, (source, tokens) in required.items():
+        if any(token not in source for token in tokens):
+            errors.append("native continuity lost original settlement/root/privacy/source boundary: " + name)
+    preparation = composition.split("private fun observeMissingRoot", 1)[-1].split("private fun scheduleRootObservation", 1)[0]
+    tick = composition.split("private fun observeRoot(original:", 1)[-1].split("/** A delayed scheduling opportunity", 1)[0]
+    for method in ("observeNativeReplayProjection", "prepareNativeReplayProjection"):
+        if composition.count(method) != 1 or preparation.count(method) != 1 or method in tick:
+            errors.append("native root observer must not renew authority or poll SQLite: " + method)
+    if any(token in tick for token in ("queue.", "authority.", "observeMissingRoot(")):
+        errors.append("native root observer must not renew authority or poll SQLite")
+
+
 def verify_capture_rate_limiter(root: pathlib.Path, errors: list[str]) -> None:
     base = MAIN_KOTLIN / "dev/elu/analytics"
     required = {
@@ -906,6 +945,7 @@ def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
     verify_capture_rate_limiter(root, errors)
     verify_replay_controls(root, errors)
+    verify_replay_continuity(root, errors)
     verify_durable_flag_exposures(root, errors)
     verify_local_endpoint_binding(root, errors)
     verify_person_selection(root, errors)

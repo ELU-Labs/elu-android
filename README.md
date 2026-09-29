@@ -615,3 +615,13 @@ Status becomes true only after the original collector is installed with live
 guards. It is false during stop/drain or after withdrawal and is not delivery or
 player proof. API 29+ Views/AppCompat support and opaque Compose/custom content
 limitations remain unchanged; these methods do not add full-tree Compose capture.
+
+Visible root replacement and viewport changes recover automatically after the
+original recorder and watcher finish. The replacement has a new replay ID and
+keeps the same analytics session, sampling decision and remaining time budget.
+Boundary frames and unsealed tails are discarded. Temporarily unsupported
+geometry can be retried under the same live permission; failed frames are never
+serialized. A missing root is checked without reading content or renewing remote
+permission. Local stop, consent/privacy restrictions, source expiry and uncertain
+cleanup prevent automatic recovery. This continuity slice still requires compiled
+and emulator validation; it does not add touch events or readable Compose replay.

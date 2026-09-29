@@ -28,6 +28,8 @@ internal data class NativeReplayRootFacts(
     val apiLevel: Int,
 )
 
+internal enum class NativeReplayRootReadiness { INACTIVE, WAITING, AVAILABLE }
+
 /** Weak native facts are independent of process screen/foreground event semantics. */
 internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAccess = AndroidNativeReplaySelectionAccess) {
     private val monitor = Any()
@@ -71,6 +73,31 @@ internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAc
     /** Called only while holding monitor; collection invalidates prior selections. */
     private fun removeCollectedActivities() {
         if (resumed.removeAll { it.get() == null }) generation = Any()
+    }
+
+    /** One read-only main hop; no selection, watcher, text, or authority is produced. */
+    fun observeRootReadiness(allowed: () -> Boolean): SdkFuture<NativeReplayRootReadiness> {
+        val result = object : SdkFuture<NativeReplayRootReadiness>() {
+            override fun cancel(mayInterruptIfRunning: Boolean) = false
+        }
+        val original = synchronized(monitor) {
+            removeCollectedActivities()
+            if (unsettledSelections.isNotEmpty()) null else resumed.singleOrNull()?.get()?.let { WeakReference(it) to generation }
+        } ?: return result.also { it.complete(NativeReplayRootReadiness.INACTIVE) }
+        try { access.onMain {
+            try {
+                val activity = original.first.get()
+                fun current() = activity != null && allowed() && current(activity, original.second) && allowed()
+                if (!current()) { result.complete(NativeReplayRootReadiness.INACTIVE); return@onMain }
+                val root = access.currentRoot(checkNotNull(activity), ::current)
+                val facts = if (root != null && current()) access.observe(activity, root, ::current) else null
+                val same = root != null && facts != null && facts.apiLevel >= 29 && facts.width > 0 && facts.height > 0 &&
+                    facts.density.isFinite() && facts.density > 0 && current() && access.currentRoot(activity, ::current) === root
+                result.complete(if (!current()) NativeReplayRootReadiness.INACTIVE
+                    else if (same) NativeReplayRootReadiness.AVAILABLE else NativeReplayRootReadiness.WAITING)
+            } catch (error: Throwable) { result.completeExceptionally(error) }
+        } } catch (error: Throwable) { result.completeExceptionally(error) }
+        return result
     }
 
     /** Discover only the sole actually resumed Activity's existing content root on main. */
@@ -184,6 +211,7 @@ internal class NativeReplaySelection private constructor(
     private val width = facts.width; private val height = facts.height
     private val density = facts.density; private val api = facts.apiLevel
     private val withdrawn = AtomicBoolean(false)
+    private val rootBoundary = AtomicBoolean(false)
     private var watcher: AutoCloseable? = null // touched only on main
     private val closeRequested = AtomicBoolean(false)
     private val closeResult = object : SdkFuture<Unit>() {
@@ -191,9 +219,12 @@ internal class NativeReplaySelection private constructor(
     }
 
     internal fun withdraw() { withdrawn.set(true) }
+    private fun rootChanged() { rootBoundary.set(true); withdrawn.set(true) }
+    internal fun observedRootBoundary(): Boolean = rootBoundary.get() ||
+        (!withdrawn.get() && originalCurrent() && (root.get() == null || window.get() == null || token.get() == null))
     internal fun matchesRoot(selectedActivity: Any, selectedRoot: Any?): Boolean {
         val same = activity.get() === selectedActivity && root.get() === selectedRoot && isCurrent()
-        if (!same) withdrawn.set(true)
+        if (!same) rootChanged()
         return same
     }
 
@@ -201,13 +232,18 @@ internal class NativeReplaySelection private constructor(
         window.get() != null && token.get() != null && originalCurrent() && !withdrawn.get()
 
     /** Invoked only inside a main callback, never by the worker-safe isCurrent getter. */
-    private fun matchesDiscovery(selectedActivity: Any, selectedRoot: Any): Boolean =
-        !discovered || (isCurrent() && access.currentRoot(selectedActivity, ::isCurrent) === selectedRoot && isCurrent())
+    private fun matchesDiscovery(selectedActivity: Any, selectedRoot: Any): Boolean {
+        if (!discovered) return true
+        if (!isCurrent()) return false
+        val actual = access.currentRoot(selectedActivity, ::isCurrent)
+        if (isCurrent() && actual !== selectedRoot) rootChanged()
+        return actual === selectedRoot && isCurrent()
+    }
 
     internal fun installWatch() {
         val selected = root.get() ?: return close()
         val weak = WeakReference(this)
-        try { watcher = access.watch(selected) { weak.get()?.withdrawn?.set(true) } }
+        try { watcher = access.watch(selected) { weak.get()?.rootChanged() } }
         catch (error: Throwable) {
             withdrawn.set(true); closeRequested.set(true)
             val acquisition = error as? NativeReplayWatchAcquisitionFailure
@@ -230,7 +266,9 @@ internal class NativeReplaySelection private constructor(
                 val same = facts != null && facts.window === window.get() && facts.token === token.get() &&
                     facts.width == width && facts.height == height && facts.density == density && facts.apiLevel == api &&
                     matchesDiscovery(checkNotNull(activity), checkNotNull(root)) && isCurrent()
-                if (!same) withdrawn.set(true)
+                if (!same) {
+                    if (isCurrent()) rootChanged() else withdrawn.set(true)
+                }
                 result.complete(same)
             } catch (error: Throwable) { withdrawn.set(true); result.completeExceptionally(error) }
         } } catch (error: Throwable) { withdrawn.set(true); result.completeExceptionally(error) }
@@ -259,14 +297,20 @@ internal class NativeReplaySelection private constructor(
                     fun authorized(): Boolean = isCurrent() && current() && isCurrent()
                     fun stopped(): Boolean = locallyStopped() && authorized() && locallyStopped()
                     fun allowed(): Boolean = !locallyStopped() && authorized() && !locallyStopped()
-                    fun discoveredMatches(): Boolean = !discovered || (selectedActivity != null && allowed() &&
-                        access.currentRoot(selectedActivity, ::allowed) === selectedRoot && allowed())
+                    fun discoveredMatches(): Boolean {
+                        if (!discovered) return true
+                        if (selectedActivity == null || !allowed()) return false
+                        val actual = access.currentRoot(selectedActivity, ::allowed)
+                        if (allowed() && actual !== selectedRoot) rootChanged()
+                        return actual === selectedRoot && allowed()
+                    }
                     fun matches(): Boolean {
                         if (selectedActivity == null || selectedRoot == null || !allowed() || !discoveredMatches()) return false
-                        val facts = access.observe(selectedActivity, selectedRoot, ::allowed) ?: return false
-                        return facts.window === window.get() && facts.token === token.get() &&
-                            facts.width == width && facts.height == height && facts.density == density &&
-                            facts.apiLevel == api && discoveredMatches() && allowed()
+                        val facts = access.observe(selectedActivity, selectedRoot, ::allowed)
+                        val same = facts != null && facts.window === window.get() && facts.token === token.get() &&
+                            facts.width == width && facts.height == height && facts.density == density && facts.apiLevel == api
+                        if (!same && allowed()) rootChanged()
+                        return same && discoveredMatches() && allowed()
                     }
                     if (stopped()) {
                         // This carries no frame and proves no fresh View facts. Existing tail

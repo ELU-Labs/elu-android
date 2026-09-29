@@ -8,7 +8,11 @@ modes and independent device identity, durable feature-flag exposure metadata,
 explicit consent, real memory-only analytics storage, strict HTTPS self-host bases
 including prefixes, manual exceptions, Views/AppCompat replay, optional HTTP/frame
 metrics and limited observed OS startup timing. Public local replay start/stop/status controls are a new source-only slice;
-its Kotlin tests are authored but not yet compiled or run. Hosted limiter testing
+its Kotlin tests are authored but not yet compiled or run. Automatic root/viewport
+continuity is a subsequent source-only slice: original capture/accounting/watchers
+must settle, each new replay ID reuses the original session/sample/time budget,
+and missing-root observation cannot renew source permission. Its new JVM controls
+also remain uncompiled/unrun. Hosted limiter testing
 has begun separately; its native migration fixture required a trusted-key setup
 correction. Neither result is replay-controls qualification. The current exact
 AAR/API inventory, consumer, emulator and resource results remain pending.

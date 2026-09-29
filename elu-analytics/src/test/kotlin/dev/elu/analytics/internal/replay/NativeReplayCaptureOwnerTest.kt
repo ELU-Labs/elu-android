@@ -83,6 +83,62 @@ class NativeReplayCaptureOwnerTest {
     private fun Rig.minimum(seconds: Int) = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", seconds) }
     private fun Rig.rows(): List<ReplayStoredChunk> = owner.storedPreparedReplayForTesting().get()
 
+    @Test fun `closed transient geometry retries same collector ordinal and stream without failed bytes`(): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate(); Session(rig).use { session ->
+            val platform = Platform(rig, session.access, 4)
+            platform.onCollect = { if (platform.collections.get() == 2) throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY) }
+            platform.onPause = { rig.advance(10); platform.collections.get() < 4 }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(listOf(0L, 1L, 1L, 2L), platform.ordinals.toList())
+            assertEquals(1, platform.factories.get()); assertEquals(1L, rig.state().nextReplayOrdinal)
+            val rows = rig.rows(); assertEquals(3, rows.size)
+            assertEquals(1, rows.map { it.prepared.replayId }.toSet().size)
+            assertFalse(rows.any { platform.timestamps[1] in wireTimestamps(it) })
+        }
+    }
+
+    @Test fun `viewport boundary discards below minimum and retains original accounting budget`(): Unit = Rig().use { rig ->
+        rig.minimum(30); rig.activate(); Session(rig).use { session ->
+            val platform = Platform(rig, session.access, 3)
+            platform.transformFrame = { if (platform.collections.get() == 2)
+                NativeMaskedSnapshot(it.ordinal, it.timestamp, NativeViewport(200, 100), it.nodes) else it }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            assertEquals(NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertTrue(rig.rows().isEmpty()); assertEquals(1, owner.completedDiagnostic()!!.frames)
+            assertEquals(1L, rig.state().nextReplayOrdinal); assertNotNull(rig.state().session?.firstStartAt)
+            assertNull(rig.state().session?.activeEpoch)
+            assertTrue(checkNotNull(rig.state().session).elapsedFloorMicroseconds >= 1_000_000)
+        }
+    }
+
+    @Test fun `geometry retry and root boundary never outlive source privacy or local stop`(): Unit = run {
+        for (mode in listOf("source", "privacy", "local")) Rig().use { rig ->
+            rig.minimum(0); rig.activate(); Session(rig).use { session ->
+                val platform = Platform(rig, session.access, 4); val blocked = CountDownLatch(1); val release = CountDownLatch(1)
+                platform.onCollect = { if (platform.collections.get() == 2) throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY) }
+                platform.onPause = {
+                    if (platform.collections.get() == 2) { blocked.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+                    else rig.advance()
+                    true
+                }
+                val owner = session.start(checkNotNull(session.prepare()), platform)
+                try {
+                    assertTrue(blocked.await(3, TimeUnit.SECONDS))
+                    when (mode) {
+                        "source" -> rig.source.withdraw()
+                        "privacy" -> platform.privacyRevision = Any()
+                        else -> owner.stopRecording()
+                    }
+                    release.countDown()
+                    assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+                    assertEquals(2, platform.collections.get()); assertEquals(1, rig.rows().size)
+                    assertNull(rig.state().session?.activeEpoch)
+                } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+            }
+        }
+    }
+
     @Test fun `local stop flushes exact accepted suffix without waiting ten seconds`() = localStopIdleTail(null)
     @Test fun `local stop cannot seal after source withdrawal`() = localStopIdleTail("source")
     @Test fun `local stop cannot seal after identity change`() = localStopIdleTail("identity")
