@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import dev.elu.analytics.EluPerformanceOptions
 import dev.elu.analytics.internal.config.V1CapturePerformance
+import dev.elu.analytics.internal.runtime.AndroidProcessLifecycle
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -26,6 +27,7 @@ class AndroidPerformanceMonitorTest {
         val monitor = AndroidPerformanceMonitor(
             EluPerformanceOptions(enabled = true, sampleIntervalMillis = 5_000, mainThreadStallThresholdMillis = 100),
             main, { context.get() }, { _, properties -> samples.offer(properties) },
+            activityLifecycle = AndroidProcessLifecycle.performanceObserved,
         )
         try {
             main.post { enteredMain.countDown(); releaseMain.await(2, TimeUnit.SECONDS) }
@@ -46,7 +48,7 @@ class AndroidPerformanceMonitorTest {
             assertNull("No samples are allowed while backgrounded", samples.poll(6, TimeUnit.SECONDS))
         } finally {
             releaseMain.countDown()
-            monitor.close()
+            monitor.closeAndWait().get(10, TimeUnit.SECONDS)
         }
     }
 }
