@@ -63,11 +63,7 @@ def verified_signature_fingerprints(ref: str) -> set[str]:
     return fingerprints
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("tag")
-    args = parser.parse_args()
-    tag = args.tag
+def verify_release(tag: str) -> dict[str, str]:
     if not TAG_PATTERN.fullmatch(tag):
         raise SystemExit(f"release tag is not a supported semantic version: {tag}")
 
@@ -81,7 +77,8 @@ def main() -> None:
     ref = f"refs/tags/{tag}"
     if git("cat-file", "-t", ref) != "tag":
         raise SystemExit("release tag must be a signed tag object; lightweight tags cannot publish")
-    if git("rev-parse", f"{ref}^{{commit}}") != git("rev-parse", "HEAD"):
+    source_commit = git("rev-parse", f"{ref}^{{commit}}")
+    if source_commit != git("rev-parse", "HEAD"):
         raise SystemExit("release tag does not point at the checked-out commit")
     message = git("for-each-ref", ref, "--format=%(contents)")
     if REVIEW_PATTERN.search(message) is None:
@@ -94,8 +91,24 @@ def main() -> None:
         )
     if git("status", "--porcelain"):
         raise SystemExit("worktree changes, including untracked files, are not publishable")
-    signer = sorted(trusted.intersection(observed))[0]
-    print(f"reviewed signed release tag verified: {tag} ({signer})")
+    # Parse the signed message, never an unsigned workflow input or release body.
+    trailers = [line for line in message.splitlines()
+                if line.lower().startswith("android-lab-evidence-sha256:")]
+    if len(trailers) != 1 or re.fullmatch(
+        r"Android-Lab-Evidence-SHA256: [a-f0-9]{64}", trailers[0]
+    ) is None:
+        raise SystemExit("signed tag requires exactly one Android-Lab-Evidence-SHA256 trailer")
+    return {"tag": tag, "sourceCommit": source_commit,
+            "evidenceSha256": trailers[0].split(": ", 1)[1],
+            "signer": sorted(trusted.intersection(observed))[0]}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("tag")
+    args = parser.parse_args()
+    binding = verify_release(args.tag)
+    print(f"reviewed signed release tag verified: {binding['tag']} ({binding['signer']})")
 
 
 if __name__ == "__main__":

@@ -51,6 +51,15 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
         run: python3 scripts/verify-release-tag.py "$RELEASE_TAG"
+      - name: Acquire reviewed draft Lab evidence
+        timeout-minutes: 3
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
+        run: >-
+          python3 scripts/acquire-runtime-network-evidence.py "$RELEASE_TAG"
+          --output build/reports/android-runtime-network-evidence.json
       - name: Run release gates
         run: >-
           ./gradlew
@@ -80,10 +89,14 @@ jobs:
           python3 scripts/zero-brand-gate.py --mode strict --skip-tree \
             --network parser-smoke=scanner/fixtures/network-parser-smoke.json
       - name: Require generated Android runtime-network evidence
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
         run: |
           python3 scripts/validate-runtime-network-evidence.py \
             build/reports/android-runtime-network-evidence.json \
-            --expect config=1 --expect capture=1 --expect flags=1 --expect replay=1
+            --tag "$RELEASE_TAG" \
+            --aar elu-analytics/build/outputs/aar/elu-analytics-release.aar
       - name: Verify public API and legal-only artifact gate
         run: |
           python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar

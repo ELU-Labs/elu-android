@@ -40,10 +40,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("if:", text[require:verify])
         self.assertNotIn("REPLAY_EVIDENCE", text)
         self.assertNotIn("if ", text[require:verify])
-        self.assertIn(
-            "--expect config=1 --expect capture=1 --expect flags=1 --expect replay=1",
-            text[require:verify],
-        )
+        self.assertIn('--tag "$RELEASE_TAG"', text[require:verify])
+        self.assertIn('--aar elu-analytics/build/outputs/aar/elu-analytics-release.aar', text[require:verify])
+        acquire = text.index("name: Acquire reviewed draft Lab evidence")
+        signed = text.index("name: Verify matching reviewed signed tag")
+        build = text.index("name: Run release gates")
+        self.assertLess(signed, acquire)
+        self.assertLess(acquire, build)
+        self.assertLess(build, require)
+        self.assertIn('GH_TOKEN: ${{ github.token }}', text[acquire:build])
+        self.assertIn('environment: maven-central-reviewed', text)
+        self.assertNotIn('if:', text[acquire:build])
+        self.assertNotIn('--expect ', text)
         self.assertIn("scanner_inputs+=(--network runtime=build/reports/android-runtime-network-evidence.json)", text)
         self.assertNotIn('if [[ "$RUNTIME_EVIDENCE" == "true" ]]', text)
 
