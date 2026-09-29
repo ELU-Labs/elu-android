@@ -21,12 +21,23 @@ import org.junit.Test
 
 /** Actual facade/runtime/native/source/queue with production installed selection; fake DB/platform only. */
 class StandaloneNativeReplayTest {
+    /** Counts follow-up work before the original task returns, unlike a queued sentinel. */
+    private class CompositionExecutor : ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue<Runnable>()) {
+        val pending = AtomicInteger()
+        override fun execute(command: Runnable) {
+            pending.incrementAndGet()
+            try { super.execute { try { command.run() } finally { pending.decrementAndGet() } } }
+            catch (error: Throwable) { pending.decrementAndGet(); throw error }
+        }
+    }
     private class MainAccess : NativeReplaySelectionAccess, AutoCloseable {
         @Volatile var main: Thread? = null
         val executor = Executors.newSingleThreadExecutor { task -> Thread(task, "fixture-composition-main").also { main = it } }
         val window = Any(); val token = Any(); val root = Any(); val activity = Any()
         val rootReads = AtomicInteger(); val watches = AtomicInteger(); val closes = AtomicInteger()
         @Volatile var onObserve: (() -> Unit)? = null
+        @Volatile var onWatch: (() -> Unit)? = null
         @Volatile var onClose: (() -> Unit)? = null
         override fun onMain(action: () -> Unit) { if (Thread.currentThread() === main) action() else executor.execute(action) }
         override fun currentRoot(activity: Any, current: () -> Boolean): Any? {
@@ -39,6 +50,7 @@ class StandaloneNativeReplayTest {
         }
         override fun watch(root: Any, withdrawn: () -> Unit): AutoCloseable {
             check(Thread.currentThread() === main); watches.incrementAndGet()
+            onWatch?.invoke()
             return AutoCloseable { check(Thread.currentThread() === main); closes.incrementAndGet(); onClose?.invoke() }
         }
         override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS)) }
@@ -148,11 +160,14 @@ class StandaloneNativeReplayTest {
         protocol: NativeReplayProtocol = NativeReplayProtocol.V1, reopen: Boolean = false,
         generation: String = protocol.generation,
         advertised: List<V1ReplayTransport> = listOf(NativeReplayProtocol.V2.transport, NativeReplayProtocol.V1.transport),
-        apiLevel: Int = 36, traceNativeStart: Boolean = false) : AutoCloseable {
+        apiLevel: Int = 36, traceNativeStart: Boolean = false, holdComposition: Boolean = false,
+        startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE) : AutoCloseable {
         val rig = Rig(protocol, generation, advertised); val access = MainAccess()
         val lifecycle = NativeReplayLifecycle(access)
         val platform = Platform(rig, access, apiLevel = apiLevel)
         val wire = Transport()
+        val compositionWorker = CompositionExecutor()
+        val releaseComposition = CountDownLatch(if (holdComposition) 1 else 0)
         val nativeTrace = CopyOnWriteArrayList<String>()
         private val nativeObserver = if (traceNativeStart) BoundedNativeStartObserver.create {
             nativeTrace += String(it, Charsets.US_ASCII)
@@ -168,18 +183,27 @@ class StandaloneNativeReplayTest {
             lifecycle.resumed(access.activity)
             native = NativeReplayComposition(rig.owner, lifecycle, proof(), StandaloneRuntime.defaultVersions(), { false },
                 { ::facade.isInitialized && facade.nativeReplayIntakeAllowed() }, platform, wire,
-                nativeStartObserver = nativeObserver)
+                worker = compositionWorker, nativeStartObserver = nativeObserver)
             native.ready().get(3, TimeUnit.SECONDS)
+            if (holdComposition) {
+                val entered = CountDownLatch(1)
+                compositionWorker.execute { entered.countDown(); check(releaseComposition.await(3, TimeUnit.SECONDS)) }
+                assertTrue(entered.await(3, TimeUnit.SECONDS))
+            }
             runtime = StandaloneRuntime(rig.owner, KEY, wallClock = { rig.clock.wall },
                 transportFactory = { BatchHTTPTransport { BatchHTTPResponse(503, byteArrayOf()) } },
                 deviceInEuTimezone = { false }, flushDelayMillis = 60_000, configurationGate = rig.gate, nativeReplay = native,
                 nativeStartTrace = nativeObserver.global)
             facade = StandaloneFacade(open = { StandaloneStack(runtime, rig.owner, null) }, deliverCallback = { it.run() },
                 wallClock = { rig.clock.wall }, bufferLimit = bufferLimit, configurationGate = rig.gate,
-                nativeStartTrace = nativeObserver.global)
+                nativeStartTrace = nativeObserver.global, startupObserver = startupObserver)
             facade.start()
         }
         fun settle() { facade.settled().get(3, TimeUnit.SECONDS) }
+        fun settleComposition() {
+            settle()
+            awaitCondition("all submitted composition evaluations returned") { compositionWorker.pending.get() == 0 }
+        }
         fun activate() { rig.activate(); facade.configurationChanged(); settle() }
         fun holdLane(): CountDownLatch {
             val lane = StandaloneFacade::class.java.getDeclaredField("lane").also { it.isAccessible = true }.get(facade) as ExecutorService
@@ -188,6 +212,7 @@ class StandaloneNativeReplayTest {
             assertTrue(entered.await(3, TimeUnit.SECONDS)); return release
         }
         override fun close() {
+            releaseComposition.countDown()
             runCatching { facade.closeAndWait().get(4, TimeUnit.SECONDS) }
             access.close(); rig.close()
         }
@@ -267,16 +292,57 @@ class StandaloneNativeReplayTest {
         repeat(20) { attempt -> Harness(resetEarly = true, traceNativeStart = true).use { h ->
             fun diagnostic(boundary: String) = "$boundary, attempt=$attempt, collectors=${h.platform.factories.get()}, " +
                 "watchers=${h.access.watches.get()}, closed=${h.access.closes.get()}\n" + h.nativeTrace.joinToString("")
-            h.settle(); assertEquals(diagnostic("before activity"), 0, h.platform.factories.get())
+            h.settleComposition(); assertEquals(diagnostic("before activity"), 0, h.platform.factories.get())
             h.facade.capture("first", null, Date(h.rig.clock.wall)); h.settle()
             assertTrue(diagnostic("first frame"), h.platform.firstFrame.await(3, TimeUnit.SECONDS))
             awaitCondition("first sealed public row") { h.rig.rows().isNotEmpty() }
             repeat(12) { h.facade.capture("activity-$it", null, Date(h.rig.clock.wall)) }
-            h.settle()
+            h.settleComposition()
             assertEquals(diagnostic("collector reuse"), 1, h.platform.factories.get())
             assertEquals(diagnostic("watcher reuse"), 1, h.access.watches.get())
             assertTrue(diagnostic("intake remains allowed"), h.facade.nativeReplayIntakeAllowed())
         } }
+    }
+
+    @Test fun `startup watcher is physically retired before first session replacement creates a collector`() {
+        val captured = CountDownLatch(1); val releaseCapture = CountDownLatch(1)
+        val watched = CountDownLatch(1); val releaseWatch = CountDownLatch(1)
+        val captureWaitTimedOut = AtomicBoolean(false)
+        val order = CopyOnWriteArrayList<String>()
+        val observer = RuntimeStartupObserver {
+            if (it.phase == RuntimeStartupPhase.CAPTURE_FIRST) {
+                captured.countDown()
+                if (!releaseCapture.await(3, TimeUnit.SECONDS)) captureWaitTimedOut.set(true)
+            }
+        }
+        Harness(resetEarly = true, holdComposition = true, startupObserver = observer).use { h ->
+            try {
+                h.settle()
+                h.access.onWatch = {
+                    val ordinal = h.access.watches.get(); order += "watch-$ordinal"
+                    if (ordinal == 1) { watched.countDown(); check(releaseWatch.await(3, TimeUnit.SECONDS)) }
+                }
+                h.access.onClose = { order += "close-${h.access.closes.get()}" }
+                h.facade.capture("first", null, Date(h.rig.clock.wall))
+                assertTrue("first event committed before facade identity renewal", captured.await(3, TimeUnit.SECONDS))
+                h.releaseComposition.countDown()
+                assertTrue("old startup evaluation acquired its original watcher", watched.await(3, TimeUnit.SECONDS))
+                assertEquals(0, h.platform.factories.get())
+                releaseCapture.countDown(); h.settle()
+                assertFalse("observer timeout must not silently release the held facade", captureWaitTimedOut.get())
+                releaseWatch.countDown()
+                assertTrue("replacement produced an actual frame", h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+                h.settleComposition()
+                awaitCondition("replacement sealed an actual native row") { h.rig.rows().isNotEmpty() }
+                assertEquals(listOf("watch-1", "close-1", "watch-2"), order.toList())
+                assertEquals(1, h.platform.factories.get())
+                assertEquals(2, h.access.watches.get()); assertEquals(1, h.access.closes.get())
+                repeat(12) { h.facade.capture("activity-$it", null, Date(h.rig.clock.wall)) }
+                h.settleComposition()
+                assertEquals(1, h.platform.factories.get())
+                assertEquals(2, h.access.watches.get()); assertTrue(h.facade.nativeReplayIntakeAllowed())
+            } finally { releaseCapture.countDown(); releaseWatch.countDown(); h.releaseComposition.countDown() }
+        }
     }
 
     @Test fun `valid context acceptance revokes a held main frame without blocking facade or granting replacement`(): Unit = Harness(activateEarly = false).use { h ->
