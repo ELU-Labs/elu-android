@@ -102,6 +102,25 @@ class VerifyReleaseTagTest(unittest.TestCase):
         result = self.verify("1.2.3", trusted=fingerprint)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_rejects_ref_whose_authenticated_tag_name_differs(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-s", "other-name", "-m", "Release\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: " + "a" * 64)
+        self.git("update-ref", "refs/tags/1.2.3", "refs/tags/other-name")
+        self.git("verify-tag", "refs/tags/1.2.3")
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("signed name does not match", result.stdout + result.stderr)
+
+    def test_rejects_signed_tag_of_tag_even_when_it_peels_to_head(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-a", "inner", "-m", "Inner fixture")
+        self.git("tag", "-s", "1.2.3", "inner", "-m", "Release\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: " + "a" * 64)
+        self.git("verify-tag", "refs/tags/1.2.3")
+        self.assertEqual(self.git("rev-parse", "1.2.3^{commit}"), self.git("rev-parse", "HEAD"))
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("directly reference the checked-out commit", result.stdout + result.stderr)
+
     def test_rejects_trusted_signed_tag_without_evidence_digest(self) -> None:
         fingerprint = self.create_signing_key()
         self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>")

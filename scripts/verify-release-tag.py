@@ -101,6 +101,16 @@ def verify_release(tag: str) -> dict[str, str]:
     if source_commit != git("rev-parse", "HEAD"):
         raise SystemExit("release tag does not point at the checked-out commit")
     raw_tag = git("cat-file", "tag", tag_object)
+    headers: dict[str, str] = {}
+    for line in raw_tag.partition("\n\n")[0].splitlines():
+        key, separator, value = line.partition(" ")
+        if not separator or key in headers:
+            raise SystemExit("release tag requires unambiguous signed object headers")
+        headers[key] = value
+    if headers.get("tag") != tag:
+        raise SystemExit("release tag object's signed name does not match the requested tag")
+    if headers.get("type") != "commit" or headers.get("object") != source_commit:
+        raise SystemExit("release tag must directly reference the checked-out commit")
     trusted = trusted_fingerprints()
     observed = verified_signature_fingerprints(tag_object)
     if trusted.isdisjoint(observed):
