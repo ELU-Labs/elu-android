@@ -115,7 +115,7 @@ class AndroidRuntimeDatabasePreflightTest {
             }
             assertThrows(IOException::class.java) { AndroidRuntimeDatabasePreflight.withSnapshot(database) { error("Must refuse") } }
             assertTrue(path.exists()); assertArrayEquals(byteArrayOf(1, 2, 3), database.readBytes())
-            Os.unlink(path.path); Os.rmdir(scratch.path)
+            Os.remove(path.path); Os.remove(scratch.path)
         }
     }
 

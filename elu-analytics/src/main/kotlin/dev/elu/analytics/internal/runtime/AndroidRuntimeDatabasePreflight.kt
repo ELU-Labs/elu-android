@@ -128,10 +128,10 @@ internal object AndroidRuntimeDatabasePreflight {
             requireSame(directory, original)
             val path = File(directory, name)
             requireIdentity(expected, stat(path) ?: throw IOException("Runtime preflight entry disappeared"))
-            Os.unlink(path.path)
+            Os.remove(path.path)
         }
         requireSame(directory, original)
-        Os.rmdir(directory.path)
+        Os.remove(directory.path)
     }
 
     private fun stat(path: File): StructStat? = try { Os.lstat(path.path) }
