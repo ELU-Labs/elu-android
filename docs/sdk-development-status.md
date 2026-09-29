@@ -14,13 +14,22 @@ recovery; each new replay ID reuses the original session/sample/time budget, and
 missing-root observation cannot renew source permission. The latest source change
 shares one immutable v1/v2 installed selection between the public runtime's queue
 and composition, retaining exact remote tuple admission and v1 fallback. Installed
-v2 selection has subsequent hosted coverage. The new automatic JVM report activation
-is source-only here: its default-false opt-in, closed server grant, original handler,
-one-slot writer and passive current-session import still need fresh compilation and
-hosted/real process-death checks. Fresh exact-artifact
+v2 selection and automatic JVM report activation have subsequent hosted coverage.
+The report path retains its default-false opt-in, closed server grant, original
+handler, one-slot writer and passive current-session import. Real process-death
+and restart checks remain pending. Fresh exact-artifact
 emulator, canonical engine/player and resource qualification remain pending.
 
-Hosted CI run `36581976453` tested PR head `d48cca2` through its synthetic merge
+The latest retained hosted CI run `36620702825` tested PR head `423f3ec` through
+synthetic merge `fb7a4caf561d22cdedcbe2b81e115493622a7890`: 1,137 JVM tests and
+121 instrumentation tests on each of API 29 and API 35 passed, with zero failures
+or skips. All 165 Python/source controls, build/lint, maintained API/ABI and consumer
+gates passed. Its actual 2,149,051-byte AAR has SHA-256
+`d98716a6dd06af71c30c176e9b8f8f9b326dc7d96b73dca34f9e219f1d493c62`
+and 807 public non-synthetic JVM classes in the maintained inventory. This is
+hosted component evidence, not completed local Lab or release qualification.
+
+The earlier hosted CI run `36581976453` tested PR head `d48cca2` through its synthetic merge
 `d2f87761915937a98bc80423dfabeaf2a181aba4`: 1,071 JVM tests and 113 Android
 instrumentation tests passed with zero failures or skips. Build, lint, maintained
 API and consumer gates passed. Its actual 2,074,770-byte AAR (SHA-256

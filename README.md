@@ -25,8 +25,8 @@ the qualified release.
 
 ## Install
 
-For the qualified 0.2.0 release, use Maven Central. This version remains
-unpublished while the source candidate completes release checks:
+Version 0.2.0 is not available from Maven Central yet. Use the source substitution
+below to evaluate this checkout. After publication, the dependency will be:
 
 ```kotlin
 dependencies {
@@ -34,8 +34,22 @@ dependencies {
 }
 ```
 
-Building from source instead (e.g. to try an unreleased change): clone this
-repo and use a Gradle composite build in your app's `settings.gradle.kts`:
+Keep that dependency in your app module. In the app's `settings.gradle.kts`,
+ensure the existing dependency repositories include Google Maven (desugaring)
+and Maven Central (the SDK and its dependencies):
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+```
+
+Merge into the existing block; preserve the app's repository policy. For the
+unpublished checkout, also add this Gradle composite substitution to that file,
+using the checkout's actual path relative to `settings.gradle.kts`:
 
 ```kotlin
 includeBuild("path/to/elu-android") {
@@ -44,6 +58,10 @@ includeBuild("path/to/elu-android") {
     }
 }
 ```
+
+The substitution builds the local `:elu-analytics` module instead of requesting
+the unpublished Maven artifact. Source builds use this checkout's toolchain and
+installed Android SDK requirements listed under [Build notes](#build-notes).
 
 The unused 0.1.0 preview has no supported persisted-data import into this
 owned release. Setup creates a fresh owned installation and leaves former
@@ -73,6 +91,23 @@ dependencies {
 ```
 
 See Android's [API desugaring documentation](https://developer.android.com/studio/write/java8-support).
+For Kotlin apps, keep the Kotlin JVM target equal to the Java target above.
+With the Kotlin 2.1 plugin used by this checkout, add or merge:
+
+```kotlin
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+    }
+}
+```
+
+If the app already targets Java/Kotlin 17 or later, preserve its matching targets
+and add desugaring without lowering them. Gradle 8+ rejects mismatched Java/Kotlin
+targets; see [Kotlin's target compatibility guidance](https://kotlinlang.org/docs/gradle-configure-project.html#check-for-jvm-target-compatibility-of-related-compile-tasks).
+The AAR supplies `INTERNET` permission, its lifecycle provider and consumer R8
+rules through normal Android library merging; no extra provider registration or
+manual OkHttp dependency is needed for basic setup.
 
 ## Setup
 
@@ -663,5 +698,6 @@ Boundary frames and unsealed tails are discarded. Temporarily unsupported
 geometry can be retried under the same live permission; failed frames are never
 serialized. A missing root is checked without reading content or renewing remote
 permission. Local stop, consent/privacy restrictions, source expiry and uncertain
-cleanup prevent automatic recovery. This continuity slice still requires compiled
-and emulator validation; it does not add touch events or readable Compose replay.
+cleanup prevent automatic recovery. Hosted component tests cover continuity and
+native-v2 touch capture; exact-artifact emulator, canonical engine and customer-player
+qualification remains pending. Compose content remains opaque.
