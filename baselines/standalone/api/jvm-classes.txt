@@ -364,6 +364,7 @@ dev.elu.analytics.internal.performance.NativePerformanceContext
 dev.elu.analytics.internal.performance.NativePerformanceSampler
 dev.elu.analytics.internal.replay.AndroidAnnotatedReplayCollector
 dev.elu.analytics.internal.replay.AndroidAnnotatedReplayCollector$Companion
+dev.elu.analytics.internal.replay.AndroidAnnotatedReplayCollectorKt
 dev.elu.analytics.internal.replay.AndroidNativeReplayCapturePlatform
 dev.elu.analytics.internal.replay.AndroidNativeReplayCapturePlatform$createCollector$4
 dev.elu.analytics.internal.replay.AndroidNativeReplaySelectionAccess
@@ -373,10 +374,15 @@ dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$7
 dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$settled$1
 dev.elu.analytics.internal.replay.AndroidViewReplayCollector
 dev.elu.analytics.internal.replay.AndroidViewReplayCollectorKt
+dev.elu.analytics.internal.replay.AnnotatedCaptureBinding
 dev.elu.analytics.internal.replay.AnnotatedGeometryBinding
 dev.elu.analytics.internal.replay.AnnotatedRasterCandidate
 dev.elu.analytics.internal.replay.AnnotatedRasterCandidate$Companion
 dev.elu.analytics.internal.replay.AnnotatedRasterSourceIdentity
+dev.elu.analytics.internal.replay.AnnotatedRootDiscovery
+dev.elu.analytics.internal.replay.AnnotatedRootDiscovery$Absent
+dev.elu.analytics.internal.replay.AnnotatedRootDiscovery$Bound
+dev.elu.analytics.internal.replay.AnnotatedRootDiscovery$Unavailable
 dev.elu.analytics.internal.replay.AnnotatedRootRegistry
 dev.elu.analytics.internal.replay.AnnotatedRootRegistry$Companion
 dev.elu.analytics.internal.replay.DeclaredRegionPngEncoder
@@ -388,6 +394,7 @@ dev.elu.analytics.internal.replay.NativeCollectionException
 dev.elu.analytics.internal.replay.NativeCollectionFailure
 dev.elu.analytics.internal.replay.NativeCollectionFence
 dev.elu.analytics.internal.replay.NativeCollectorStage
+dev.elu.analytics.internal.replay.NativeDeclaredRootHistory
 dev.elu.analytics.internal.replay.NativeEncodedChunk
 dev.elu.analytics.internal.replay.NativeEncodingException
 dev.elu.analytics.internal.replay.NativeEncodingFailure
@@ -465,7 +472,7 @@ dev.elu.analytics.internal.replay.NativeReplayCaptureFinish
 dev.elu.analytics.internal.replay.NativeReplayCaptureOutcome
 dev.elu.analytics.internal.replay.NativeReplayCaptureOwner
 dev.elu.analytics.internal.replay.NativeReplayCaptureOwner$Companion
-dev.elu.analytics.internal.replay.NativeReplayCaptureOwner$Companion$start$completion$1
+dev.elu.analytics.internal.replay.NativeReplayCaptureOwner$Companion$launch$completion$1
 dev.elu.analytics.internal.replay.NativeReplayCaptureOwnerKt
 dev.elu.analytics.internal.replay.NativeReplayCapturePhysicalUse
 dev.elu.analytics.internal.replay.NativeReplayCapturePhysicalUse$Companion
@@ -480,6 +487,8 @@ dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$Captured
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$CollectorDeadline
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$LocalStop
+dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$RasterCaptured
+dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$RasterDiscovery
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$TouchBoundary
 dev.elu.analytics.internal.replay.NativeReplayCollectionAttempt$UnsupportedGeometry
 dev.elu.analytics.internal.replay.NativeReplayCompletedCaptureSnapshot
@@ -501,6 +510,7 @@ dev.elu.analytics.internal.replay.NativeReplayLifecycle$observeRootReadiness$res
 dev.elu.analytics.internal.replay.NativeReplayLifecycle$selectCurrent$result$1
 dev.elu.analytics.internal.replay.NativeReplayMoveCoalescer
 dev.elu.analytics.internal.replay.NativeReplayMoveCoalescer$Offer
+dev.elu.analytics.internal.replay.NativeReplayOriginalRootIdentity
 dev.elu.analytics.internal.replay.NativeReplayOutlineObservation
 dev.elu.analytics.internal.replay.NativeReplayOutlineRect
 dev.elu.analytics.internal.replay.NativeReplayPermit
@@ -585,9 +595,13 @@ dev.elu.analytics.internal.replay.ReplayBase64
 dev.elu.analytics.internal.replay.ReplayBlockKind
 dev.elu.analytics.internal.replay.ReplayDeliveryAuthorization
 dev.elu.analytics.internal.replay.ReplayDeliveryClaim
+dev.elu.analytics.internal.replay.ReplayDeliveryClaim$Companion
+dev.elu.analytics.internal.replay.ReplayDeliveryClaim$Payload$Raster
+dev.elu.analytics.internal.replay.ReplayDeliveryClaim$Payload$Wireframe
 dev.elu.analytics.internal.replay.ReplayDeliveryCommit
 dev.elu.analytics.internal.replay.ReplayDeliveryCoordinator
 dev.elu.analytics.internal.replay.ReplayDeliveryCoordinator$closeResult$1
+dev.elu.analytics.internal.replay.ReplayDeliveryFormat
 dev.elu.analytics.internal.replay.ReplayDeliveryMetadata
 dev.elu.analytics.internal.replay.ReplayDeliveryMetadata$Companion
 dev.elu.analytics.internal.replay.ReplayDeliveryModelsKt
@@ -603,6 +617,7 @@ dev.elu.analytics.internal.replay.ReplayDeliveryQueue
 dev.elu.analytics.internal.replay.ReplayDeliveryScheduledTask
 dev.elu.analytics.internal.replay.ReplayDeliveryScheduler
 dev.elu.analytics.internal.replay.ReplayDeliveryState
+dev.elu.analytics.internal.replay.ReplayDeliverySupport
 dev.elu.analytics.internal.replay.ReplayDeliveryTransport
 dev.elu.analytics.internal.replay.ReplayJson
 dev.elu.analytics.internal.replay.ReplayMaskingAdmission
@@ -775,6 +790,7 @@ dev.elu.analytics.internal.runtime.RuntimeQueueOwner$CaptureAuthorityActivationS
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$CaptureAuthorityActivationStage$Terminate
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$Companion
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$PreparedAppend$Companion
+dev.elu.analytics.internal.runtime.RuntimeQueueOwner$claimReplayDelivery$lambda$179$lambda$175$$inlined$sortedBy$1
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$closeAsync$completion$1
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$openReplayDeliveryQueue$1$2
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$submitNative$1$result$1
