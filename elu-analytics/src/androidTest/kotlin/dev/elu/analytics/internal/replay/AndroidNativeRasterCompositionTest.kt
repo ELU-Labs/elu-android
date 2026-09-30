@@ -225,15 +225,24 @@ class AndroidNativeRasterCompositionTest {
                     }
                     awaitReady("second", second, checkNotNull(secondRoot)) { secondHost }
                     rule.waitUntil(5_000) { rule.runOnUiThread { firstActivity.lifecycle.currentState == Lifecycle.State.CREATED } }
+                    val waitsBeforeB = rig.waits.get()
                     rule.runOnUiThread {
                         assertFalse(firstActivity.isDestroyed)
                         assertSame(firstRoot, firstActivity.findViewById<View>(android.R.id.content))
                         assertEquals(Lifecycle.State.RESUMED, second.lifecycle.currentState)
                         secondAdmitted = true; rig.resumed(second)
                     }
+                    stage = "B-capture"
+                    // The resume callback can coalesce onto the withdrawn pause evaluation.
+                    // Observe the retained automatic B evaluation's real collector first.
+                    until { rig.waits.get() >= 2 && rig.waits.get() > waitsBeforeB && rig.composition.recordingStarted() }
+                    rule.runOnUiThread {
+                        assertEquals(Lifecycle.State.CREATED, firstActivity.lifecycle.currentState)
+                        assertEquals(Lifecycle.State.RESUMED, second.lifecycle.currentState)
+                        assertSame(secondRoot, second.findViewById<View>(android.R.id.content))
+                    }
                     stage = "B-evaluation"
-                    assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
-                    until { rig.waits.get() >= 2 }
+                    assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate().get(5, TimeUnit.SECONDS))
                     stage = "retire-A-return-original"
                     rule.runOnUiThread {
                         assertSame(firstRegistry, AnnotatedRootRegistry.fromHost(host))
