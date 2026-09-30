@@ -1227,6 +1227,49 @@ def verify_raster_sealer_boundary(root: pathlib.Path, errors: list[str]) -> None
         if relative != replay / "AnnotatedRootRegistry.kt" and "AnnotatedRasterSourceIdentity(" in text:
             errors.append("raster source identities may only originate at the original registry")
 
+def verify_native_raster_response_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    replay = MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+    path = replay / "NativeRasterResponseClassifier.kt"
+    source = load_text(root, path)
+    for token in (
+        "request: NativeRasterPreparedRequest", "response.status == 200", "response.status == 409",
+        'ack.number("schemaVersion") == 3L', 'ack.string("requestId", 72, 72) == request.requestId',
+        'ack.string("replayId", 1, 256) == request.replayId', 'ack.string("chunkId", 1, 256) == request.chunkId',
+        'ack.number("sequence") == request.sequence', 'ack.string("result", 1, 16) == "accepted"',
+        'conflict.number("schemaVersion") == 3L && conflict.number("status") == 409L',
+        'conflict.string("requestId", 72, 72) == request.requestId',
+        'conflict.string("code", 1, 64) == "replay-identity-conflict"',
+        'conflict.string("disposition", 1, 64) == "permanent"',
+        '"request" -> NativeRasterConflictScope.REQUEST', '"chunk" -> NativeRasterConflictScope.CHUNK',
+        '"sequence" -> NativeRasterConflictScope.SEQUENCE', "finally { body.fill(0) }",
+    ):
+        if token not in source:
+            errors.append("raster response lost closed schema3 or original request identity checks")
+    if source.count("require(response.retryAfter == null)") != 3 or \
+            "if (response.status == 401 || response.status == 403)" not in source or \
+            "if (response.status == 429) require(header != null)" not in source or \
+            "minOf(REPLAY_MAX_RETRY_MILLIS, maxOf(0L, retryDelayMillis, delay))" not in source:
+        errors.append("raster response lost original refusal or bounded retry semantics")
+    remaining = source
+    for owner, method in (("ReplayJson", "parse"), ("V1BatchResponseCodec", "validateTransportError"),
+                          ("RetryAfterParser", "parseDelayMillis")):
+        remaining = re.sub(rf"^import [\w.]+\.{owner}\n", "", remaining, flags=re.MULTILINE)
+        remaining = re.sub(rf"\b{owner}\.{method}\s*\(", "(", remaining)
+        if re.search(rf"\b{owner}\b", remaining):
+            errors.append("raster response may reuse only the exact static parse/error/retry helpers")
+    forbidden = ("RuntimeQueueOwner", "AndroidRuntimeQueue", "RuntimeQueueDatabase", "V2ConfigAuthorityGate",
+                 "NativeReplayAuthority", "NativeReplayComposition", "NativeReplayCaptureOwner", "NativeRasterSealer",
+                 "AnnotatedRasterCandidate", "AnnotatedRootRegistry", "ReplayDeliveryClaim", "ReplayDeliveryOutcome",
+                 "ReplayDeliveryCoordinator", "ReplayResponseClassifier", "PreparedReplayRequest", "Thread", "Executors",
+                 "URL", "URLConnection", "HttpURLConnection", "Socket", "FileOutputStream")
+    if any(re.search(rf"\b{token}\b", source) for token in forbidden) or FORBIDDEN_EGRESS.search(source) or \
+            re.search(r"NativeRasterPreparedRequest\s*\(|\.clearRejected\s*\(", source):
+        errors.append("raster response cannot construct requests, install authority, dispatch or mutate queue state")
+    for file in (root / MAIN_KOTLIN).rglob("*.kt"):
+        if file.relative_to(root) != path and re.search(r"\bNativeRaster(?:ResponseClassifier|ResponseOutcome|ConflictScope)\b", file.read_text()):
+            errors.append("raster response classifier and outcomes must remain uninstalled")
+
+
 def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> None:
     config = MAIN_KOTLIN / "dev/elu/analytics/internal/config"
     path = config / "NativeV3ConfigParser.kt"
@@ -1263,6 +1306,7 @@ def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> N
 
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_native_raster_response_boundary(root, errors)
     verify_native_v3_parser_boundary(root, errors)
     verify_raster_sealer_boundary(root, errors)
     verify_annotated_root_boundary(root, errors)

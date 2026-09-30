@@ -41,6 +41,43 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_raster_response_binds_original_schema_and_only_static_helpers(self) -> None:
+        def errors() -> str:
+            result: list[str] = []
+            BOUNDARY.verify_native_raster_response_boundary(self.root, result)
+            return "\n".join(result)
+        self.assertEqual(errors(), "")
+        path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeRasterResponseClassifier.kt"
+        original = path.read_text()
+        for before, after, expected in [
+            ('response.status == 200', 'response.status in 200..299', 'original request'),
+            ('ack.number("schemaVersion") == 3L', 'ack.number("schemaVersion") == 2L', 'original request'),
+            ('ack.number("sequence") == request.sequence', 'true', 'original request'),
+            ('conflict.string("requestId", 72, 72) == request.requestId', 'true', 'original request'),
+            ('"sequence" -> NativeRasterConflictScope.SEQUENCE', '"session" -> NativeRasterConflictScope.SEQUENCE', 'original request'),
+            ('require(response.retryAfter == null)', 'Unit', 'bounded retry'),
+            ('RetryAfterParser.parseDelayMillis(it, now)', 'RetryAfterParser.other(it, now)', 'exact static'),
+        ]:
+            with self.subTest(before=before):
+                self.assertIn(before, original); path.write_text(original.replace(before, after))
+                self.assertIn(expected, errors()); path.write_text(original)
+        for token in ["NativeRasterPreparedRequest()", "request.clearRejected()", "RuntimeQueueOwner", "NativeReplayAuthority",
+                      "ReplayDeliveryClaim", "ReplayDeliveryOutcome", "ReplayResponseClassifier", "PreparedReplayRequest",
+                      "AnnotatedRasterCandidate", "Thread", "Executors", "URL.openConnection()"]:
+            with self.subTest(token=token):
+                path.write_text(original + "\n// " + token)
+                self.assertIn("cannot construct", errors()); path.write_text(original)
+
+    def test_raster_response_never_installs_in_runtime_or_sibling_sources(self) -> None:
+        for relative in [BOUNDARY.STACK, BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/CopiedRasterResponse.kt"]:
+            path = self.root / relative; original = path.read_text() if path.exists() else None
+            for token in ["NativeRasterResponseClassifier.classify(value)", "NativeRasterResponseOutcome.Accepted", "NativeRasterConflictScope.REQUEST"]:
+                path.write_text((original or "") + "\n// " + token)
+                errors: list[str] = []; BOUNDARY.verify_native_raster_response_boundary(self.root, errors)
+                self.assertIn("must remain uninstalled", "\n".join(errors))
+            if original is None: path.unlink()
+            else: path.write_text(original)
+
     def test_native_v3_parser_preserves_original_bytes_and_cannot_install_authority(self) -> None:
         self.assertEqual(self.run_guard().returncode, 0)
         config = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/config"
