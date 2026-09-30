@@ -14,27 +14,30 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 internal const val V2_CONFIG_MAXIMUM_RESPONSE_BYTES: Int = 65_536
 
+/** Immutable original request selection; no version fallback or response-driven negotiation. */
+internal enum class V2ConfigFormat(val pathVersion: String) { V2("v2"), NATIVE_V3("v3") }
+
 /** Only an issued, single-component ELU credential may enter the config path. */
 internal object V2ConfigEndpoint {
     private val SITE_KEY = Regex("elu_pk_(live|test)_[A-Za-z0-9]{22,64}")
 
-    fun build(configHost: String, siteKey: String, debuggable: Boolean = false, apiHost: String? = null): URI {
+    fun build(configHost: String, siteKey: String, debuggable: Boolean = false, apiHost: String? = null, format: V2ConfigFormat = V2ConfigFormat.V2): URI {
         require(SITE_KEY.matches(siteKey)) { "Invalid ELU site key" }
         val origin = requireNotNull(EluConfigHostPolicy.resolve(configHost, debuggable, apiHost)) {
             "Configuration requires an approved application config origin"
         }
-        return URI("$origin/sdk/v2/$siteKey/config")
+        return URI("$origin/sdk/${format.pathVersion}/$siteKey/config")
     }
 
-    fun requireApproved(endpoint: URI, debuggable: Boolean = false, apiHost: String? = null) {
+    fun requireApproved(endpoint: URI, debuggable: Boolean = false, apiHost: String? = null, format: V2ConfigFormat = V2ConfigFormat.V2) {
         val components = endpoint.rawPath?.split('/') ?: emptyList()
         val tail = components.takeLast(4)
-        require(components.size >= 5 && tail[0] == "sdk" && tail[1] == "v2" && tail[3] == "config") {
-            "Invalid v2 config endpoint"
+        require(components.size >= 5 && tail[0] == "sdk" && tail[1] == format.pathVersion && tail[3] == "config") {
+            "Invalid selected config endpoint"
         }
         val prefix = components.dropLast(4).joinToString("/")
         val base = "${endpoint.scheme}://${endpoint.rawAuthority}$prefix"
-        require(endpoint == build(base, tail[2], debuggable, apiHost)) { "Invalid v2 config endpoint" }
+        require(endpoint == build(base, tail[2], debuggable, apiHost, format)) { "Invalid selected config endpoint" }
     }
 }
 
@@ -65,10 +68,11 @@ internal class HttpURLConnectionV2ConfigTransport(
     private val debuggable: Boolean = false,
     private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
     private val boundEndpoint: URI? = null,
+    private val format: V2ConfigFormat = V2ConfigFormat.V2,
 ) : V2ConfigTransport {
     init {
         require(endpointPolicy.apiOrigin == null || boundEndpoint != null) { "Custom config transport requires its original endpoint" }
-        boundEndpoint?.let { V2ConfigEndpoint.requireApproved(it, debuggable, endpointPolicy.apiOrigin) }
+        boundEndpoint?.let { V2ConfigEndpoint.requireApproved(it, debuggable, endpointPolicy.apiOrigin, format) }
         require(connectTimeoutMillis in 1..30_000)
         require(readTimeoutMillis in 1..30_000)
         require(requestTimeoutMillis in 1..30_000)
@@ -76,7 +80,7 @@ internal class HttpURLConnectionV2ConfigTransport(
     }
 
     override fun fetch(endpoint: URI): V2ConfigHttpResponse {
-        V2ConfigEndpoint.requireApproved(endpoint, debuggable, endpointPolicy.apiOrigin)
+        V2ConfigEndpoint.requireApproved(endpoint, debuggable, endpointPolicy.apiOrigin, format)
         require(boundEndpoint == null || endpoint == boundEndpoint) { "Config endpoint differs from its original binding" }
         val started = elapsedRealtimeNanos()
         val connection = connectionFactory(endpoint)

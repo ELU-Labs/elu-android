@@ -137,6 +137,49 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         stack.write_text(stack.read_text() + "\n// NativeV3ConfigParser.parse(bytes)\n")
         self.assertIn("must remain uninstalled", self.run_guard().stderr)
 
+    def test_native_v3_source_keeps_original_receipt_selection_and_conflict_fences(self) -> None:
+        self.assertEqual(self.run_guard().returncode, 0)
+        config = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/config"
+        def check() -> str:
+            errors = []
+            BOUNDARY.verify_native_v3_source_boundary(self.root, errors)
+            BOUNDARY.verify_native_v3_parser_boundary(self.root, errors)
+            return "\n".join(errors)
+        cases = [
+            ("V2ConfigTransport.kt", "tail[1] == format.pathVersion", "true", "exact selection"),
+            ("V2ConfigSource.kt", "private val format: V2ConfigFormat = V2ConfigFormat.V2", "private val format: V2ConfigFormat = V2ConfigFormat.NATIVE_V3", "exact selection"),
+            ("V2ConfigSource.kt", "prior.conflicted = true", "Unit", "conflict"),
+            ("V2ConfigSource.kt", "parsed.data.contentEquals(strictConfigUtf8(receiptBody))", "true", "receipt"),
+            ("V2ConfigSource.kt", "parsed.configV2Data.contentEquals(strictConfigUtf8(body))", "true", "receipt"),
+            ("V2ConfigSource.kt", "minOf(deadline, prior?.deadline ?: deadline)", "deadline", "lease fence"),
+            ("V2ConfigLifecycleDriver.kt", "sameReceipt(published, snapshot)", "published?.body == snapshot?.body", "receipt"),
+            ("V2ConfigAuthorityGate.kt", "lease.body == body && lease.validReceiptBinding()", "true", "receipt"),
+            ("V2ConfigAuthorityGate.kt", "lease?.receiptBody == witness.receiptBody && lease?.nativeV3 === witness.nativeV3", "true", "receipt"),
+        ]
+        for name, before, after, expected in cases:
+            path = config / name; original = path.read_text()
+            with self.subTest(name=name, before=before):
+                self.assertIn(before, original)
+                try:
+                    path.write_text(original.replace(before, after)); self.assertIn(expected, check())
+                finally: path.write_text(original)
+        source = config / "V2ConfigSource.kt"; original = source.read_text()
+        for addition, expected in [("envelopeBoundary = null", "erase"), ("transport.fetch(endpoint)", "fallback"),
+                ("NativeRasterSealer", "cannot install")]:
+            try:
+                source.write_text(original + "\n// " + addition + "\n"); self.assertIn(expected, check())
+            finally: source.write_text(original)
+        stack = self.root / BOUNDARY.STACK; original = stack.read_text()
+        try:
+            stack.write_text(original + "\n// V2ConfigFormat.NATIVE_V3\n")
+            self.assertIn("uninstalled in production Stack", check())
+        finally: stack.write_text(original)
+        sibling = config / "UnexpectedV3Source.kt"
+        try:
+            sibling.write_text("// NativeV3ConfigParser.parse(bytes)\n")
+            self.assertIn("belongs only", check()); self.assertIn("must remain uninstalled", check())
+        finally: sibling.unlink()
+
     def test_annotated_capture_remains_uninstalled_and_geometry_only(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
         self.assertEqual(self.run_guard().returncode, 0)

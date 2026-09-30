@@ -336,18 +336,118 @@ class V2ConfigLifecycleDriverTest {
         assertEquals(before, rig.refreshes.size)
     }
 
-    private class Rig(consumeImmediately: Boolean = true) {
+
+    @Test fun `native outer raw replacement rotates original token while exact repeat only notifies refresh`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        try {
+            rig.driver.start(); rig.worker.runNext()
+            val original = checkNotNull(rig.gate.snapshot())
+            val first = checkNotNull(rig.source.currentLeaseSnapshot())
+            assertTrue(original.nativeV3?.raster != null)
+            rig.clock.nanos += SECOND
+            rig.body = "  ${rig.body}\n"
+            rig.driver.refresh(); rig.worker.runNext()
+            val second = checkNotNull(rig.gate.snapshot())
+            assertEquals(original.body, second.body)
+            assertFalse(original.isCurrent()); assertTrue(second.isCurrent())
+            assertEquals(2, rig.updates.size); assertTrue(rig.refreshes.isEmpty())
+            assertEquals(first.monotonicDeadlineNanos, rig.source.currentLeaseSnapshot()?.monotonicDeadlineNanos)
+            rig.driver.refresh(); rig.worker.runNext()
+            assertEquals(2, rig.updates.size); assertEquals(1, rig.refreshes.size)
+            assertTrue(second.isCurrent())
+        } finally { rig.driver.close() }
+    }
+
+    @Test fun `native source receipt replacement fences old gate before next lifecycle notification`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        try {
+            rig.driver.start(); rig.worker.runNext()
+            val original = checkNotNull(rig.gate.snapshot())
+            rig.body = " ${rig.body}"
+            assertTrue(rig.source.refresh() is V2ConfigSourceResult.Document)
+            assertFalse(original.isCurrent())
+            assertNull(rig.gate.snapshot())
+            assertEquals(1, rig.updates.size)
+            rig.driver.refresh(); rig.worker.runNext()
+            assertTrue(checkNotNull(rig.gate.snapshot()).isCurrent())
+            assertFalse(original.isCurrent()); assertEquals(2, rig.updates.size)
+        } finally { rig.driver.close() }
+    }
+
+    @Test fun `native gate refuses receipt paired with a foreign base expiry or wrapper`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        try {
+            rig.driver.start(); rig.worker.runNext()
+            val lease = checkNotNull(rig.source.currentLeaseSnapshot())
+            val foreign = JSONObject(lease.body).put("revision", "foreign").toString()
+            val invalid = listOf(lease.copy(body = foreign), lease.copy(receiptBody = "{}"),
+                lease.copy(expiresAt = V1ExactTimestamp.fromEpochMillis(rig.clock.wall + 1_000)))
+            for (bad in invalid) {
+                val gate = V2ConfigAuthorityGate()
+                gate.update(V2ConfigLifecycleUpdate(1, originalLease = bad) { consumer -> consumer(bad.body); true })
+                assertNull(gate.snapshot()); gate.close()
+            }
+            val gate = V2ConfigAuthorityGate()
+            gate.update(V2ConfigLifecycleUpdate(1, originalLease = lease) { consumer -> consumer(lease.body); true })
+            assertTrue(checkNotNull(gate.snapshot()).isCurrent()); gate.close()
+        } finally { rig.driver.close() }
+    }
+
+    @Test fun `native original suspension boundary cannot survive a later source operation`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        try {
+            rig.driver.start(); rig.worker.runNext()
+            val original = checkNotNull(rig.gate.snapshot())
+            var boundary: V2ConfigApplicationBackgrounded? = null
+            rig.driver.onApplicationBackgrounded("2026-08-05T00:01:00Z") { boundary = it }
+            assertFalse(original.isCurrent()); assertNull(rig.gate.snapshot()?.nativeV3)
+            val retained = checkNotNull(boundary)
+            assertTrue(retained.claim()); assertFalse(retained.claim())
+            assertTrue(retained.authorizes(original))
+            assertTrue(rig.source.refresh() is V2ConfigSourceResult.Document)
+            assertFalse(retained.authorizes(original))
+            rig.driver.onForeground(); rig.worker.runNext()
+            assertTrue(checkNotNull(rig.gate.snapshot()).nativeV3 != null)
+            assertFalse(original.isCurrent())
+        } finally { rig.driver.close() }
+    }
+
+    @Test fun `native canceled fetch cannot publish and foreground waits for original physical slot`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        try {
+            val old = rig.body
+            rig.fetch = {
+                rig.driver.onBackground(); rig.driver.onForeground()
+                assertEquals(0, rig.worker.queued.size)
+                assertTrue(rig.driver.diagnostics().fetchInFlight)
+                V2ConfigHttpResponse(200, old)
+            }
+            rig.driver.start(); rig.worker.runNext()
+            assertNull(rig.gate.snapshot()?.nativeV3)
+            assertEquals(1, rig.worker.queued.size); assertEquals(1, rig.calls)
+            rig.fetch = { V2ConfigHttpResponse(200, rig.body) }
+            rig.worker.runNext()
+            val witness = checkNotNull(rig.gate.snapshot())
+            assertTrue(witness.nativeV3 != null); assertEquals(2, rig.calls)
+            rig.clock.nanos += 240 * SECOND
+            assertFalse(witness.isCurrent()); assertNull(rig.gate.snapshot()?.nativeV3)
+        } finally { rig.driver.close() }
+    }
+
+    private class Rig(consumeImmediately: Boolean = true, format: V2ConfigFormat = V2ConfigFormat.V2) {
         val clock = FakeClock()
         val scheduler = ManualScheduler(clock)
         val worker = ManualWorker()
         val updates = mutableListOf<V2ConfigLifecycleUpdate>()
         val refreshes = mutableListOf<V2ConfigLifecycleUpdate>()
         val deliveries = mutableListOf<String?>()
-        var body = config().toString()
+        val gate = V2ConfigAuthorityGate()
+        var body = if (format == V2ConfigFormat.NATIVE_V3) nativeV3SourceFixture().toString() else config().toString()
         var calls = 0
         var fetch: () -> V2ConfigHttpResponse = { V2ConfigHttpResponse(200, body) }
-        val source = V2ConfigSource("https://elu.dev", "elu_pk_live_${"A".repeat(26)}", V2ConfigTransport { calls++; fetch() }, clock)
+        val source = V2ConfigSource("https://elu.dev", "elu_pk_live_${"A".repeat(26)}", V2ConfigTransport { calls++; fetch() }, clock, format = format)
         val driver = V2ConfigLifecycleDriver(source, { update ->
+            gate.update(update)
             updates.add(update)
             if (consumeImmediately) update.consume { deliveries.add(it) }
         }, clock, scheduler, worker, onRetainedRefresh = { refreshes += it })

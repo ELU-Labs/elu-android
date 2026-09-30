@@ -1337,8 +1337,64 @@ def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> N
             "if (depth == 1 && name == retainedRootProperty) rootPropertyRange = valueStart until index" not in strict:
         errors.append("native v3 root span must come from the original complete strict parse")
     for file in (root / MAIN_KOTLIN).rglob("*.kt"):
-        if file.relative_to(root) != path and "NativeV3ConfigParser" in file.read_text():
-            errors.append("native v3 semantic parser must remain uninstalled")
+        allowed = {path, *(config / name for name in (
+            "V2ConfigSource.kt", "V2ConfigTransport.kt", "V2ConfigLifecycleDriver.kt", "V2ConfigAuthorityGate.kt"))}
+        if file.relative_to(root) not in allowed and "NativeV3ConfigParser" in file.read_text():
+            errors.append("native v3 semantic parser must remain uninstalled outside original config source")
+
+
+def verify_native_v3_source_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    config = MAIN_KOTLIN / "dev/elu/analytics/internal/config"
+    required = {
+        "V2ConfigTransport.kt": [
+            'internal enum class V2ConfigFormat(val pathVersion: String) { V2("v2"), NATIVE_V3("v3") }',
+            "format: V2ConfigFormat = V2ConfigFormat.V2", "tail[1] == format.pathVersion",
+            "requireApproved(endpoint, debuggable, endpointPolicy.apiOrigin, format)",
+            "endpoint == boundEndpoint", "connection.instanceFollowRedirects = false",
+        ],
+        "V2ConfigSource.kt": [
+            "private val format: V2ConfigFormat = V2ConfigFormat.V2",
+            "V2ConfigEndpoint.build(configHost, siteKey, debuggable, endpointPolicy.apiOrigin, format)",
+            "boundEndpoint = endpoint, format = format", "format == V2ConfigFormat.NATIVE_V3",
+            "NativeV3ConfigParser.parse(strictConfigUtf8(receiptBody), endpointPolicy)",
+            "nativeV3?.configV2Data?.toString(Charsets.UTF_8) ?: receiptBody",
+            "body == other.body && receiptBody == other.receiptBody",
+            "parsed.configV2Data.contentEquals(strictConfigUtf8(body))",
+            "parsed.data.contentEquals(strictConfigUtf8(receiptBody))",
+            "parsed.base.expiresAtInstant.compareTo(expiresAt) == 0",
+            "onMalformedInput(CodingErrorAction.REPORT)", "onUnmappableCharacter(CodingErrorAction.REPORT)",
+            "prior.conflicted || prior.semanticHash != nativeV3.semanticHash", "prior.conflicted = true",
+            "EnvelopeBoundary(issued, nativeV3.semanticHash)", "manager.install(body, sample.wall)",
+            "minOf(deadline, prior?.deadline ?: deadline)", "retained.snapshot.sameReceipt(expected)",
+        ],
+        "V2ConfigLifecycleDriver.kt": [
+            "internal fun consumeLease(", "consumeCurrent { body -> consumer(body, originalLease) }",
+            "current.sameReceipt(retained)", "current.sameReceipt(published)",
+            "sameReceipt(published, snapshot)", "V2ConfigLifecycleUpdate(noticeSequence, kind, snapshot)",
+        ],
+        "V2ConfigAuthorityGate.kt": [
+            "token.consumeLease { body, lease ->", "lease.body == body && lease.validReceiptBinding()",
+            "lease?.receiptBody == witness.receiptBody && lease?.nativeV3 === witness.nativeV3",
+            "current === token", "current !== witness.token",
+        ],
+    }
+    for name, tokens in required.items():
+        text = load_text(root, config / name)
+        if any(token not in text for token in tokens):
+            errors.append("native v3 original source lost exact selection, receipt, conflict or lease fence")
+        if re.search(r"\b(?:RuntimeQueueOwner|AndroidRuntimeQueue|NativeRasterSealer|NativeReplayAuthority|"
+                     r"NativeRasterResponseClassifier|FileOutputStream)\b", text):
+            errors.append("native v3 source cannot install raster runtime, storage or authority")
+    source = load_text(root, config / "V2ConfigSource.kt")
+    if source.count("transport.fetch(endpoint)") != 1 or re.search(r"envelopeBoundary\s*=\s*null", source):
+        errors.append("native v3 source cannot fallback or erase its original conflict boundary")
+    for file in (root / MAIN_KOTLIN).rglob("*.kt"):
+        relative = file.relative_to(root)
+        text = file.read_text()
+        if "V2ConfigFormat.NATIVE_V3" in text and relative not in {config / "V2ConfigSource.kt", config / "V2ConfigTransport.kt"}:
+            errors.append("native v3 request selection must remain uninstalled in production Stack")
+        if "NativeV3ConfigParser.parse(" in text and relative != config / "V2ConfigSource.kt":
+            errors.append("native v3 parser acquisition belongs only to the original source")
 
 
 def verify(root: pathlib.Path) -> list[str]:
@@ -1346,6 +1402,7 @@ def verify(root: pathlib.Path) -> list[str]:
     verify_compose_distribution_boundary(root, errors)
     verify_native_raster_response_boundary(root, errors)
     verify_native_v3_parser_boundary(root, errors)
+    verify_native_v3_source_boundary(root, errors)
     verify_raster_sealer_boundary(root, errors)
     verify_annotated_root_boundary(root, errors)
     verify_exception_intake(root, errors)

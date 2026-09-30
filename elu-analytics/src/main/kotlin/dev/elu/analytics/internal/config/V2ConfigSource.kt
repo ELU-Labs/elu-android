@@ -1,6 +1,8 @@
 package dev.elu.analytics.internal.config
 
 import android.os.SystemClock
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
 
 internal interface V2ConfigClock {
     fun wallNowEpochMillis(): Long
@@ -20,7 +22,28 @@ internal data class V2ConfigLeaseSnapshot(
     val body: String,
     val expiresAt: V1ExactTimestamp,
     val monotonicDeadlineNanos: Long,
-)
+    val nativeV3: NativeV3ConfigParser.Parsed? = null,
+    /** Exact original response, cached once; existing channels still consume body. */
+    val receiptBody: String = body,
+) {
+    internal fun sameReceipt(other: V2ConfigLeaseSnapshot?): Boolean =
+        other != null && body == other.body && receiptBody == other.receiptBody
+
+    internal fun validReceiptBinding(): Boolean = try {
+        val parsed = nativeV3
+        if (parsed == null) receiptBody == body
+        else parsed.configV2Data.contentEquals(strictConfigUtf8(body)) &&
+            parsed.data.contentEquals(strictConfigUtf8(receiptBody)) &&
+            parsed.base.expiresAtInstant.compareTo(expiresAt) == 0
+    } catch (_: Exception) { false }
+}
+
+/** The production transport already strictly decodes UTF-8; injected Strings must not replace surrogates. */
+private fun strictConfigUtf8(value: String): ByteArray {
+    val encoded = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(value))
+    return ByteArray(encoded.remaining()).also { encoded.get(it) }
+}
 
 internal enum class V2ConfigSourceFailure {
     TRANSPORT,
@@ -64,9 +87,10 @@ internal class V2ConfigSource(
     private val clock: V2ConfigClock = AndroidV2ConfigClock,
     debuggable: Boolean = false,
     private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
+    private val format: V2ConfigFormat = V2ConfigFormat.V2,
 ) : AutoCloseable {
-    private val endpoint = V2ConfigEndpoint.build(configHost, siteKey, debuggable, endpointPolicy.apiOrigin)
-    private val transport = transport ?: HttpURLConnectionV2ConfigTransport(debuggable = debuggable, endpointPolicy = endpointPolicy, boundEndpoint = endpoint)
+    private val endpoint = V2ConfigEndpoint.build(configHost, siteKey, debuggable, endpointPolicy.apiOrigin, format)
+    private val transport = transport ?: HttpURLConnectionV2ConfigTransport(debuggable = debuggable, endpointPolicy = endpointPolicy, boundEndpoint = endpoint, format = format)
     private val manager = V1ConfigManager(endpointPolicy = endpointPolicy)
     private val lock = Any()
     private var generation = 0L
@@ -78,6 +102,8 @@ internal class V2ConfigSource(
     private var lease: Lease? = null
     /** Retained across withdrawal so re-reading identical data cannot renew a spent lease. */
     private var leaseBoundary: LeaseBoundary? = null
+    /** The base manager cannot see raster changes. Retain the full validated wrapper boundary. */
+    private var envelopeBoundary: EnvelopeBoundary? = null
 
     /** Invoked off the main thread. Concurrent older completions are ignored. */
     fun refresh(): V2ConfigSourceResult {
@@ -101,13 +127,20 @@ internal class V2ConfigSource(
             val sample = sampleClock() ?: return@synchronized unavailable(V2ConfigSourceFailure.CLOCK)
             expireLease(sample)
             if (response.status != 200) return@synchronized unavailable(V2ConfigSourceFailure.HTTP)
-            val body = response.body
-            if (body == null || body.toByteArray(Charsets.UTF_8).size > V2_CONFIG_MAXIMUM_RESPONSE_BYTES) {
+            val receiptBody = response.body
+            if (receiptBody == null || receiptBody.toByteArray(Charsets.UTF_8).size > V2_CONFIG_MAXIMUM_RESPONSE_BYTES) {
                 manager.install(null, sample.wall)
                 return@synchronized unavailable(V2ConfigSourceFailure.CONFIG, V1ConfigRejection.MALFORMED)
             }
+            val nativeV3 = if (format == V2ConfigFormat.NATIVE_V3) {
+                try { NativeV3ConfigParser.parse(strictConfigUtf8(receiptBody), endpointPolicy) }
+                catch (_: Exception) {
+                    return@synchronized unavailable(V2ConfigSourceFailure.CONFIG, V1ConfigRejection.MALFORMED)
+                }
+            } else null
+            val body = nativeV3?.configV2Data?.toString(Charsets.UTF_8) ?: receiptBody
             val parsed = try {
-                V1ConfigJson.parseConfig(body)
+                nativeV3?.base ?: V1ConfigJson.parseConfig(body)
             } catch (_: V1UnsupportedConfigSchemaException) {
                 return@synchronized rejectDocument(body, sample, V1ConfigRejection.UNSUPPORTED_SCHEMA)
             } catch (_: V1MalformedConfigException) {
@@ -128,6 +161,19 @@ internal class V2ConfigSource(
             ) {
                 manager.install(null, sample.wall)
                 return@synchronized unavailable(V2ConfigSourceFailure.INVALID_VALIDITY)
+            }
+            if (nativeV3 != null) {
+                val prior = envelopeBoundary
+                val order = prior?.issuedAt?.let(issued::compareTo)
+                if (order != null && order < 0) return@synchronized V2ConfigSourceResult.Superseded
+                if (prior != null && order == 0) {
+                    if (prior.conflicted || prior.semanticHash != nativeV3.semanticHash) {
+                        prior.conflicted = true
+                        return@synchronized unavailable(V2ConfigSourceFailure.CONFIG, V1ConfigRejection.CONFLICT)
+                    }
+                } else {
+                    envelopeBoundary = EnvelopeBoundary(issued, nativeV3.semanticHash)
+                }
             }
             when (val result = manager.install(body, sample.wall)) {
                 is V1ConfigUpdateResult.Rejected -> {
@@ -157,7 +203,7 @@ internal class V2ConfigSource(
                     if (sample.monotonic >= boundedDeadline) {
                         return@synchronized unavailable(V2ConfigSourceFailure.CONFIG, V1ConfigRejection.EXPIRED)
                     }
-                    lease = Lease(body, parsed.expiresAtInstant, boundedDeadline)
+                    lease = Lease(body, parsed.expiresAtInstant, boundedDeadline, nativeV3, receiptBody)
                     V2ConfigSourceResult.Document(body, parsed.status)
                 }
             }
@@ -194,7 +240,7 @@ internal class V2ConfigSource(
         val sample = sampleClock()
         if (sample != null) expireLease(sample)
         val retained = lease
-        val matches = sample != null && retained != null && retained.body == expected.body &&
+        val matches = sample != null && retained != null && retained.snapshot.sameReceipt(expected) &&
             retained.expiresAt.compareTo(expected.expiresAt) == 0 && retained.deadline <= expected.monotonicDeadlineNanos
         generation = Math.incrementExact(generation)
         val withdrawalGeneration = generation
@@ -286,11 +332,15 @@ internal class V2ConfigSource(
         val body: String,
         val expiresAt: V1ExactTimestamp,
         val deadline: Long,
+        val nativeV3: NativeV3ConfigParser.Parsed?,
+        val receiptBody: String,
     ) {
-        // All three fields are immutable. Reuse conveys data only; every return
+        // All fields are immutable. Reuse conveys data only; every return
         // still follows fresh clock/expiry checks and the current lease field.
-        val snapshot = V2ConfigLeaseSnapshot(body, expiresAt, deadline)
+        val snapshot = V2ConfigLeaseSnapshot(body, expiresAt, deadline, nativeV3, receiptBody)
     }
+
+    private data class EnvelopeBoundary(val issuedAt: V1ExactTimestamp, val semanticHash: String, var conflicted: Boolean = false)
 
     private data class LeaseBoundary(val semanticHash: String, val deadline: Long)
 

@@ -15,6 +15,37 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class V2ConfigTransportTest {
+
+    @Test fun `immutable request format rejects crossed endpoints before opening a connection`() {
+        for (format in V2ConfigFormat.entries) {
+            val endpoint = V2ConfigEndpoint.build("https://elu.dev", KEY, format = format)
+            assertEquals("https://elu.dev/sdk/${format.pathVersion}/$KEY/config", endpoint.toString())
+            val other = V2ConfigFormat.entries.single { it != format }
+            val crossed = V2ConfigEndpoint.build("https://elu.dev", KEY, format = other)
+            var opens = 0
+            val connection = FakeConnection(200, "{}".toByteArray())
+            val transport = HttpURLConnectionV2ConfigTransport(elapsedRealtimeNanos = System::nanoTime,
+                boundEndpoint = endpoint, format = format, connectionFactory = { opens++; connection })
+            assertThrows(IllegalArgumentException::class.java) { transport.fetch(crossed) }
+            assertEquals(0, opens)
+            assertEquals("{}", transport.fetch(endpoint).body)
+            assertEquals(1, opens); assertTrue(connection.disconnected)
+        }
+    }
+
+    @Test fun `native selected transport retains strict bytes and refuses foreign origin without fallback`() {
+        val endpoint = V2ConfigEndpoint.build("https://elu.dev", KEY, format = V2ConfigFormat.NATIVE_V3)
+        var opens = 0
+        val connection = FakeConnection(200, byteArrayOf(0xc3.toByte(), 0x28))
+        val transport = HttpURLConnectionV2ConfigTransport(elapsedRealtimeNanos = System::nanoTime,
+            boundEndpoint = endpoint, format = V2ConfigFormat.NATIVE_V3, connectionFactory = { opens++; connection })
+        assertThrows(IllegalArgumentException::class.java) { transport.fetch(URI("https://evil.test/sdk/v3/$KEY/config")) }
+        assertEquals(0, opens)
+        assertThrows(IOException::class.java) { transport.fetch(endpoint) }
+        assertEquals(1, opens); assertTrue(connection.disconnected); assertTrue(connection.streamClosed)
+    }
+
+
     @Test fun `selected custom config URI is immutable before physical connection and never follows redirect`() {
         val origin = "https://analytics.example.com"
         val policy = LocalEndpointPolicy.fromApiHost(origin)

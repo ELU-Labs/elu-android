@@ -12,9 +12,14 @@ internal enum class V2ConfigLifecycleUpdateKind { CONFIGURATION, APPLICATION_SUS
 internal class V2ConfigLifecycleUpdate internal constructor(
     val sequence: Long,
     val kind: V2ConfigLifecycleUpdateKind = V2ConfigLifecycleUpdateKind.CONFIGURATION,
+    private val originalLease: V2ConfigLeaseSnapshot? = null,
     private val consumeCurrent: ((String?) -> Unit) -> Boolean,
 ) {
     fun consume(consumer: (String?) -> Unit): Boolean = consumeCurrent(consumer)
+
+    /** Original snapshot only inside the same current-token critical section. */
+    internal fun consumeLease(consumer: (String?, V2ConfigLeaseSnapshot?) -> Unit): Boolean =
+        consumeCurrent { body -> consumer(body, originalLease) }
 }
 
 /** One use, one fixed local event, and no generic capture or delivery authority. */
@@ -108,7 +113,7 @@ internal class V2ConfigLifecycleDriver(
         // Only a currently live published lease can be suspended. Invalid/expired/clock-failed
         // absence remains a configuration withdrawal, including when its notice was deferred.
         val current = if (wasForeground && original != null && retained != null) source.currentLeaseSnapshot() else null
-        val applicationSuspension = current != null && retained != null && current.body == retained.body &&
+        val applicationSuspension = current != null && retained != null && current.sameReceipt(retained) &&
             current.expiresAt.compareTo(retained.expiresAt) == 0 && current.monotonicDeadlineNanos <= retained.monotonicDeadlineNanos &&
             remaining(current) > 0
         phase = V2ConfigLifecyclePhase.BACKGROUND
@@ -196,7 +201,7 @@ internal class V2ConfigLifecycleDriver(
             if (phase == V2ConfigLifecyclePhase.FOREGROUND) scheduleRetry()
         } else {
             retryDelay = SECOND
-            val retained = hasPublished && published?.body == current.body &&
+            val retained = hasPublished && current.sameReceipt(published) &&
                 publishedUpdate?.kind == V2ConfigLifecycleUpdateKind.CONFIGURATION
             publish(current)
             if (result is V2ConfigSourceResult.Document && retained && phase == V2ConfigLifecyclePhase.FOREGROUND) {
@@ -217,7 +222,7 @@ internal class V2ConfigLifecycleDriver(
         if (sequence != expected) return@synchronized false
         val raw = if (phase == V2ConfigLifecyclePhase.FOREGROUND) {
             val current = source.currentLeaseSnapshot()
-            if (published != null && (current == null || current.body != published?.body)) return@synchronized false
+            if (published != null && (current == null || !current.sameReceipt(published))) return@synchronized false
             published?.body
         } else null
         consumer(raw)
@@ -229,16 +234,19 @@ internal class V2ConfigLifecycleDriver(
         if (remaining(installed) <= 0 || source.currentLeaseSnapshot() == null) publish(null)
     }
 
+    private fun sameReceipt(first: V2ConfigLeaseSnapshot?, second: V2ConfigLeaseSnapshot?): Boolean =
+        if (first == null) second == null else first.sameReceipt(second)
+
     private fun publish(snapshot: V2ConfigLeaseSnapshot?, force: Boolean = false,
         kind: V2ConfigLifecycleUpdateKind = V2ConfigLifecycleUpdateKind.CONFIGURATION,
         beforeNotify: ((V2ConfigLifecycleUpdate) -> Unit)? = null) {
-        if (!force && hasPublished && published?.body == snapshot?.body && publishedUpdate?.kind == kind) return
+        if (!force && hasPublished && sameReceipt(published, snapshot) && publishedUpdate?.kind == kind) return
         published = snapshot
         hasPublished = true
         if (snapshot == null) cancelExpiry()
         sequence = Math.incrementExact(sequence)
         val noticeSequence = sequence
-        val update = V2ConfigLifecycleUpdate(noticeSequence, kind) { consumer -> consume(noticeSequence, consumer) }
+        val update = V2ConfigLifecycleUpdate(noticeSequence, kind, snapshot) { consumer -> consume(noticeSequence, consumer) }
         publishedUpdate = update
         try {
             beforeNotify?.invoke(update)

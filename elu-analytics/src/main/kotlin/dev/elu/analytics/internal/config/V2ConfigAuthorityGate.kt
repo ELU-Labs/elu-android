@@ -14,8 +14,10 @@ internal class V2ConfigAuthorityGate {
         if (closed) return null
         val token = current ?: return null
         var witness: V2ConfigAuthorityWitness? = null
-        token.consume { body ->
-            if (!closed && current === token) witness = V2ConfigAuthorityWitness(this, token, body)
+        token.consumeLease { body, lease ->
+            if (!closed && current === token &&
+                (lease == null || (lease.body == body && lease.validReceiptBinding()))
+            ) witness = V2ConfigAuthorityWitness(this, token, body, lease?.nativeV3, lease?.receiptBody)
         }
         return witness
     }
@@ -32,8 +34,10 @@ internal class V2ConfigAuthorityGate {
     internal fun consume(witness: V2ConfigAuthorityWitness, action: () -> Unit): Boolean {
         if (closed || current !== witness.token) return false
         var consumed = false
-        witness.token.consume { body ->
-            if (!closed && current === witness.token && body == witness.body) {
+        witness.token.consumeLease { body, lease ->
+            if (!closed && current === witness.token && body == witness.body &&
+                lease?.receiptBody == witness.receiptBody && lease?.nativeV3 === witness.nativeV3
+            ) {
                 action()
                 consumed = true
             }
@@ -47,6 +51,9 @@ internal class V2ConfigAuthorityWitness internal constructor(
     private val gate: V2ConfigAuthorityGate,
     internal val token: V2ConfigLifecycleUpdate,
     val body: String?,
+    /** Descriptive original receipt; use only through this witness's final consume fence. */
+    val nativeV3: NativeV3ConfigParser.Parsed?,
+    internal val receiptBody: String?,
 ) {
     /** Classification comes from the current opaque source update, never from null alone. */
     val isApplicationSuspended: Boolean

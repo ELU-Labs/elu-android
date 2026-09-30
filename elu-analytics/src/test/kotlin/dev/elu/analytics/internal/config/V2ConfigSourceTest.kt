@@ -7,6 +7,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
+import org.json.JSONArray
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -300,6 +303,115 @@ class V2ConfigSourceTest {
         }
     }
 
+
+    @Test fun `explicit native v3 retains original wrapper and exact embedded value under one lease`() {
+        val original = nativeV3SourceFixture().toString()
+        val base = NativeV3ConfigParser.parse(original.toByteArray()).configV2Data.toString(Charsets.UTF_8)
+            .replace("0.25", "2.5e-1")
+        val raster = nativeV3SourceFixture().getJSONObject("raster")
+        val wire = " { \"schemaVersion\": 3.0, \"configV2\": $base, \"raster\": $raster }\n"
+        var calls = 0
+        source(format = V2ConfigFormat.NATIVE_V3) { calls++; ok(wire) }.use { source ->
+            assertEquals(V2ConfigSourceResult.Document(base, V1ConfigStatus.ENABLED), source.refresh())
+            val lease = checkNotNull(source.currentLeaseSnapshot())
+            assertEquals(wire, lease.receiptBody); assertEquals(base, lease.body)
+            assertArrayEquals(wire.toByteArray(), checkNotNull(lease.nativeV3).data)
+            assertArrayEquals(base.toByteArray(), checkNotNull(lease.nativeV3).configV2Data)
+            assertTrue(lease.validReceiptBinding()); assertEquals(1, calls)
+        }
+        source { ok(wire) }.use { source ->
+            assertTrue(source.refresh() is V2ConfigSourceResult.Unavailable)
+            assertNull(source.currentLeaseSnapshot())
+        }
+    }
+
+    @Test fun `native base only and inactive wrappers preserve channel data without raster permission`() {
+        val bodies = listOf(config(), inactive("disabled"), inactive("revoked"))
+        bodies.forEach { base ->
+            val wire = JSONObject().put("schemaVersion", 3).put("configV2", base).toString()
+            source(format = V2ConfigFormat.NATIVE_V3) { ok(wire) }.use { source ->
+                assertTrue(source.refresh() is V2ConfigSourceResult.Document)
+                val lease = checkNotNull(source.currentLeaseSnapshot())
+                assertEquals(base.toString(), lease.body)
+                assertNull(checkNotNull(lease.nativeV3).raster)
+                assertTrue(lease.validReceiptBinding())
+            }
+        }
+    }
+
+    @Test fun `same issuance raster addition or removal poisons full wrapper across withdrawal`() {
+        for (initialRaster in listOf(false, true)) {
+            val original = nativeV3SourceFixture().also { if (!initialRaster) it.remove("raster") }.toString()
+            var body = original
+            source(format = V2ConfigFormat.NATIVE_V3) { ok(body) }.use { source ->
+                assertTrue(source.refresh() is V2ConfigSourceResult.Document)
+                body = nativeV3SourceFixture().also { if (initialRaster) it.remove("raster") }.toString()
+                assertEquals(V1ConfigRejection.CONFLICT, (source.refresh() as V2ConfigSourceResult.Unavailable).configRejection)
+                source.withdraw(); body = original
+                assertEquals(V1ConfigRejection.CONFLICT, (source.refresh() as V2ConfigSourceResult.Unavailable).configRejection)
+                assertNull(source.currentLeaseSnapshot())
+                body = nativeV3SourceFixture().apply {
+                    remove("raster"); getJSONObject("configV2").put("issuedAt", "2026-08-05T00:00:30Z")
+                }.toString()
+                assertTrue(source.refresh() is V2ConfigSourceResult.Document)
+                val newer = checkNotNull(source.currentLeaseSnapshot())
+                body = original
+                assertEquals(V2ConfigSourceResult.Superseded, source.refresh())
+                assertEquals(newer.receiptBody, source.currentLeaseSnapshot()?.receiptBody)
+            }
+        }
+    }
+
+    @Test fun `native formatting refresh and withdrawal cannot renew either original expiration`() {
+        for (wallExpires in listOf(false, true)) {
+            val clock = FakeClock(); var body = nativeV3SourceFixture().toString()
+            source(clock, V2ConfigFormat.NATIVE_V3) { ok(body) }.use { source ->
+                source.refresh(); val first = checkNotNull(source.currentLeaseSnapshot())
+                clock.nanos += 10_000_000_000L
+                source.withdraw(); body = "  $body\n"
+                assertTrue(source.refresh() is V2ConfigSourceResult.Document)
+                val updated = checkNotNull(source.currentLeaseSnapshot())
+                assertEquals(first.monotonicDeadlineNanos, updated.monotonicDeadlineNanos)
+                assertFalse(first.sameReceipt(updated))
+                if (wallExpires) clock.wall += 240_000 else clock.nanos = first.monotonicDeadlineNanos
+                assertNull(source.currentLeaseSnapshot())
+                assertTrue(source.refresh() is V2ConfigSourceResult.Unavailable)
+            }
+        }
+    }
+
+    @Test fun `native malformed or foreign wrapper withdraws without fallback or manufactured receipt`() {
+        val valid = nativeV3SourceFixture().toString()
+        val invalid = listOf(
+            valid.replace("\"schemaVersion\":3", "\"schemaVersion\":3,\"schemaVersion\":3"),
+            valid.replace("site_demo", "\ud800"),
+            valid.replace("ingest.elu.dev", "evil.test"),
+            nativeV3SourceFixture().apply { getJSONObject("raster").getJSONObject("privacy")
+                .put("automaticInputDiscovery", true) }.toString(),
+            valid + " ".repeat(V2_CONFIG_MAXIMUM_RESPONSE_BYTES),
+        )
+        invalid.forEach { rejected ->
+            var body = valid; var calls = 0
+            source(format = V2ConfigFormat.NATIVE_V3) { calls++; ok(body) }.use { source ->
+                source.refresh(); body = rejected
+                assertTrue(source.refresh() is V2ConfigSourceResult.Unavailable)
+                assertNull(source.currentLeaseSnapshot()); assertEquals(2, calls)
+            }
+        }
+    }
+
+    @Test fun `native delayed request consumes original lease and rollback remains terminal`() {
+        val clock = FakeClock(); val body = nativeV3SourceFixture().toString()
+        source(clock, V2ConfigFormat.NATIVE_V3) { clock.nanos += 10_000_000_000L; ok(body) }.use { source ->
+            assertTrue(source.refresh() is V2ConfigSourceResult.Document)
+            assertEquals(240_000_000_100L, source.currentLeaseSnapshot()?.monotonicDeadlineNanos)
+            clock.wall--
+            assertNull(source.currentLeaseSnapshot())
+            clock.wall++
+            assertEquals(V2ConfigSourceFailure.CLOCK, (source.refresh() as V2ConfigSourceResult.Unavailable).reason)
+        }
+    }
+
     private fun withBlockedFirst(
         laterFailure: Boolean = false,
         firstFailure: Boolean = false,
@@ -329,8 +441,8 @@ class V2ConfigSourceTest {
         }
     }
 
-    private fun source(clock: FakeClock = FakeClock(), fetch: () -> V2ConfigHttpResponse): V2ConfigSource =
-        V2ConfigSource("https://elu.dev", "elu_pk_live_${"A".repeat(26)}", V2ConfigTransport { fetch() }, clock)
+    private fun source(clock: FakeClock = FakeClock(), format: V2ConfigFormat = V2ConfigFormat.V2, fetch: () -> V2ConfigHttpResponse): V2ConfigSource =
+        V2ConfigSource("https://elu.dev", "elu_pk_live_${"A".repeat(26)}", V2ConfigTransport { fetch() }, clock, format = format)
 
     private fun ok(body: String): V2ConfigHttpResponse = V2ConfigHttpResponse(200, body)
     private fun config(): JSONObject = JSONObject(resource("contracts/v2/fixtures/config-enabled.json"))
@@ -349,4 +461,35 @@ class V2ConfigSourceTest {
     private companion object {
         val NOW = Instant.parse("2026-08-05T00:01:00.000Z").toEpochMilli()
     }
+}
+
+
+/** Existing v2 resource, upgraded only for source/lifecycle tests; semantic golden vectors remain in parser tests. */
+internal fun nativeV3SourceFixture(): JSONObject {
+    val base = JSONObject(checkNotNull(V2ConfigSourceTest::class.java.classLoader
+        ?.getResourceAsStream("contracts/v2/fixtures/config-enabled.json")).bufferedReader().use { it.readText() })
+    base.getJSONObject("privacy").getJSONObject("masking").put("images", "allow")
+    base.getJSONObject("capabilities").getJSONObject("replay")
+        .put("replayProtocolGeneration", "protocol-generation-v2")
+        .put("transports", JSONArray().put(JSONObject().put("codec", "elu-native-wireframe-v2").put("compression", "gzip")))
+    val privacy = base.getJSONObject("privacy")
+    val limits = JSONObject().put("requestBytes", 5_242_880).put("decodedPayloadBytes", 2_800_000)
+        .put("pngBytes", 2_097_152).put("imageEdgePixels", 2_048).put("imagePixels", 1_048_576)
+        .put("viewportEdge", 16_384).put("minimumFrameIntervalSeconds", 1).put("framesPerChunk", 1)
+    fun declarations() = JSONObject().put("declaredRegionsAllowed", true).put("inputCoverage", "declared-regions")
+        .put("automaticInputDiscovery", false).put("unknownContentClassification", false)
+        .put("redactionBoundary", "before-encoding").put("requiredBindingBehavior", "deny-incomplete-or-stale")
+        .put("maskingProfileHash", NativeV3ConfigParser.PROFILE_HASH)
+    val material = declarations().put("schemaVersion", 1).put("policyRevision", privacy.getString("revision"))
+        .put("basePolicyRevision", privacy.getString("revision")).put("basePrivacy", privacy)
+        .put("replayAudience", "all-devices").put("limits", limits)
+    val hash = V1StrictCanonicalJson.sha256("elu-native-raster-effective-policy-v1\u0000".toByteArray() +
+        V1StrictCanonicalJson.canonicalBytes(V1StrictCanonicalJson.parse(material.toString())))
+    val raster = JSONObject().put("schemaVersion", 1).put("endpoint", "https://ingest.elu.dev/v3/replay")
+        .put("replayContractVersion", "3.0.0").put("replaySchemaVersion", 3).put("ackSchemaVersion", 3)
+        .put("replayProtocolGeneration", "native-raster-generation-v1").put("codec", "elu-native-raster-v1")
+        .put("compression", "gzip").put("platforms", JSONArray().put("android").put("ios"))
+        .put("privacy", declarations().put("schemaVersion", 1).put("revision", privacy.getString("revision"))
+            .put("effectivePolicyHash", hash)).put("limits", limits)
+    return JSONObject().put("schemaVersion", 3).put("configV2", base).put("raster", raster)
 }
