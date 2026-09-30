@@ -272,7 +272,7 @@ class OkHttpReplayTransportTest {
         val stored = NativeRasterStoredRequest.parse(NativeRasterStorageTest.storedBody(policy.effectivePolicyHash))
         val claim = ReplayDeliveryClaim.raster(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
             NativeRasterStoredChunk(0, "site", stored), ReplayDeliveryAuthorization(policy.endpoint, KEY, "site",
-                dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, "gzip"), NativeRasterSealer.GENERATION,
+                dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, dev.elu.analytics.internal.config.V1ReplayCompression.GZIP), NativeRasterSealer.GENERATION,
                 "credential", "scope", ReplayDeliveryFormat.RASTER, "2026-08-05T00:00:00Z", policy.revision, policy.effectivePolicyHash), 1, source)
         val worker = Worker(); lateinit var sent: FakeCall
         val adapter = OkHttpReplayTransport(KEY, policy.endpoint, format = ReplayDeliveryFormat.RASTER,
@@ -289,7 +289,7 @@ class OkHttpReplayTransportTest {
         rig.activate(); val source = checkNotNull(rig.gate.snapshot()); val policy = checkNotNull(source.nativeV3?.raster)
         val stored = NativeRasterStoredRequest.parse(NativeRasterStorageTest.storedBody(policy.effectivePolicyHash))
         val claim = ReplayDeliveryClaim.raster(UUID.randomUUID().toString(), UUID.randomUUID().toString(), NativeRasterStoredChunk(0, "site", stored),
-            ReplayDeliveryAuthorization(policy.endpoint, KEY, "site", dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, "gzip"),
+            ReplayDeliveryAuthorization(policy.endpoint, KEY, "site", dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, dev.elu.analytics.internal.config.V1ReplayCompression.GZIP),
                 NativeRasterSealer.GENERATION, "credential", "scope", ReplayDeliveryFormat.RASTER, "2026-08-05T00:00:00Z"), 1, source)
         for (valid in listOf(false, true)) {
             val worker = Worker(); lateinit var original: ReplayTransportOperation

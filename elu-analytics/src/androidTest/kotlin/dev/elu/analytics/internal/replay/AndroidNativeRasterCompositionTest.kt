@@ -98,7 +98,7 @@ class AndroidNativeRasterCompositionTest {
         lateinit var parent: ViewGroup; lateinit var firstView: ComposeView; lateinit var secondView: ComposeView
         lateinit var firstRegistry: AnnotatedRootRegistry
         var secondHost: View? = null; var index = -1
-        rule.runOnIdle {
+        rule.runOnUiThread {
             firstView = ComposeView(rule.activity).apply {
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
                 setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Red)) {
@@ -125,31 +125,41 @@ class AndroidNativeRasterCompositionTest {
             val params = old.layoutParams
             parent.removeView(old); parent.addView(next, index, params)
         }
+        var primary: Throwable? = null
         try {
-            rule.waitForIdle(); rule.waitUntil(5_000) { rule.runOnIdle { ready(host) } }
-            rule.runOnIdle { firstRegistry = checkNotNull(AnnotatedRootRegistry.fromHost(host)) }
+            // A intentionally stays composed while detached. Global Compose idleness is not
+            // a readiness condition for the selected original root and can prevent cleanup.
+            rule.waitUntil(5_000) { rule.runOnUiThread { this::host.isInitialized && ready(host) } }
+            rule.runOnUiThread { firstRegistry = checkNotNull(AnnotatedRootRegistry.fromHost(host)) }
             Rig().use { rig ->
                 assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate().get(5, TimeUnit.SECONDS))
                 until { rig.waits.get() == 1 }
-                rule.runOnIdle { replace(firstRoot, secondRoot) }
-                rule.waitForIdle(); rule.waitUntil(5_000) { rule.runOnIdle { ready(secondHost) } }
+                rule.runOnUiThread { replace(firstRoot, secondRoot) }
+                rule.waitUntil(5_000) { rule.runOnUiThread { ready(secondHost) } }
                 assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
                 until { rig.waits.get() >= 2 }
-                rule.runOnIdle {
+                rule.runOnUiThread {
                     // The original A composition remains alive while B is selected; remove only A's scope.
                     assertSame(firstRegistry, AnnotatedRootRegistry.fromHost(host))
                     firstRegistry.close(); assertNull(AnnotatedRootRegistry.fromHost(host))
                     replace(secondRoot, firstRoot)
                 }
-                rule.waitForIdle(); rule.waitUntil(5_000) { rule.runOnIdle { ready(host) } }
+                rule.waitUntil(5_000) { rule.runOnUiThread { ready(host) } }
                 assertEquals(NativeReplayCompositionEvaluation.INACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
                 assertEquals(0, rig.wireframeFactories.get())
                 assertTrue(rig.rows().isEmpty()); assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
             }
+        } catch (failure: Throwable) {
+            primary = failure; throw failure
         } finally {
-            rule.runOnIdle {
-                if (secondRoot.parent === parent) replace(secondRoot, firstRoot)
-                firstView.disposeComposition(); secondView.disposeComposition()
+            try {
+                rule.runOnUiThread {
+                    try { if (secondRoot.parent === parent) replace(secondRoot, firstRoot) }
+                    finally { try { firstView.disposeComposition() } finally { secondView.disposeComposition() } }
+                }
+            } catch (cleanup: Throwable) {
+                val original = primary
+                if (original == null) throw cleanup else original.addSuppressed(cleanup)
             }
         }
     }

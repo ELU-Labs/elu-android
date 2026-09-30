@@ -98,8 +98,9 @@ class AndroidNativeRasterSealerTest {
     private fun versions() = RuntimeVersions(platform = RuntimePlatform.ANDROID,
         runtime = RuntimeVersionComponent("elu-android", "1.0.0"), facade = RuntimeVersionComponent("EluAnalytics", "1.0.0"), build = "raster-test")
     private fun sealer(frame: AnnotatedRasterCandidate, maximum: Int = MAX_REPLAY_REQUEST_BYTES,
-        current: () -> Boolean = { true }, snapshot: IdentityState = identity(), runtime: RuntimeVersions = versions()) =
-        NativeRasterSealer("raster-epoch", snapshot, NativeRasterPolicyBinding("policy-1", policyHash, 7, maximum),
+        current: () -> Boolean = { true }, snapshot: IdentityState = identity(), runtime: RuntimeVersions = versions(),
+        replayId: String = "raster-epoch") =
+        NativeRasterSealer(replayId, snapshot, NativeRasterPolicyBinding("policy-1", policyHash, 7, maximum),
             runtime, frame.sourceIdentity, current)
     private fun chunk(request: NativeRasterPreparedRequest) = JSONObject(request.copyBytes().toString(Charsets.UTF_8)).getJSONObject("chunk")
     private fun payload(request: NativeRasterPreparedRequest): JSONArray {
@@ -219,14 +220,23 @@ class AndroidNativeRasterSealerTest {
         assertEquals(0L, original.seal(capture { allowed }, instant).sequence)
     }
 
-    @Test fun changedViewportRequiresANewEpochEvenWhenTheOriginalSourceIdentitySurvives() {
+    @Test fun changedViewportRetiresOriginalSourceAndRestoringSizeRequiresANewEpoch() {
         install(); val first = capture(); val token = first.sourceIdentity; val original = sealer(first)
         original.seal(first, instant)
         rule.runOnIdle { width = 100 }; rule.waitForIdle()
-        val changed = capture(); assertSame(token, changed.sourceIdentity)
-        refusal(NativeRasterSealingFailure.CHANGED_VIEWPORT) { original.seal(changed, instant + 1_000) }
+        val changed = capture(); val changedToken = changed.sourceIdentity
+        assertNotSame(token, changedToken); assertFalse(token.isCurrent())
+        refusal(NativeRasterSealingFailure.WITHDRAWN) { original.seal(changed, instant + 1_000) }
+        assertThrows(IllegalStateException::class.java) { changed.encodePng() }
         rule.runOnIdle { width = 80 }; rule.waitForIdle()
-        assertEquals(1L, original.seal(capture(), instant + 1_000).sequence)
+        val restored = capture()
+        assertNotSame(token, restored.sourceIdentity); assertNotSame(changedToken, restored.sourceIdentity)
+        assertFalse(token.isCurrent()); assertFalse(changedToken.isCurrent())
+        refusal(NativeRasterSealingFailure.WITHDRAWN) { original.seal(restored, instant + 1_000) }
+        assertThrows(IllegalStateException::class.java) { restored.encodePng() }
+        val fresh = capture()
+        val request = sealer(fresh, replayId = "raster-epoch-after-resize").seal(fresh, instant + 2_000)
+        assertEquals("raster-epoch-after-resize", request.replayId); assertEquals(0L, request.sequence)
     }
 
     @Test fun foreignActualRootCannotSupplyPixelsUnderAnotherLiveSourceClosure() {

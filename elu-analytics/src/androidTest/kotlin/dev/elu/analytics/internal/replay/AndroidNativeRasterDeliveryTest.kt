@@ -24,6 +24,7 @@ import java.time.Instant
 import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 import org.json.JSONArray
@@ -101,7 +102,14 @@ class AndroidNativeRasterDeliveryTest {
             val blocked = claim.classify(conflict(claim.rasterRow.request), wall, 1)
             assertEquals(ReplayDeliveryOutcome.Blocked(ReplayBlockKind.RASTER_SEQUENCE), blocked)
             assertEquals(ReplayDeliveryCommit.COMMITTED, h.queue.commit(claim, blocked))
-            assertTrue(h.owner.appendNativeRaster(notAppended, checkNotNull(h.admission), checkNotNull(h.use)).get() is NativeReplayAppendOutcome.Rejected)
+            // The permanent refusal already withdraws the original physical capture use.
+            // The existing enrollment guard rejects before reaching the append outcome branch.
+            assertFalse(checkNotNull(h.use).isCurrent())
+            val stale = assertThrows(ExecutionException::class.java) {
+                h.owner.appendNativeRaster(notAppended, checkNotNull(h.admission), checkNotNull(h.use)).get()
+            }
+            assertTrue(stale.cause is IllegalStateException)
+            assertEquals("Native capture use is stale", stale.cause?.message)
             assertNull(h.queue.claim())
             val retained = h.owner.storedNativeRasterForTesting().get(); assertEquals(2, retained.size)
             originals.zip(retained).forEach { (bytes, row) -> assertArrayEquals(bytes, row.request.copyBytes()) }
