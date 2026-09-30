@@ -3,7 +3,6 @@ package dev.elu.analytics.internal.replay
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -123,16 +122,16 @@ class AndroidNativeRasterCompositionTest {
         fun ready(view: View?) = view != null && view.isAttachedToWindow && view.hasWindowFocus() &&
             view.isLaidOut && !view.isLayoutRequested
         fun replace(old: ViewGroup, next: ViewGroup) {
-            // Give the ordinary replacement the displayed predecessor's actual bounds,
-            // retaining the layout parameters expected by the original parent.
+            // Transfer the actual parent's parameters only after detaching the predecessor;
+            // preserve any parent-specific fields without guessing its parameter subtype.
             val width = old.width; val height = old.height
             check(width > 0 && height > 0) { "Original displayed root must have positive bounds" }
-            val params = when (val original = old.layoutParams) {
-                is FrameLayout.LayoutParams -> FrameLayout.LayoutParams(original)
-                is LinearLayout.LayoutParams -> LinearLayout.LayoutParams(original)
-                else -> error("Unsupported fixture parent layout parameters")
-            }.apply { this.width = width; this.height = height }
-            parent.removeView(old); parent.addView(next, index, params)
+            check(old.parent === parent && next.parent == null)
+            val params = checkNotNull(old.layoutParams)
+            parent.removeView(old)
+            check(old.parent == null)
+            params.width = width; params.height = height
+            parent.addView(next, index, params)
         }
         fun awaitReady(stage: String, expectedRoot: ViewGroup, view: () -> View?) {
             try {
