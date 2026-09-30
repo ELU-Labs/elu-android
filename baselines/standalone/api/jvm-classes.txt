@@ -1,4 +1,5 @@
-# Reviewed standalone candidate; published 0.1.0 baseline remains immutable.
+# Every public, non-synthetic JVM class in the release classes.jar.
+# Regenerate with: python3 scripts/check-api-snapshot.py --update-classes <aar>
 dev.elu.analytics.Elu
 dev.elu.analytics.EluAnnotatedReplayBinding
 dev.elu.analytics.EluAnnotatedReplayRootScope
@@ -133,6 +134,7 @@ dev.elu.analytics.internal.config.V2ConfigAuthorityGate
 dev.elu.analytics.internal.config.V2ConfigAuthorityWitness
 dev.elu.analytics.internal.config.V2ConfigClock
 dev.elu.analytics.internal.config.V2ConfigEndpoint
+dev.elu.analytics.internal.config.V2ConfigFormat
 dev.elu.analytics.internal.config.V2ConfigHttpResponse
 dev.elu.analytics.internal.config.V2ConfigLeaseSnapshot
 dev.elu.analytics.internal.config.V2ConfigLifecycleDiagnostics
@@ -145,6 +147,7 @@ dev.elu.analytics.internal.config.V2ConfigLifecycleUpdateKind
 dev.elu.analytics.internal.config.V2ConfigLifecycleWorker
 dev.elu.analytics.internal.config.V2ConfigSource
 dev.elu.analytics.internal.config.V2ConfigSourceFailure
+dev.elu.analytics.internal.config.V2ConfigSourceKt
 dev.elu.analytics.internal.config.V2ConfigSourceResult
 dev.elu.analytics.internal.config.V2ConfigSourceResult$Document
 dev.elu.analytics.internal.config.V2ConfigSourceResult$Superseded
