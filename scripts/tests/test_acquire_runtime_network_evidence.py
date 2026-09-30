@@ -7,7 +7,7 @@ import pathlib
 import tempfile
 import unittest
 from unittest.mock import patch
-from test_validate_runtime_network_evidence import protocol_fixture, encoded, binding
+from test_validate_runtime_network_evidence import protocol_fixture, paired_protocol_fixture, encoded, binding
 
 spec = importlib.util.spec_from_file_location("acquire_tested", pathlib.Path(__file__).resolve().parents[1] / "acquire-runtime-network-evidence.py")
 acquire = importlib.util.module_from_spec(spec)
@@ -122,6 +122,23 @@ class AcquireRuntimeNetworkEvidenceTest(unittest.TestCase):
         reader.deadline = 0
         with self.assertRaisesRegex(ValueError, "deadline"):
             reader(acquire.API + "/releases/assets/5", binary=True)
+
+
+class AcquirePairedRuntimeNetworkEvidenceTest(AcquireRuntimeNetworkEvidenceTest):
+    """Repeat original authenticated acquisition refusals for the new signed version."""
+    def setUp(self):
+        super().setUp()
+        self.data = encoded(paired_protocol_fixture())
+        self.binding = binding(self.data)
+        self.meta["assets"][0].update(size=len(self.data), digest="sha256:" + self.binding["evidenceSha256"])
+
+    def test_acquired_paired_envelope_cannot_pass_existing_core_publication_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "result.json"
+            acquire.acquire(self.binding, path, self.fetch)
+            with self.assertRaisesRegex(ValueError, "core-only"):
+                acquire.evidence.validate(path.read_bytes(), self.binding, pathlib.Path(directory) / "not-read.aar")
+            self.assertEqual(self.data, path.read_bytes())
 
 
 if __name__ == "__main__":

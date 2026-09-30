@@ -34,7 +34,7 @@ inspect that original evidence and the exact maintained exporter commit before
 signing; the consumer validates the reviewed export's identity and structure,
 not the truth of raw observations it does not possess.
 
-The closed schema is enforced in `scripts/android-release-evidence.py`:
+The historical **core-only** schema is enforced in `scripts/android-release-evidence.py`:
 
 - `schemaVersion: 2`, `evidenceKind: "android-release-lab-evidence"`.
 - `source`: exact `ELU-Labs/elu-android` repository, 40-hex commit and version.
@@ -144,3 +144,82 @@ the entire two-artifact publication set. Current candidate versions must not be
 advertised as available until actual package publication and clean-consumer
 verification finish. Annotation registration on API 23 does not change the
 current API 29+ replay eligibility or waive the API 26–28 gap.
+
+## Paired export consumer (publication remains disabled)
+
+The evidence consumer also accepts a separate closed **schema 3** for the exact
+core and Compose pair. This implements validation of a prospective signed
+export, not the missing original Lab exporter or its completion gate. No real
+paired release export or qualification is asserted here. The existing Maven
+workflow still uses the schema-2 core-only `--aar` check, and the optional
+module still refuses publication.
+
+The new envelope retains `evidenceKind`, `source`, `producer`, `run`,
+`completion`, and `environment` with their existing closed fields. It retains
+all 15 mandatory original proof categories; it adds no pass flags or invented
+qualification category. It replaces `artifact` with these exact fields:
+
+- `artifacts`: exactly `core` and `compose`, each containing `coordinate`,
+  `sha256`, and `bytes`. Both coordinates use the original signed version.
+- `distribution`: exactly `descriptor: {sha256, bytes}` and `files`. `files`
+  contains the 12 exact versioned member paths emitted by the existing local
+  distribution checker: each module's AAR, POM, Gradle module metadata, sources
+  JAR, Javadoc JAR and runtime SBOM. Both AAR references must equal their member
+  references. Each payload is at most 32 MiB; all 12 total at most 128 MiB.
+- `scope`: exactly `profile: "android-views-and-declared-compose-v1"` and
+  `profiles`, with exactly `views` and `declaredCompose` entries. Each entry
+  contains `framework` (`Views` or `Compose`, respectively), original `cohort`
+  (`lab`, `replay`, or `replay-performance`), `sourceCommit`, `coreAarSha256`,
+  `composeAarSha256`, `distributionSha256`, `completionReceiptSha256`, an
+  original `run`, and `configuration`, `policy`, and `observations` digest/byte
+  references. Source, pair, descriptor and completion hashes must equal the
+  top-level originals. Each case's `run` uses the existing five-field run shape;
+  its run ID, test-run ID, manifest and cohort are preserved independently.
+  Different original cases must not be relabelled as the top completion run.
+
+The original final completion owner must join those case runs and the private
+configuration/policy/framework observations to its final receipt. A digest
+alone does not establish that relationship; consumer acceptance is structural
+and cryptographic binding to a reviewed signed export, not proof of the
+referenced observations' truth. Baseline and analytics cohorts cannot receive
+replay-profile credit. Resource comparisons still require separate matched
+original baseline evidence under the existing `resource-overhead` proof.
+
+Schema 3 requires exactly six request summaries, using the unchanged summary
+fields, positive observed counts and private original ledger references:
+
+| Scenario | Method | Sanitized default-cloud route |
+| --- | --- | --- |
+| `config-v2` | GET | `https://elu.dev/sdk/v2/{siteKey}/config` |
+| `config-v3` | GET | `https://elu.dev/sdk/v3/{siteKey}/config` |
+| `capture` | POST | `https://ingest.elu.dev/v1/events` |
+| `flags` | POST | `https://ingest.elu.dev/v1/flags` |
+| `replay-v2` | POST | `https://ingest.elu.dev/v2/replay` |
+| `replay-v3` | POST | `https://ingest.elu.dev/v3/replay` |
+
+These are route templates, never URLs copied from traffic. The original exporter
+must verify the actual corresponding exchanges before sanitizing. A declared
+scenario, client option or observed v2 exchange cannot substitute for v3 traffic.
+Custom origins and private trust roots remain ineligible for this cloud profile.
+
+The explicit paired check is:
+
+```sh
+python3 scripts/validate-runtime-network-evidence.py original-export.json \
+  --tag 0.2.0 --distribution build/compose-distribution
+```
+
+`--aar` and `--distribution` are mutually exclusive. Schema 2 cannot pass paired
+validation, and schema 3 cannot pass the old core-only check. Authenticated
+draft acquisition can preserve either signed schema's bytes; acquisition alone
+does not validate installed artifacts or authorize publication. The 64 KiB
+export bound, original signed-tag digest and acquisition restrictions remain.
+
+The paired check compares the descriptor, version file and all 12 payload files,
+rejects extra/missing/linked members, and reuses the existing exact POM/GMM/SBOM
+validators. It checks original file and directory identities across the read.
+The local descriptor must retain `runtimeQualified:false`; it is never rewritten
+or promoted into qualification. A future separately reviewed publication gate
+must recheck the actual final publish bytes. This consumer does not register a
+repository, load signing credentials, upload, tag, deploy, or enable Compose
+publication.
