@@ -125,17 +125,42 @@ class AndroidNativeRasterCompositionTest {
             val params = old.layoutParams
             parent.removeView(old); parent.addView(next, index, params)
         }
+        fun awaitReady(stage: String, expectedRoot: ViewGroup, view: () -> View?) {
+            try {
+                rule.waitUntil(5_000) { rule.runOnUiThread { ready(view()) } }
+            } catch (failure: Throwable) {
+                // Failure-only original main-thread facts: no tree enumeration, text or pixels.
+                val facts = try { rule.runOnUiThread {
+                    fun state(value: View?): String = if (value == null) "exists=false" else
+                        "exists=true,attached=${value.isAttachedToWindow},focused=${value.hasWindowFocus()}," +
+                            "laidOut=${value.isLaidOut},layoutRequested=${value.isLayoutRequested}," +
+                            "width=${value.width},height=${value.height},visibility=${value.visibility}," +
+                            "windowVisibility=${value.windowVisibility}"
+                    val selected = view()
+                    "stage=$stage;host={${state(selected)}};root={${state(expectedRoot)}};" +
+                        "decor={${state(rule.activity.window.peekDecorView())}};" +
+                        "firstCompose={${state(firstView)}},hasComposition=${firstView.hasComposition};" +
+                        "secondCompose={${state(secondView)}},hasComposition=${secondView.hasComposition};" +
+                        "rootParentOriginal=${expectedRoot.parent === parent}," +
+                        "hostParentFirst=${selected?.parent === firstView},hostParentSecond=${selected?.parent === secondView}," +
+                        "hostRootIsDecor=${selected != null && selected.rootView === rule.activity.window.peekDecorView()}," +
+                        "selectedContentIsExpected=${rule.activity.findViewById<View>(android.R.id.content) === expectedRoot}"
+                } } catch (_: Throwable) { "stage=$stage;readinessFactsUnavailable=true" }
+                failure.addSuppressed(AssertionError(facts))
+                throw failure
+            }
+        }
         var primary: Throwable? = null
         try {
             // A intentionally stays composed while detached. Global Compose idleness is not
             // a readiness condition for the selected original root and can prevent cleanup.
-            rule.waitUntil(5_000) { rule.runOnUiThread { this::host.isInitialized && ready(host) } }
+            awaitReady("first", firstRoot) { if (this::host.isInitialized) host else null }
             rule.runOnUiThread { firstRegistry = checkNotNull(AnnotatedRootRegistry.fromHost(host)) }
             Rig().use { rig ->
                 assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate().get(5, TimeUnit.SECONDS))
                 until { rig.waits.get() == 1 }
                 rule.runOnUiThread { replace(firstRoot, secondRoot) }
-                rule.waitUntil(5_000) { rule.runOnUiThread { ready(secondHost) } }
+                awaitReady("second", secondRoot) { secondHost }
                 assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
                 until { rig.waits.get() >= 2 }
                 rule.runOnUiThread {
@@ -144,7 +169,7 @@ class AndroidNativeRasterCompositionTest {
                     firstRegistry.close(); assertNull(AnnotatedRootRegistry.fromHost(host))
                     replace(secondRoot, firstRoot)
                 }
-                rule.waitUntil(5_000) { rule.runOnUiThread { ready(host) } }
+                awaitReady("returned-first", firstRoot) { host }
                 assertEquals(NativeReplayCompositionEvaluation.INACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
                 assertEquals(0, rig.wireframeFactories.get())
                 assertTrue(rig.rows().isEmpty()); assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())

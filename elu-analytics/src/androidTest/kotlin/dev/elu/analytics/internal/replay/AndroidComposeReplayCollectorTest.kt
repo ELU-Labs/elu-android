@@ -151,6 +151,10 @@ class AndroidComposeReplayCollectorTest {
             }
         }
         rule.waitForIdle()
+        rule.waitUntil(5_000) { rule.runOnUiThread {
+            this::host.isInitialized && host.isAttachedToWindow && host.hasWindowFocus() &&
+                host.isLaidOut && !host.isLayoutRequested
+        } }
         rule.runOnIdle {
             assertTrue(rule.activity.window.decorView.hasWindowFocus())
             registry = checkNotNull(AnnotatedRootRegistry.fromHost(host))
