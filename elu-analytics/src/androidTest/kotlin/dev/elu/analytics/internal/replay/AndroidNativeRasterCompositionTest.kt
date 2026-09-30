@@ -1,8 +1,11 @@
 package dev.elu.analytics.internal.replay
 
+import android.app.Activity
+import android.app.Application
+import android.content.Intent
+import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
-import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -15,7 +18,9 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.test.filters.SdkSuppress
+import androidx.test.platform.app.InstrumentationRegistry
 import dev.elu.analytics.compose.EluAnnotatedReplayRoot
 import dev.elu.analytics.internal.concurrent.SdkFuture
 import dev.elu.analytics.internal.config.*
@@ -94,107 +99,153 @@ class AndroidNativeRasterCompositionTest {
     }
 
     @Test fun returningToEarlierActualDeclaredRootCannotDowngradeAfterAnotherRoot() {
-        lateinit var firstRoot: ViewGroup; lateinit var secondRoot: FrameLayout
-        lateinit var parent: ViewGroup; lateinit var firstView: ComposeView; lateinit var secondView: ComposeView
+        val firstActivity = rule.activity
+        lateinit var firstRoot: ViewGroup
+        lateinit var firstView: ComposeView
         lateinit var firstRegistry: AnnotatedRootRegistry
-        var secondHost: View? = null; var index = -1
+        var secondActivity: NativeAppCompatTestActivity? = null
+        var secondRoot: ViewGroup? = null; var secondView: ComposeView? = null
+        var secondHost: View? = null
         rule.runOnUiThread {
-            firstView = ComposeView(rule.activity).apply {
+            firstView = ComposeView(firstActivity).apply {
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
                 setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Red)) {
                     val view = LocalView.current; SideEffect { host = view }; Box(Modifier.size(16.dp).background(Color.Blue))
                 } }
             }
-            rule.activity.setContentView(firstView)
-            firstRoot = rule.activity.findViewById(android.R.id.content)
-            parent = firstRoot.parent as ViewGroup; index = parent.indexOfChild(firstRoot)
-            secondView = ComposeView(rule.activity).apply {
-                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-                setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Green)) {
-                    val view = LocalView.current; SideEffect { secondHost = view }; Box(Modifier.size(16.dp).background(Color.Blue))
-                } }
-            }
-            secondRoot = FrameLayout(rule.activity).apply {
-                id = android.R.id.content
-                addView(secondView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            }
+            firstActivity.setContentView(firstView)
+            firstRoot = firstActivity.findViewById(android.R.id.content)
         }
         fun ready(view: View?) = view != null && view.isAttachedToWindow && view.hasWindowFocus() &&
             view.isLaidOut && !view.isLayoutRequested
-        fun replace(old: ViewGroup, next: ViewGroup) {
-            // Transfer the actual parent's parameters only after detaching the predecessor;
-            // preserve any parent-specific fields without guessing its parameter subtype.
-            val width = old.width; val height = old.height
-            check(width > 0 && height > 0) { "Original displayed root must have positive bounds" }
-            check(old.parent === parent && next.parent == null)
-            val params = checkNotNull(old.layoutParams)
-            parent.removeView(old)
-            check(old.parent == null)
-            params.width = width; params.height = height
-            parent.addView(next, index, params)
+        fun originalFacts(stage: String, activity: ComponentActivity, expectedRoot: ViewGroup, view: () -> View?): String {
+            return try { rule.runOnUiThread {
+                fun state(value: View?): String = if (value == null) "exists=false" else
+                    "exists=true,attached=${value.isAttachedToWindow},focused=${value.hasWindowFocus()}," +
+                        "laidOut=${value.isLaidOut},layoutRequested=${value.isLayoutRequested}," +
+                        "width=${value.width},height=${value.height},measuredWidth=${value.measuredWidth}," +
+                        "measuredHeight=${value.measuredHeight},visibility=${value.visibility}," +
+                        "windowVisibility=${value.windowVisibility},shown=${value.isShown}," +
+                        "alphaOne=${value.alpha == 1f},transitionAlphaOne=${value.transitionAlpha == 1f}," +
+                        "matrixIdentity=${value.matrix.isIdentity},animationMatrixIdentity=${value.animationMatrix?.isIdentity != false}," +
+                        "animationAbsent=${value.animation == null},clipToOutline=${value.clipToOutline}"
+                val selected = view()
+                val parent = expectedRoot.parent as? View
+                "stage=$stage,activityFinishing=${activity.isFinishing},activityDestroyed=${activity.isDestroyed}," +
+                    "activityState=${activity.lifecycle.currentState.ordinal}," +
+                    "secureWindow=${activity.window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0};host={${state(selected)}};root={${state(expectedRoot)}};" +
+                    "decor={${state(activity.window.peekDecorView())}};" +
+                    "parentClass=${parent?.javaClass?.name?.take(160)},parent={${state(parent)}};" +
+                    "rootParamsClass=${expectedRoot.layoutParams?.javaClass?.name?.take(160)}," +
+                    "rootParamsWidth=${expectedRoot.layoutParams?.width},rootParamsHeight=${expectedRoot.layoutParams?.height};" +
+                    "firstCompose={${state(firstView)}},hasComposition=${firstView.hasComposition};" +
+                    "secondCompose={${state(secondView)}},hasComposition=${secondView?.hasComposition};" +
+                    "firstOriginalRootRetained=${firstActivity.findViewById<View>(android.R.id.content) === firstRoot}," +
+                    "hostParentFirst=${selected?.parent === firstView},hostParentSecond=${selected?.parent === secondView}," +
+                    "hostRootIsDecor=${selected != null && selected.rootView === activity.window.peekDecorView()}," +
+                    "selectedContentIsExpected=${activity.findViewById<View>(android.R.id.content) === expectedRoot}"
+            } } catch (_: Throwable) { "stage=$stage;readinessFactsUnavailable=true" }
         }
-        fun awaitReady(stage: String, expectedRoot: ViewGroup, view: () -> View?) {
-            try {
-                rule.waitUntil(5_000) { rule.runOnUiThread { ready(view()) } }
-                rule.runOnUiThread {
-                    val selected = checkNotNull(view())
-                    assertTrue(expectedRoot.width > 0 && expectedRoot.height > 0)
-                    assertTrue(selected.width > 0 && selected.height > 0)
-                }
-            } catch (failure: Throwable) {
-                // Failure-only original main-thread facts: no tree enumeration, text or pixels.
-                val facts = try { rule.runOnUiThread {
-                    fun state(value: View?): String = if (value == null) "exists=false" else
-                        "exists=true,attached=${value.isAttachedToWindow},focused=${value.hasWindowFocus()}," +
-                            "laidOut=${value.isLaidOut},layoutRequested=${value.isLayoutRequested}," +
-                            "width=${value.width},height=${value.height},visibility=${value.visibility}," +
-                            "windowVisibility=${value.windowVisibility}"
-                    val selected = view()
-                    "stage=$stage;host={${state(selected)}};root={${state(expectedRoot)}};" +
-                        "decor={${state(rule.activity.window.peekDecorView())}};" +
-                        "firstCompose={${state(firstView)}},hasComposition=${firstView.hasComposition};" +
-                        "secondCompose={${state(secondView)}},hasComposition=${secondView.hasComposition};" +
-                        "rootParentOriginal=${expectedRoot.parent === parent}," +
-                        "hostParentFirst=${selected?.parent === firstView},hostParentSecond=${selected?.parent === secondView}," +
-                        "hostRootIsDecor=${selected != null && selected.rootView === rule.activity.window.peekDecorView()}," +
-                        "selectedContentIsExpected=${rule.activity.findViewById<View>(android.R.id.content) === expectedRoot}"
-                } } catch (_: Throwable) { "stage=$stage;readinessFactsUnavailable=true" }
-                failure.addSuppressed(AssertionError(facts))
-                throw failure
+        var stage = "first-readiness"
+        var diagnosticActivity: ComponentActivity = firstActivity
+        var diagnosticRoot: ViewGroup = firstRoot
+        var diagnosticView: () -> View? = { if (this::host.isInitialized) host else null }
+        var beforeActionFacts = "unobserved"
+        var diagnosticRig: Rig? = null
+        fun awaitReady(phase: String, activity: ComponentActivity, expectedRoot: ViewGroup, view: () -> View?) {
+            stage = phase; diagnosticActivity = activity; diagnosticRoot = expectedRoot; diagnosticView = view
+            rule.waitUntil(5_000) { rule.runOnUiThread {
+                activity.lifecycle.currentState == Lifecycle.State.RESUMED &&
+                    !activity.isFinishing && !activity.isDestroyed && ready(view())
+            } }
+            rule.runOnUiThread {
+                val selected = checkNotNull(view())
+                assertSame(expectedRoot, activity.findViewById<View>(android.R.id.content))
+                assertTrue(expectedRoot.width > 0 && expectedRoot.height > 0)
+                assertTrue(selected.width > 0 && selected.height > 0)
             }
+            beforeActionFacts = originalFacts(phase, activity, expectedRoot, view)
         }
         var primary: Throwable? = null
         try {
-            // A intentionally stays composed while detached. Global Compose idleness is not
-            // a readiness condition for the selected original root and can prevent cleanup.
-            awaitReady("first", firstRoot) { if (this::host.isInitialized) host else null }
+            // Each Activity keeps its own framework content root. A's composition survives
+            // its stopped lifecycle; global Compose idleness is not selected-root readiness.
+            awaitReady("first", firstActivity, firstRoot) { if (this::host.isInitialized) host else null }
             rule.runOnUiThread { firstRegistry = checkNotNull(AnnotatedRootRegistry.fromHost(host)) }
-            Rig().use { rig ->
+            Rig(traceNativeStart = true).use { rig ->
+                diagnosticRig = rig; stage = "initial-A-evaluation"
                 assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate().get(5, TimeUnit.SECONDS))
                 until { rig.waits.get() == 1 }
-                rule.runOnUiThread { replace(firstRoot, secondRoot) }
-                awaitReady("second", secondRoot) { secondHost }
-                assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
-                until { rig.waits.get() >= 2 }
-                rule.runOnUiThread {
-                    // The original A composition remains alive while B is selected; remove only A's scope.
-                    assertSame(firstRegistry, AnnotatedRootRegistry.fromHost(host))
-                    firstRegistry.close(); assertNull(AnnotatedRootRegistry.fromHost(host))
-                    replace(secondRoot, firstRoot)
+                var secondAdmitted = false // Main-thread only; no empty pre-install B admission.
+                val callbacks = object : Application.ActivityLifecycleCallbacks {
+                    fun original(activity: Activity) = activity === firstActivity ||
+                        (secondAdmitted && activity === secondActivity)
+                    override fun onActivityResumed(activity: Activity) { if (original(activity)) rig.resumed(activity) }
+                    override fun onActivityPaused(activity: Activity) { if (original(activity)) rig.withdrawing(activity) }
+                    override fun onActivityDestroyed(activity: Activity) { if (original(activity)) rig.withdrawing(activity) }
+                    override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
+                    override fun onActivityStarted(activity: Activity) = Unit
+                    override fun onActivityStopped(activity: Activity) = Unit
+                    override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
                 }
-                awaitReady("returned-first", firstRoot) { host }
-                assertEquals(NativeReplayCompositionEvaluation.INACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
-                assertEquals(0, rig.wireframeFactories.get())
-                assertTrue(rig.rows().isEmpty()); assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
+                rule.runOnUiThread { firstActivity.application.registerActivityLifecycleCallbacks(callbacks) }
+                try {
+                    stage = "launch-original-B"
+                    val instrumentation = InstrumentationRegistry.getInstrumentation()
+                    val second = instrumentation.startActivitySync(Intent(instrumentation.context, NativeAppCompatTestActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as NativeAppCompatTestActivity
+                    secondActivity = second
+                    rule.runOnUiThread {
+                        assertSame(firstActivity.application, second.application)
+                        val content = ComposeView(second).apply {
+                            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+                            setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Green)) {
+                                val view = LocalView.current; SideEffect { secondHost = view }
+                                Box(Modifier.size(16.dp).background(Color.Blue))
+                            } }
+                        }
+                        secondView = content; second.setContentView(content)
+                        secondRoot = second.findViewById(android.R.id.content)
+                        assertNotSame(firstRoot, secondRoot)
+                    }
+                    awaitReady("second", second, checkNotNull(secondRoot)) { secondHost }
+                    rule.waitUntil(5_000) { rule.runOnUiThread { firstActivity.lifecycle.currentState == Lifecycle.State.CREATED } }
+                    rule.runOnUiThread {
+                        assertFalse(firstActivity.isDestroyed)
+                        assertSame(firstRoot, firstActivity.findViewById<View>(android.R.id.content))
+                        assertEquals(Lifecycle.State.RESUMED, second.lifecycle.currentState)
+                        secondAdmitted = true; rig.resumed(second)
+                    }
+                    stage = "B-evaluation"
+                    assertEquals(NativeReplayCompositionEvaluation.ACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
+                    until { rig.waits.get() >= 2 }
+                    stage = "retire-A-return-original"
+                    rule.runOnUiThread {
+                        assertSame(firstRegistry, AnnotatedRootRegistry.fromHost(host))
+                        firstRegistry.close(); assertNull(AnnotatedRootRegistry.fromHost(host))
+                        second.finish()
+                    }
+                    awaitReady("returned-first", firstActivity, firstRoot) { host }
+                    rule.waitUntil(5_000) { rule.runOnUiThread { second.isDestroyed } }
+                    stage = "returned-A-evaluation"
+                    assertEquals(NativeReplayCompositionEvaluation.INACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
+                    assertEquals(0, rig.wireframeFactories.get())
+                    assertTrue(rig.rows().isEmpty()); assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
+                } finally { rule.runOnUiThread { firstActivity.application.unregisterActivityLifecycleCallbacks(callbacks) } }
             }
         } catch (failure: Throwable) {
-            primary = failure; throw failure
+            primary = failure
+            // Failure only: original pre-action facts and current fixed views, no text/tree/pixels.
+            failure.addSuppressed(AssertionError("beforeAction={$beforeActionFacts};failure={${originalFacts(stage, diagnosticActivity, diagnosticRoot, diagnosticView)}}"))
+            diagnosticRig?.let { rig -> failure.addSuppressed(AssertionError("boundedNativeStart=${rig.nativeTrace.joinToString("")}")) }
+            throw failure
         } finally {
             try {
                 rule.runOnUiThread {
-                    try { if (secondRoot.parent === parent) replace(secondRoot, firstRoot) }
-                    finally { try { firstView.disposeComposition() } finally { secondView.disposeComposition() } }
+                    try { secondActivity?.let { if (!it.isDestroyed) it.finish() } }
+                    finally { try { firstView.disposeComposition() } finally { secondView?.disposeComposition() } }
                 }
+                secondActivity?.let { original -> rule.waitUntil(5_000) { rule.runOnUiThread { original.isDestroyed } } }
             } catch (cleanup: Throwable) {
                 val original = primary
                 if (original == null) throw cleanup else original.addSuppressed(cleanup)
@@ -225,7 +276,11 @@ class AndroidNativeRasterCompositionTest {
         }
     }
 
-    private inner class Rig(child: Boolean = true) : AutoCloseable {
+    private inner class Rig(child: Boolean = true, traceNativeStart: Boolean = false) : AutoCloseable {
+        val nativeTrace = CopyOnWriteArrayList<String>()
+        private val nativeObserver = if (traceNativeStart) BoundedNativeStartObserver.create { record ->
+            if (nativeTrace.size < 64) nativeTrace += String(record, Charsets.US_ASCII)
+        } else BoundedNativeStartObserver.NONE
         val now = AtomicLong(origin)
         val waits = AtomicInteger(); val wireframeFactories = AtomicInteger(); private val step = Semaphore(0)
         val ack = AtomicBoolean(); val sent = CopyOnWriteArrayList<ByteArray>()
@@ -299,10 +354,12 @@ class AndroidNativeRasterCompositionTest {
                         } catch (failure: Throwable) { future.completeExceptionally(failure) }
                     }
                     operation
-                })
+                }, nativeStartObserver = nativeObserver)
             composition.ready().get(5, TimeUnit.SECONDS)
         }
         fun rows() = owner.storedNativeRasterForTesting().get()
+        fun resumed(activity: Activity) { lifecycle.resumed(activity) }
+        fun withdrawing(activity: Activity) { lifecycle.withdrawing(activity) }
         fun next() { now.addAndGet(1_000); step.release() }
         override fun close() {
             try { composition.closeAndWait().get(5, TimeUnit.SECONDS) }
