@@ -102,8 +102,11 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
             validate(original, plan(window, checks)); checks.check()
             owned.setHasAlpha(false)
             val acceptedPolicy = original.policyVersion
-            val result = AnnotatedRasterCandidate.validated(owned,
-                { current() && registry.policyCurrent(acceptedPolicy) }, { occupied.set(false) })
+            val root = original.witnesses.single { it.binding.intent == null }
+            val source = registry.sourceIdentity(root.binding, root.geometry, window, original.decor, original.token)
+            checks.check()
+            val result = AnnotatedRasterCandidate.validated(owned, source,
+                { current() && source.isCurrent() && registry.policyCurrent(acceptedPolicy) }, { occupied.set(false) })
             bitmap = null; transferred = true
             return result
         } catch (error: Throwable) { primary = error; throw error }

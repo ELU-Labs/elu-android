@@ -147,16 +147,16 @@ internal class NativeReplaySealer(
         return PreparedReplayRequest.parse(body, protocolGeneration, maximumRequestBytes)
     }
 
-    private companion object {
-        fun binding(allowed: Boolean) { if (!allowed) throw NativeReplaySealingException(NativeReplaySealingFailure.INVALID_BINDING) }
-        fun requestLimit(allowed: Boolean) { if (!allowed) throw NativeReplaySealingException(NativeReplaySealingFailure.REQUEST_LIMIT) }
-        fun obj(vararg pairs: Pair<String, Value>) = Value.ObjectValue(pairs.toList())
-        fun text(value: String) = Value.StringValue(value)
-        fun checkedInteger(value: Long): Long { binding(value in 0..MAX_REPLAY_SAFE_INTEGER); return value }
-        fun integer(value: Long) = Value.NumberValue(checkedInteger(value).toString())
-        fun envelope(chunk: Value, requestId: String) = obj("schemaVersion" to integer(2), "requestId" to text(requestId), "chunk" to chunk)
-        fun digest(bytes: ByteArray) = ReplayJson.digest(bytes).removePrefix("sha256:")
-        fun checkedString(value: String, maximum: Int): String {
+    internal companion object {
+        private fun binding(allowed: Boolean) { if (!allowed) throw NativeReplaySealingException(NativeReplaySealingFailure.INVALID_BINDING) }
+        private fun requestLimit(allowed: Boolean) { if (!allowed) throw NativeReplaySealingException(NativeReplaySealingFailure.REQUEST_LIMIT) }
+        private fun obj(vararg pairs: Pair<String, Value>) = Value.ObjectValue(pairs.toList())
+        private fun text(value: String) = Value.StringValue(value)
+        private fun checkedInteger(value: Long): Long { binding(value in 0..MAX_REPLAY_SAFE_INTEGER); return value }
+        private fun integer(value: Long) = Value.NumberValue(checkedInteger(value).toString())
+        private fun envelope(chunk: Value, requestId: String) = obj("schemaVersion" to integer(2), "requestId" to text(requestId), "chunk" to chunk)
+        private fun digest(bytes: ByteArray) = ReplayJson.digest(bytes).removePrefix("sha256:")
+        private fun checkedString(value: String, maximum: Int): String {
             binding(value.codePointCount(0, value.length) in 1..maximum)
             var index = 0
             while (index < value.length) {
@@ -167,7 +167,7 @@ internal class NativeReplaySealer(
             }
             return value
         }
-        fun timestamp(milliseconds: Long): String {
+        internal fun timestamp(milliseconds: Long): String {
             nativeRequire(milliseconds in 1..253_402_300_799_999L, NativeEncodingFailure.INVALID_TIMESTAMP)
             val zone = TimeZone.getTimeZone("UTC")
             val calendar = GregorianCalendar(zone, Locale.ROOT).apply { gregorianChange = Date(Long.MIN_VALUE) }
@@ -177,7 +177,7 @@ internal class NativeReplaySealer(
             return format.format(Date(milliseconds)).also { V1ConfigJson.parseExactTimestamp(it) }
         }
         /** API23-safe deterministic gzip: zero mtime, no optional fields, level6, Unix OS byte. */
-        fun gzip(input: ByteArray, maximumBytes: Int): ByteArray {
+        internal fun gzip(input: ByteArray, maximumBytes: Int): ByteArray {
             requestLimit(input.size in 1..16_777_216 && maximumBytes >= 18)
             val output = ByteArrayOutputStream()
             fun append(bytes: ByteArray, count: Int = bytes.size) {

@@ -328,7 +328,11 @@ def verify_prepared_replay_boundary(root: pathlib.Path, errors: list[str]) -> No
             errors.append(f"production composition must not supply masking admission: {relative}")
         if ("readbackProvenReplayTransports" in text or "supportedReplayProtocolGenerations" in text) and relative not in {OWNER, STACK, MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/AndroidRuntimeQueue.kt"} and relative.parent != config_package:
             errors.append(f"production composition must not supply replay proof: {relative}")
-        if "NativeReplaySealer" in text and relative not in {replay_package / "NativeReplaySealer.kt", replay_package / "NativeReplayCaptureOwner.kt"}:
+        old_sealer_text = text
+        if relative == replay_package / "NativeRasterSealer.kt":
+            old_sealer_text = old_sealer_text.replace("NativeReplaySealer.timestamp(timestamp)", "").replace(
+                "NativeReplaySealer.gzip(encodedPayload, (policy.maximumRequestBytes - overhead) / 4 * 3)", "")
+        if "NativeReplaySealer" in old_sealer_text and relative not in {replay_package / "NativeReplaySealer.kt", replay_package / "NativeReplayCaptureOwner.kt"}:
             errors.append(f"native replay sealer must remain unconstructed: {relative}")
         if "OkHttpReplayTransport" in text and relative not in {replay_package / "OkHttpReplayTransport.kt", composition}:
             errors.append(f"prepared replay HTTP transport must remain unconstructed: {relative}")
@@ -1125,7 +1129,7 @@ def verify_annotated_root_boundary(root: pathlib.Path, errors: list[str]) -> Non
         "internal/replay/AndroidAnnotatedReplayCollector.kt": ['if (Build.VERSION.SDK_INT < 29) error("unsupported-platform")', "occupied.compareAndSet(false, true)",
             "INTERVAL_NANOS = 1_000_000_000L", "PASS_NANOS = 50_000_000L", "lastAttempt = checks.started",
             "checkNotNull(c.read { binding.read() })", "sameGeometry(a.geometry, b.geometry)",
-            "val acceptedPolicy = original.policyVersion", "{ current() && registry.policyCurrent(acceptedPolicy) }",
+            "val acceptedPolicy = original.policyVersion", "{ current() && source.isCurrent() && registry.policyCurrent(acceptedPolicy) }",
             "bitmap?.let { AnnotatedRasterCandidate.clear(it) }"],
         "internal/replay/AnnotatedRasterCandidate.kt": ["internal class AnnotatedRasterCandidate private constructor(",
             "DeclaredRegionPngEncoder.normalize(checkNotNull(raw), width, height)", "raw?.fill(0); output?.close()",
@@ -1179,8 +1183,53 @@ def verify_annotated_root_boundary(root: pathlib.Path, errors: list[str]) -> Non
     if build.count(option) != 1 or task_set not in build:
         errors.append("Compose runtime-absent option must preserve strict AndroidTest compilation")
 
+def verify_raster_sealer_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    replay = MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+    path = replay / "NativeRasterSealer.kt"
+    source = load_text(root, path)
+    for token in ("fun seal(frame: AnnotatedRasterCandidate, timestamp: Long)",
+                  "frame.sourceIdentity === sourceIdentity", "sourceIdentity.isCurrent() && sourceIsCurrent()",
+                  "private val sourceIsCurrent: () -> Boolean", "fun fork(): NativeRasterSealer",
+                  "timestamp - it >= 1_000", "viewport == null || viewport == Pair(frame.width, frame.height)",
+                  '"elu-sdk-replay-request-v3"', '"schemaVersion" to number(3)',
+                  '"automaticInputDiscovery" to Value.BooleanValue(false)',
+                  '"unknownContentClassification" to Value.BooleanValue(false)',
+                  '"requiredRegionsRedacted" to Value.BooleanValue(true)',
+                  "frame.close()\n            checkSource()\n            nextSequence++", "if (!accepted) prepared?.clearRejected()",
+                  "png?.fill(0); payload?.fill(0); compressed?.fill(0)"):
+        if token not in source:
+            errors.append("raster sealer lost original source, one-shot state or closed schema boundary")
+    if any(token in source for token in ("Bitmap", "V1AuthorizedConfig", "NativeReplayAuthority", "RuntimeQueue", "SQLite",
+                                         "FileOutputStream", "Executors.", "secureInputsMasked", "fun seal(png:", "sourceIsCurrent: () -> Boolean =")):
+        errors.append("raster sealer cannot accept raw images, obtain authority or reuse automatic-input policy")
+    registry = load_text(root, replay / "AnnotatedRootRegistry.kt")
+    for token in ("originalSource?.withdraw()", "if (intent == null) sourceBindingChanged()",
+                  "if (intent == null) owner.sourceBindingChanged()", "originalRoot?.get() === root",
+                  "originalCoordinates?.get() === geometry.coordinateIdentity", "originalWindow?.get() === window",
+                  "originalWindowToken?.get() === token", "private val live = AtomicBoolean(true)"):
+        if token not in registry:
+            errors.append("raster source token lost original root/window or withdrawal binding")
+    collector = load_text(root, replay / "AndroidAnnotatedReplayCollector.kt")
+    if "registry.sourceIdentity(root.binding, root.geometry, window, original.decor, original.token)" not in collector or \
+            "AnnotatedRasterCandidate.validated(owned, source," not in collector:
+        errors.append("raster candidate must carry its actual collector source identity")
+    old = load_text(root, replay / "NativeReplaySealer.kt")
+    helpers = old[old.index("internal companion object {"):]
+    visible = re.findall(r"^        (?!private )(?:internal )?fun (\w+)", helpers, re.MULTILINE)
+    if visible != ["timestamp", "gzip"]:
+        errors.append("old sealer may expose only timestamp/gzip helpers for raster reuse")
+    for file in (root / MAIN_KOTLIN).rglob("*.kt"):
+        relative = file.relative_to(root); text = file.read_text()
+        if relative != path and any(token in text for token in ("NativeRasterSealer(", "NativeRasterPreparedRequest(", ".clearRejected()")):
+            errors.append("raster sealer/request must remain uninstalled")
+        if relative != replay / "AndroidAnnotatedReplayCollector.kt" and "AnnotatedRasterCandidate.validated(" in text:
+            errors.append("raster candidate may only originate at the original collector")
+        if relative != replay / "AnnotatedRootRegistry.kt" and "AnnotatedRasterSourceIdentity(" in text:
+            errors.append("raster source identities may only originate at the original registry")
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_raster_sealer_boundary(root, errors)
     verify_annotated_root_boundary(root, errors)
     verify_exception_intake(root, errors)
     verify_capture_rate_limiter(root, errors)

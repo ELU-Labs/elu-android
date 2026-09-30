@@ -7,6 +7,7 @@ import java.io.OutputStream
 /** Internal post-validation output. No public Bitmap getter or arbitrary image submission API. */
 internal class AnnotatedRasterCandidate private constructor(
     private var bitmap: Bitmap?,
+    val sourceIdentity: AnnotatedRasterSourceIdentity,
     private val current: () -> Boolean,
     private val released: () -> Unit,
 ) : AutoCloseable {
@@ -52,8 +53,9 @@ internal class AnnotatedRasterCandidate private constructor(
 
     internal companion object {
         /** Called only after original complete collector validation. Not capture/queue authority. */
-        fun validated(bitmap: Bitmap, current: () -> Boolean, released: () -> Unit) =
-            AnnotatedRasterCandidate(bitmap, current, released)
+        fun validated(bitmap: Bitmap, sourceIdentity: AnnotatedRasterSourceIdentity,
+            current: () -> Boolean, released: () -> Unit) =
+            AnnotatedRasterCandidate(bitmap, sourceIdentity, current, released)
 
         fun clear(bitmap: Bitmap) {
             try { bitmap.eraseColor(Color.TRANSPARENT) } finally { bitmap.recycle() }

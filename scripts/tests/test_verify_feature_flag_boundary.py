@@ -47,7 +47,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         cases = [
             ("EluReplayRegionGeometry.kt", "public class EluReplayRegionGeometry(", "// Bitmap\npublic class EluReplayRegionGeometry(", "geometry only"),
             ("EluAnnotatedReplayRootScope.kt", "AnnotatedRootRegistry(view)", "AnnotatedRootRegistry(view).also { it.attach() }", "must not attach"),
-            ("internal/replay/AndroidAnnotatedReplayCollector.kt", "{ current() && registry.policyCurrent(acceptedPolicy) }", "{ current() && registry.policyCurrent(original.policyVersion) }", "declared ownership"),
+            ("internal/replay/AndroidAnnotatedReplayCollector.kt", "{ current() && source.isCurrent() && registry.policyCurrent(acceptedPolicy) }", "{ current() && registry.policyCurrent(original.policyVersion) }", "declared ownership"),
             ("internal/replay/AndroidAnnotatedReplayCollector.kt", "validate(original, plan(window, checks))", "validate(original, original)", "revalidate original geometry"),
             ("internal/replay/AnnotatedRootRegistry.kt", "if (isClosed) null else reader.read()", "null", "declared ownership"),
             ("internal/replay/AnnotatedRasterCandidate.kt", "bitmap.eraseColor(Color.TRANSPARENT)", "Unit", "declared ownership"),
@@ -78,6 +78,33 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         ]:
             path.write_text(changed); self.assertIn(expected, self.run_guard().stderr)
         path.write_text(original)
+
+    def test_raster_sealer_keeps_original_source_and_only_reuses_two_old_helpers(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+        self.assertEqual(self.run_guard().returncode, 0)
+        cases = [
+            ("NativeRasterSealer.kt", "frame.sourceIdentity === sourceIdentity", "true", "original source"),
+            ("NativeRasterSealer.kt", "timestamp - it >= 1_000", "timestamp - it >= 0", "original source"),
+            ("NativeRasterSealer.kt", "private val sourceIsCurrent: () -> Boolean", "private val sourceIsCurrent: () -> Boolean = { true }", "raw images"),
+            ("NativeRasterSealer.kt", "NativeReplaySealer.timestamp(timestamp)", "NativeReplaySealer(replayId)", "sealer must remain unconstructed"),
+            ("NativeRasterSealer.kt", "NativeReplaySealer.timestamp(timestamp)", "NativeReplaySealer.envelope(timestamp)", "sealer must remain unconstructed"),
+            ("NativeReplaySealer.kt", "private fun envelope(", "internal fun envelope(", "only timestamp/gzip"),
+            ("AnnotatedRootRegistry.kt", "originalSource?.withdraw()", "Unit", "withdrawal binding"),
+        ]
+        for name, before, after, message in cases:
+            with self.subTest(name=name, before=before):
+                path = base / name; original = path.read_text(); self.assertIn(before, original)
+                path.write_text(original.replace(before, after)); self.assertIn(message, self.run_guard().stderr)
+                path.write_text(original)
+        for code, message in [
+            ("NativeRasterSealer()", "must remain uninstalled"),
+            ("AnnotatedRasterCandidate.validated()", "only originate at the original collector"),
+            ("AnnotatedRasterSourceIdentity()", "only originate at the original registry"),
+        ]:
+            copied = base / "UnrelatedRasterCaller.kt"
+            copied.write_text("package dev.elu.analytics.internal.replay\n// " + code)
+            self.assertIn(message, self.run_guard().stderr)
+            copied.unlink()
 
     def test_exception_intake_keeps_exact_schema_and_original_commit(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal"

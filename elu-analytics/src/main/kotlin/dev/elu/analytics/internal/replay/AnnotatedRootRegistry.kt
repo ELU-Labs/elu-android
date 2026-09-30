@@ -2,6 +2,7 @@ package dev.elu.analytics.internal.replay
 
 import android.os.Looper
 import android.view.View
+import android.view.Window
 import dev.elu.analytics.EluReplayGeometryReader
 import dev.elu.analytics.EluReplayPrivateRegion
 import dev.elu.analytics.EluReplayRegionGeometry
@@ -41,6 +42,14 @@ internal class AnnotatedRootRegistry(view: View) {
     private val revision = AtomicLong()
     private val policyRevision = AtomicLong()
     private var overflowed = false
+    private var originalSource: AnnotatedRasterSourceIdentity? = null
+    private var originalRoot: WeakReference<AnnotatedGeometryBinding>? = null
+    private var originalCoordinates: WeakReference<Any>? = null
+    private var originalParent: WeakReference<Any>? = null
+    private var originalParentWasNull = true
+    private var originalWindow: WeakReference<Window>? = null
+    private var originalDecor: WeakReference<View>? = null
+    private var originalWindowToken: WeakReference<Any>? = null
 
     fun attach(): Boolean {
         main()
@@ -62,7 +71,7 @@ internal class AnnotatedRootRegistry(view: View) {
         catch (error: Throwable) { conflict(); throw error }
         return true
     }
-    private fun conflict() { conflicted.set(true); changed() }
+    private fun conflict() { conflicted.set(true); sourceBindingChanged(); changed() }
     fun declare(required: List<EluReplayPrivateRegion>) {
         main(); if (closed.get()) return
         val before = intents.revision
@@ -71,6 +80,7 @@ internal class AnnotatedRootRegistry(view: View) {
     }
     fun bind(intent: EluReplayPrivateRegion?, reader: EluReplayGeometryReader): AnnotatedGeometryBinding {
         main()
+        if (intent == null) sourceBindingChanged()
         val entry = AnnotatedGeometryBinding(this, intent, reader)
         entries.removeAll { it.get() == null || it.get()?.isClosed == true }
         if (!closed.get()) {
@@ -80,6 +90,29 @@ internal class AnnotatedRootRegistry(view: View) {
         return entry
     }
     internal fun changed() { main(); check(revision.get() != Long.MAX_VALUE); revision.incrementAndGet() }
+    internal fun sourceBindingChanged() {
+        main(); originalSource?.withdraw(); originalSource = null
+        originalRoot = null; originalCoordinates = null; originalParent = null
+        originalWindow = null; originalDecor = null; originalWindowToken = null
+    }
+    /** Main-only provenance of an already validated plan, never capture permission. */
+    fun sourceIdentity(root: AnnotatedGeometryBinding, geometry: EluReplayRegionGeometry,
+        window: Window, decor: View, token: Any): AnnotatedRasterSourceIdentity {
+        main(); check(live() && root.owner === this && root.intent == null && !root.isClosed)
+        val parentMatches = if (geometry.parentIdentity == null) originalParentWasNull
+            else !originalParentWasNull && originalParent?.get() === geometry.parentIdentity
+        originalSource?.let {
+            if (originalRoot?.get() === root && originalCoordinates?.get() === geometry.coordinateIdentity &&
+                parentMatches && originalWindow?.get() === window && originalDecor?.get() === decor &&
+                originalWindowToken?.get() === token) return it
+        }
+        sourceBindingChanged()
+        originalRoot = WeakReference(root); originalCoordinates = WeakReference(geometry.coordinateIdentity)
+        originalParentWasNull = geometry.parentIdentity == null
+        originalParent = geometry.parentIdentity?.let { WeakReference(it) }
+        originalWindow = WeakReference(window); originalDecor = WeakReference(decor); originalWindowToken = WeakReference(token)
+        return AnnotatedRasterSourceIdentity().also { originalSource = it }
+    }
     fun version(): Long = revision.get()
     fun policyVersion(): Long = policyRevision.get()
     private fun live(): Boolean = attached.get() && !closed.get() && !conflicted.get()
@@ -98,6 +131,7 @@ internal class AnnotatedRootRegistry(view: View) {
     fun close() {
         main()
         if (!closed.compareAndSet(false, true)) return
+        sourceBindingChanged()
         changed(); entries.clear()
         try {
             host.get()?.let { if (it.getTag(R.id.elu_annotated_replay_root) === this) it.setTag(R.id.elu_annotated_replay_root, null) }
@@ -129,6 +163,14 @@ internal class AnnotatedGeometryBinding(
     fun read(): EluReplayRegionGeometry? { AnnotatedRootRegistry.main(); return if (isClosed) null else reader.read() }
     fun close() {
         AnnotatedRootRegistry.main(); if (isClosed) return
+        if (intent == null) owner.sourceBindingChanged()
         invalidate(); isClosed = true
     }
+}
+
+/** Opaque, collector-owned source token. No View or permission is carried to the worker. */
+internal class AnnotatedRasterSourceIdentity internal constructor() {
+    private val live = AtomicBoolean(true)
+    fun isCurrent(): Boolean = live.get()
+    internal fun withdraw() { live.set(false) }
 }

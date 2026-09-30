@@ -210,7 +210,7 @@ class AndroidComposeReplayCollectorTest {
         val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(AndroidAnnotatedReplayCollector.PLACEHOLDER)
         var releases = 0
-        val frame = AnnotatedRasterCandidate.validated(bitmap, { true }, { releases++ })
+        val frame = AnnotatedRasterCandidate.validated(bitmap, AnnotatedRasterSourceIdentity(), { true }, { releases++ })
         val encoded = frame.encodePng()
         try {
             DeclaredRegionPngEncoder.validate(encoded, 2, 2)
