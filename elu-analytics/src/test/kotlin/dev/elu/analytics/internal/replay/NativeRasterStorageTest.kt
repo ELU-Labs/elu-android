@@ -119,6 +119,7 @@ class NativeRasterStorageTest {
             assertNull(ReplayQueueStore.nextWakeDelay(tx, "original", authorization, 3))
             assertArrayEquals(raster.copyBytes(), ReplayQueueStore.readRaster(tx, ReplayQueueStore.headers(tx).single()).request.copyBytes())
             ReplayQueueStore.validate(tx, RasterQueueRig.namespace)
+            Unit
         } }
     }
 
