@@ -891,7 +891,7 @@ def verify_local_endpoint_binding(root: pathlib.Path, errors: list[str]) -> None
         "internal/runtime/delivery/BatchDeliveryModels.kt": ["endpointPolicy.requireApproved(this.eventsEndpoint, V1EndpointRole.EVENTS)"],
         "internal/flags/V2ConfigBoundFlagTransport.kt": ["HttpURLConnectionFlagTransport(key, endpoint, endpointPolicy = endpointPolicy)"],
         "internal/flags/HttpURLConnectionFlagTransport.kt": ["requireApprovedEndpoint(endpoint, endpointPolicy)", "endpointPolicy.requireApproved(uri, V1EndpointRole.FLAGS)"],
-        "internal/replay/NativeReplayComposition.kt": ["NativeReplayHttpRouter(queue.endpointPolicy)", "claim.authorization.endpoint, endpointPolicy = endpointPolicy"],
+        "internal/replay/NativeReplayComposition.kt": ["NativeReplayHttpRouter(queue.endpointPolicy)", "claim.authorization.endpoint, format = claim.format, endpointPolicy = endpointPolicy"],
         "internal/replay/OkHttpReplayTransport.kt": ["endpointPolicy.requireApproved(endpoint, V1EndpointRole.REPLAY)"],
         "internal/facade/StandaloneFacade.kt": ["value != networkConfigHost && value != networkApiHost"],
         "internal/runtime/CaptureAuthority.kt": ['endpointPolicy.apiOrigin ?: return "site-$keyDigest"', '"elu-runtime-selfhost-v1\\u0000$origin\\u0000$keyDigest"'],
@@ -1306,7 +1306,7 @@ def verify_native_raster_response_boundary(root: pathlib.Path, errors: list[str]
             re.search(r"NativeRasterPreparedRequest\s*\(|\.clearRejected\s*\(", source):
         errors.append("raster response cannot construct requests, install authority, dispatch or mutate queue state")
     for file in (root / MAIN_KOTLIN).rglob("*.kt"):
-        if file.relative_to(root) != path and re.search(r"\bNativeRaster(?:ResponseClassifier|ResponseOutcome|ConflictScope)\b", file.read_text()):
+        if file.relative_to(root) not in {path, replay / "ReplayDeliveryModels.kt"} and re.search(r"\bNativeRaster(?:ResponseClassifier|ResponseOutcome|ConflictScope)\b", file.read_text()):
             errors.append("raster response classifier and outcomes must remain uninstalled")
 
 
@@ -1439,7 +1439,7 @@ def verify_native_raster_durable_boundary(root: pathlib.Path, errors: list[str])
             "stored.effectivePolicyHash == admission.policy.effectivePolicyHash"],
         authority: ["internal val rasterSupported: Boolean = false", "captureUse = use", "receipt = started.receipt",
             "NativeRasterPermit.issue", "rasterActive = null"],
-        store: ["require(state.rasterStorage == tx.nativeRasterReplaySchemaPresent())", "filterNot { it.raster }",
+        store: ["require(state.rasterStorage == tx.nativeRasterReplaySchemaPresent())", "delivery.raster == header.raster",
             "config.issuedAtInstant > V1ConfigJson.parseExactTimestamp(old.issuedAt)", "order == 0 -> checkNotNull(old).copy(conflicted = true)",
             "V1ConfigJson.parseExactTimestamp(state.issuedAt) >", "baseOrder < 0 || (baseOrder == 0 && state.poisoned)",
             "else -> old", "ledger.semanticHash != wrapper.semanticHash", "core.queueCount + state.count + 1 > maximumCount"],
@@ -1488,9 +1488,79 @@ def verify_native_raster_durable_boundary(root: pathlib.Path, errors: list[str])
         errors.append("restored raster facts cannot decode pixels or revive producer authority")
 
 
+def verify_native_raster_delivery_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics/internal"
+    replay = base / "replay"
+    required = {
+        replay / "ReplayDeliveryModels.kt": [
+            "val support: ReplayDeliverySupport = ReplayDeliverySupport.WIREFRAME_ONLY",
+            "private sealed interface Payload", "internal val originalSource:",
+            "NativeRasterResponseOutcome.RejectedTooLarge -> ReplayDeliveryOutcome.Blocked(ReplayBlockKind.RASTER_TOO_LARGE)",
+            "NativeRasterResponseClassifier.classify(response, p.row.request, now, retry)"],
+        replay / "ReplayDeliveryMetadata.kt": [
+            "row.storageSchemaVersion in setOf(1L, 2L)", "row.storageSchemaVersion == 2L",
+            'setOf("replayId", "sourceIssuedAt")', "require(value.protocolGeneration == NativeRasterSealer.GENERATION)",
+            "value.row().payload.contentEquals(row.payload)",
+            "if (retirement) it == 0L else it in 1..31",
+            "if (retirement) require(value.credentialWitness.isEmpty() && value.scopeWitness.isEmpty())"],
+        replay / "ReplayQueueStore.kt": [
+            "if (rasterEpochBlocked(tx, request.replayId))", "it.raster == raster",
+            "originalSource == null", "request.effectivePolicyHash != authorization.effectivePolicyHash",
+            "d.replayId == claim.replayId && d.sourceIssuedAt == claim.authorization.sourceIssuedAt",
+            "require(claim.format != ReplayDeliveryFormat.RASTER || outcome == ReplayDeliveryOutcome.Accepted)",
+            "header.replayId in expiredRaster || header.replayId in retiredRaster",
+            "it.replayId !in expiredEpochs && it.replayId !in retiredEpochs",
+            "if (mayRemoveRaster(it.replayId)) return@filter true",
+            "markRasterRetiring(tx, current, all, it.replayId)",
+            "sourceIssuedAt = prior?.sourceIssuedAt ?: anchor",
+            "val anchor = checkNotNull(original.rasterSource).issuedAt",
+            "d.scopeWitness == authorization.scopeWitness", "it.scopeWitness == authority.scopeWitness",
+            "eligibleRaster(readRaster(tx, it).request)", "if (heads.isEmpty()) return null"],
+        OWNER: [
+            "policy.support != ReplayDeliverySupport.INCLUDING_RASTER", "claim.originalSource !== witness",
+            "claim.originalSource ?: configurationGate?.snapshot()", "rasterIdentityMatches",
+            "request.identityRevision == identity.revision && request.contextRevision == identity.contextRevision",
+            "nativeCaptureEnrollment != null || replayPhysicalClaim?.replayId == replayId",
+            "nativeCaptureEnrollment?.withdraw()", "replayPhysicalOperation?.cancel()",
+            "nativeSettlementUncertain || nativeCaptureEnrollment != null", "drainRasterRetirementOnWorker(claim)",
+            "ReplayQueueStore.removeRasterEpochs(tx, ready)", "configurationGate?.rasterDenial() != null"],
+        replay / "OkHttpReplayTransport.kt": [
+            "private val format: ReplayDeliveryFormat = ReplayDeliveryFormat.WIREFRAME",
+            "endpointPolicy.requireNativeRasterApproved(endpoint)", "claim.format == format",
+            "val body = claim.copyBody()", "val classified = claim.classify(result, 0, 0)",
+            "rasterRefusal != null -> flight.result.complete(rasterRefusal)", "body.fill(0)"],
+        base / "config/LocalEndpointPolicy.kt": [
+            'require(endpoint.rawPath == apiPrefix + "/v3/replay")', "requireApproved(legacyRole, V1EndpointRole.REPLAY)"],
+    }
+    for path, tokens in required.items():
+        try: text = load_text(root, path)
+        except ValueError as error:
+            errors.append(str(error)); continue
+        if any(token not in text for token in tokens):
+            errors.append("raster delivery lost original source, refusal, scope or settlement boundary: " + str(path))
+    try: owner = load_text(root, OWNER)
+    except ValueError as error:
+        errors.append(str(error)); return
+    if "drainRasterRetirementOnWorker(claim)" in owner and owner.index("drainRasterRetirementOnWorker(claim)") > owner.index("if (replayPhysicalOperation === started)"):
+        errors.append("raster retirement must settle before clearing original physical slot")
+    models = replay / "ReplayDeliveryModels.kt"
+    store = replay / "ReplayQueueStore.kt"
+    for file in (root / MAIN_KOTLIN).rglob("*.kt"):
+        relative = file.relative_to(root); text = file.read_text()
+        if "ReplayDeliverySupport.INCLUDING_RASTER" in text and relative != OWNER:
+            errors.append("raster delivery support must remain default-off and uninstalled")
+        if "ReplayDeliveryClaim.raster(" in text and relative != store:
+            errors.append("raster delivery claims belong only to the original queue")
+        if "requireNativeRasterApproved(" in text and relative not in {base / "config/LocalEndpointPolicy.kt", replay / "OkHttpReplayTransport.kt"}:
+            errors.append("raster endpoint role does not grant producer or delivery authority")
+        if re.search(r"NativeRasterStoredRequest\.parse\(", text) and relative in {models, replay / "OkHttpReplayTransport.kt", replay / "NativeRasterResponseClassifier.kt"}:
+            errors.append("delivery cannot replace the original stored request")
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
     verify_native_raster_durable_boundary(root, errors)
+    verify_native_raster_delivery_boundary(root, errors)
     verify_compose_distribution_boundary(root, errors)
     verify_native_raster_response_boundary(root, errors)
     verify_native_v3_parser_boundary(root, errors)

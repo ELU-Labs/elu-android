@@ -25,6 +25,16 @@ internal class LocalEndpointPolicy private constructor(val apiOrigin: String?) {
         }
     }
 
+    /** Exact raster role; caller must also own the original native-v3 policy/claim. */
+    fun requireNativeRasterApproved(endpoint: URI) {
+        require(endpoint.rawPath == apiPrefix + "/v3/replay")
+        // Reuse every original origin/credential/query restriction without broadening v1/v2 roles.
+        val legacyRole = URI(endpoint.scheme + "://" + endpoint.rawAuthority + apiPrefix + "/v2/replay" +
+            (endpoint.rawQuery?.let { "?$it" } ?: ""))
+        requireApproved(legacyRole, V1EndpointRole.REPLAY)
+        require(endpoint.rawFragment == null && endpoint.rawUserInfo == null && endpoint.toString().all { it.code in 0x21..0x7e })
+    }
+
     fun matchesRole(endpoint: URI, role: V1EndpointRole, schemaVersion: Int): Boolean {
         val host = apiHost ?: if (role == V1EndpointRole.ASSETS) "assets.elu.dev" else "ingest.elu.dev"
         val path = when (role) {

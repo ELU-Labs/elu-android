@@ -15,7 +15,10 @@ internal fun interface ReplayDeliveryPrivacy {
     fun current(config: V1ParsedConfig, identity: IdentityState, wallEpochMillis: Long): String?
 }
 
-internal data class ReplayDeliveryPolicy(val privacy: ReplayDeliveryPrivacy, val retention: ReplayMaskingRetention)
+internal enum class ReplayDeliveryFormat { WIREFRAME, RASTER }
+internal enum class ReplayDeliverySupport { WIREFRAME_ONLY, INCLUDING_RASTER }
+internal data class ReplayDeliveryPolicy(val privacy: ReplayDeliveryPrivacy, val retention: ReplayMaskingRetention,
+    val support: ReplayDeliverySupport = ReplayDeliverySupport.WIREFRAME_ONLY)
 
 /** Derived by the serialized owner from its validated endpoint and exact installation credential. */
 internal data class ReplayDeliveryAuthorization(
@@ -26,16 +29,64 @@ internal data class ReplayDeliveryAuthorization(
     val protocolGeneration: String,
     val credentialWitness: String,
     val scopeWitness: String,
+    val format: ReplayDeliveryFormat = ReplayDeliveryFormat.WIREFRAME,
+    val sourceIssuedAt: String = "",
+    val policyRevision: String = "",
+    val effectivePolicyHash: String = "",
+    val maximumRequestBytes: Int = MAX_REPLAY_REQUEST_BYTES,
 )
 
 /** Only an exact persisted owner/nonce/digest match can execute or resolve this token. */
-internal class ReplayDeliveryClaim internal constructor(
+internal class ReplayDeliveryClaim private constructor(
     internal val owner: String,
     internal val nonce: String,
-    val row: ReplayStoredChunk,
+    private val payload: Payload,
     val authorization: ReplayDeliveryAuthorization,
     val attemptCount: Int,
-)
+    internal val originalSource: dev.elu.analytics.internal.config.V2ConfigAuthorityWitness?,
+) {
+    private sealed interface Payload {
+        data class Wireframe(val row: ReplayStoredChunk) : Payload
+        data class Raster(val row: NativeRasterStoredChunk) : Payload
+    }
+    internal constructor(owner: String, nonce: String, row: ReplayStoredChunk,
+        authorization: ReplayDeliveryAuthorization, attemptCount: Int) :
+        this(owner, nonce, Payload.Wireframe(row), authorization, attemptCount, null) {
+        require(authorization.format == ReplayDeliveryFormat.WIREFRAME)
+    }
+    val format get() = authorization.format
+    // Existing callers remain typed wireframe consumers; raster code uses the closed alternative.
+    val row: ReplayStoredChunk get() = (payload as Payload.Wireframe).row
+    val rasterRow: NativeRasterStoredChunk get() = (payload as Payload.Raster).row
+    val ordinal get() = when (val p = payload) { is Payload.Wireframe -> p.row.ordinal; is Payload.Raster -> p.row.ordinal }
+    val digest get() = when (val p = payload) { is Payload.Wireframe -> p.row.prepared.digest; is Payload.Raster -> p.row.request.digest }
+    val replayId get() = when (val p = payload) { is Payload.Wireframe -> p.row.prepared.replayId; is Payload.Raster -> p.row.request.replayId }
+    fun copyBody(): ByteArray = when (val p = payload) { is Payload.Wireframe -> p.row.prepared.copyBytes(); is Payload.Raster -> p.row.request.copyBytes() }
+    fun classify(response: ReplayTransportResponse, now: Long, retry: Long): ReplayDeliveryOutcome = when (val p = payload) {
+        is Payload.Wireframe -> ReplayResponseClassifier.classify(response, p.row.prepared, now, retry)
+        is Payload.Raster -> when (val outcome = NativeRasterResponseClassifier.classify(response, p.row.request, now, retry)) {
+            NativeRasterResponseOutcome.Accepted -> ReplayDeliveryOutcome.Accepted
+            NativeRasterResponseOutcome.RejectedTooLarge -> ReplayDeliveryOutcome.Blocked(ReplayBlockKind.RASTER_TOO_LARGE)
+            is NativeRasterResponseOutcome.IdentityConflict -> ReplayDeliveryOutcome.Blocked(when (outcome.scope) {
+                NativeRasterConflictScope.REQUEST -> ReplayBlockKind.RASTER_REQUEST
+                NativeRasterConflictScope.CHUNK -> ReplayBlockKind.RASTER_CHUNK
+                NativeRasterConflictScope.SEQUENCE -> ReplayBlockKind.RASTER_SEQUENCE
+            })
+            is NativeRasterResponseOutcome.CredentialBlocked -> ReplayDeliveryOutcome.Blocked(
+                if (outcome.status == 401) ReplayBlockKind.UNAUTHORIZED else ReplayBlockKind.FORBIDDEN)
+            NativeRasterResponseOutcome.ProtocolBlocked -> ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL)
+            is NativeRasterResponseOutcome.Retry -> ReplayDeliveryOutcome.Retry(outcome.delayMillis, outcome.endpointCooldown)
+        }
+    }
+    companion object {
+        internal fun raster(owner: String, nonce: String, row: NativeRasterStoredChunk,
+            authorization: ReplayDeliveryAuthorization, attemptCount: Int,
+            source: dev.elu.analytics.internal.config.V2ConfigAuthorityWitness): ReplayDeliveryClaim {
+            require(authorization.format == ReplayDeliveryFormat.RASTER)
+            return ReplayDeliveryClaim(owner, nonce, Payload.Raster(row), authorization, attemptCount, source)
+        }
+    }
+}
 
 internal sealed interface ReplayDeliveryOutcome {
     data object Accepted : ReplayDeliveryOutcome
@@ -43,7 +94,8 @@ internal sealed interface ReplayDeliveryOutcome {
     data class Retry(val delayMillis: Long, val endpointCooldown: Boolean = false) : ReplayDeliveryOutcome
     data class Blocked(val kind: ReplayBlockKind) : ReplayDeliveryOutcome
 }
-internal enum class ReplayBlockKind { UNAUTHORIZED, FORBIDDEN, PROTOCOL, CONFLICT }
+internal enum class ReplayBlockKind { UNAUTHORIZED, FORBIDDEN, PROTOCOL, CONFLICT,
+    RASTER_REQUEST, RASTER_CHUNK, RASTER_SEQUENCE, RASTER_TOO_LARGE, RASTER_RETIRE }
 internal enum class ReplayDeliveryCommit { COMMITTED, STALE }
 
 internal class ReplayTransportResponse(val status: Int, body: ByteArray, val retryAfter: String? = null) {

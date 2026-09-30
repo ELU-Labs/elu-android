@@ -553,7 +553,7 @@ private class NativeReplayHttpRouter(private val endpointPolicy: LocalEndpointPo
     private val active = AtomicReference<Flight?>()
     override fun start(claim: ReplayDeliveryClaim, authorizeIo: () -> Boolean): ReplayTransportOperation {
         check(!closed.get()) { "Native delivery is closed" }
-        val flight = Flight(OkHttpReplayTransport(claim.authorization.siteKey, claim.authorization.endpoint, endpointPolicy = endpointPolicy))
+        val flight = Flight(OkHttpReplayTransport(claim.authorization.siteKey, claim.authorization.endpoint, format = claim.format, endpointPolicy = endpointPolicy))
         if (!active.compareAndSet(null, flight)) { flight.client.close(); error("Native delivery is occupied") }
         if (closed.get()) flight.cancel()
         flight.start(claim, authorizeIo)

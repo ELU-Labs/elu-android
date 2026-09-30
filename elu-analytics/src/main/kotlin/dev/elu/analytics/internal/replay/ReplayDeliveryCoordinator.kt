@@ -119,7 +119,7 @@ internal class ReplayDeliveryCoordinator(
                     synchronized(lock) { if (active === operation) active = null }
                 }
                 val delay = backoff(claim.attemptCount)
-                val classified = response?.let { ReplayResponseClassifier.classify(it, claim.row.prepared, wallNow(), delay) }
+                val classified = response?.let { claim.classify(it, wallNow(), delay) }
                 // Physical refusal belongs to the original attempt even after logical withdrawal.
                 // Only success/deletion is downgraded when its authority or deadline is gone.
                 val outcome = when {

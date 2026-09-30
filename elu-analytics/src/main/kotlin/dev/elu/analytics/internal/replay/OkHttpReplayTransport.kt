@@ -33,6 +33,7 @@ import okio.BufferedSink
 internal class OkHttpReplayTransport(
     private val siteKey: String,
     private val endpoint: URI,
+    private val format: ReplayDeliveryFormat = ReplayDeliveryFormat.WIREFRAME,
     private val requestTimeoutMillis: Int = 20_000,
     private val connectTimeoutMillis: Int = 10_000,
     private val readTimeoutMillis: Int = 10_000,
@@ -54,23 +55,28 @@ internal class OkHttpReplayTransport(
 
     init {
         require(Regex("elu_pk_(live|test)_[A-Za-z0-9]{22,64}").matches(siteKey)) { "Invalid ELU site key" }
-        endpointPolicy.requireApproved(endpoint, V1EndpointRole.REPLAY)
+        if (format == ReplayDeliveryFormat.RASTER) endpointPolicy.requireNativeRasterApproved(endpoint)
+        else endpointPolicy.requireApproved(endpoint, V1EndpointRole.REPLAY)
         require(requestTimeoutMillis in 1..30_000 && connectTimeoutMillis in 1..30_000 && readTimeoutMillis in 1..30_000)
         require(maximumResponseBytes in 1..REPLAY_MAX_RESPONSE_BYTES)
     }
 
     override fun start(claim: ReplayDeliveryClaim, authorizeIo: () -> Boolean): ReplayTransportOperation {
         check(!closed.get()) { "Replay transport is closed" }
-        require(claim.authorization.endpoint == endpoint && claim.authorization.siteKey == siteKey) {
+        require(claim.format == format && claim.authorization.endpoint == endpoint && claim.authorization.siteKey == siteKey) {
             "Replay request differs from the transport's endpoint or credential binding"
         }
-        val body = claim.row.prepared.copyBytes()
+        val body = claim.copyBody()
         require(body.size in 1..MAX_REPLAY_REQUEST_BYTES)
         val flight = Flight(elapsedRealtimeNanos())
-        check(active.compareAndSet(null, flight)) { "A replay request is already in flight" }
+        if (!active.compareAndSet(null, flight)) {
+            body.fill(0)
+            error("A replay request is already in flight")
+        }
         try {
-            executor.execute { execute(flight, body, authorizeIo) }
+            executor.execute { execute(flight, body, claim, authorizeIo) }
         } catch (error: Throwable) {
+            body.fill(0)
             active.compareAndSet(flight, null)
             flight.result.completeExceptionally(error)
         }
@@ -86,11 +92,12 @@ internal class OkHttpReplayTransport(
         (executor as? ExecutorService)?.shutdown()
     }
 
-    private fun execute(flight: Flight, body: ByteArray, authorizeIo: () -> Boolean) {
+    private fun execute(flight: Flight, body: ByteArray, claim: ReplayDeliveryClaim, authorizeIo: () -> Boolean) {
         var client: OkHttpClient? = null
         var response: Response? = null
         var deadline: AutoCloseable? = null
         var result: ReplayTransportResponse? = null
+        var rasterRefusal: ReplayTransportResponse? = null
         var failure: Throwable? = null
         var cleanupFailure: Throwable? = null
         val timedOut = AtomicBoolean(false)
@@ -166,6 +173,13 @@ internal class OkHttpReplayTransport(
             if (refusal.get() == 0) {
                 remainingMillis()
                 result = readResponse(response, maximumResponseBytes) { remainingMillis() }
+                // Only a complete, exact original schema3 refusal survives a later cancel.
+                if (format == ReplayDeliveryFormat.RASTER && result.status in setOf(409, 413)) {
+                    val classified = claim.classify(result, 0, 0)
+                    if (classified is ReplayDeliveryOutcome.Blocked && classified.kind in setOf(
+                        ReplayBlockKind.RASTER_REQUEST, ReplayBlockKind.RASTER_CHUNK,
+                        ReplayBlockKind.RASTER_SEQUENCE, ReplayBlockKind.RASTER_TOO_LARGE)) rasterRefusal = result
+                }
                 remainingMillis()
             }
         } catch (error: Throwable) {
@@ -181,6 +195,7 @@ internal class OkHttpReplayTransport(
             cleanup { client?.connectionPool?.evictAll() }
             cleanup { client?.dispatcher?.executorService?.shutdown() }
             cleanup { check(client?.connectionPool?.connectionCount() in listOf(null, 0)) { "Replay connection cleanup is incomplete" } }
+            body.fill(0)
             flight.finished.set(true)
         }
         if (cleanupFailure != null) {
@@ -192,6 +207,7 @@ internal class OkHttpReplayTransport(
         val status = refusal.get()
         when {
             status != 0 -> flight.result.complete(ReplayTransportResponse(status, ByteArray(0)))
+            rasterRefusal != null -> flight.result.complete(rasterRefusal)
             failure != null -> flight.result.completeExceptionally(failure)
             result != null && !closed.get() && !flight.canceled.get() && !timedOut.get() -> flight.result.complete(result)
             else -> flight.result.completeExceptionally(IOException("Replay request canceled"))

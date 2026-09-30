@@ -120,6 +120,37 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
                 self.assertIn(before, original); path.write_text(original.replace(before, after))
                 self.assertIn(message, errors()); path.write_text(original)
 
+    def test_raster_delivery_retains_original_source_physical_slot_and_default_denial(self) -> None:
+        def errors() -> str:
+            result: list[str] = []
+            BOUNDARY.verify_native_raster_delivery_boundary(self.root, result)
+            return "\n".join(result)
+        self.assertEqual("", errors())
+        for relative, token in (
+            ("runtime/RuntimeQueueOwner.kt", "claim.originalSource !== witness"),
+            ("runtime/RuntimeQueueOwner.kt", "request.identityRevision == identity.revision && request.contextRevision == identity.contextRevision"),
+            ("runtime/RuntimeQueueOwner.kt", "drainRasterRetirementOnWorker(claim)"),
+            ("runtime/RuntimeQueueOwner.kt", "nativeSettlementUncertain || nativeCaptureEnrollment != null"),
+            ("replay/ReplayQueueStore.kt", "if (rasterEpochBlocked(tx, request.replayId))"),
+            ("replay/ReplayQueueStore.kt", "it.replayId !in expiredEpochs && it.replayId !in retiredEpochs"),
+            ("replay/ReplayDeliveryMetadata.kt", "if (retirement) it == 0L else it in 1..31"),
+            ("replay/ReplayQueueStore.kt", "sourceIssuedAt = prior?.sourceIssuedAt ?: anchor"),
+            ("replay/ReplayQueueStore.kt", "it.scopeWitness == authority.scopeWitness"),
+            ("replay/ReplayQueueStore.kt", "eligibleRaster(readRaster(tx, it).request)"),
+            ("replay/ReplayDeliveryMetadata.kt", 'setOf("replayId", "sourceIssuedAt")'),
+            ("replay/OkHttpReplayTransport.kt", "claim.format == format"),
+            ("replay/OkHttpReplayTransport.kt", "val classified = claim.classify(result, 0, 0)")):
+            path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal" / relative
+            original = path.read_text(); self.assertIn(token, original)
+            try:
+                path.write_text(original.replace(token, "false")); self.assertIn("raster delivery lost", errors())
+            finally: path.write_text(original)
+        foreign = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/RasterDeliveryEscape.kt"
+        for token in ("ReplayDeliverySupport.INCLUDING_RASTER", "ReplayDeliveryClaim.raster(a, b, c)",
+                      "requireNativeRasterApproved(endpoint)"):
+            foreign.write_text("// " + token); self.assertTrue(errors())
+        foreign.unlink(); self.assertEqual("", errors())
+
     def test_raster_response_binds_original_schema_and_only_static_helpers(self) -> None:
         def errors() -> str:
             result: list[str] = []

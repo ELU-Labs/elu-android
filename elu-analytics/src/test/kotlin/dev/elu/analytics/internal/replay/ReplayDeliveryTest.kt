@@ -15,6 +15,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ReplayDeliveryTest {
+    @Test fun `legacy metadata canonical schema1 is unchanged by explicit raster support`() {
+        val d = ReplayDeliveryMetadata(2, "sha256:" + "a".repeat(64), ReplayDeliveryState.CLAIMED,
+            "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", 1,
+            credentialWitness = "sha256:" + "b".repeat(64), scopeWitness = "sha256:" + "c".repeat(64), protocolGeneration = "old-generation")
+        val expected = ReplayJson.encode("ordinal" to ReplayJson.number(2), "digest" to ReplayJson.text(d.digest),
+            "state" to ReplayJson.text("CLAIMED"), "owner" to ReplayJson.text(d.owner), "nonce" to ReplayJson.text(d.nonce),
+            "attempts" to ReplayJson.number(1), "delayMillis" to ReplayJson.number(0), "notBeforeMillis" to ReplayJson.number(0),
+            "endpointCooldown" to V1StrictCanonicalJson.Value.BooleanValue(false), "blockKind" to ReplayJson.text(""),
+            "credentialWitness" to ReplayJson.text(d.credentialWitness), "scopeWitness" to ReplayJson.text(d.scopeWitness),
+            "protocolGeneration" to ReplayJson.text(d.protocolGeneration))
+        assertEquals(1L, d.row().storageSchemaVersion); assertArrayEquals(expected, d.row().payload)
+        assertEquals(d, ReplayDeliveryMetadata.decode(d.row()))
+    }
+
     @Test fun `sealed delivery ignores fresh sampling session and budget without changing original bytes`() = Rig().use { rig ->
         rig.activate(); rig.append()
         val original = rig.rows().single().prepared.copyBytes()

@@ -808,6 +808,7 @@ internal class RuntimeQueueOwner private constructor(
                 if (!released) return@submitNativeSettlement NativeReplayCaptureFinish.ACCOUNTING_PENDING
                 // Terminal arbitration and exact slot clearing precede callbacks, outside locks.
                 enrollment.notifyReleased()
+                drainRasterRetirementOnWorker()
                 NativeReplayCaptureFinish.SETTLED
             } catch (error: Throwable) { enrollment.quarantine(); throw error }
         }
@@ -959,7 +960,7 @@ internal class RuntimeQueueOwner private constructor(
                 readbackProvenReplayTransports, supportedReplayProtocolGenerations, ReplayMaskingRetention { profile, required ->
                     NativeMaskingProfile.retention(profile.copyBytes(), required.privacy?.masking,
                         dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) == NativeMaskingRetention.COMPATIBLE
-                })
+                }, ::mayRemoveRasterOnWorker)
             if (!admission.isCurrent()) throw ReplaySourceWithdrawn()
             val state = checkNotNull(ReplayQueueStore.state(tx))
             result || (!state.poisoned && state.issuedAt == parsed.issuedAt &&
@@ -1280,6 +1281,7 @@ internal class RuntimeQueueOwner private constructor(
         // original receipt no longer owns a durable epoch. Neither is new authority.
         nativeReceipt = null
         nativeSettlementUncertain = false
+        drainRasterRetirementOnWorker()
         return matched
     }
 
@@ -1415,7 +1417,7 @@ internal class RuntimeQueueOwner private constructor(
             val restrictivePrivacy = reason in setOf(V1ChannelAuthorizationReason.IDENTITY_OPTED_OUT,
                 V1ChannelAuthorizationReason.DECISION_NOT_ALLOWED, V1ChannelAuthorizationReason.REGION_POLICY_CONFLICT)
             ReplayQueueStore.reconcile(tx, parsed, checkNotNull(ownerNamespaceHash), now,
-                current.state.identity.optedOut || restrictivePrivacy, readbackProvenReplayTransports, supportedReplayProtocolGenerations, retention)
+                current.state.identity.optedOut || restrictivePrivacy, readbackProvenReplayTransports, supportedReplayProtocolGenerations, retention, ::mayRemoveRasterOnWorker)
         }
     }
 
@@ -1443,7 +1445,7 @@ internal class RuntimeQueueOwner private constructor(
                 readbackProvenReplayTransports, supportedReplayProtocolGenerations, ReplayMaskingRetention { profile, required ->
                     NativeMaskingProfile.retention(profile.copyBytes(), required.privacy?.masking,
                         dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) == NativeMaskingRetention.COMPATIBLE
-                })
+                }, ::mayRemoveRasterOnWorker)
             if (!admission.isCurrent()) throw ReplaySourceWithdrawn()
             result
         }
@@ -1572,7 +1574,7 @@ internal class RuntimeQueueOwner private constructor(
         assertUsable()
         replayTransaction(null, 0) { tx ->
             val now = captureClock.wallNowEpochMillis()
-            if (!replayClockIsCurrent(tx, now)) 0 else ReplayQueueStore.expire(tx, now)
+            if (!replayClockIsCurrent(tx, now)) 0 else ReplayQueueStore.expire(tx, now, ::mayRemoveRasterOnWorker)
         }
     }
 
@@ -1602,6 +1604,29 @@ internal class RuntimeQueueOwner private constructor(
     private var replayPhysicalClaim: ReplayDeliveryClaim? = null
     private var replayIoConsumed = false
     private var replayDeliveryObservedWall = 0L
+    // Restriction-only cleanup waits for original capture accounting and physical IO settlement.
+    private val pendingRasterRetirement = linkedSetOf<String>()
+
+    private fun mayRemoveRasterOnWorker(replayId: String): Boolean {
+        if (nativeReceipt?.replayId == replayId || nativeCaptureEnrollment != null || replayPhysicalClaim?.replayId == replayId) {
+            pendingRasterRetirement.add(replayId)
+            if (nativeReceipt?.replayId == replayId) { nativeScope.invalidate(); nativeCaptureEnrollment?.withdraw() }
+            if (replayPhysicalClaim?.replayId == replayId) runCatching { replayPhysicalOperation?.cancel() }
+            return false
+        }
+        return true
+    }
+
+    private fun drainRasterRetirementOnWorker(settledPhysical: ReplayDeliveryClaim? = null) {
+        if (pendingRasterRetirement.isEmpty() || nativeSettlementUncertain || nativeCaptureEnrollment != null) return
+        val ready = pendingRasterRetirement.filter { nativeReceipt?.replayId != it &&
+            (replayPhysicalClaim?.replayId != it || replayPhysicalClaim === settledPhysical) }.toSet()
+        if (ready.isEmpty()) return
+        nativeSettlementUncertain = true
+        replayTransaction(null, Unit) { tx -> ReplayQueueStore.removeRasterEpochs(tx, ready) }
+        pendingRasterRetirement.removeAll(ready)
+        nativeSettlementUncertain = false
+    }
 
     /** One internal delivery binding per existing installation owner; canonical stack never calls it. */
     internal fun openReplayDeliveryQueue(policy: ReplayDeliveryPolicy): Future<ReplayDeliveryQueue> = submit {
@@ -1641,7 +1666,8 @@ internal class RuntimeQueueOwner private constructor(
     }
 
     private fun resolveReplayDelivery(tx: RuntimeQueueTransaction, witness: V2ConfigAuthorityWitness,
-        policy: ReplayDeliveryPolicy, reconcile: Boolean): ReplayDeliveryAuthorization? {
+        policy: ReplayDeliveryPolicy, reconcile: Boolean,
+        format: ReplayDeliveryFormat = ReplayDeliveryFormat.WIREFRAME): ReplayDeliveryAuthorization? {
         if (!replayOwnerIsLive() || !witness.isCurrent() || configurationGate?.rasterDenial() != null) return null
         val parsed = try { V1ConfigJson.parseConfig(witness.body) } catch (_: Exception) { return null }
         if (tx.nativeRasterReplaySchemaPresent() && !ReplayQueueStore.rasterOrdering(tx, witness, parsed)) return null
@@ -1654,7 +1680,26 @@ internal class RuntimeQueueOwner private constructor(
         val restrictive = fresh?.replayAuthorization?.reason in setOf(V1ChannelAuthorizationReason.IDENTITY_OPTED_OUT,
             V1ChannelAuthorizationReason.DECISION_NOT_ALLOWED, V1ChannelAuthorizationReason.REGION_POLICY_CONFLICT)
         if (reconcile) ReplayQueueStore.reconcile(tx, parsed, checkNotNull(ownerNamespaceHash), now,
-            identity.optedOut || restrictive, readbackProvenReplayTransports, supportedReplayProtocolGenerations, policy.retention)
+            identity.optedOut || restrictive, readbackProvenReplayTransports, supportedReplayProtocolGenerations, policy.retention, ::mayRemoveRasterOnWorker)
+        if (format == ReplayDeliveryFormat.RASTER) {
+            if (policy.support != ReplayDeliverySupport.INCLUDING_RASTER || !tx.nativeRasterReplaySchemaPresent()) return null
+            val raster = witness.nativeV3?.raster ?: return null
+            val state = ReplayQueueStore.state(tx) ?: return null
+            if (!nativeRasterBaseMayRetain(parsed) || fresh == null || identity.optedOut ||
+                fresh.captureAuthorization.status != V1ChannelAuthorizationStatus.AUTHORIZED ||
+                fresh.replayAuthorization.status == V1ChannelAuthorizationStatus.INVALID ||
+                fresh.configSemanticHash != parsed.configSemanticHash || fresh.siteId != parsed.siteId ||
+                state.poisoned || state.clockDenied || state.issuedAt != parsed.issuedAt || state.semanticHash != parsed.configSemanticHash ||
+                state.rasterSource?.conflicted != false || state.rasterSource?.semanticHash != witness.nativeV3?.semanticHash) return null
+            val siteKey = trustedSiteKey ?: return null
+            val credential = ReplayJson.digest(("elu-replay-credential-v2\u0000" + siteKey).toByteArray(Charsets.UTF_8))
+            val scope = ReplayJson.digest(ReplayJson.encode("namespace" to ReplayJson.text(checkNotNull(ownerNamespaceHash)),
+                "siteId" to ReplayJson.text(fresh.siteId), "endpoint" to ReplayJson.text(raster.endpoint.toASCIIString()),
+                "format" to ReplayJson.text("raster")))
+            return ReplayDeliveryAuthorization(raster.endpoint, siteKey, fresh.siteId,
+                dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, "gzip"), NativeRasterSealer.GENERATION,
+                credential, scope, ReplayDeliveryFormat.RASTER, parsed.issuedAt, raster.revision, raster.effectivePolicyHash, raster.maximumRequestBytes)
+        }
         val allowed = configManager.authorizeSealedReplayDelivery(privacy, identity, now) ?: return null
         val state = ReplayQueueStore.state(tx) ?: return null
         if (state.poisoned || state.clockDenied || state.protocol != allowed.protocolGeneration ||
@@ -1674,13 +1719,26 @@ internal class RuntimeQueueOwner private constructor(
         val witness = configurationGate?.snapshot()
         if (!reconcileRasterSourceOnWorker(witness) || witness == null) return@submit null
         val claimed = replayTransaction<ReplayDeliveryClaim?>(witness, null) { tx ->
-            val authority = resolveReplayDelivery(tx, witness, policy, true) ?: return@replayTransaction null
+            val authorities = listOfNotNull(resolveReplayDelivery(tx, witness, policy, true),
+                resolveReplayDelivery(tx, witness, policy, false, ReplayDeliveryFormat.RASTER)).associateBy { it.format }
             val now = captureClock.wallNowEpochMillis()
-            val claim = ReplayQueueStore.claim(tx, replayDeliveryOwner, authority, now, replayElapsedMillis()) {
-                resolveReplayDelivery(tx, witness, policy, false) == authority
+            var claimed: ReplayDeliveryClaim? = null
+            val heads = ReplayQueueStore.headers(tx).groupBy { it.replayId }.values.map { it.minBy { row -> row.sequence } }.sortedBy { it.ordinal }
+            for (head in heads) {
+                val format = if (head.raster) ReplayDeliveryFormat.RASTER else ReplayDeliveryFormat.WIREFRAME
+                val authority = authorities[format] ?: continue
+                if (head.raster && (head.replayId in pendingRasterRetirement ||
+                    !rasterIdentityMatches(ReplayQueueStore.readRaster(tx, head).request, requireCurrent(tx).state.identity))) continue
+                claimed = ReplayQueueStore.claim(tx, replayDeliveryOwner, authority, now, replayElapsedMillis(),
+                    originalSource = witness.takeIf { head.raster }, onlyOrdinal = head.ordinal) {
+                    resolveReplayDelivery(tx, witness, policy, false, format) == authority
+                }
+                if (claimed != null) {
+                    if (resolveReplayDelivery(tx, witness, policy, false, format) != authority) throw ReplaySourceWithdrawn()
+                    break
+                }
             }
-            if (claim != null && resolveReplayDelivery(tx, witness, policy, false) != authority) throw ReplaySourceWithdrawn()
-            claim
+            claimed
         }
         if (claimed != null && !replayPublicationIsCurrent(claimed, witness, policy)) {
             replayTransaction(null, ReplayDeliveryCommit.STALE) { tx ->
@@ -1697,17 +1755,28 @@ internal class RuntimeQueueOwner private constructor(
         val witness = configurationGate?.snapshot()
         if (!reconcileRasterSourceOnWorker(witness) || witness == null) return@submit null
         replayTransaction<Long?>(witness, null) { tx ->
-            val authority = resolveReplayDelivery(tx, witness, policy, false) ?: return@replayTransaction null
-            ReplayQueueStore.nextWakeDelay(tx, replayDeliveryOwner, authority, replayElapsedMillis())
+            listOfNotNull(resolveReplayDelivery(tx, witness, policy, false),
+                resolveReplayDelivery(tx, witness, policy, false, ReplayDeliveryFormat.RASTER))
+                .mapNotNull { authority -> ReplayQueueStore.nextWakeDelay(tx, replayDeliveryOwner, authority, replayElapsedMillis()) { request ->
+                    request.replayId !in pendingRasterRetirement && rasterIdentityMatches(request, requireCurrent(tx).state.identity) &&
+                        !request.expiredAt(captureClock.wallNowEpochMillis()) &&
+                        request.policyRevision == authority.policyRevision && request.effectivePolicyHash == authority.effectivePolicyHash &&
+                        request.byteCount <= authority.maximumRequestBytes
+                } }.minOrNull()
         }
     }
 
     private fun replayClaimIsCurrent(tx: RuntimeQueueTransaction, claim: ReplayDeliveryClaim,
         witness: V2ConfigAuthorityWitness, policy: ReplayDeliveryPolicy): Boolean {
         if (claim.owner != replayDeliveryOwner || !ReplayQueueStore.matches(tx, claim)) return false
-        val authority = resolveReplayDelivery(tx, witness, policy, true) ?: return false
+        if (claim.format == ReplayDeliveryFormat.RASTER && (claim.originalSource !== witness || claim.replayId in pendingRasterRetirement)) return false
+        val authority = resolveReplayDelivery(tx, witness, policy, true, claim.format) ?: return false
         if (authority != claim.authorization || !ReplayQueueStore.matches(tx, claim)) return false
         val parsed = try { V1ConfigJson.parseConfig(witness.body) } catch (_: Exception) { return false }
+        if (claim.format == ReplayDeliveryFormat.RASTER) return !ReplayQueueStore.rasterEpochBlocked(tx, claim.replayId) &&
+            rasterIdentityMatches(claim.rasterRow.request, requireCurrent(tx).state.identity) &&
+            !claim.rasterRow.request.expiredAt(captureClock.wallNowEpochMillis()) &&
+            resolveReplayDelivery(tx, witness, policy, false, claim.format) == authority
         return !claim.row.prepared.expiredAt(captureClock.wallNowEpochMillis()) &&
             policy.retention.mayRetain(claim.row.maskingProfile, parsed) &&
             resolveReplayDelivery(tx, witness, policy, false) == authority
@@ -1716,7 +1785,7 @@ internal class RuntimeQueueOwner private constructor(
     private fun dispatchReplayDelivery(claim: ReplayDeliveryClaim, policy: ReplayDeliveryPolicy,
         transport: ReplayDeliveryTransport): Future<ReplayTransportOperation?> = submit {
         assertUsable()
-        val witness = configurationGate?.snapshot() ?: return@submit null
+        val witness = claim.originalSource ?: configurationGate?.snapshot() ?: return@submit null
         val allowed = replayTransaction(witness, false) { tx ->
             replayClaimIsCurrent(tx, claim, witness, policy) && ReplayQueueStore.enroll(tx, claim)
         }
@@ -1747,15 +1816,18 @@ internal class RuntimeQueueOwner private constructor(
                                 val outcome = when (response.status) {
                                     401 -> ReplayDeliveryOutcome.Blocked(ReplayBlockKind.UNAUTHORIZED)
                                     403 -> ReplayDeliveryOutcome.Blocked(ReplayBlockKind.FORBIDDEN)
-                                    else -> ReplayResponseClassifier.classify(response, claim.row.prepared,
-                                        captureClock.wallNowEpochMillis(), REPLAY_UNKNOWN_ATTEMPT_DELAY_MILLIS)
+                                    else -> claim.classify(response, captureClock.wallNowEpochMillis(), REPLAY_UNKNOWN_ATTEMPT_DELAY_MILLIS)
                                 }
                                 if (outcome is ReplayDeliveryOutcome.Blocked) {
                                     replayTransaction(null, ReplayDeliveryCommit.STALE) { tx ->
                                         ReplayQueueStore.commit(tx, claim, outcome, 0)
                                     }
+                                    if (claim.format == ReplayDeliveryFormat.RASTER && nativeReceipt?.replayId == claim.replayId) {
+                                        nativeScope.invalidate(); nativeCaptureEnrollment?.withdraw()
+                                    }
                                 }
                             }
+                            drainRasterRetirementOnWorker(claim)
                             synchronized(lifecycleLock) {
                                 if (replayPhysicalOperation === started) { replayPhysicalOperation = null; replayPhysicalClaim = null }
                             }
@@ -1784,7 +1856,7 @@ internal class RuntimeQueueOwner private constructor(
         check(!isCurrentThreadWorker()) { "Replay transport I/O authorization must run on its own worker" }
         return try {
             submit {
-                val witness = configurationGate?.snapshot() ?: return@submit false
+                val witness = claim.originalSource ?: configurationGate?.snapshot() ?: return@submit false
                 val allowed = replayTransaction(witness, false) { tx -> replayClaimIsCurrent(tx, claim, witness, policy) }
                 val finalPolicy = allowed && replayPublicationIsCurrent(claim, witness, policy)
                 persistReplayDeliveryClockDenial()
@@ -1803,12 +1875,16 @@ internal class RuntimeQueueOwner private constructor(
         assertUsable()
         if (claim.owner != replayDeliveryOwner || !replayOwnerIsLive()) return@submit ReplayDeliveryCommit.STALE
         val deletes = outcome == ReplayDeliveryOutcome.Accepted || outcome == ReplayDeliveryOutcome.RejectedTooLarge
-        val witness = if (deletes) configurationGate?.snapshot() ?: return@submit ReplayDeliveryCommit.STALE else null
+        val witness = if (deletes) claim.originalSource ?: configurationGate?.snapshot() ?: return@submit ReplayDeliveryCommit.STALE else null
         val committed = replayTransaction(witness, ReplayDeliveryCommit.STALE) { tx ->
             if (!replayOwnerIsLive() || (witness != null && !replayClaimIsCurrent(tx, claim, witness, policy))) return@replayTransaction ReplayDeliveryCommit.STALE
             val result = ReplayQueueStore.commit(tx, claim, outcome, replayElapsedMillis())
             if (!replayOwnerIsLive() || (witness != null && !witness.isCurrent())) throw ReplaySourceWithdrawn()
             result
+        }
+        if (committed == ReplayDeliveryCommit.COMMITTED && outcome is ReplayDeliveryOutcome.Blocked &&
+            claim.format == ReplayDeliveryFormat.RASTER && nativeReceipt?.replayId == claim.replayId) {
+            nativeScope.invalidate(); nativeCaptureEnrollment?.withdraw()
         }
         val current = witness == null || replayPublicationIsCurrent(claim, witness, policy)
         persistReplayDeliveryClockDenial()
@@ -1824,8 +1900,24 @@ internal class RuntimeQueueOwner private constructor(
                 V1ConfigJson.parseExactTimestamp(RuntimeWallTimestamps.rfc3339(now)).toEpochMillisFloor() == now
         } catch (_: Exception) { false }
         if (!validWall) replayClockPoisoned = true
-        if (replayClockPoisoned || !replayOwnerIsLive() || !witness.isCurrent()) false
-        else {
+        if (replayClockPoisoned || !replayOwnerIsLive() || !witness.isCurrent() || configurationGate?.rasterDenial() != null) false
+        else if (claim.format == ReplayDeliveryFormat.RASTER) {
+            val parsed = V1ConfigJson.parseConfig(witness.body)
+            val identity = requireLoaded().state.identity
+            val privacy = policy.privacy.current(parsed, identity, now)
+            val fresh = (configManager.authorize(privacy, identity, now) as? V1ConfigResolution.Authorized)?.config
+            val raster = witness.nativeV3?.raster
+            val expected = claim.authorization
+            policy.support == ReplayDeliverySupport.INCLUDING_RASTER && claim.originalSource === witness &&
+                claim.replayId !in pendingRasterRetirement &&
+                fresh != null && fresh.captureAuthorization.status == V1ChannelAuthorizationStatus.AUTHORIZED &&
+                fresh.replayAuthorization.status != V1ChannelAuthorizationStatus.INVALID &&
+                fresh.configSemanticHash == parsed.configSemanticHash && fresh.siteId == expected.siteId &&
+                nativeRasterBaseMayRetain(parsed) && raster != null && raster.endpoint == expected.endpoint &&
+                raster.revision == expected.policyRevision && raster.effectivePolicyHash == expected.effectivePolicyHash &&
+                parsed.issuedAt == expected.sourceIssuedAt && rasterIdentityMatches(claim.rasterRow.request, identity) &&
+                claim.rasterRow.request.byteCount <= raster.maximumRequestBytes && !claim.rasterRow.request.expiredAt(now)
+        } else {
             val parsed = V1ConfigJson.parseConfig(witness.body)
             val identity = requireLoaded().state.identity
             val privacy = policy.privacy.current(parsed, identity, now)
@@ -1838,6 +1930,10 @@ internal class RuntimeQueueOwner private constructor(
                 !claim.row.prepared.expiredAt(now) && policy.retention.mayRetain(claim.row.maskingProfile, parsed)
         }
     } catch (_: Exception) { false }
+
+    private fun rasterIdentityMatches(request: NativeRasterStoredRequest, identity: dev.elu.analytics.internal.core.IdentityState): Boolean =
+        !identity.optedOut && request.anonymousId == identity.anonymousId && request.userId == identity.userId &&
+            request.identityRevision == identity.revision && request.contextRevision == identity.contextRevision
 
     private fun persistReplayDeliveryClockDenial() {
         if (replayClockPoisoned) replayTransaction(null, Unit) { tx ->
@@ -3641,7 +3737,7 @@ internal class RuntimeQueueOwner private constructor(
         candidate: PreparedAppend,
     ) {
         nativeScope.beforeIdentityWrite(candidate.after.state.identity)
-        if (candidate.after.state.identity.optedOut) ReplayQueueStore.purge(transaction)
+        if (candidate.after.state.identity.optedOut) ReplayQueueStore.purge(transaction, ::mayRemoveRasterOnWorker)
         if (candidate.before.state.identity.contextRevision != candidate.after.state.identity.contextRevision) {
             transaction.invalidateCurrentFlagCache()
         }

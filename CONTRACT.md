@@ -557,8 +557,8 @@ its pixel allocation. The original request bytes, identity, start receipt, clock
 budget survive retries; no restored row creates a producer permit.
 
 The existing segmented replay table has a closed raster header/body variant. Ordinals, queue limits,
-opt-out purge and original COMMIT reconciliation are shared with legacy replay. Legacy delivery skips
-raster rows, including cooldown/head scans. A missing raster branch or plain-v2 source retains sealed
+opt-out purge and original COMMIT reconciliation are shared with legacy replay. Default delivery skips
+raster rows; the explicit internal delivery branch below handles their separate scope. A missing raster branch or plain-v2 source retains sealed
 raster bytes; explicit incompatible privacy, consent or replay disable and lawful TTL still remove them.
 The old 42 supported database versions retain their meaning. Only native families 5,6,11,12,29,30,35,36,
 41,42,47,48,53,54 may lazily add128, atomically with the raster state discriminator. Other markers and
@@ -581,3 +581,40 @@ original resources/denial until exact reopened state establishes the outcome; ti
 
 New Kotlin and instrumentation cases for this checkpoint are authored but have not been compiled or
 executed locally. Source-boundary controls are not device or end-to-end qualification.
+
+
+### Internal raster delivery checkpoint (default off)
+
+The existing delivery owner has an explicit `INCLUDING_RASTER` mode; the installed composition still
+uses `WIREFRAME_ONLY`. It introduces no recorder, worker, public bitmap/request API, or production
+capability advertisement. One original physical transport slot, installation lease and SQLite worker
+serve both formats. A claim retains its exact original config-source witness, identity/context, closed
+policy hash/revision and `/v3/replay` endpoint scope. Replacement source tokens can authorize only a
+new claim, never adopt enrolled IO. Reset/logout, opt-out, expiry and source loss deny old IO/ACKs.
+Sealed delivery does not sample again or fabricate a session/recording budget.
+
+Strict raster delivery metadata uses schema2 on the existing marked raster table; legacy schema1
+canonical bytes remain unchanged. The lowest unresolved sequence is retried with its original body,
+request ID and digest. Lost ACK/process restart applies the existing unknown-attempt delay. Exact
+schema3 ACK deletes only its original row, subject to current original authority. Ambiguous COMMIT
+uses original full-state reconciliation; divergent state quarantines the owner rather than guessing.
+429 cooldown is keyed to its format/endpoint scope, and cannot stall the other format's endpoint.
+
+Validated original409 request/chunk/sequence conflicts and413 permanently block the entire raster
+epoch, including later appends and suffixes after restart.401/403 and protocol-invalid replies retain
+the refused epoch and latch its source issuance; a genuinely newer lawful issuance may deliver only
+a new epoch. Fully validated physical409/413 and observed401/403 survive subsequent cancellation,
+but partial/mismatched response bodies do not manufacture an exact conflict. Original transport
+cleanup and durable refusal settlement precede physical-slot release. Failed settlement retains the
+original lease and close barrier; elapsed time does not authorize release.
+
+TTL retires the whole raster epoch rather than only an expired head. Privacy/opt-out purge follows
+the same ordering: withdraw matching intake, cancel matching transport, and retain rows/refusal
+metadata until original capture accounting and physical IO settle. Deferred removal first commits an exact schema2 BLOCKED/RASTER_RETIRE restriction on the original
+rows. Only that closed variant allows attempts=0 and empty owner/nonce/credential/scope; it cannot
+become CLAIMED/RETRY or a schema1 record. Existing source time is retained when already claimed;
+otherwise the original durable wrapper boundary is restriction provenance, not a reconstructed first
+capture grant. This survives opt-in/loosening/restart. Deferred removal uses only the existing owner
+and is conservative when an enrolled capture remains. No separate tombstone store is added. Unavailable child/support retains bytes without granting permission; explicit incompatible
+base privacy still purges. New delivery tests are authored, not compiled or executed by this source
+checkpoint. Hosted and actual local device/engine/player qualification remain separate requirements.

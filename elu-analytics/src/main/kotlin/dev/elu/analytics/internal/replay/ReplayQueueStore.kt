@@ -98,9 +98,9 @@ internal object ReplayQueueStore {
             total = Math.addExact(total, header.length.toLong())
             require(total <= MAX_RUNTIME_QUEUE_BYTES)
             tx.readReplayRow(ReplayDeliveryMetadata.key(header.ordinal))?.let { metadata ->
-                require(!header.raster) { "Raster delivery is not installed" }
                 val delivery = ReplayDeliveryMetadata.decode(metadata)
-                require(delivery.ordinal == header.ordinal && delivery.digest == header.digest && delivery.protocolGeneration == header.generation)
+                require(delivery.ordinal == header.ordinal && delivery.digest == header.digest && delivery.protocolGeneration == header.generation &&
+                    delivery.raster == header.raster && (!header.raster || delivery.replayId == header.replayId))
                 expectedKeys += metadata.key
                 deliveryCount++
             }
@@ -148,7 +148,8 @@ internal object ReplayQueueStore {
 
     /** Explicit restrictions purge; expired/unavailable configuration is handled by the owner. */
     fun reconcile(tx: RuntimeQueueTransaction, config: V1ParsedConfig, namespace: String, now: Long,
-        optedOut: Boolean, proven: Set<V1ReplayTransport>, supportedGenerations: Set<String>, retention: ReplayMaskingRetention): Boolean {
+        optedOut: Boolean, proven: Set<V1ReplayTransport>, supportedGenerations: Set<String>, retention: ReplayMaskingRetention,
+        mayRemoveRaster: (String) -> Boolean = { true }): Boolean {
         var state = state(tx) ?: corrupt("Replay schema not initialized")
         require(state.namespaceHash == namespace)
         if (state.clockDenied || now < state.wallFloor) return false
@@ -167,32 +168,55 @@ internal object ReplayQueueStore {
             config.privacy?.replay?.enabled != true || config.features?.capture != true ||
             config.privacy?.capture?.enabled != true || optedOut || protocol !in supportedGenerations
         val generationChanged = state.protocol.isNotEmpty() && state.protocol != protocol
-        val remove = headers(tx).filter { header ->
-            if (header.raster) return@filter optedOut || !nativeRasterBaseMayRetain(config) ||
-                (config.siteId != null && config.siteId != header.siteId) || readRaster(tx, header).request.expiredAt(now)
+        val all = headers(tx)
+        val expiredRaster = all.filter { it.raster && readRaster(tx, it).request.expiredAt(now) }.map { it.replayId }.toSet()
+        val retiredRaster = rasterRetirementEpochs(tx, all)
+        val retiring = hashSetOf<String>()
+        val remove = all.filter { header ->
+            if (header.raster) {
+                val restricted = optedOut || !nativeRasterBaseMayRetain(config) ||
+                    (config.siteId != null && config.siteId != header.siteId) || header.replayId in expiredRaster || header.replayId in retiredRaster
+                if (!restricted) return@filter false
+                if (mayRemoveRaster(header.replayId)) return@filter true
+                if (retiring.add(header.replayId)) markRasterRetiring(tx, state, all, header.replayId)
+                return@filter false
+            }
             val row = read(tx, header)
             disabled || generationChanged || row.prepared.transport !in advertised || row.prepared.transport !in proven ||
                 row.prepared.expiredAt(now) || !retention.mayRetain(row.maskingProfile, config)
         }
-        state = delete(tx, state, remove)
+        state = delete(tx, checkNotNull(state(tx)), remove)
         tx.putReplayRow(state.copy(siteId = config.siteId ?: state.siteId, issuedAt = config.issuedAt,
             semanticHash = config.configSemanticHash, protocol = protocol, wallFloor = now, poisoned = false).row())
         return !disabled
     }
 
-    fun expire(tx: RuntimeQueueTransaction, now: Long): Int {
+    fun expire(tx: RuntimeQueueTransaction, now: Long, mayRemoveRaster: (String) -> Boolean = { true }): Int {
         val current = state(tx) ?: return 0
         if (current.clockDenied || now < current.wallFloor) return 0
-        val expired = headers(tx).filter {
-            if (it.raster) readRaster(tx, it).request.expiredAt(now) else read(tx, it).prepared.expiredAt(now)
+        val all = headers(tx)
+        val expiredEpochs = all.filter { it.raster && readRaster(tx, it).request.expiredAt(now) }.map { it.replayId }.toSet()
+        val retiredEpochs = rasterRetirementEpochs(tx, all)
+        val retiring = hashSetOf<String>()
+        val expired = all.filter {
+            if (!it.raster) return@filter read(tx, it).prepared.expiredAt(now)
+            if (it.replayId !in expiredEpochs && it.replayId !in retiredEpochs) return@filter false
+            if (mayRemoveRaster(it.replayId)) return@filter true
+            if (retiring.add(it.replayId)) markRasterRetiring(tx, current, all, it.replayId)
+            false
         }
-        tx.putReplayRow(delete(tx, current, expired).copy(wallFloor = now).row())
+        tx.putReplayRow(delete(tx, checkNotNull(state(tx)), expired).copy(wallFloor = now).row())
         return expired.size
     }
 
-    fun purge(tx: RuntimeQueueTransaction) {
+    fun purge(tx: RuntimeQueueTransaction, mayRemoveRaster: (String) -> Boolean = { true }) {
         val current = state(tx) ?: return
-        tx.putReplayRow(delete(tx, current, headers(tx)).row())
+        val all = headers(tx); val retiring = hashSetOf<String>()
+        val remove = all.filter {
+            if (!it.raster || mayRemoveRaster(it.replayId)) true
+            else { if (retiring.add(it.replayId)) markRasterRetiring(tx, current, all, it.replayId); false }
+        }
+        tx.putReplayRow(delete(tx, checkNotNull(state(tx)), remove).row())
     }
 
     fun append(tx: RuntimeQueueTransaction, request: PreparedReplayRequest, profile: ReplayMaskingProfile,
@@ -284,6 +308,7 @@ internal object ReplayQueueStore {
         if (state.clockDenied || now < state.wallFloor) return ReplayAppendResult.Rejected(ReplayAppendRejection.CLOCK)
         if (request.expiredAt(now)) return ReplayAppendResult.Rejected(ReplayAppendRejection.EXPIRED)
         val rows = headers(tx)
+        if (rasterEpochBlocked(tx, request.replayId)) return ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
         val collisions = rows.filter { it.requestId == request.requestId ||
             (it.replayId == request.replayId && (it.chunkId == request.chunkId || it.sequence == request.sequence)) }
         if (collisions.isNotEmpty()) {
@@ -319,18 +344,59 @@ internal object ReplayQueueStore {
     fun delivery(tx: RuntimeQueueTransaction, ordinal: Long): ReplayDeliveryMetadata? =
         tx.readReplayRow(ReplayDeliveryMetadata.key(ordinal))?.let { checked { ReplayDeliveryMetadata.decode(it) } }
 
+    fun rasterEpochBlocked(tx: RuntimeQueueTransaction, replayId: String): Boolean =
+        headers(tx).filter { it.raster && it.replayId == replayId }.any {
+            delivery(tx, it.ordinal)?.state == ReplayDeliveryState.BLOCKED
+        }
+
+    private fun rasterRetirementEpochs(tx: RuntimeQueueTransaction, rows: List<ReplayStoredHeader>): Set<String> =
+        rows.filter { it.raster && delivery(tx, it.ordinal)?.let { d ->
+            d.state == ReplayDeliveryState.BLOCKED && d.blockKind == ReplayBlockKind.RASTER_RETIRE.name
+        } == true }.map { it.replayId }.toSet()
+
+    /** Restriction provenance only: no attempt, owner/nonce, credential or allow authority is minted. */
+    private fun markRasterRetiring(tx: RuntimeQueueTransaction, original: ReplayStoredState,
+        rows: List<ReplayStoredHeader>, replayId: String) {
+        require(original.rasterStorage && original.namespaceHash.isNotEmpty())
+        val anchor = checkNotNull(original.rasterSource).issuedAt
+        var added = 0L
+        rows.filter { it.raster && it.replayId == replayId }.forEach { header ->
+            require(header.siteId == original.siteId && header.generation == NativeRasterSealer.GENERATION)
+            val prior = delivery(tx, header.ordinal)
+            if (prior?.blockKind == ReplayBlockKind.RASTER_RETIRE.name) return@forEach
+            val restriction = ReplayDeliveryMetadata(header.ordinal, header.digest, ReplayDeliveryState.BLOCKED, "", "", 0,
+                blockKind = ReplayBlockKind.RASTER_RETIRE.name, protocolGeneration = header.generation,
+                raster = true, replayId = header.replayId, sourceIssuedAt = prior?.sourceIssuedAt ?: anchor)
+            tx.putReplayRow(restriction.row())
+            if (prior == null) added++
+        }
+        if (added > 0) {
+            val state = checkNotNull(state(tx))
+            tx.putReplayRow(state.copy(deliveryMetadataCount = (state.deliveryMetadataCount ?: 0L) + added).row())
+        }
+    }
+
     fun claim(tx: RuntimeQueueTransaction, owner: String, authorization: ReplayDeliveryAuthorization,
-        now: Long, elapsedMillis: Long, finalAdmission: () -> Boolean): ReplayDeliveryClaim? {
+        now: Long, elapsedMillis: Long,
+        originalSource: dev.elu.analytics.internal.config.V2ConfigAuthorityWitness? = null,
+        onlyOrdinal: Long? = null, finalAdmission: () -> Boolean): ReplayDeliveryClaim? {
         require(elapsedMillis in 0..MAX_REPLAY_SAFE_INTEGER - REPLAY_MAX_RETRY_MILLIS)
         val state = state(tx) ?: return null
         if (state.poisoned || state.clockDenied || now < state.wallFloor) return null
-        val rows = headers(tx).filterNot { it.raster }
+        val raster = authorization.format == ReplayDeliveryFormat.RASTER
+        val all = headers(tx)
+        if (all.any { delivery(tx, it.ordinal)?.let { d -> d.owner == owner &&
+            d.state in setOf(ReplayDeliveryState.CLAIMED, ReplayDeliveryState.ENROLLED) } == true }) return null
+        val rows = all.filter { it.raster == raster }
         var occupied = false
         var cooldown = false
         rows.forEach { header ->
             var d = delivery(tx, header.ordinal) ?: return@forEach
-            if (d.state == ReplayDeliveryState.BLOCKED && d.blockKind == ReplayBlockKind.UNAUTHORIZED.name &&
-                d.credentialWitness == authorization.credentialWitness && d.scopeWitness == authorization.scopeWitness) cooldown = true
+            if (d.state == ReplayDeliveryState.BLOCKED && (d.blockKind == ReplayBlockKind.UNAUTHORIZED.name ||
+                raster && d.blockKind in setOf(ReplayBlockKind.FORBIDDEN.name, ReplayBlockKind.PROTOCOL.name)) &&
+                d.credentialWitness == authorization.credentialWitness && d.scopeWitness == authorization.scopeWitness &&
+                (!raster || dev.elu.analytics.internal.config.V1ConfigJson.parseExactTimestamp(authorization.sourceIssuedAt) <=
+                    dev.elu.analytics.internal.config.V1ConfigJson.parseExactTimestamp(d.sourceIssuedAt))) cooldown = true
             if (d.state in setOf(ReplayDeliveryState.CLAIMED, ReplayDeliveryState.ENROLLED) && d.owner == owner) occupied = true
             if (d.state != ReplayDeliveryState.BLOCKED && d.owner != owner) {
                 val delay = if (d.state in setOf(ReplayDeliveryState.CLAIMED, ReplayDeliveryState.ENROLLED)) REPLAY_UNKNOWN_ATTEMPT_DELAY_MILLIS else d.delayMillis
@@ -343,73 +409,99 @@ internal object ReplayQueueStore {
         if (occupied || cooldown) return null
         val heads = rows.groupBy { it.replayId }.values.map { group -> group.minBy { it.sequence } }.sortedBy { it.ordinal }
         for (header in heads) {
+            if (onlyOrdinal != null && header.ordinal != onlyOrdinal) continue
+            if (raster && rasterEpochBlocked(tx, header.replayId)) continue
             val d = delivery(tx, header.ordinal)
             if (d?.state == ReplayDeliveryState.BLOCKED || (d?.state == ReplayDeliveryState.RETRY && elapsedMillis < d.notBeforeMillis)) continue
-            val row = read(tx, header)
-            if (row.siteId != authorization.siteId || row.captureProtocolGeneration != authorization.protocolGeneration ||
+            val row = if (!raster) read(tx, header) else null
+            val rasterRow = if (raster) readRaster(tx, header) else null
+            if (rasterRow != null) {
+                val request = rasterRow.request
+                if (originalSource == null || rasterRow.siteId != authorization.siteId || request.expiredAt(now) ||
+                    request.policyRevision != authorization.policyRevision || request.effectivePolicyHash != authorization.effectivePolicyHash ||
+                    request.byteCount > authorization.maximumRequestBytes) continue
+            } else if (row == null || row.siteId != authorization.siteId || row.captureProtocolGeneration != authorization.protocolGeneration ||
                 row.prepared.transport != authorization.transport || row.prepared.expiredAt(now)) continue
             val next = ReplayDeliveryMetadata(header.ordinal, header.digest, ReplayDeliveryState.CLAIMED, owner,
                 java.util.UUID.randomUUID().toString(), minOf((d?.attempts ?: 0) + 1, 31),
                 credentialWitness = authorization.credentialWitness, scopeWitness = authorization.scopeWitness,
-                protocolGeneration = authorization.protocolGeneration)
+                protocolGeneration = authorization.protocolGeneration, raster = raster,
+                replayId = if (raster) header.replayId else "", sourceIssuedAt = if (raster) authorization.sourceIssuedAt else "")
             if (!finalAdmission()) return null
             tx.putReplayRow(next.row())
             val current = checkNotNull(state(tx))
             tx.putReplayRow(current.copy(wallFloor = maxOf(now, current.wallFloor),
                 deliveryMetadataCount = (current.deliveryMetadataCount ?: 0L) + if (d == null) 1 else 0).row())
-            return ReplayDeliveryClaim(owner, next.nonce, row, authorization, next.attempts)
+            return if (rasterRow != null) ReplayDeliveryClaim.raster(owner, next.nonce, rasterRow, authorization, next.attempts, checkNotNull(originalSource))
+                else ReplayDeliveryClaim(owner, next.nonce, checkNotNull(row), authorization, next.attempts)
         }
         return null
     }
 
     fun matches(tx: RuntimeQueueTransaction, claim: ReplayDeliveryClaim): Boolean {
-        val d = delivery(tx, claim.row.ordinal) ?: return false
-        return d.state in setOf(ReplayDeliveryState.CLAIMED, ReplayDeliveryState.ENROLLED) && d.owner == claim.owner && d.nonce == claim.nonce &&
-            d.digest == claim.row.prepared.digest && d.protocolGeneration == claim.authorization.protocolGeneration &&
+        val d = delivery(tx, claim.ordinal) ?: return false
+        return d.raster == (claim.format == ReplayDeliveryFormat.RASTER) &&
+            (!d.raster || d.replayId == claim.replayId && d.sourceIssuedAt == claim.authorization.sourceIssuedAt) &&
+            d.state in setOf(ReplayDeliveryState.CLAIMED, ReplayDeliveryState.ENROLLED) && d.owner == claim.owner && d.nonce == claim.nonce &&
+            d.digest == claim.digest && d.protocolGeneration == claim.authorization.protocolGeneration &&
             d.credentialWitness == claim.authorization.credentialWitness && d.scopeWitness == claim.authorization.scopeWitness
     }
 
     fun enroll(tx: RuntimeQueueTransaction, claim: ReplayDeliveryClaim): Boolean {
         if (!matches(tx, claim)) return false
-        val d = checkNotNull(delivery(tx, claim.row.ordinal))
+        val d = checkNotNull(delivery(tx, claim.ordinal))
         if (d.state != ReplayDeliveryState.CLAIMED) return false
         tx.putReplayRow(d.copy(state = ReplayDeliveryState.ENROLLED).row())
         return true
     }
 
-    fun nextWakeDelay(tx: RuntimeQueueTransaction, owner: String, authority: ReplayDeliveryAuthorization, elapsedMillis: Long): Long? {
-        val rows = headers(tx).filterNot { it.raster }
+    fun nextWakeDelay(tx: RuntimeQueueTransaction, owner: String, authority: ReplayDeliveryAuthorization, elapsedMillis: Long,
+        eligibleRaster: (NativeRasterStoredRequest) -> Boolean = { true }): Long? {
+        val raster = authority.format == ReplayDeliveryFormat.RASTER
+        val all = headers(tx)
+        if (all.any { delivery(tx, it.ordinal)?.let { d -> d.owner == owner &&
+            d.state in setOf(ReplayDeliveryState.CLAIMED, ReplayDeliveryState.ENROLLED) } == true }) return null
+        val rows = all.filter { it.raster == raster }
         val metadata = rows.mapNotNull { delivery(tx, it.ordinal) }
-        if (metadata.any { it.state == ReplayDeliveryState.BLOCKED && it.blockKind == ReplayBlockKind.UNAUTHORIZED.name &&
-            it.credentialWitness == authority.credentialWitness && it.scopeWitness == authority.scopeWitness }) return null
+        if (metadata.any { it.state == ReplayDeliveryState.BLOCKED && (it.blockKind == ReplayBlockKind.UNAUTHORIZED.name ||
+            raster && it.blockKind in setOf(ReplayBlockKind.FORBIDDEN.name, ReplayBlockKind.PROTOCOL.name)) &&
+            it.credentialWitness == authority.credentialWitness && it.scopeWitness == authority.scopeWitness &&
+            (!raster || dev.elu.analytics.internal.config.V1ConfigJson.parseExactTimestamp(authority.sourceIssuedAt) <=
+                dev.elu.analytics.internal.config.V1ConfigJson.parseExactTimestamp(it.sourceIssuedAt)) }) return null
         if (metadata.any { it.state in setOf(ReplayDeliveryState.CLAIMED, ReplayDeliveryState.ENROLLED) && it.owner == owner }) return null
+        val heads = rows.groupBy { it.replayId }.values.map { it.minBy { row -> row.sequence } }
+            .filter { !raster || !rasterEpochBlocked(tx, it.replayId) && eligibleRaster(readRaster(tx, it).request) }
+        if (heads.isEmpty()) return null
         // A matching endpoint cooldown blocks every row, including already-due ordinary heads.
         // Waking for an earlier head would otherwise spin at1ms until this deadline expires.
         val endpointDeadline = metadata.filter { it.state == ReplayDeliveryState.RETRY && it.owner == owner &&
             it.endpointCooldown && it.scopeWitness == authority.scopeWitness && it.notBeforeMillis > elapsedMillis }
             .maxOfOrNull { it.notBeforeMillis }
         if (endpointDeadline != null) return endpointDeadline - elapsedMillis
-        return rows.groupBy { it.replayId }.values.map { it.minBy { row -> row.sequence } }
-            .mapNotNull { delivery(tx, it.ordinal) }.filter { it.state == ReplayDeliveryState.RETRY && it.owner == owner }
+        return heads.mapNotNull { delivery(tx, it.ordinal) }.filter { it.state == ReplayDeliveryState.RETRY && it.owner == owner }
             .minOfOrNull { maxOf(1L, it.notBeforeMillis - elapsedMillis) }
     }
 
     fun commit(tx: RuntimeQueueTransaction, claim: ReplayDeliveryClaim, outcome: ReplayDeliveryOutcome,
         elapsedMillis: Long): ReplayDeliveryCommit {
         require(elapsedMillis in 0..MAX_REPLAY_SAFE_INTEGER - REPLAY_MAX_RETRY_MILLIS)
-        val retained = delivery(tx, claim.row.ordinal)
+        require(outcome != ReplayDeliveryOutcome.Blocked(ReplayBlockKind.RASTER_RETIRE))
+        val retained = delivery(tx, claim.ordinal)
         // Owner settlement may have persisted this exact permanent refusal before waking the
         // coordinator or completing close. Its repeat is idempotent, never a new authority grant.
         if (outcome is ReplayDeliveryOutcome.Blocked && retained?.state == ReplayDeliveryState.BLOCKED &&
-            retained.owner == claim.owner && retained.nonce == claim.nonce && retained.digest == claim.row.prepared.digest &&
+            retained.owner == claim.owner && retained.nonce == claim.nonce && retained.digest == claim.digest &&
+            retained.raster == (claim.format == ReplayDeliveryFormat.RASTER) &&
+            (!retained.raster || retained.replayId == claim.replayId && retained.sourceIssuedAt == claim.authorization.sourceIssuedAt) &&
             retained.blockKind == outcome.kind.name && retained.protocolGeneration == claim.authorization.protocolGeneration &&
             retained.credentialWitness == claim.authorization.credentialWitness && retained.scopeWitness == claim.authorization.scopeWitness)
             return ReplayDeliveryCommit.COMMITTED
         if (!matches(tx, claim)) return ReplayDeliveryCommit.STALE
-        val d = checkNotNull(delivery(tx, claim.row.ordinal))
+        val d = checkNotNull(delivery(tx, claim.ordinal))
         when (outcome) {
             ReplayDeliveryOutcome.Accepted, ReplayDeliveryOutcome.RejectedTooLarge -> {
-                val header = headers(tx).singleOrNull { it.ordinal == claim.row.ordinal && it.digest == claim.row.prepared.digest }
+                require(claim.format != ReplayDeliveryFormat.RASTER || outcome == ReplayDeliveryOutcome.Accepted)
+                val header = headers(tx).singleOrNull { it.ordinal == claim.ordinal && it.digest == claim.digest }
                     ?: return ReplayDeliveryCommit.STALE
                 tx.putReplayRow(delete(tx, checkNotNull(state(tx)), listOf(header)).row())
             }
@@ -422,6 +514,12 @@ internal object ReplayQueueStore {
                 blockKind = outcome.kind.name, delayMillis = 0, notBeforeMillis = 0, endpointCooldown = false).row())
         }
         return ReplayDeliveryCommit.COMMITTED
+    }
+
+    /** Restriction-only removal after the original owner has settled matching physical work. */
+    fun removeRasterEpochs(tx: RuntimeQueueTransaction, replayIds: Set<String>) {
+        val state = state(tx) ?: return
+        tx.putReplayRow(delete(tx, state, headers(tx).filter { it.raster && it.replayId in replayIds }).row())
     }
 
     private fun delete(tx: RuntimeQueueTransaction, state: ReplayStoredState, rows: List<ReplayStoredHeader>): ReplayStoredState {

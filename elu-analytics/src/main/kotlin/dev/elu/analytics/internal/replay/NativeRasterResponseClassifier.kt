@@ -22,6 +22,17 @@ internal sealed interface NativeRasterResponseOutcome {
 internal object NativeRasterResponseClassifier {
     fun classify(response: ReplayTransportResponse, request: NativeRasterPreparedRequest, now: Long,
         retryDelayMillis: Long): NativeRasterResponseOutcome {
+        return classify(response, Identity(request.requestId, request.replayId, request.chunkId, request.sequence), now, retryDelayMillis)
+    }
+
+    /** Restoring immutable request facts never constructs a producer permission. */
+    fun classify(response: ReplayTransportResponse, request: NativeRasterStoredRequest, now: Long,
+        retryDelayMillis: Long): NativeRasterResponseOutcome =
+        classify(response, Identity(request.requestId, request.replayId, request.chunkId, request.sequence), now, retryDelayMillis)
+
+    private data class Identity(val requestId: String, val replayId: String, val chunkId: String, val sequence: Long)
+    private fun classify(response: ReplayTransportResponse, request: Identity, now: Long,
+        retryDelayMillis: Long): NativeRasterResponseOutcome {
         if (response.status == 401 || response.status == 403) {
             return NativeRasterResponseOutcome.CredentialBlocked(response.status)
         }

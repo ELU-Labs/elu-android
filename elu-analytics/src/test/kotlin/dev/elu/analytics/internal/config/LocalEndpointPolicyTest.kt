@@ -11,6 +11,21 @@ class LocalEndpointPolicyTest {
     private val origin = "https://analytics.example.com"
     private val selected = LocalEndpointPolicy.fromApiHost(origin)
 
+    @Test fun `explicit raster role preserves exact origin prefix and reserved query restrictions`() {
+        val cloud = URI("https://ingest.elu.dev/v3/replay")
+        LocalEndpointPolicy.CLOUD.requireNativeRasterApproved(cloud)
+        assertThrows(IllegalArgumentException::class.java) { LocalEndpointPolicy.CLOUD.requireApproved(cloud, V1EndpointRole.REPLAY) }
+        val prefixed = LocalEndpointPolicy.fromApiHost("$origin/team")
+        prefixed.requireNativeRasterApproved(URI("$origin/team/v3/replay?route=eu"))
+        for (bad in listOf("$origin/v3/replay", "$origin/team/v2/replay", "$origin/team/v3/replay/",
+            "$origin/team/v3/replay?%73ite_key=secret", "$origin/team/v3/replay?site_key=secret",
+            "http://analytics.example.com/team/v3/replay", "$origin:444/team/v3/replay",
+            "https://user@analytics.example.com/team/v3/replay", "$origin/team/v3/replay#fragment",
+            "https://other.example.com/team/v3/replay")) {
+            assertThrows(bad, IllegalArgumentException::class.java) { prefixed.requireNativeRasterApproved(URI(bad)) }
+        }
+    }
+
     @Test fun `local origin alone changes every role while cloud defaults remain closed`() {
         for ((role, path) in listOf(V1EndpointRole.EVENTS to "/v1/events", V1EndpointRole.FLAGS to "/v1/flags",
             V1EndpointRole.REPLAY to "/v2/replay", V1EndpointRole.ASSETS to "/sdk/")) {

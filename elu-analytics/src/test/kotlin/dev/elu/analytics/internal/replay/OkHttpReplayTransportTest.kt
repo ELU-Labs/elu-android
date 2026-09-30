@@ -267,6 +267,43 @@ class OkHttpReplayTransportTest {
         worker.runNext(); assertEquals(1, worker.tasks.size); worker.runNext(); next.get(1, TimeUnit.SECONDS); adapter.close()
     }
 
+    @Test fun `raster transport writes exact stored schema3 bytes and requires explicit original format`() = RasterQueueRig().use { rig ->
+        rig.activate(); val source = checkNotNull(rig.gate.snapshot()); val policy = checkNotNull(source.nativeV3?.raster)
+        val stored = NativeRasterStoredRequest.parse(NativeRasterStorageTest.storedBody(policy.effectivePolicyHash))
+        val claim = ReplayDeliveryClaim.raster(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+            NativeRasterStoredChunk(0, "site", stored), ReplayDeliveryAuthorization(policy.endpoint, KEY, "site",
+                dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, "gzip"), NativeRasterSealer.GENERATION,
+                "credential", "scope", ReplayDeliveryFormat.RASTER, "2026-08-05T00:00:00Z", policy.revision, policy.effectivePolicyHash), 1, source)
+        val worker = Worker(); lateinit var sent: FakeCall
+        val adapter = OkHttpReplayTransport(KEY, policy.endpoint, format = ReplayDeliveryFormat.RASTER,
+            elapsedRealtimeNanos = { 0L }, scheduleDeadline = { _, _ -> AutoCloseable {} }, executor = worker,
+            callFactory = { client, request -> FakeCall(client, request, body = Body(NativeRasterDeliveryTest.ack(stored).copyBody())).also { sent = it } })
+        assertThrows(IllegalArgumentException::class.java) { OkHttpReplayTransport(KEY, policy.endpoint) }
+        val operation = adapter.start(claim) { true }; worker.runNext()
+        assertEquals(ReplayDeliveryOutcome.Accepted, claim.classify(operation.settlement.get(), 0, 1))
+        assertArrayEquals(stored.copyBytes(), sent.written.readByteArray()); assertTrue(sent.body.closed)
+        assertEquals(policy.endpoint.toString(), sent.request().url.toString()); adapter.close()
+    }
+
+    @Test fun `complete exact raster refusal survives cleanup cancellation but malformed body cannot invent one`() = RasterQueueRig().use { rig ->
+        rig.activate(); val source = checkNotNull(rig.gate.snapshot()); val policy = checkNotNull(source.nativeV3?.raster)
+        val stored = NativeRasterStoredRequest.parse(NativeRasterStorageTest.storedBody(policy.effectivePolicyHash))
+        val claim = ReplayDeliveryClaim.raster(UUID.randomUUID().toString(), UUID.randomUUID().toString(), NativeRasterStoredChunk(0, "site", stored),
+            ReplayDeliveryAuthorization(policy.endpoint, KEY, "site", dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, "gzip"),
+                NativeRasterSealer.GENERATION, "credential", "scope", ReplayDeliveryFormat.RASTER, "2026-08-05T00:00:00Z"), 1, source)
+        for (valid in listOf(false, true)) {
+            val worker = Worker(); lateinit var original: ReplayTransportOperation
+            val bytes = if (valid) NativeRasterDeliveryTest.refusal(stored, ReplayBlockKind.RASTER_SEQUENCE).copyBody() else "{}".toByteArray()
+            val adapter = OkHttpReplayTransport(KEY, policy.endpoint, format = ReplayDeliveryFormat.RASTER,
+                elapsedRealtimeNanos = { 0L }, scheduleDeadline = { _, _ -> AutoCloseable {} }, executor = worker,
+                callFactory = { client, request -> FakeCall(client, request, 409, Body(bytes, onClose = { original.cancel() })) })
+            original = adapter.start(claim) { true }; worker.runNext()
+            if (valid) assertEquals(ReplayDeliveryOutcome.Blocked(ReplayBlockKind.RASTER_SEQUENCE), claim.classify(original.settlement.get(), 0, 1))
+            else assertTrue(failure(original) is IOException)
+            assertTrue(adapter.isIdle()); adapter.close()
+        }
+    }
+
     private fun adapter(worker: Executor, factory: (OkHttpClient, Request) -> Call = { client, request -> FakeCall(client, request) }) =
         OkHttpReplayTransport(KEY, ENDPOINT, elapsedRealtimeNanos = { 0L }, scheduleDeadline = { _, _ -> AutoCloseable {} }, executor = worker, callFactory = factory)
     private fun claim(key: String = KEY, endpoint: URI = ENDPOINT): ReplayDeliveryClaim {
