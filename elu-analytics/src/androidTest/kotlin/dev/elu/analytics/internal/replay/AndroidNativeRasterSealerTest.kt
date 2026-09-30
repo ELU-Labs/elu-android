@@ -75,9 +75,21 @@ class AndroidNativeRasterSealerTest {
         }
     }
     // Controlled monotonic time isolates frame/ownership behavior from cold renderer speed.
-    private fun capture(current: () -> Boolean = { true }): AnnotatedRasterCandidate = rule.runOnIdle {
-        val at = nextAttempt; nextAttempt += 1_000_000_000L
-        collector.capture(rule.activity.window, current) { at }
+    private fun awaitOriginalHostReady(view: View) {
+        // Compose idleness does not imply that the real Window has regained focus.
+        rule.waitUntil(timeoutMillis = 5_000) {
+            rule.runOnIdle {
+                view.rootView === rule.activity.window.peekDecorView() && view.isAttachedToWindow &&
+                    view.hasWindowFocus() && view.isLaidOut && !view.isLayoutRequested && view.width > 0 && view.height > 0
+            }
+        }
+    }
+    private fun capture(current: () -> Boolean = { true }): AnnotatedRasterCandidate {
+        awaitOriginalHostReady(host)
+        return rule.runOnIdle {
+            val at = nextAttempt; nextAttempt += 1_000_000_000L
+            collector.capture(rule.activity.window, current) { at }
+        }
     }
     private fun identity() = IdentityState(revision = 3, contextRevision = 7, anonymousId = "anon-raster", userId = "user-raster",
         groups = emptyMap(), superProperties = emptyMap(),
@@ -234,6 +246,7 @@ class AndroidNativeRasterSealerTest {
             EluReplayRegionGeometry(coordinates, foreign.parent, 0, x, y, x+w, y, x, y+h, x+w, y+h)
         }) }
         try {
+            awaitOriginalHostReady(foreign)
             val frame = rule.runOnIdle { AndroidAnnotatedReplayCollector(scope.registry).capture(rule.activity.window, { true }) { 1L } }
             assertNotSame(originalFrame.sourceIdentity, frame.sourceIdentity)
             refusal(NativeRasterSealingFailure.SOURCE_MISMATCH) { original.seal(frame, instant) }
