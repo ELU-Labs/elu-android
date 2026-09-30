@@ -492,10 +492,10 @@ class ReplayDeliveryTest {
     private fun error(status:Int,requestId:String)=JSONObject().put("schemaVersion",1).put("status",status).put("requestId",requestId)
         .put("code","request-refused").put("disposition",if(status==413) "retry-after-reduction" else "retryable").put("message","refused").toString().toByteArray()
     private class Rig(private val proven: Boolean = true, private val countLimit: Int = 100, private val allowProfile: Boolean = true, private val maximumExpiredSession: Boolean = false, private val supported: Set<String> = setOf(ReplayFixtures.GENERATION, "replay-v2-generation-2")) : AutoCloseable {
-        val clock = Clock(); val worker = Worker(); val gate = V2ConfigAuthorityGate()
+        val clock = Clock(); var worker = Worker(); var gate = V2ConfigAuthorityGate()
         var body = ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json")
-        val source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
-        val driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+        var source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+        var driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
         val backing = FakeRuntimeQueueBacking()
         @Volatile var onReplayWrite: (() -> Unit)? = null
         @Volatile var onReplayStateRead: (() -> Unit)? = null
@@ -578,7 +578,17 @@ class ReplayDeliveryTest {
             ReplayMaskingRetention { _, _ -> profileCurrent },
         )).get().also { queue = it }
         fun reopen() { owner.closeAsync().get(); openAfterClose() }
-        fun openAfterClose() { owner = open(); queue = null; owner.submitCaptureAuthority(body, privacy()).get() }
+        fun openAfterClose() {
+            driver.close()
+            // A reopened queue owns a fresh original source/gate; a closed gate stays closed.
+            assertNull(gate.snapshot())
+            worker = Worker(); gate = V2ConfigAuthorityGate()
+            source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+            driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+            owner = open(); queue = null
+            driver.start(); worker.runNext()
+            assertTrue(owner.submitCaptureAuthority(body, privacy()).get() is RuntimeCaptureAuthorityUpdateResult.Activated)
+        }
         fun event() = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "event", "2026-08-05T00:01:06.000Z", emptyMap(), StandaloneRuntime.defaultVersions())
         override fun close() { runCatching { owner.closeAsync().get(3, TimeUnit.SECONDS) }; driver.close() }
     }

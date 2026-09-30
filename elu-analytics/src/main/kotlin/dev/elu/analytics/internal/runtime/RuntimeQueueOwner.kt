@@ -576,10 +576,22 @@ internal class RuntimeQueueOwner private constructor(
         effectivePrivacyBody: String?,
     ): Future<RuntimeCaptureAuthorityUpdateResult> =
         submit(revokeNative = true) {
+            val previousAuthority = captureAuthority
+            // Raster ordering now reads storage before config installation. That fallible read
+            // must not leave the previous executable authority available on an unknown result.
+            captureAuthority = RuntimeCaptureAuthorityState.Pending(when (previousAuthority) {
+                is RuntimeCaptureAuthorityState.Authorized -> previousAuthority.configIssuedAt to previousAuthority.configSemanticHash
+                is RuntimeCaptureAuthorityState.Pending -> previousAuthority.trustedConfigBoundary
+                is RuntimeCaptureAuthorityState.Terminal -> previousAuthority.trustedConfigBoundary
+                RuntimeCaptureAuthorityState.Absent -> null
+            })
             val witness = configurationGate?.snapshotFor(configBody)
             if (!reconcileRasterSourceOnWorker(witness)) {
                 return@submit terminateAuthority(RuntimeCaptureAuthorityTerminalReason.CONFLICT, null)
             }
+            // Only a known successful ordering read reaches the existing install/activation
+            // path, which retains its own Pending latch and previous-authority semantics.
+            captureAuthority = previousAuthority
             if (configurationGate != null && witness == null) {
                 return@submit terminateAuthority(RuntimeCaptureAuthorityTerminalReason.STALE, null, null, null)
             }

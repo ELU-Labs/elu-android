@@ -111,12 +111,14 @@ class NativeRasterStorageTest {
             ReplayQueueStore.validate(tx, RasterQueueRig.namespace)
             assertEquals(raster.byteCount.toLong() + old.byteCount, ReplayQueueStore.state(tx)!!.bytes)
             val authorization = ReplayDeliveryAuthorization(URI("https://ingest.elu.dev/v2/replay"), RasterQueueRig.KEY,
-                checkNotNull(wrapper.base.siteId), NativeReplayProtocol.V2.transport, NativeReplayProtocol.V2.generation, "credential", "scope")
-            val claim = checkNotNull(ReplayQueueStore.claim(tx, "original", authorization, rig.clock.wall, 1) { true })
+                checkNotNull(wrapper.base.siteId), NativeReplayProtocol.V2.transport, NativeReplayProtocol.V2.generation,
+                "sha256:" + "c".repeat(64), "sha256:" + "d".repeat(64))
+            val originalOwner = "d682cd3e-9bfb-4d07-bc80-0b194bc11b86"
+            val claim = checkNotNull(ReplayQueueStore.claim(tx, originalOwner, authorization, rig.clock.wall, 1) { true })
             assertArrayEquals(old.copyBytes(), claim.row.prepared.copyBytes())
             assertEquals(ReplayDeliveryCommit.COMMITTED, ReplayQueueStore.commit(tx, claim, ReplayDeliveryOutcome.Accepted, 2))
-            assertNull(ReplayQueueStore.claim(tx, "original", authorization, rig.clock.wall, 3) { true })
-            assertNull(ReplayQueueStore.nextWakeDelay(tx, "original", authorization, 3))
+            assertNull(ReplayQueueStore.claim(tx, originalOwner, authorization, rig.clock.wall, 3) { true })
+            assertNull(ReplayQueueStore.nextWakeDelay(tx, originalOwner, authorization, 3))
             assertArrayEquals(raster.copyBytes(), ReplayQueueStore.readRaster(tx, ReplayQueueStore.headers(tx).single()).request.copyBytes())
             ReplayQueueStore.validate(tx, RasterQueueRig.namespace)
             Unit

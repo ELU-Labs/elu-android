@@ -225,6 +225,30 @@ class CaptureAuthorityRuntimeTest {
     }
 
     @Test
+    fun `raster ordering read ambiguity revokes an already executable authority`() {
+        val backing = FakeRuntimeQueueBacking()
+        val owner = open(backing = backing)
+        val original = owner.submitCaptureAuthority(config(), privacy(5)).await()
+            as RuntimeCaptureAuthorityUpdateResult.Activated
+        val pinnedSite = owner.pinnedConfigSiteForTesting().await()
+        backing.ambiguousNextReadOnlyTransaction = true
+
+        val failure = assertThrows(ExecutionException::class.java) {
+            owner.submitCaptureAuthority(config(), privacy(5)).await()
+        }
+        assertTrue(failure.cause is AmbiguousRuntimeCommitException)
+        val pending = owner.captureAuthorityForTesting().await() as RuntimeCaptureAuthorityState.Pending
+        assertEquals(original.authority.configIssuedAt to original.authority.configSemanticHash, pending.trustedConfigBoundary)
+        assertEquals(pinnedSite, owner.pinnedConfigSiteForTesting().await())
+        val rejected = owner.capture(command("old-authority-after-ordering-ambiguity", NOW)).await()
+            as RuntimeCaptureResult.Rejected
+        assertEquals(RuntimeCaptureRejection.AUTHORITY_PENDING, rejected.reason)
+        assertEquals(0, rejected.snapshot.queuedCount)
+
+        assertTrue(owner.submitCaptureAuthority(config(), privacy(5)).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
+    }
+
+    @Test
     fun `activation brackets authoritative wall time and expires if the transaction consumes its lease`() {
         val orderedClock =
             SequencedCaptureClock(

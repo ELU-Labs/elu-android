@@ -333,10 +333,10 @@ class NativeReplaySessionQueueTest {
     }
 
     private class Rig : AutoCloseable {
-        val clock = Clock(); val worker = Worker(); val gate = V2ConfigAuthorityGate()
+        val clock = Clock(); var worker = Worker(); var gate = V2ConfigAuthorityGate()
         var body = ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json")
-        val source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
-        val driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+        var source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+        var driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
         val backing = FakeRuntimeQueueBacking()
         val ownership = "native-accounting-" + UUID.randomUUID()
         @Volatile var ownerNanos: Long? = null
@@ -392,7 +392,17 @@ class NativeReplaySessionQueueTest {
         fun row() = checkNotNull(backing.replayRows[NativeReplayAccounting.KEY])
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
-        fun reopen() { owner.closeAsync().get(); owner = openSame().get().also { it.bindConfigurationGate(gate).get() } }
+        fun reopen() {
+            owner.closeAsync().get()
+            driver.close()
+            // A reopened queue owns a fresh original source/gate; a closed gate stays closed.
+            assertNull(gate.snapshot())
+            worker = Worker(); gate = V2ConfigAuthorityGate()
+            source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+            driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+            owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
+            driver.start(); worker.runNext()
+        }
         fun now() = RuntimeWallTimestamps.rfc3339(clock.wall)
         fun event() = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "activity", now(), emptyMap(), StandaloneRuntime.defaultVersions())
         override fun close() { runCatching { owner.closeAsync().get() }; driver.close() }
