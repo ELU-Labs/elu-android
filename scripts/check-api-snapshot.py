@@ -26,7 +26,13 @@ PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions",
                   "dev.elu.analytics.EluFeatureFlagResult", "dev.elu.analytics.EluPerformanceOptions",
                   "dev.elu.analytics.EluOkHttpInterceptor", "dev.elu.analytics.EluFrameMetricsOptions",
                   "dev.elu.analytics.EluDiagnosticsOptions", "dev.elu.analytics.EluPersonProfilesMode",
-                  "dev.elu.analytics.EluPersistenceMode", "dev.elu.analytics.EluRateLimitingOptions")
+                  "dev.elu.analytics.EluPersistenceMode", "dev.elu.analytics.EluRateLimitingOptions",
+                  "dev.elu.analytics.EluReplayPrivateRegion", "dev.elu.analytics.EluReplayPrivateRegion$Companion",
+                  "dev.elu.analytics.EluAnnotatedReplayBinding", "dev.elu.analytics.EluAnnotatedReplayRootScope",
+                  "dev.elu.analytics.EluAnnotatedReplayRootScope$Companion",
+                  "dev.elu.analytics.EluReplayRegionGeometry", "dev.elu.analytics.EluReplayGeometryReader")
+COMPOSE_PUBLIC_CLASSES = ("dev.elu.analytics.compose.EluComposeReplayKt",)
+COMPOSE_API_DIR = ROOT / "baselines" / "standalone" / "compose" / "api"
 
 ACC_PUBLIC = 0x0001
 ACC_SYNTHETIC = 0x1000
@@ -100,9 +106,9 @@ def public_jvm_classes(classes_jar: pathlib.Path) -> list[str]:
     return sorted(names)
 
 
-def facade_signatures(classes_jar: pathlib.Path) -> str:
+def facade_signatures(classes_jar: pathlib.Path, public_classes: tuple[str, ...] = PUBLIC_CLASSES) -> str:
     return subprocess.run(
-        ["javap", "-classpath", str(classes_jar), "-public", *PUBLIC_CLASSES],
+        ["javap", "-classpath", str(classes_jar), "-public", *public_classes],
         check=True,
         capture_output=True,
         text=True,
@@ -135,9 +141,24 @@ def missing_legacy_members(baseline: str, candidate: str) -> list[str]:
     return missing
 
 
+def check_compose(aar: pathlib.Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="elu-compose-api-") as temp_dir:
+        classes = pathlib.Path(temp_dir) / "classes.jar"
+        with zipfile.ZipFile(aar) as archive:
+            classes.write_bytes(archive.read("classes.jar"))
+        facade = facade_signatures(classes, COMPOSE_PUBLIC_CLASSES)
+        inventory = public_jvm_classes(classes)
+    if facade != normalized_snapshot(COMPOSE_API_DIR / "public-api.txt"):
+        raise SystemExit("optional Compose API/ABI changed; review the compiled facade and update its snapshot")
+    if inventory != normalized_snapshot(COMPOSE_API_DIR / "jvm-classes.txt").splitlines():
+        raise SystemExit("optional Compose JVM class inventory changed; review the compiled classes and update its snapshot")
+    print(f"optional Compose API and {len(inventory)} JVM classes match the reviewed candidate")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("aar", type=pathlib.Path)
+    parser.add_argument("--compose-aar", type=pathlib.Path, help="also check the optional Compose release AAR")
     parser.add_argument(
         "--update-classes",
         action="store_true",
@@ -146,6 +167,8 @@ def main() -> None:
     args = parser.parse_args()
     if not args.aar.is_file():
         parser.error(f"AAR does not exist: {args.aar}")
+    if args.compose_aar is not None and not args.compose_aar.is_file():
+        parser.error(f"Compose AAR does not exist: {args.compose_aar}")
 
     with tempfile.TemporaryDirectory(prefix="elu-api-") as temp_dir:
         classes = pathlib.Path(temp_dir) / "classes.jar"
@@ -173,6 +196,8 @@ def main() -> None:
             CLASS_INVENTORY_HEADER + "\n".join(inventory) + "\n", encoding="utf-8"
         )
         print(f"wrote {len(inventory)} public JVM classes to {CLASS_INVENTORY.relative_to(ROOT)}")
+        if args.compose_aar is not None:
+            check_compose(args.compose_aar)
         return
 
     expected_inventory = normalized_snapshot(CLASS_INVENTORY).splitlines()
@@ -184,6 +209,8 @@ def main() -> None:
         lines.extend(f"- {name}" for name in removed)
         raise SystemExit("\n".join(lines))
     print(f"published 0.1.0 facade ABI preserved; standalone API and {len(inventory)} JVM classes match the reviewed candidate")
+    if args.compose_aar is not None:
+        check_compose(args.compose_aar)
 
 
 if __name__ == "__main__":

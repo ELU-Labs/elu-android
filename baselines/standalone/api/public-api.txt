@@ -195,3 +195,57 @@ public final class dev.elu.analytics.EluRateLimitingOptions {
   public dev.elu.analytics.EluRateLimitingOptions(double);
   public dev.elu.analytics.EluRateLimitingOptions();
 }
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluReplayPrivateRegion {
+  public static final dev.elu.analytics.EluReplayPrivateRegion$Companion Companion;
+  public static final dev.elu.analytics.EluReplayPrivateRegion create();
+  public dev.elu.analytics.EluReplayPrivateRegion(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluReplayPrivateRegion$Companion {
+  public final dev.elu.analytics.EluReplayPrivateRegion create();
+  public dev.elu.analytics.EluReplayPrivateRegion$Companion(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluAnnotatedReplayBinding implements java.lang.AutoCloseable {
+  public dev.elu.analytics.EluAnnotatedReplayBinding(dev.elu.analytics.internal.replay.AnnotatedGeometryBinding);
+  public final dev.elu.analytics.internal.replay.AnnotatedGeometryBinding getEntry$elu_analytics_release();
+  public final void invalidate();
+  public void close();
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluAnnotatedReplayRootScope implements java.lang.AutoCloseable {
+  public static final dev.elu.analytics.EluAnnotatedReplayRootScope$Companion Companion;
+  public final dev.elu.analytics.internal.replay.AnnotatedRootRegistry getRegistry$elu_analytics_release();
+  public final boolean attach();
+  public final void declareRequired(java.util.List<dev.elu.analytics.EluReplayPrivateRegion>);
+  public final dev.elu.analytics.EluAnnotatedReplayBinding bindRoot(dev.elu.analytics.EluReplayGeometryReader);
+  public final dev.elu.analytics.EluAnnotatedReplayBinding bindPrivate(dev.elu.analytics.EluReplayPrivateRegion, dev.elu.analytics.EluReplayGeometryReader);
+  public void close();
+  public static final dev.elu.analytics.EluAnnotatedReplayRootScope prepare(android.view.View);
+  public dev.elu.analytics.EluAnnotatedReplayRootScope(dev.elu.analytics.internal.replay.AnnotatedRootRegistry, kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluAnnotatedReplayRootScope$Companion {
+  public final dev.elu.analytics.EluAnnotatedReplayRootScope prepare(android.view.View);
+  public dev.elu.analytics.EluAnnotatedReplayRootScope$Companion(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluReplayRegionGeometry.kt"
+public final class dev.elu.analytics.EluReplayRegionGeometry {
+  public dev.elu.analytics.EluReplayRegionGeometry(java.lang.Object, java.lang.Object, long, float, float, float, float, float, float, float, float);
+  public final java.lang.Object getCoordinateIdentity();
+  public final java.lang.Object getParentIdentity();
+  public final long getGeneration();
+  public final float getTopLeftX();
+  public final float getTopLeftY();
+  public final float getTopRightX();
+  public final float getTopRightY();
+  public final float getBottomLeftX();
+  public final float getBottomLeftY();
+  public final float getBottomRightX();
+  public final float getBottomRightY();
+}
+Compiled from "EluReplayRegionGeometry.kt"
+public interface dev.elu.analytics.EluReplayGeometryReader {
+  public abstract dev.elu.analytics.EluReplayRegionGeometry read();
+}

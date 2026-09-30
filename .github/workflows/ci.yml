@@ -22,6 +22,7 @@ jobs:
           :elu-analytics:testDebugUnitTest
           :elu-analytics:lintRelease
           :elu-analytics:assembleRelease
+          :elu-analytics-compose:assembleRelease
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication
           :elu-analytics:generateMetadataFileForMavenPublication
@@ -35,7 +36,10 @@ jobs:
           checkZeroBrandRatchet
           --stacktrace
       - name: Verify public API and ABI snapshot
-        run: python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
+        run: >-
+          python3 scripts/check-api-snapshot.py
+          elu-analytics/build/outputs/aar/elu-analytics-release.aar
+          --compose-aar elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar
       - name: Compile immutable historical 0.1.0 consumer (no state-import claim)
         run: >-
           ./gradlew
@@ -66,6 +70,7 @@ jobs:
           path: |
             elu-analytics/build/reports/tests/
             elu-analytics/build/outputs/aar/elu-analytics-release.aar
+            elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar
             elu-analytics/build/publications/maven/
             elu-analytics/build/reports/sbom/
             build/reports/

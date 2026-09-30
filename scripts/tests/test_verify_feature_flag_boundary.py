@@ -24,7 +24,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         self.root = pathlib.Path(self.temporary.name)
         main_source = REPOSITORY / BOUNDARY.MAIN_KOTLIN
         shutil.copytree(main_source, self.root / BOUNDARY.MAIN_KOTLIN)
-        for relative in {*BOUNDARY.PINNED_FILES, *BOUNDARY.CONTRACT_FILES}:
+        for relative in {*BOUNDARY.PINNED_FILES, *BOUNDARY.CONTRACT_FILES, *BOUNDARY.ANNOTATED_EXTRA_FILES}:
             source = REPOSITORY / relative
             target = self.root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -40,6 +40,37 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def test_annotated_capture_remains_uninstalled_and_geometry_only(self) -> None:
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        self.assertEqual(self.run_guard().returncode, 0)
+        cases = [
+            ("EluReplayRegionGeometry.kt", "public class EluReplayRegionGeometry(", "// Bitmap\npublic class EluReplayRegionGeometry(", "geometry only"),
+            ("EluAnnotatedReplayRootScope.kt", "AnnotatedRootRegistry(view)", "AnnotatedRootRegistry(view).also { it.attach() }", "must not attach"),
+            ("internal/replay/AndroidAnnotatedReplayCollector.kt", "{ current() && registry.policyCurrent(acceptedPolicy) }", "{ current() && registry.policyCurrent(original.policyVersion) }", "declared ownership"),
+            ("internal/replay/AndroidAnnotatedReplayCollector.kt", "validate(original, plan(window, checks))", "validate(original, original)", "revalidate original geometry"),
+            ("internal/replay/AnnotatedRootRegistry.kt", "if (isClosed) null else reader.read()", "null", "declared ownership"),
+            ("internal/replay/AnnotatedRasterCandidate.kt", "bitmap.eraseColor(Color.TRANSPARENT)", "Unit", "declared ownership"),
+            ("internal/replay/AnnotatedRasterCandidate.kt", "try { close() } catch", "try { if (failure != null) close() } catch", "declared ownership"),
+        ]
+        for relative, before, after, expected in cases:
+            with self.subTest(relative=relative, before=before):
+                path = base / relative; original = path.read_text(); self.assertIn(before, original)
+                path.write_text(original.replace(before, after))
+                self.assertIn(expected, self.run_guard().stderr)
+                path.write_text(original)
+        stack = self.root / BOUNDARY.STACK
+        stack.write_text(stack.read_text() + "\n// AndroidAnnotatedReplayCollector(registry)\n")
+        self.assertIn("must remain uninstalled", self.run_guard().stderr)
+
+    def test_annotated_compose_fixture_keeps_core_dependency_and_compiler_boundaries(self) -> None:
+        path = self.root / "elu-analytics/build.gradle.kts"; original = path.read_text()
+        for changed, expected in [
+            (original.replace('androidTestImplementation(project(":elu-analytics-compose"))', 'implementation(project(":elu-analytics-compose"))'), "androidTest-only"),
+            (original.replace('"compileReleaseUnitTestKotlin"', '"compileReleaseUnitTestKotlin", "compileDebugAndroidTestKotlin"'), "strict AndroidTest"),
+        ]:
+            path.write_text(changed); self.assertIn(expected, self.run_guard().stderr)
+        path.write_text(original)
 
     def test_exception_intake_keeps_exact_schema_and_original_commit(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal"

@@ -2,6 +2,7 @@ import org.cyclonedx.gradle.CyclonedxDirectTask
 import org.cyclonedx.model.Component
 import org.gradle.api.file.RegularFile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 val sdkVersion =
     Regex("const val NAME: String = \"([^\"]+)\"")
@@ -13,6 +14,7 @@ val sdkVersion =
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
     id("com.vanniktech.maven.publish")
     id("org.cyclonedx.bom")
 }
@@ -20,6 +22,8 @@ plugins {
 android {
     namespace = "dev.elu.analytics"
     compileSdk = 36
+    // Compiler support for the original-host Compose androidTest fixture only.
+    buildFeatures { compose = true }
 
     defaultConfig {
         // Keep the public minimum Android version unchanged.
@@ -53,6 +57,18 @@ kotlin {
     }
 }
 
+// The plugin is needed by the original-host androidTest sources only. Pinned 2.1.20
+// explicitly supports skipping IR transformation when no Compose runtime is present.
+// Keep AndroidTest strict and core production/runtime dependencies Compose-free.
+tasks.withType<KotlinCompile>().configureEach {
+    if (name in setOf("compileDebugKotlin", "compileReleaseKotlin", "compileDebugUnitTestKotlin", "compileReleaseUnitTestKotlin")) {
+        compilerOptions.freeCompilerArgs.addAll(
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:skipIrLoweringIfRuntimeNotFound=true",
+        )
+    }
+}
+
 dependencies {
     // Backport the Java time and arithmetic APIs used by the runtime on API 23.
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
@@ -69,6 +85,12 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     // Compatibility fixture only. The published SDK has no AppCompat dependency.
     androidTestImplementation("androidx.appcompat:appcompat:1.8.0")
+    // Test-only reverse edge: core main -> optional main -> core androidTest. No runtime dependency.
+    androidTestImplementation(project(":elu-analytics-compose"))
+    androidTestImplementation("androidx.activity:activity:1.8.0")
+    androidTestImplementation("androidx.compose.foundation:foundation:1.7.8")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.7.8")
+    androidTestImplementation("androidx.compose.ui:ui-test-manifest:1.7.8")
 }
 
 mavenPublishing {

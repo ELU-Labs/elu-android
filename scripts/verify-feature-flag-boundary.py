@@ -26,7 +26,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
         "3282da2f4743b7910e8471d814862540d350b5fb38f782b9c04331756f0d2e77",
     "elu-analytics/build.gradle.kts":
-        "5078f447f6432ce825a48366df0b02086029db510037cd8c2c9fb2e48feebbe5",
+        "8892f4437472ea55bb6d3375568d7c56cafe86f60a9a8a7ae7fb54cb43cda523",
     "elu-analytics/consumer-rules.pro":
         "4fabc808ed8f99ec3660a83c224cdcf8e3fd041a51c404093195e4cd8bdbb6cb",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/concurrent/SdkFuture.kt":
@@ -37,6 +37,15 @@ PINNED_FILES = {
     "elu-analytics/src/test/resources/contracts/v1/fixtures/transport-policy.json":
         "992900180683af04f69d5e459b7c0c9e68edf92c6ebf320136ed36dbae8b60ce",
 }
+
+ANNOTATED_EXTRA_FILES = (
+    "build.gradle.kts",
+    "settings.gradle.kts",
+    "elu-analytics/src/main/res/values/elu_annotated_replay_ids.xml",
+    "elu-analytics-compose/build.gradle.kts",
+    "elu-analytics-compose/src/main/kotlin/dev/elu/analytics/compose/EluComposeReplay.kt",
+    "elu-analytics-compose/src/main/kotlin/dev/elu/analytics/compose/internal/ComposeReplayNodes.kt",
+)
 
 CONTRACT_FILES = {
     "elu-analytics/src/test/resources/contracts/v1/schemas/flags-request.schema.json":
@@ -1106,8 +1115,71 @@ def verify_exception_intake(root: pathlib.Path, errors: list[str]) -> None:
     if any(name in intake for name in ("RuntimeQueueOwner", "SQLiteDatabase", "ExceptionSerializer", "HttpURLConnection", "Thread.sleep")):
         errors.append("exception callback/writer escaped its detached one-slot boundary")
 
+def verify_annotated_root_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    required = {
+        "EluAnnotatedReplayRootScope.kt": ["fun prepare(view: View)", "AnnotatedRootRegistry(view)", "fun attach(): Boolean = registry.attach()"],
+        "internal/replay/AnnotatedRootRegistry.kt": ["private val host = WeakReference(view)", "private var required:",
+            "(previous as? AnnotatedRootRegistry)?.conflict()", "previous !== this", "it.getTag(R.id.elu_annotated_replay_root) === this",
+            "private val reader: EluReplayGeometryReader", "if (isClosed) null else reader.read()"],
+        "internal/replay/AndroidAnnotatedReplayCollector.kt": ["check(Build.VERSION.SDK_INT >= 29)", "occupied.compareAndSet(false, true)",
+            "INTERVAL_NANOS = 1_000_000_000L", "PASS_NANOS = 50_000_000L", "lastAttempt = checks.started",
+            "checkNotNull(c.read { binding.read() })", "sameGeometry(a.geometry, b.geometry)",
+            "val acceptedPolicy = original.policyVersion", "{ current() && registry.policyCurrent(acceptedPolicy) }",
+            "bitmap?.let { AnnotatedRasterCandidate.clear(it) }"],
+        "internal/replay/AnnotatedRasterCandidate.kt": ["internal class AnnotatedRasterCandidate private constructor(",
+            "DeclaredRegionPngEncoder.normalize(checkNotNull(raw), width, height)", "raw?.fill(0); output?.close()",
+            "failure?.let { encoded?.fill(0); throw it }",
+            "bitmap.eraseColor(Color.TRANSPARENT)", "finally { bitmap.recycle() }", "try { close() } catch"],
+        "internal/replay/DeclaredRegionPngEncoder.kt": ["MAX_ENCODED_BYTES = 2_097_152", "chunks.size < 1024", "w * h <= 1_048_576",
+            "inflater.finished() && inflater.remaining == 0", "png-nonopaque", "png-idat-order", "png-crc"],
+    }
+    for relative, tokens in required.items():
+        try:
+            source = load_text(root, base / relative)
+        except ValueError as error:
+            errors.append(str(error)); continue
+        if any(token not in source for token in tokens):
+            errors.append("annotated capture lost declared ownership, bounds or validated-output gate: " + relative)
+    public = "\n".join(load_text(root, base / path) for path in ("EluAnnotatedReplayRootScope.kt", "EluReplayRegionGeometry.kt"))
+    if any(token in public for token in ("Bitmap", "ByteArray", "OutputStream", "NativeReplayAuthority", "PreparedReplayRequest", "RuntimeQueue")):
+        errors.append("annotated public seam must carry declared geometry only")
+    prepare = public[public.index("fun prepare(view: View)"):public.index("fun prepare(view: View)") + 260]
+    if ".attach(" in prepare or ".setTag(" in prepare:
+        errors.append("annotated preparation must not attach before composition commits")
+    collector = load_text(root, base / "internal/replay/AndroidAnnotatedReplayCollector.kt")
+    if not (0 <= collector.find("canvas.clipOutRect(it)") < collector.find("original.host.draw(canvas)") <
+            collector.find("validate(original, plan(window, checks))") < collector.find("AnnotatedRasterCandidate.validated")) or collector.count("validate(original, plan(window, checks))") != 2:
+        errors.append("annotated output must revalidate original geometry before candidate construction")
+    optional_base = pathlib.Path("elu-analytics-compose/src/main/kotlin/dev/elu/analytics/compose")
+    optional = load_text(root, optional_base / "EluComposeReplay.kt")
+    node = load_text(root, optional_base / "internal/ComposeReplayNodes.kt")
+    if any(token not in optional for token in ("EluAnnotatedReplayRootScope.prepare(view)", "DisposableEffect(registry, view)",
+            "registry.attach()", "registry.declareRequired(requiredPrivateRegions)", "onDispose { registry.close() }")) or any(token not in node for token in
+            ("val weak = WeakReference(this)", "original.localToWindow(", "serial != generation", "original.parentLayoutCoordinates !== parent", "binding?.close()")):
+        errors.append("Compose bindings must read current original geometry and retain exact scope lifetime")
+    for path in (root / MAIN_KOTLIN).rglob("*.kt"):
+        source = path.read_text()
+        if "import androidx.compose." in source:
+            errors.append("core production source must remain Compose-independent")
+        if path.name != "AndroidAnnotatedReplayCollector.kt" and "AndroidAnnotatedReplayCollector(" in source:
+            errors.append("annotated collector must remain uninstalled before closed policy/envelope support")
+    for relative in required:
+        source = load_text(root, base / relative)
+        if any(token in source for token in ("RuntimeQueueOwner", "NativeReplayAuthority", "HttpURLConnection", "Executors.", "FileOutputStream")):
+            errors.append("annotated capture cannot obtain authority, install a worker or publish bytes")
+    build = load_text(root, pathlib.Path("elu-analytics/build.gradle.kts"))
+    runtime_dependency = re.compile(r'^\s*(?:api|implementation|compileOnly|debugImplementation|releaseImplementation)\(.*(?:compose|elu-analytics-compose)', re.MULTILINE)
+    if runtime_dependency.search(build) or 'androidTestImplementation(project(":elu-analytics-compose"))' not in build:
+        errors.append("Compose fixture dependencies must remain androidTest-only")
+    option = 'plugin:androidx.compose.compiler.plugins.kotlin:skipIrLoweringIfRuntimeNotFound=true'
+    task_set = 'if (name in setOf("compileDebugKotlin", "compileReleaseKotlin", "compileDebugUnitTestKotlin", "compileReleaseUnitTestKotlin"))'
+    if build.count(option) != 1 or task_set not in build:
+        errors.append("Compose runtime-absent option must preserve strict AndroidTest compilation")
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_annotated_root_boundary(root, errors)
     verify_exception_intake(root, errors)
     verify_capture_rate_limiter(root, errors)
     verify_replay_controls(root, errors)

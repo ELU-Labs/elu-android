@@ -1,6 +1,8 @@
-# Every public, non-synthetic JVM class in the release classes.jar.
-# Regenerate with: python3 scripts/check-api-snapshot.py --update-classes <aar>
+# Reviewed standalone candidate; published 0.1.0 baseline remains immutable.
 dev.elu.analytics.Elu
+dev.elu.analytics.EluAnnotatedReplayBinding
+dev.elu.analytics.EluAnnotatedReplayRootScope
+dev.elu.analytics.EluAnnotatedReplayRootScope$Companion
 dev.elu.analytics.EluConfigClient
 dev.elu.analytics.EluConfigHostPolicy
 dev.elu.analytics.EluConfigUrl
@@ -25,6 +27,10 @@ dev.elu.analytics.EluReplayBudgetPolicy$Decision$Disabled
 dev.elu.analytics.EluReplayBudgetPolicy$Decision$Retry
 dev.elu.analytics.EluReplayBudgetPolicy$Decision$Schedule
 dev.elu.analytics.EluReplayBudgetPolicy$Decision$Stop
+dev.elu.analytics.EluReplayGeometryReader
+dev.elu.analytics.EluReplayPrivateRegion
+dev.elu.analytics.EluReplayPrivateRegion$Companion
+dev.elu.analytics.EluReplayRegionGeometry
 dev.elu.analytics.EluStatePolicy
 dev.elu.analytics.EluStatePolicy$Action
 dev.elu.analytics.EluStatePolicy$State
@@ -343,6 +349,8 @@ dev.elu.analytics.internal.performance.NativePerformanceActivityLifecycle
 dev.elu.analytics.internal.performance.NativePerformanceActivityLifecycle$Selection
 dev.elu.analytics.internal.performance.NativePerformanceContext
 dev.elu.analytics.internal.performance.NativePerformanceSampler
+dev.elu.analytics.internal.replay.AndroidAnnotatedReplayCollector
+dev.elu.analytics.internal.replay.AndroidAnnotatedReplayCollector$Companion
 dev.elu.analytics.internal.replay.AndroidNativeReplayCapturePlatform
 dev.elu.analytics.internal.replay.AndroidNativeReplayCapturePlatform$createCollector$4
 dev.elu.analytics.internal.replay.AndroidNativeReplaySelectionAccess
@@ -352,6 +360,13 @@ dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$7
 dev.elu.analytics.internal.replay.AndroidReplayTouchObserver$settled$1
 dev.elu.analytics.internal.replay.AndroidViewReplayCollector
 dev.elu.analytics.internal.replay.AndroidViewReplayCollectorKt
+dev.elu.analytics.internal.replay.AnnotatedGeometryBinding
+dev.elu.analytics.internal.replay.AnnotatedRasterCandidate
+dev.elu.analytics.internal.replay.AnnotatedRasterCandidate$Companion
+dev.elu.analytics.internal.replay.AnnotatedRootRegistry
+dev.elu.analytics.internal.replay.AnnotatedRootRegistry$Companion
+dev.elu.analytics.internal.replay.DeclaredRegionPngEncoder
+dev.elu.analytics.internal.replay.LimitedBytes
 dev.elu.analytics.internal.replay.NativeAncestorFailure
 dev.elu.analytics.internal.replay.NativeAppCompatViewTypes
 dev.elu.analytics.internal.replay.NativeCapturePassProfile
@@ -559,6 +574,7 @@ dev.elu.analytics.internal.replay.ReplayStoredState
 dev.elu.analytics.internal.replay.ReplayStoredState$Companion
 dev.elu.analytics.internal.replay.ReplayTransportOperation
 dev.elu.analytics.internal.replay.ReplayTransportResponse
+dev.elu.analytics.internal.replay.RequiredPrivacyIntents
 dev.elu.analytics.internal.runtime.ActivityLifecycleEmitter
 dev.elu.analytics.internal.runtime.ActivityLifecycleEmitter$Companion
 dev.elu.analytics.internal.runtime.ActivityLifecycleTracker
