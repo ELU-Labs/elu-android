@@ -252,7 +252,32 @@ class AndroidNativeRasterCompositionTest {
                     awaitReady("returned-first", firstActivity, firstRoot, declared = false) { host }
                     rule.waitUntil(5_000) { rule.runOnUiThread { second.isDestroyed } }
                     stage = "returned-A-evaluation"
-                    assertEquals(NativeReplayCompositionEvaluation.INACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
+                    rule.runOnUiThread {
+                        assertEquals(Lifecycle.State.RESUMED, firstActivity.lifecycle.currentState)
+                        assertSame(firstRoot, firstActivity.findViewById<View>(android.R.id.content))
+                        assertTrue(second.isDestroyed)
+                        assertTrue(discoverAnnotatedRoot(firstRoot, firstActivity.window, { true }) is AnnotatedRootDiscovery.Absent)
+                    }
+                    // Retain the same bounded diagnostic window for the return phase.
+                    rig.nativeTrace.clear()
+                    val returnedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    fun joinReturned(future: SdkFuture<NativeReplayCompositionEvaluation>): NativeReplayCompositionEvaluation {
+                        val remaining = returnedDeadline - System.nanoTime()
+                        check(remaining > 0) { "original returned-A evaluation deadline" }
+                        return future.get(remaining, TimeUnit.NANOSECONDS)
+                    }
+                    // Join the original pause/resume evaluation once, then read the current
+                    // generation. Neither a withdrawn old future nor no recording proves denial.
+                    val retired = joinReturned(rig.composition.reevaluate(force = true))
+                    assertTrue(retired == NativeReplayCompositionEvaluation.WITHDRAWN || retired == NativeReplayCompositionEvaluation.INACTIVE)
+                    assertEquals(NativeReplayCompositionEvaluation.INACTIVE, joinReturned(rig.composition.reevaluate()))
+                    val returnEvaluations = rig.nativeTrace.map { JSONObject(it) }.groupBy { it.getInt("evaluation") }
+                    assertTrue("actual returned A must be selected and denied", returnEvaluations.any { (evaluation, records) ->
+                        evaluation > 0 && records.any { it.getString("phase") == "ROOT_SELECTION_RESULT" && it.optBoolean("result", false) } &&
+                            records.any { it.getString("phase") == "PREPARE_POSTCHECK" && !it.isNull("result") && !it.getBoolean("result") } &&
+                            records.any { it.getString("phase") == "EVALUATION_ACTIVE" && !it.isNull("result") && !it.getBoolean("result") }
+                    })
+                    assertFalse(rig.composition.recordingStarted())
                     assertEquals(0, rig.wireframeFactories.get())
                     assertTrue(rig.rows().isEmpty()); assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
                 } finally { rule.runOnUiThread { firstActivity.application.unregisterActivityLifecycleCallbacks(callbacks) } }
