@@ -1697,7 +1697,7 @@ internal class RuntimeQueueOwner private constructor(
                 "siteId" to ReplayJson.text(fresh.siteId), "endpoint" to ReplayJson.text(raster.endpoint.toASCIIString()),
                 "format" to ReplayJson.text("raster")))
             return ReplayDeliveryAuthorization(raster.endpoint, siteKey, fresh.siteId,
-                dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, "gzip"), NativeRasterSealer.GENERATION,
+                dev.elu.analytics.internal.config.V1ReplayTransport(NativeRasterSealer.CODEC, dev.elu.analytics.internal.config.V1ReplayCompression.GZIP), NativeRasterSealer.GENERATION,
                 credential, scope, ReplayDeliveryFormat.RASTER, parsed.issuedAt, raster.revision, raster.effectivePolicyHash, raster.maximumRequestBytes)
         }
         val allowed = configManager.authorizeSealedReplayDelivery(privacy, identity, now) ?: return null
