@@ -1227,8 +1227,43 @@ def verify_raster_sealer_boundary(root: pathlib.Path, errors: list[str]) -> None
         if relative != replay / "AnnotatedRootRegistry.kt" and "AnnotatedRasterSourceIdentity(" in text:
             errors.append("raster source identities may only originate at the original registry")
 
+def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    config = MAIN_KOTLIN / "dev/elu/analytics/internal/config"
+    path = config / "NativeV3ConfigParser.kt"
+    source = load_text(root, path)
+    for token in (
+        "internal object NativeV3ConfigParser", "const val MAXIMUM_BYTES = 65_536",
+        "val original = data.copyOf()", "onMalformedInput(CodingErrorAction.REPORT)",
+        "onUnmappableCharacter(CodingErrorAction.REPORT)",
+        'V1StrictCanonicalJson.parseRetainingRootProperty(source, "configV2")',
+        "V1ConfigJson.parseConfig(baseSource)", "base.schemaVersion != V2_CONFIG_SCHEMA_VERSION",
+        "endpointPolicy.requireApproved(uri, role, base.schemaVersion)",
+        "trusted(it.flags, V1EndpointRole.FLAGS)", "trusted(replay, V1EndpointRole.REPLAY)",
+        "trusted(assets, V1EndpointRole.ASSETS)", "replay.advertisedTransports.size != 1",
+        "NativeReplayProtocol.match(replay.advertisedTransports.singleOrNull(), replay.replayProtocolGeneration)",
+        'setOf("https://ingest.elu.dev", "https://35-224-68-29.sslip.io")',
+        '"basePrivacy" to basePrivacy', '"replayAudience" to string(',
+        "V1StrictCanonicalJson.canonicalize(candidate) != V1StrictCanonicalJson.canonicalize(expected)",
+        "minOf(limits.replayChunkBytes, 5_242_880)",
+    ):
+        if token not in source:
+            errors.append("native v3 semantic parser lost exact bytes, closed policy or original endpoint checks")
+    if re.search(r"\b(?:RuntimeQueueOwner|AndroidRuntimeQueue|V2ConfigAuthorityGate|V2ConfigSource|"
+                 r"NativeReplayAuthority|NativeRasterSealer|V1AuthorizedConfig|HttpURLConnection|"
+                 r"Thread|Executors|FileOutputStream)\b|\.install\s*\(", source):
+        errors.append("native v3 semantic parser cannot install authority, persistence, capture or network")
+    strict = load_text(root, config / "V1StrictCanonicalJson.kt")
+    if "val value = parser.parse()\n        return RootPropertyDocument(value, parser.rootPropertyRange?.let(source::substring))" not in strict or \
+            "if (depth == 1 && name == retainedRootProperty) rootPropertyRange = valueStart until index" not in strict:
+        errors.append("native v3 root span must come from the original complete strict parse")
+    for file in (root / MAIN_KOTLIN).rglob("*.kt"):
+        if file.relative_to(root) != path and "NativeV3ConfigParser" in file.read_text():
+            errors.append("native v3 semantic parser must remain uninstalled")
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_native_v3_parser_boundary(root, errors)
     verify_raster_sealer_boundary(root, errors)
     verify_annotated_root_boundary(root, errors)
     verify_exception_intake(root, errors)

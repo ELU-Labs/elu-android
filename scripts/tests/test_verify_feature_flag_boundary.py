@@ -41,6 +41,33 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_native_v3_parser_preserves_original_bytes_and_cannot_install_authority(self) -> None:
+        self.assertEqual(self.run_guard().returncode, 0)
+        config = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/config"
+        parser = config / "NativeV3ConfigParser.kt"
+        original = parser.read_text()
+        for before, after, expected in [
+            ("onMalformedInput(CodingErrorAction.REPORT)", "onMalformedInput(CodingErrorAction.REPLACE)", "original endpoint"),
+            ("trusted(it.flags, V1EndpointRole.FLAGS)", "Unit", "original endpoint"),
+            ("replay.advertisedTransports.size != 1", "false", "closed policy"),
+            ("V1StrictCanonicalJson.canonicalize(candidate) != V1StrictCanonicalJson.canonicalize(expected)", "false", "closed policy"),
+            ("minOf(limits.replayChunkBytes, 5_242_880)", "5_242_880", "closed policy"),
+            ("internal object NativeV3ConfigParser", "// V2ConfigAuthorityGate\ninternal object NativeV3ConfigParser", "cannot install authority"),
+        ]:
+            with self.subTest(before=before):
+                self.assertIn(before, original)
+                parser.write_text(original.replace(before, after))
+                self.assertIn(expected, self.run_guard().stderr)
+                parser.write_text(original)
+        strict = config / "V1StrictCanonicalJson.kt"
+        strict_original = strict.read_text()
+        strict.write_text(strict_original.replace("depth == 1 && name == retainedRootProperty", "name == retainedRootProperty"))
+        self.assertIn("complete strict parse", self.run_guard().stderr)
+        strict.write_text(strict_original)
+        stack = self.root / BOUNDARY.STACK
+        stack.write_text(stack.read_text() + "\n// NativeV3ConfigParser.parse(bytes)\n")
+        self.assertIn("must remain uninstalled", self.run_guard().stderr)
+
     def test_annotated_capture_remains_uninstalled_and_geometry_only(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
         self.assertEqual(self.run_guard().returncode, 0)
