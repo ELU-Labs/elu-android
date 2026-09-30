@@ -203,6 +203,13 @@ class AndroidNativeRasterResponseTest {
             rule.runOnIdle { collector = AndroidAnnotatedReplayCollector(checkNotNull(AnnotatedRootRegistry.fromHost(host))) }
             installed = true
         }
+        // Compose idleness alone does not establish real Window focus/readiness.
+        rule.waitUntil(5_000) {
+            rule.runOnIdle {
+                host.rootView === rule.activity.window.peekDecorView() && host.isAttachedToWindow &&
+                    host.hasWindowFocus() && host.isLaidOut && !host.isLayoutRequested && host.width > 0 && host.height > 0
+            }
+        }
         val frame = rule.runOnIdle {
             val at = nextAttempt; nextAttempt += AndroidAnnotatedReplayCollector.INTERVAL_NANOS
             collector.capture(rule.activity.window, { true }) { at }

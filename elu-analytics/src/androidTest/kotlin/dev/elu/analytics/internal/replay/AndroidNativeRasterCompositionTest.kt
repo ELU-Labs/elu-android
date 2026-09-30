@@ -3,6 +3,7 @@ package dev.elu.analytics.internal.replay
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -122,12 +123,25 @@ class AndroidNativeRasterCompositionTest {
         fun ready(view: View?) = view != null && view.isAttachedToWindow && view.hasWindowFocus() &&
             view.isLaidOut && !view.isLayoutRequested
         fun replace(old: ViewGroup, next: ViewGroup) {
-            val params = old.layoutParams
+            // Give the ordinary replacement the displayed predecessor's actual bounds,
+            // retaining the layout parameters expected by the original parent.
+            val width = old.width; val height = old.height
+            check(width > 0 && height > 0) { "Original displayed root must have positive bounds" }
+            val params = when (val original = old.layoutParams) {
+                is FrameLayout.LayoutParams -> FrameLayout.LayoutParams(original)
+                is LinearLayout.LayoutParams -> LinearLayout.LayoutParams(original)
+                else -> error("Unsupported fixture parent layout parameters")
+            }.apply { this.width = width; this.height = height }
             parent.removeView(old); parent.addView(next, index, params)
         }
         fun awaitReady(stage: String, expectedRoot: ViewGroup, view: () -> View?) {
             try {
                 rule.waitUntil(5_000) { rule.runOnUiThread { ready(view()) } }
+                rule.runOnUiThread {
+                    val selected = checkNotNull(view())
+                    assertTrue(expectedRoot.width > 0 && expectedRoot.height > 0)
+                    assertTrue(selected.width > 0 && selected.height > 0)
+                }
             } catch (failure: Throwable) {
                 // Failure-only original main-thread facts: no tree enumeration, text or pixels.
                 val facts = try { rule.runOnUiThread {
