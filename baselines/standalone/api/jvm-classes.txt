@@ -378,6 +378,9 @@ dev.elu.analytics.internal.replay.AnnotatedCaptureBinding
 dev.elu.analytics.internal.replay.AnnotatedGeometryBinding
 dev.elu.analytics.internal.replay.AnnotatedRasterCandidate
 dev.elu.analytics.internal.replay.AnnotatedRasterCandidate$Companion
+dev.elu.analytics.internal.replay.AnnotatedRasterDimensions
+dev.elu.analytics.internal.replay.AnnotatedRasterDimensions$Companion
+dev.elu.analytics.internal.replay.AnnotatedRasterMask
 dev.elu.analytics.internal.replay.AnnotatedRasterSourceIdentity
 dev.elu.analytics.internal.replay.AnnotatedRootDiscovery
 dev.elu.analytics.internal.replay.AnnotatedRootDiscovery$Absent
