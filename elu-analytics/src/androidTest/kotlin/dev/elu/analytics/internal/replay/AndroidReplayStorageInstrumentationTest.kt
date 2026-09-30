@@ -1,5 +1,9 @@
 package dev.elu.analytics.internal.replay
 
+import android.app.ActivityManager
+import android.content.Context
+import android.os.Build
+import android.os.Debug
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.elu.analytics.internal.config.V1StrictCanonicalJson
 import dev.elu.analytics.internal.core.*
@@ -14,7 +18,29 @@ import org.junit.Test
 
 /** Device-only schema/segment evidence. It does not negotiate, decode or send an inner codec. */
 class AndroidReplayStorageInstrumentationTest {
-    @Test fun bothMigrationOrdersRetainExactPreparedRequestBeyondOneMiB() {
+    // Fixed numeric stages only; a diagnostic failure must never replace the original test result.
+    private fun heapMeasurement(stage: Int) {
+        try {
+            val vm = Runtime.getRuntime()
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val display = context.resources.displayMetrics
+            println("ELU_HEAP stage=$stage sdk=${Build.VERSION.SDK_INT} max=${vm.maxMemory()} " +
+                "total=${vm.totalMemory()} free=${vm.freeMemory()} native=${Debug.getNativeHeapAllocatedSize()} " +
+                "memoryClass=${manager?.memoryClass ?: -1} largeMemoryClass=${manager?.largeMemoryClass ?: -1} " +
+                "lowRam=${manager?.let { if (it.isLowRamDevice) 1 else 0 } ?: -1} " +
+                "densityDpi=${display.densityDpi} widthPixels=${display.widthPixels} heightPixels=${display.heightPixels}")
+        } catch (_: Throwable) {
+            // Best effort, including when the original allocation has already exhausted the heap.
+        }
+    }
+
+    private inline fun withHeapMeasurements(stage: Int, action: () -> Unit) {
+        heapMeasurement(stage)
+        try { action() } finally { heapMeasurement(stage + 99) }
+    }
+
+    @Test fun bothMigrationOrdersRetainExactPreparedRequestBeyondOneMiB() = withHeapMeasurements(1000) {
         for (flagsFirst in listOf(true, false)) {
             val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "replay-storage-test-" + UUID.randomUUID())
             val file = File(directory, "queue.sqlite")
@@ -23,7 +49,9 @@ class AndroidReplayStorageInstrumentationTest {
             val initial = ReplayStoredState(namespace).row()
             val flag = FlagDurableStore.uninitializedAuthorityRow(key, namespace)
             val profile = ReplayMaskingProfile.parse("{\"fixture\":true}".toByteArray())
+            heapMeasurement(if (flagsFirst) 1001 else 1002)
             val request = prepared(profile)
+            heapMeasurement(if (flagsFirst) 1003 else 1004)
             assertTrue(request.byteCount > 1_048_576)
             try {
                 AndroidSQLiteRuntimeDatabase.open(file).use { db ->

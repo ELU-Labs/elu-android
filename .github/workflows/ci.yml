@@ -108,6 +108,11 @@ jobs:
             adb shell getprop ro.product.cpu.abi
             test "$(adb shell getprop ro.build.version.sdk | tr -d '\r')" = "${{ matrix.api-level }}"
             test "$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" = "x86_64"
+            mkdir -p elu-analytics/build/reports
+            adb shell 'for key in ro.build.version.sdk ro.product.cpu.abi dalvik.vm.heapgrowthlimit dalvik.vm.heapsize dalvik.vm.heapstartsize ro.config.low_ram ro.sf.lcd_density; do printf "%s=" "$key"; getprop "$key"; done' | tee elu-analytics/build/reports/device-memory.txt
+            adb shell wm size | tee -a elu-analytics/build/reports/device-memory.txt
+            adb shell wm density | tee -a elu-analytics/build/reports/device-memory.txt
+            if [ -r "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" ]; then awk -F '[[:space:]]*=[[:space:]]*' '$1 ~ /^(hw\.ramSize|vm\.heapSize|hw\.lcd\.width|hw\.lcd\.height|hw\.lcd\.density|hw\.cpu\.ncore)$/ { print }' "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" | tee -a elu-analytics/build/reports/device-memory.txt; else echo 'avd_config_available=0' | tee -a elu-analytics/build/reports/device-memory.txt; fi
             ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
       - uses: actions/upload-artifact@v4
         if: always()
@@ -118,3 +123,4 @@ jobs:
           path: |
             elu-analytics/build/reports/androidTests/
             elu-analytics/build/outputs/androidTest-results/
+            elu-analytics/build/reports/device-memory.txt

@@ -1,10 +1,12 @@
 package dev.elu.analytics.internal.runtime
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.database.sqlite.SQLiteDatabase
 import android.os.Build
+import android.os.Debug
 import android.os.Looper
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.elu.analytics.internal.config.V1StrictCanonicalJson
@@ -39,6 +41,28 @@ import org.junit.Before
 import org.junit.Test
 
 class AndroidRuntimeQueueInstrumentationTest {
+    // Fixed numeric stages only; a diagnostic failure must never replace the original test result.
+    private fun heapMeasurement(stage: Int) {
+        try {
+            val vm = Runtime.getRuntime()
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val display = context.resources.displayMetrics
+            println("ELU_HEAP stage=$stage sdk=${Build.VERSION.SDK_INT} max=${vm.maxMemory()} " +
+                "total=${vm.totalMemory()} free=${vm.freeMemory()} native=${Debug.getNativeHeapAllocatedSize()} " +
+                "memoryClass=${manager?.memoryClass ?: -1} largeMemoryClass=${manager?.largeMemoryClass ?: -1} " +
+                "lowRam=${manager?.let { if (it.isLowRamDevice) 1 else 0 } ?: -1} " +
+                "densityDpi=${display.densityDpi} widthPixels=${display.widthPixels} heightPixels=${display.heightPixels}")
+        } catch (_: Throwable) {
+            // Best effort, including when the original allocation has already exhausted the heap.
+        }
+    }
+
+    private inline fun withHeapMeasurements(stage: Int, action: () -> Unit) {
+        heapMeasurement(stage)
+        try { action() } finally { heapMeasurement(stage + 99) }
+    }
+
     private val owners = mutableListOf<RuntimeQueueOwner>()
     private val testDirectories = mutableListOf<File>()
 
@@ -436,7 +460,7 @@ class AndroidRuntimeQueueInstrumentationTest {
     }
 
     @Test
-    fun flagStorageAcceptsExactlyFourOneMiBChunksAndRejectsOneByteOverARow() {
+    fun flagStorageAcceptsExactlyFourOneMiBChunksAndRejectsOneByteOverARow() = withHeapMeasurements(2000) {
         val file = databaseFile()
         val owner =
             open(
@@ -450,7 +474,9 @@ class AndroidRuntimeQueueInstrumentationTest {
         owner.closeAsync().await()
         owners.remove(owner)
 
+        heapMeasurement(2001)
         val chunks = List(4) { index -> ByteArray(MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) { index.toByte() } }
+        heapMeasurement(2002)
         val database = AndroidSQLiteRuntimeDatabase.open(file)
         try {
             database.transaction { transaction ->
@@ -460,13 +486,20 @@ class AndroidRuntimeQueueInstrumentationTest {
                     )
                 }
             }
-            val loaded = mutableListOf<ByteArray>()
+            heapMeasurement(2003)
+            var loadedCount = 0
+            var loadedBytes = 0L
             database.transaction { transaction ->
-                transaction.scanFlagRows("cache-body:limit:") { row -> loaded += row.payload.copyOf() }
+                transaction.scanFlagRows("cache-body:limit:") { row ->
+                    assertTrue(loadedCount < chunks.size)
+                    assertArrayEquals(chunks[loadedCount], row.payload)
+                    loadedCount += 1
+                    loadedBytes += row.payload.size.toLong()
+                }
             }
-            assertEquals(4, loaded.size)
-            chunks.zip(loaded).forEach { (expected, actual) -> assertArrayEquals(expected, actual) }
-            assertEquals(4_194_304L, loaded.sumOf { it.size.toLong() })
+            assertEquals(4, loadedCount)
+            assertEquals(4_194_304L, loadedBytes)
+            heapMeasurement(2004)
 
             try {
                 database.transaction { transaction ->
@@ -746,20 +779,24 @@ class AndroidRuntimeQueueInstrumentationTest {
     }
 
     @Test
-    fun cursorWindowSafeRowReopensAndOversizedRowIsRejectedBeforeInsert() {
+    fun cursorWindowSafeRowReopensAndOversizedRowIsRejectedBeforeInsert() = withHeapMeasurements(3000) {
         val file = databaseFile()
         val owner = open(file, CountingIdentifiers(), RecordingFaults(), ::freshState)
         val safePayload = "x".repeat(MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES - 4_096)
         val safeEvent = event("safe-large").copy(properties = mapOf("payload" to safePayload))
 
+        heapMeasurement(3001)
         val accepted = appendEvents(owner, safeEvent) as RuntimeAppendResult.Accepted
+        heapMeasurement(3002)
         assertEquals(1L, accepted.snapshot.state.stream.nextSequence)
 
         val oversized =
             event("oversized").copy(
                 properties = mapOf("payload" to "x".repeat(MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES)),
             )
+        heapMeasurement(3003)
         val rejected = appendEvents(owner, oversized) as RuntimeAppendResult.Rejected
+        heapMeasurement(3004)
         assertEquals(RuntimeAppendRejection.RECORD_TOO_LARGE, rejected.reason)
         assertEquals(1L, rejected.snapshot.state.stream.nextSequence)
 
