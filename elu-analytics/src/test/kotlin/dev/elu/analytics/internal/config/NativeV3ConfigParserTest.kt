@@ -53,7 +53,20 @@ class NativeV3ConfigParserTest {
         val input = envelope().toString()
         assertThrows(IllegalArgumentException::class.java) { V1ConfigJson.parseConfig(input) }
         val parsed = NativeV3ConfigParser.parse(input.toByteArray())
-        assertEquals(parsed.base, V1ConfigJson.parseConfig(String(parsed.configV2Data, Charsets.UTF_8)))
+        val legacy = V1ConfigJson.parseConfig(String(parsed.configV2Data, Charsets.UTF_8))
+        // V1ExactTimestamp has reference equality. Compare its complete exact value first,
+        // then normalize only those references to compare every other parsed base field.
+        for ((original, reparsed) in listOf(parsed.base.issuedAtInstant to legacy.issuedAtInstant,
+                parsed.base.expiresAtInstant to legacy.expiresAtInstant)) {
+            assertEquals(original.epochWholeSecond, reparsed.epochWholeSecond)
+            assertEquals(original.fractionalDigits, reparsed.fractionalDigits)
+            assertEquals(original.isLeapSecond, reparsed.isLeapSecond)
+            assertEquals(0, original.compareTo(reparsed))
+        }
+        assertEquals(parsed.base.copy(issuedAtInstant = legacy.issuedAtInstant,
+            expiresAtInstant = legacy.expiresAtInstant), legacy)
+        assertArrayEquals(parsed.baseCanonicalData,
+            V1StrictCanonicalJson.canonicalBytes(V1StrictCanonicalJson.parse(legacy.serialized)))
         val versionOne = envelope().apply { getJSONObject("configV2").put("schemaVersion", 1) }
         rejected(versionOne)
     }
@@ -63,8 +76,8 @@ class NativeV3ConfigParserTest {
         val browser = envelope().apply {
             remove("raster")
             getJSONObject("configV2").getJSONObject("capabilities").getJSONObject("replay")
-                .put("replayProtocolGeneration", "browser-generation-1")
-                .put("transports", JSONArray().put(JSONObject().put("codec", "rrweb").put("compression", "gzip")))
+                .put("replayProtocolGeneration", "replay-v2-generation-1")
+                .put("transports", JSONArray().put(JSONObject().put("codec", "elu-browser-dom-v1").put("compression", "gzip")))
         }
         assertNull(parse(browser).raster)
         browser.put("raster", envelope().getJSONObject("raster"))
@@ -91,7 +104,7 @@ class NativeV3ConfigParserTest {
             rejected(value, NativeV3ConfigParser.Rejection.INCOMPATIBLE_BASE)
         }
         for ((codec, compression, generation) in listOf(
-            Triple("unknown", "gzip", "protocol-generation-v2"),
+            Triple("elu-unknown-v1", "gzip", "protocol-generation-v2"),
             Triple("elu-native-wireframe-v2", "none", "protocol-generation-v2"),
             Triple("elu-native-wireframe-v2", "gzip", "unknown"),
         )) {
@@ -99,6 +112,12 @@ class NativeV3ConfigParserTest {
             replay.put("replayProtocolGeneration", generation)
             replay.put("transports", JSONArray().put(JSONObject().put("codec", codec).put("compression", compression)))
             rejected(value, NativeV3ConfigParser.Rejection.INCOMPATIBLE_BASE)
+        }
+        for ((codec, compression) in listOf("unknown" to "gzip", "elu-native-wireframe-v2" to "unknown")) {
+            val malformed = envelope()
+            malformed.getJSONObject("configV2").getJSONObject("capabilities").getJSONObject("replay")
+                .put("transports", JSONArray().put(JSONObject().put("codec", codec).put("compression", compression)))
+            rejected(malformed, NativeV3ConfigParser.Rejection.MALFORMED)
         }
         val mixed = envelope()
         mixed.getJSONObject("configV2").getJSONObject("capabilities").getJSONObject("replay")
