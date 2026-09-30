@@ -113,15 +113,20 @@ class AndroidComposeReplayCollectorTest {
     @Test fun originalChildStateScrollAndActualInputRemainOnTheOriginalHost() {
         val private = EluReplayPrivateRegion.create()
         var instance: Any? = null
-        var offset = 0
-        var inputLength = 0
+        lateinit var readOffset: () -> Int
+        lateinit var readInputLength: () -> Int
         install({ listOf(private) }) {
             val identity = remember { Any() }
             var counter by remember { mutableIntStateOf(0) }
-            var input by remember { mutableStateOf("") }
+            val input = remember { mutableStateOf("") }
             val scroll = rememberScrollState()
             val focus = LocalFocusManager.current
-            SideEffect { instance = identity; offset = scroll.value; inputLength = input.length }
+            // Read the original state on demand; child recomposition/layout need not rerun this effect.
+            SideEffect {
+                instance = identity
+                readOffset = { scroll.value }
+                readInputLength = { input.value.length }
+            }
             Column {
                 Box(Modifier.fillMaxWidth().height(28.dp)
                     .background(if (counter == 0) Color.Red else Color.Blue)
@@ -129,7 +134,7 @@ class AndroidComposeReplayCollectorTest {
                     BasicText("COUNT $counter", Modifier.testTag("counter-text"))
                 }
                 EluReplayMask(private) {
-                    BasicTextField(input, { input = it }, Modifier.fillMaxWidth().height(36.dp).testTag("input"),
+                    BasicTextField(input.value, { input.value = it }, Modifier.fillMaxWidth().height(36.dp).testTag("input"),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }))
                 }
@@ -153,12 +158,12 @@ class AndroidComposeReplayCollectorTest {
                 performImeAction()
             }
             rule.waitForIdle()
-            assertEquals(17, rule.runOnIdle { inputLength })
+            assertEquals(17, rule.runOnIdle { readInputLength() })
             val beforeScroll = sample()
             try {
                 rule.onNodeWithTag("scroll").performTouchInput { swipeUp(durationMillis = 500) }
                 rule.waitForIdle()
-                assertTrue(rule.runOnIdle { offset } > 0)
+                assertTrue(rule.runOnIdle { readOffset() } > 0)
                 val afterScroll = sample()
                 try { assertFalse(beforeScroll.contentEquals(afterScroll)) } finally { afterScroll.fill(0) }
             } finally { beforeScroll.fill(0) }
