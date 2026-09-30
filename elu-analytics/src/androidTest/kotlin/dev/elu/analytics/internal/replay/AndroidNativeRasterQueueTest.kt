@@ -208,7 +208,7 @@ class AndroidNativeRasterQueueTest {
                     if (offset >= 48) db.ensureExceptionSchema()
                 }
                 // The old no-audience family is a real supported historical schema, not a new marker hole.
-                if (offset == 0) SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
+                if (offset == 0) SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
                     db.execSQL("DROP TABLE replay_audience")
                     db.rawQuery("PRAGMA user_version = $originalBase", null).use { cursor -> while (cursor.moveToNext()) { } }
                 }
@@ -221,7 +221,7 @@ class AndroidNativeRasterQueueTest {
                         ReplayQueueStore.validate(tx, namespace)
                     }
                 }
-                SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { db ->
                     assertEquals(originalBase + offset + 128, db.version)
                 }
                 AndroidSQLiteRuntimeDatabase.open(file).use { db ->
@@ -236,7 +236,7 @@ class AndroidNativeRasterQueueTest {
                         assertArrayEquals(flags.payload, tx.readFlagRow(flags.key)!!.payload)
                     }
                 }
-                SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY).use { assertEquals(182, it.version) }
+                SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS).use { assertEquals(182, it.version) }
             } finally { dir.deleteRecursively() }
         }
     }
