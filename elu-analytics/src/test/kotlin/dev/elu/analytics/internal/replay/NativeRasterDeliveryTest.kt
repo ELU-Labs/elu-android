@@ -264,7 +264,10 @@ class NativeRasterDeliveryTest {
                     replayRows.putAll(h.rig.backing.replayRows); records.putAll(h.rig.backing.records)
                     flagRows.putAll(h.rig.backing.flagRows); captureRateState = h.rig.backing.captureRateState
                 }
-                Rig(restored).use { restarted ->
+                Rig(restored, expectedRasterActivation = false).use { restarted ->
+                    // Opt-out cleared the original session; opt-in must not invent another.
+                    assertNull(restarted.rig.owner.snapshot().get().state.identity.session)
+                    assertTrue(restored.connection().use { db -> db.transaction { it.nativeRasterReplaySchemaPresent() } })
                     assertNull(restarted.queue.claim()); assertTrue(restarted.rows().isEmpty())
                 }
             } finally {
@@ -314,15 +317,17 @@ class NativeRasterDeliveryTest {
         var canceled = false; override fun cancel() { canceled = true }
     }
     private class Rig(backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(), name: String = "raster-delivery-" + UUID.randomUUID(),
-        support: ReplayDeliverySupport = ReplayDeliverySupport.INCLUDING_RASTER) : AutoCloseable {
+        support: ReplayDeliverySupport = ReplayDeliverySupport.INCLUDING_RASTER,
+        expectedRasterActivation: Boolean = true) : AutoCloseable {
         val rig = RasterQueueRig(backing, name)
         val queue: ReplayDeliveryQueue
         init {
-            rig.activate(); assertTrue(rig.owner.ensureNativeRasterStorage().get())
+            rig.activate(); assertEquals(expectedRasterActivation, rig.owner.ensureNativeRasterStorage().get())
             queue = rig.owner.openReplayDeliveryQueue(ReplayDeliveryPolicy(ReplayDeliveryPrivacy { config, identity, now ->
                 PrivacyStateProjector.encode(PrivacyStateProjector.project(PrivacyProjectionInput(checkNotNull(config.privacy),
                     checkNotNull(config.features), checkNotNull(config.replayCapabilities), identity, false,
-                    RuntimeWallTimestamps.rfc3339(now))))
+                    RuntimeWallTimestamps.rfc3339(now),
+                    PrivacyReplayInput(false, true, false, 0, NativeReplayProtocol.V2.transport))))
             }, ReplayMaskingRetention { _, _ -> true }, support)).get()
         }
         fun advance(millis: Long) { rig.clock.wall += millis; rig.clock.nanos += millis * 1_000_000 }
