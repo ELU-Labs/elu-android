@@ -434,6 +434,59 @@ class V2ConfigLifecycleDriverTest {
         } finally { rig.driver.close() }
     }
 
+    @Test fun `same null lifecycle update still delivers original denial and foreign gate cannot acknowledge`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        try {
+            rig.driver.start(); rig.worker.runNext()
+            rig.driver.onBackground()
+            assertNull(rig.gate.snapshot()?.body)
+            rig.body = JSONObject(rig.body).apply { remove("raster") }.toString()
+            rig.driver.onForeground(); rig.worker.runNext()
+            val denial = checkNotNull(rig.gate.rasterDenial())
+            assertSame(rig.source.rasterConflictReceipt(), denial.receipt)
+            assertNull(rig.gate.snapshot()?.body)
+            val foreign = V2ConfigAuthorityGate()
+            assertFalse(foreign.ownsDenial(denial)); assertFalse(foreign.acknowledgeDenial(denial))
+            rig.driver.onBackground(); assertSame(denial, rig.gate.rasterDenial())
+            rig.driver.close(); rig.gate.close(); assertSame(denial, rig.gate.rasterDenial())
+            assertTrue(rig.gate.acknowledgeDenial(denial)); assertNull(rig.source.rasterConflictReceipt())
+            assertFalse(rig.gate.acknowledgeDenial(denial))
+        } finally { rig.driver.close() }
+    }
+
+    @Test fun `gate close fences original source and retains conflict before its lifecycle notification`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        try {
+            rig.driver.start(); rig.worker.runNext()
+            val original = checkNotNull(rig.gate.snapshot())
+            rig.body = JSONObject(rig.body).apply { remove("raster") }.toString()
+            assertTrue(rig.source.refresh() is V2ConfigSourceResult.Unavailable)
+            val receipt = checkNotNull(rig.source.rasterConflictReceipt())
+            rig.gate.close()
+            assertFalse(original.isCurrent()); assertSame(receipt, rig.gate.rasterDenial()?.receipt)
+            assertEquals(V2ConfigSourceFailure.CLOSED, (rig.source.refresh() as V2ConfigSourceResult.Unavailable).reason)
+            rig.driver.close() // Its later null publication cannot discard or revive the closed gate.
+            assertNull(rig.gate.snapshot()); assertSame(receipt, rig.gate.rasterDenial()?.receipt)
+        } finally { rig.driver.close() }
+    }
+
+    @Test fun `gate close denies an original response still outside the validation fence`() {
+        val rig = Rig(format = V2ConfigFormat.NATIVE_V3)
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        rig.driver.start(); rig.worker.runNext()
+        val original = checkNotNull(rig.gate.snapshot())
+        rig.fetch = { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)); V2ConfigHttpResponse(200, rig.body) }
+        rig.driver.refresh()
+        val thread = Thread { rig.worker.runNext() }; thread.start()
+        try {
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            rig.gate.close()
+            assertFalse(original.isCurrent()); assertNull(rig.gate.snapshot())
+            release.countDown(); thread.join(2_000); assertFalse(thread.isAlive)
+            assertNull(rig.gate.snapshot()); assertNull(rig.source.currentDocument())
+        } finally { release.countDown(); thread.join(2_000); rig.driver.close() }
+    }
+
     private class Rig(consumeImmediately: Boolean = true, format: V2ConfigFormat = V2ConfigFormat.V2) {
         val clock = FakeClock()
         val scheduler = ManualScheduler(clock)

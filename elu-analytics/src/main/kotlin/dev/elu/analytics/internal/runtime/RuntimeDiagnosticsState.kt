@@ -77,7 +77,7 @@ internal data class RuntimeDiagnosticsConfiguration(
 )
 
 internal const val RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET = 24
-internal fun runtimeDatabaseFeatureOffset(version: Long): Int = when (version) {
+internal fun runtimeDatabaseFeatureOffset(version: Long): Int = when (runtimeNormalizedDatabaseVersion(version)) {
     in 1L..6L -> 0
     in 7L..12L -> RUNTIME_AUDIENCE_SCHEMA_OFFSET
     in 25L..30L -> RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET
@@ -87,3 +87,14 @@ internal fun runtimeDatabaseFeatureOffset(version: Long): Int = when (version) {
     in 49L..54L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET
     else -> throw UnsupportedRuntimeStorageSchemaException(version)
 }
+
+/** Closed outer marker: only already-native families may acquire raster storage. */
+internal const val RUNTIME_RASTER_SCHEMA_OFFSET = 128
+internal fun runtimeNormalizedDatabaseVersion(version: Long): Long = when (version) {
+    in 1L..12L, in 25L..54L -> version
+    133L, 134L, 139L, 140L, 157L, 158L, 163L, 164L,
+    169L, 170L, 175L, 176L, 181L, 182L -> version - RUNTIME_RASTER_SCHEMA_OFFSET
+    else -> throw UnsupportedRuntimeStorageSchemaException(version)
+}
+internal fun runtimeDatabaseRasterOffset(version: Long): Int =
+    if (runtimeNormalizedDatabaseVersion(version) == version) 0 else RUNTIME_RASTER_SCHEMA_OFFSET

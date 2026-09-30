@@ -266,6 +266,7 @@ internal class NativeReplayCaptureResources(
     private var database = database
     private var lease = lease
     private var prepared: PreparedReplayRequest? = null
+    private var rasterPrepared: NativeRasterPreparedRequest? = null
     private var quarantined = false
     private var originalTouch: NativeReplayCaptureTouch? = null
     @Synchronized fun retainOriginalTouch(value: NativeReplayCaptureTouch) {
@@ -278,10 +279,14 @@ internal class NativeReplayCaptureResources(
         if (value != null || !quarantined) database = value
     }
     @Synchronized fun quarantine(retaining: PreparedReplayRequest?) {
-        if (prepared == null) prepared = retaining
+        if (prepared == null && rasterPrepared == null && retaining != null) prepared = retaining
         if (!quarantined) { quarantined = true; synchronized(retained) { retained.add(this) } }
     }
-    @Synchronized fun released() { if (!quarantined) { database = null; lease = null; prepared = null } }
+    @Synchronized fun quarantineRaster(retaining: NativeRasterPreparedRequest) {
+        if (prepared == null && rasterPrepared == null) rasterPrepared = retaining
+        if (!quarantined) { quarantined = true; synchronized(retained) { retained.add(this) } }
+    }
+    @Synchronized fun released() { if (!quarantined) { database = null; lease = null; prepared = null; rasterPrepared = null } }
     private companion object { val retained = mutableListOf<NativeReplayCaptureResources>() }
 }
 
@@ -341,6 +346,15 @@ internal class NativeReplayCaptureEnrollment private constructor(
         retainQuarantine(retaining)
         notifyQuarantineIfPhysicallyFinished()
     }
+    internal fun quarantineRaster(retaining: NativeRasterPreparedRequest) {
+        synchronized(monitor) {
+            if (released) return
+            quarantined = true; intakeClosed = true
+            resources.quarantineRaster(retaining)
+        }
+        notifyQuarantineIfPhysicallyFinished()
+    }
+
     internal fun retainQuarantine(retaining: PreparedReplayRequest? = null) {
         synchronized(monitor) {
             // Release and quarantine have one terminal decision. This only moves local

@@ -29,5 +29,5 @@ internal const val RUNTIME_AUDIENCE_SCHEMA_OFFSET: Int = 6
 internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE: Int = 7
 
 internal fun runtimeBaseDatabaseVersion(version: Long): Long {
-    return version - runtimeDatabaseFeatureOffset(version)
+    return runtimeNormalizedDatabaseVersion(version) - runtimeDatabaseFeatureOffset(version)
 }

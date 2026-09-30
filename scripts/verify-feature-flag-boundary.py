@@ -313,14 +313,14 @@ def verify_prepared_replay_boundary(root: pathlib.Path, errors: list[str]) -> No
         text = path.read_text(encoding="utf-8")
         if "ensureNativeReplaySchema" in text and relative not in {OWNER, DATABASE_INTERFACE, SQLITE_DATABASE}:
             errors.append(f"native replay schema escaped its internal owner: {relative}")
-        if ("ensureNativeReplayAccounting" in text and relative not in {OWNER, composition}) or (
+        if ("ensureNativeReplayAccounting" in text and relative not in {OWNER, composition, replay_package / "NativeReplayAuthority.kt"}) or (
             any(name in text for name in ("observeNativeReplaySession", "beginNativeReplayAccounting")) and relative != OWNER) or (
             "stopNativeReplayAccounting" in text and relative not in {OWNER, replay_package / "NativeReplayAuthority.kt"}
         ):
             errors.append(f"native replay accounting must remain unconstructed: {relative}")
         if "ensureReplaySchema" in text and relative not in {OWNER, DATABASE_INTERFACE, SQLITE_DATABASE}:
             errors.append(f"replay schema migration escaped its internal owner: {relative}")
-        if ("ensurePreparedReplayStorage" in text and relative not in {OWNER, composition}) or (
+        if ("ensurePreparedReplayStorage" in text and relative not in {OWNER, composition, replay_package / "NativeReplayAuthority.kt"}) or (
             any(name in text for name in ("appendPreparedReplay", "reconcilePreparedReplay",
                                          "expirePreparedReplay", "storedPreparedReplayForTesting")) and relative != OWNER):
             errors.append(f"prepared replay storage must remain unconstructed: {relative}")
@@ -336,6 +336,8 @@ def verify_prepared_replay_boundary(root: pathlib.Path, errors: list[str]) -> No
         if relative == replay_package / "NativeRasterSealer.kt":
             old_sealer_text = old_sealer_text.replace("NativeReplaySealer.timestamp(timestamp)", "").replace(
                 "NativeReplaySealer.gzip(encodedPayload, (policy.maximumRequestBytes - overhead) / 4 * 3)", "")
+        if relative == replay_package / "NativeRasterStorage.kt":
+            old_sealer_text = old_sealer_text.replace("NativeReplaySealer.timestamp(timestamp)", "")
         if "NativeReplaySealer" in old_sealer_text and relative not in {replay_package / "NativeReplaySealer.kt", replay_package / "NativeReplayCaptureOwner.kt"}:
             errors.append(f"native replay sealer must remain unconstructed: {relative}")
         if "OkHttpReplayTransport" in text and relative not in {replay_package / "OkHttpReplayTransport.kt", composition}:
@@ -616,6 +618,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
         if len(re.findall(expression, sources.get(issuer, ""))) != 1:
             errors.append(f"native capture capability must have exactly one original issuer: {symbol}")
     exact_capture_counts = {
+        "nativeReplayCaptureMatches": {OWNER: 1, authority: 2},
         "consumeOriginalWindow": {lifecycle: 2, loop: 3},
         "retainOriginalTouch": {accounting: 3, loop: 1},
     }
@@ -919,7 +922,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
             "person = transitionedPerson", "left.person == right.person",
             "request.drafts.any { isPersonMutation(it.change) }", "putAll(checkNotNull(person).stamps(identity, personProfiles))"],
         "internal/runtime/AndroidSQLiteRuntimeDatabase.kt": [
-            "version !in 1L..12L && version !in 25L..54L", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
+            "else -> runtimeNormalizedDatabaseVersion(version)", "validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)",
             'readPerson(sqlite) ?: corrupt("Missing person state")'],
     }
     for relative, tokens in required.items():
@@ -1052,7 +1055,7 @@ def verify_exception_intake(root: pathlib.Path, errors: list[str]) -> None:
     base = MAIN_KOTLIN / "dev/elu/analytics/internal"
     required = {
         "runtime/RuntimeDiagnosticsState.kt": ["in 49L..54L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET", "else -> throw UnsupportedRuntimeStorageSchemaException(version)"],
-        "runtime/AndroidSQLiteRuntimeDatabase.kt": ["version !in 1L..12L && version !in 25L..54L", "validateTableSql(sqlite, EXCEPTIONS_TABLE, CREATE_EXCEPTIONS)",
+        "runtime/AndroidSQLiteRuntimeDatabase.kt": ["else -> runtimeNormalizedDatabaseVersion(version)", "validateTableSql(sqlite, EXCEPTIONS_TABLE, CREATE_EXCEPTIONS)",
             'readExceptions(sqlite) ?: corrupt("Missing exception state")', "exceptions.reservation.matches(state)"],
         "runtime/RuntimeQueueOwner.kt": ["if (memoryOnly || exceptionSpoolFactory == null", "exceptionIntake?.let { barriers += it.close() }",
             "exceptionIntake?.joinClosedWriter()", "val sourceIsCurrent = { !sourceRequired || originalSource?.isCurrent() == true }",
@@ -1339,7 +1342,11 @@ def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> N
     for file in (root / MAIN_KOTLIN).rglob("*.kt"):
         allowed = {path, *(config / name for name in (
             "V2ConfigSource.kt", "V2ConfigTransport.kt", "V2ConfigLifecycleDriver.kt", "V2ConfigAuthorityGate.kt"))}
-        if file.relative_to(root) not in allowed and "NativeV3ConfigParser" in file.read_text():
+        text = file.read_text()
+        if file.relative_to(root) in {MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeReplayAuthority.kt",
+                MAIN_KOTLIN / "dev/elu/analytics/internal/replay/ReplayQueueStore.kt"}:
+            text = re.sub(r"NativeV3ConfigParser\.(?:RasterPolicy|Parsed)\b", "", text)
+        if file.relative_to(root) not in allowed and "NativeV3ConfigParser" in text:
             errors.append("native v3 semantic parser must remain uninstalled outside original config source")
 
 
@@ -1370,7 +1377,7 @@ def verify_native_v3_source_boundary(root: pathlib.Path, errors: list[str]) -> N
         "V2ConfigLifecycleDriver.kt": [
             "internal fun consumeLease(", "consumeCurrent { body -> consumer(body, originalLease) }",
             "current.sameReceipt(retained)", "current.sameReceipt(published)",
-            "sameReceipt(published, snapshot)", "V2ConfigLifecycleUpdate(noticeSequence, kind, snapshot)",
+            "sameReceipt(published, snapshot)", "V2ConfigLifecycleUpdate(noticeSequence, kind, snapshot, conflict,",
         ],
         "V2ConfigAuthorityGate.kt": [
             "token.consumeLease { body, lease ->", "lease.body == body && lease.validReceiptBinding()",
@@ -1397,8 +1404,93 @@ def verify_native_v3_source_boundary(root: pathlib.Path, errors: list[str]) -> N
             errors.append("native v3 parser acquisition belongs only to the original source")
 
 
+def verify_native_raster_durable_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics/internal"
+    replay = base / "replay"
+    authority = replay / "NativeReplayAuthority.kt"
+    source = base / "config/V2ConfigSource.kt"
+    gate = base / "config/V2ConfigAuthorityGate.kt"
+    lifecycle = base / "config/V2ConfigLifecycleDriver.kt"
+    storage = replay / "NativeRasterStorage.kt"
+    store = replay / "ReplayQueueStore.kt"
+    sealer = replay / "NativeRasterSealer.kt"
+    candidate = replay / "AnnotatedRasterCandidate.kt"
+    required = {
+        base / "runtime/RuntimeDiagnosticsState.kt": [
+            "RUNTIME_RASTER_SCHEMA_OFFSET = 128", "in 1L..12L, in 25L..54L -> version",
+            "133L, 134L, 139L, 140L, 157L, 158L, 163L, 164L,",
+            "169L, 170L, 175L, 176L, 181L, 182L -> version - RUNTIME_RASTER_SCHEMA_OFFSET",
+            "else -> throw UnsupportedRuntimeStorageSchemaException(version)"],
+        SQLITE_DATABASE: ["override fun ensureNativeRasterReplaySchema()", "state.copy(rasterStorage = true).row()",
+            "runtimeDatabaseRasterOffset(version)", "runtimeNormalizedDatabaseVersion(version)"],
+        source: ["internal class V2RasterConflictReceipt private constructor", "pendingRasterConflict === original",
+            "if (!prior.conflicted)", "V2RasterConflictReceipt.issue(parsed.issuedAt, prior.semanticHash, nativeV3.semanticHash)",
+            "fun closeSource() = original.close()", "if (format == V2ConfigFormat.NATIVE_V3) V2RasterConflictChannel(this) else null"],
+        gate: ["pendingDenial === value", "value.originalChannel.acknowledge(value.receipt)", "value.belongsTo(this)",
+            "originalRasterConflicts?.closeSource()", "originalRasterConflicts === channel"],
+        lifecycle: ["source.rasterConflictReceipt()", "publishedUpdate?.rasterConflict === conflict", "source.rasterConflictChannel"],
+        OWNER: ["if (!gate.ownsDenial(denial))", "ReplayQueueStore.recordRasterDenial(tx, denial.receipt)",
+            "if (known) gate.acknowledgeDenial(denial)", "reconcileRasterSourceOnWorker(witness)",
+            "fun ensureRestrictionStorage()", "configurationGate?.close() // Fences original source validation",
+            "flushRasterSourceDenialOnWorker()", "nativeSettlementUncertain = previousUncertain",
+            "request.sourceIdentity !== admission.permit.sourceIdentity", "request.originalCaptureIsCurrent()",
+            "NativeRasterStoredRequest.parse(bytes)", "finally { bytes.fill(0) }", "use.enrollment.quarantineRaster(request)",
+            "session.activeEpoch == receipt.epoch", "stored.policyRevision == admission.policy.revision",
+            "stored.effectivePolicyHash == admission.policy.effectivePolicyHash"],
+        authority: ["internal val rasterSupported: Boolean = false", "captureUse = use", "receipt = started.receipt",
+            "NativeRasterPermit.issue", "rasterActive = null"],
+        store: ["require(state.rasterStorage == tx.nativeRasterReplaySchemaPresent())", "filterNot { it.raster }",
+            "config.issuedAtInstant > V1ConfigJson.parseExactTimestamp(old.issuedAt)", "order == 0 -> checkNotNull(old).copy(conflicted = true)",
+            "V1ConfigJson.parseExactTimestamp(state.issuedAt) >", "baseOrder < 0 || (baseOrder == 0 && state.poisoned)",
+            "else -> old", "ledger.semanticHash != wrapper.semanticHash", "core.queueCount + state.count + 1 > maximumCount"],
+        storage: ["class NativeRasterStoredRequest private constructor", '"elu-sdk-replay-request-v3"',
+            "V1StrictCanonicalJson.canonicalBytes(root).contentEquals(input)", "input.copyOf()"],
+        candidate: ["internal fun publicationGuard(): () -> Boolean = current"],
+        sealer: ["frame.publicationGuard()", "sourceIdentity.isCurrent() && originalCaptureCurrent()",
+            "val originalSourceCurrent = sourceIsCurrent", "originalFrameCurrent() && originalSourceCurrent()"],
+    }
+    for path, tokens in required.items():
+        text = load_text(root, path)
+        if any(token not in text for token in tokens):
+            errors.append("raster durability lost closed schema, original denial or append ownership: " + str(path))
+    permitted = {
+        "ensureNativeRasterReplaySchema": {OWNER, DATABASE_INTERFACE, SQLITE_DATABASE},
+        "ensureNativeRasterStorage": {OWNER, authority},
+        "prepareNativeRasterProjection": {OWNER, authority},
+        "beginNativeRasterAuthority": {OWNER, authority},
+        "makeNativeRasterCaptureAdmission": {OWNER, authority},
+        "appendNativeRaster": {OWNER},
+        "prepareRaster": {authority}, "startRaster": {authority},
+        "recordRasterDenial": {OWNER, store}, "acknowledgeDenial": {OWNER, gate},
+        "publicationGuard": {candidate, sealer},
+    }
+    issuers = {"NativeRasterPreparedProjection": OWNER, "NativeRasterCaptureAdmission": OWNER,
+        "NativeRasterPreparedAuthority": authority, "NativeRasterPermit": authority,
+        "V2RasterConflictReceipt": source}
+    for file in (root / MAIN_KOTLIN).rglob("*.kt"):
+        path = file.relative_to(root); text = file.read_text()
+        for name, paths in permitted.items():
+            if re.search(r"\b" + name + r"\b", text) and path not in paths:
+                errors.append("raster durability escaped original internal owner: " + name)
+        for name, issuer in issuers.items():
+            if re.search(r"\b" + name + r"\s*(?:\.\s*Companion\s*)?(?:\.|::)\s*issue\b", text) and path != issuer:
+                errors.append("raster capability escaped its original issuer: " + name)
+        if path != gate and re.search(r"\bV2RasterDenialWitness\s*\(", text):
+            errors.append("raster denial must retain its original gate and update")
+        if path != source and re.search(r"\bV2RasterConflictChannel\s*\(", text):
+            errors.append("raster denial channel must retain its original source")
+        if path not in {source, lifecycle, gate} and re.search(r"\bV2RasterConflictChannel\b|\.rasterConflictChannel\b", text):
+            errors.append("raster denial channel cannot escape source lifecycle gate")
+        if "rasterSupported = true" in text:
+            errors.append("raster capability must remain uninstalled")
+    # An outer marker cannot legalize future/absent old families, and cannot authorize decoding.
+    if re.search(r"GZIPInputStream|Inflater|Bitmap|BitmapFactory|NativeRasterPreparedRequest\s*\(", load_text(root, storage)):
+        errors.append("restored raster facts cannot decode pixels or revive producer authority")
+
+
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_native_raster_durable_boundary(root, errors)
     verify_compose_distribution_boundary(root, errors)
     verify_native_raster_response_boundary(root, errors)
     verify_native_v3_parser_boundary(root, errors)

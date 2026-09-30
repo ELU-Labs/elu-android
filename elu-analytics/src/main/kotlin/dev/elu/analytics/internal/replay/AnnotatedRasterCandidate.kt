@@ -14,6 +14,9 @@ internal class AnnotatedRasterCandidate private constructor(
     val width: Int = checkNotNull(bitmap).width
     val height: Int = checkNotNull(bitmap).height
 
+    /** Exact collector predicate, including its copied intent revision; no pixels/release callback. */
+    internal fun publicationGuard(): () -> Boolean = current
+
     /** One-shot worker encoding. Original request bytes, never retained pixels, serve later retries. */
     @Synchronized
     fun encodePng(): ByteArray {

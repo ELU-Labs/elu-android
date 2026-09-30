@@ -577,6 +577,9 @@ internal class RuntimeQueueOwner private constructor(
     ): Future<RuntimeCaptureAuthorityUpdateResult> =
         submit(revokeNative = true) {
             val witness = configurationGate?.snapshotFor(configBody)
+            if (!reconcileRasterSourceOnWorker(witness)) {
+                return@submit terminateAuthority(RuntimeCaptureAuthorityTerminalReason.CONFLICT, null)
+            }
             if (configurationGate != null && witness == null) {
                 return@submit terminateAuthority(RuntimeCaptureAuthorityTerminalReason.STALE, null, null, null)
             }
@@ -595,6 +598,7 @@ internal class RuntimeQueueOwner private constructor(
     ): Future<Boolean> = submit {
         assertUsable()
         val witness = configurationGate?.snapshotFor(configBody)
+        if (!reconcileRasterSourceOnWorker(witness)) return@submit false
         if (configurationGate != null && witness == null) return@submit false
         val parsed = try { V1ConfigJson.parseConfig(configBody) } catch (_: Exception) { return@submit false }
         if (parsed.status != V1ConfigStatus.ENABLED) return@submit false
@@ -823,6 +827,195 @@ internal class RuntimeQueueOwner private constructor(
         database().transaction { ReplayQueueStore.validate(it, namespace) }
         nativeAccountingActivated = true
         Unit
+    }
+
+    /** Explicit dormant raster storage; the default stack never invokes this seam. */
+    internal fun ensureNativeRasterStorage(): Future<Boolean> = submitNative {
+        assertUsable()
+        val source = captureConfiguration ?: return@submitNative false
+        val capture = captureAuthority as? RuntimeCaptureAuthorityState.Authorized ?: return@submitNative false
+        if (source.nativeV3?.raster == null || nativeCurrentConfig(requireLoaded(), source, capture) == null) return@submitNative false
+        try { database().ensureNativeRasterReplaySchema() }
+        catch (uncertain: AmbiguousRuntimeCommitException) {
+            reopenValidated(uncertain, holdNativeScope = true) ?: corrupt("Runtime core disappeared during raster migration")
+            try { database().ensureNativeRasterReplaySchema() }
+            finally { resumeNativeScopeAfterReconciliation() }
+        }
+        database().transaction { ReplayQueueStore.validate(it, ownerNamespaceHash) }
+        reconcileRasterSourceOnWorker(source)
+    }
+
+    /** Original denial only; no executable lease is manufactured for this transaction. */
+    private fun flushRasterSourceDenialOnWorker() {
+        val gate = configurationGate ?: return
+        val denial = gate.rasterDenial() ?: return
+        val previousUncertain = nativeSettlementUncertain
+        nativeSettlementUncertain = true
+        try {
+            check(poison == null) { "Source conflict storage is poisoned" }
+            // A validated denial needs durable ordering even before any raster permission/start.
+            // These existing singleton migrations do not select, sample, or start a recorder.
+            val namespace = checkNotNull(ownerNamespaceHash)
+            val stream = requireLoaded().state.stream.streamId
+            fun ensureRestrictionStorage() {
+                database().ensureReplaySchema(ReplayStoredState(namespace).row())
+                database().ensureNativeReplaySchema(NativeReplayAccounting.row(NativeReplaySessionState(namespace, stream)))
+                database().ensureNativeRasterReplaySchema()
+            }
+            try { ensureRestrictionStorage() }
+            catch (uncertain: AmbiguousRuntimeCommitException) {
+                reopenValidated(uncertain, holdNativeScope = true) ?: corrupt("Runtime core disappeared during denial migration")
+                try { ensureRestrictionStorage() } finally { resumeNativeScopeAfterReconciliation() }
+            }
+            val known = replayTransaction(null, false) { tx ->
+                if (!gate.ownsDenial(denial)) return@replayTransaction false
+                ReplayQueueStore.recordRasterDenial(tx, denial.receipt)
+                true
+            }
+            // Unknown COMMIT never reaches here unless exact reopened state proved the outcome.
+            if (known) gate.acknowledgeDenial(denial)
+            nativeSettlementUncertain = previousUncertain
+        } catch (error: Throwable) {
+            // Keep the original DB/file lease at close if the restriction remains undurable.
+            quarantineReplayFailure(error)
+            throw error
+        }
+    }
+
+    /** Whole-source ordering is independent of lease availability and of embedded-v2 equality. */
+    private fun reconcileRasterSourceOnWorker(source: V2ConfigAuthorityWitness?): Boolean {
+        flushRasterSourceDenialOnWorker()
+        if (!database().transaction { it.nativeRasterReplaySchemaPresent() }) return true
+        val parsed = source?.takeIf { it.isCurrent() }?.body?.let { runCatching { V1ConfigJson.parseConfig(it) }.getOrNull() }
+        val allowed = if (source == null || parsed == null) false else replayTransaction(source, false) { tx ->
+            ReplayQueueStore.rasterOrdering(tx, source, parsed)
+        }
+        if (!allowed) {
+            // Restrict live channels too; a later genuinely newer original source may reactivate.
+            flagConfiguration = null
+            terminateAuthority(RuntimeCaptureAuthorityTerminalReason.CONFLICT, null)
+        }
+        return allowed
+    }
+
+    internal fun prepareNativeRasterProjection(input: NativeReplayProjectionInput,
+        sourceIdentity: AnnotatedRasterSourceIdentity, deviceInEuTimezone: Boolean): Future<NativeRasterPreparedProjection?> = submitNative {
+        assertUsable()
+        if (!input.belongsTo(nativeOwnerToken) || !input.isCurrent() || !sourceIdentity.isCurrent() || nativeReceipt != null) return@submitNative null
+        val original = input.observation
+        if (!reconcileRasterSourceOnWorker(original.source)) return@submitNative null
+        val config = nativeCurrentConfig(requireLoaded(), original.source, original.capture) ?: return@submitNative null
+        val policy = original.source.nativeV3?.raster ?: return@submitNative null
+        val session = original.session
+        if (!nativeRasterBaseMayRetain(config) || !original.currentSelected || session.clockDenied || session.interrupted ||
+            session.activeEpoch != null || session.remainingWholeSeconds <= 0 || nativeKey(requireLoaded(), original.capture) != session.key) return@submitNative null
+        val general = PrivacyStateProjector.project(PrivacyProjectionInput(checkNotNull(config.privacy),
+            checkNotNull(config.features), checkNotNull(config.replayCapabilities), input.identity, deviceInEuTimezone, nativeWall()))
+        if (!general.captureAllowed || !input.isCurrent() || !sourceIdentity.isCurrent()) return@submitNative null
+        // Keep the original general capture hash/monotonic interval. The raster hash is separate.
+        NativeRasterPreparedProjection.issue(nativeOwnerToken, input, policy, sourceIdentity)
+    }
+
+    internal fun beginNativeRasterAuthority(prepared: NativeRasterPreparedProjection,
+        use: NativeReplayCapturePhysicalUse): Future<NativeReplayStartedProjection?> = submitNative {
+        assertUsable(); requireNativeCaptureUse(use)
+        if (!prepared.belongsTo(nativeOwnerToken) || !prepared.isCurrent() ||
+            !reconcileRasterSourceOnWorker(prepared.input.observation.source)) return@submitNative null
+        val started = beginNativeOnWorker(prepared.input.observation, use, prepared.input.guard) ?: return@submitNative null
+        val session = database().transaction { nativeState(it).session } ?: return@submitNative null
+        val original = prepared.input.observation
+        val guard = nativeScope.issue(original.source, original.capture, session, started.anchor)
+        // The original physical owner retains this receipt even when its post-start guard fails.
+        if (guard == null) return@submitNative null
+        NativeReplayStartedProjection.issue(started, guard)
+    }
+
+    internal fun makeNativeRasterCaptureAdmission(permit: NativeRasterPermit,
+        use: NativeReplayCapturePhysicalUse): Future<NativeRasterCaptureAdmission?> = submitNative {
+        assertUsable(); requireNativeCaptureUse(use)
+        val input = permit.prepared.projection.input
+        if (!input.belongsTo(nativeOwnerToken) || nativeReceipt !== permit.started.receipt || !permit.isCurrent() ||
+            !reconcileRasterSourceOnWorker(input.observation.source)) return@submitNative null
+        val parsed = nativeCurrentConfig(requireLoaded(), input.observation.source, input.observation.capture) ?: return@submitNative null
+        if (!nativeRasterBaseMayRetain(parsed) || input.observation.source.nativeV3?.raster != permit.prepared.projection.policy) return@submitNative null
+        val admission = NativeRasterCaptureAdmission.issue(nativeOwnerToken, permit, use)
+        val reconciled = replayTransaction(admission.source, false) { tx ->
+            if (!admission.isCurrent()) throw ReplaySourceWithdrawn()
+            val now = captureClock.wallNowEpochMillis()
+            if (!replayClockIsCurrent(tx, now)) return@replayTransaction false
+            val result = ReplayQueueStore.reconcile(tx, parsed, checkNotNull(ownerNamespaceHash), now, false,
+                readbackProvenReplayTransports, supportedReplayProtocolGenerations, ReplayMaskingRetention { profile, required ->
+                    NativeMaskingProfile.retention(profile.copyBytes(), required.privacy?.masking,
+                        dev.elu.analytics.internal.config.V1PrivacyPlatform.ANDROID) == NativeMaskingRetention.COMPATIBLE
+                })
+            if (!admission.isCurrent()) throw ReplaySourceWithdrawn()
+            val state = checkNotNull(ReplayQueueStore.state(tx))
+            result || (!state.poisoned && state.issuedAt == parsed.issuedAt &&
+                state.semanticHash == parsed.configSemanticHash && nativeRasterBaseMayRetain(parsed))
+        }
+        admission.takeIf { reconciled && replayOwnerIsLive() && it.isCurrent() }
+    }
+
+    internal fun appendNativeRaster(request: NativeRasterPreparedRequest, admission: NativeRasterCaptureAdmission,
+        use: NativeReplayCapturePhysicalUse): Future<NativeReplayAppendOutcome> = submitNative {
+        assertUsable(); requireNativeCaptureUse(use)
+        val denied = ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
+        if (!admission.belongsTo(nativeOwnerToken) || admission.use !== use || !admission.isCurrent() ||
+            !request.originalCaptureIsCurrent() || request.sourceIdentity !== admission.permit.sourceIdentity ||
+            !reconcileRasterSourceOnWorker(admission.source)) return@submitNative NativeReplayAppendOutcome.Rejected(denied.reason)
+        try {
+            val bytes = request.copyBytes()
+            val stored = try { NativeRasterStoredRequest.parse(bytes) } finally { bytes.fill(0) }
+            var withdrawn = false
+            val result = replayTransaction<ReplayAppendResult>(admission.source, denied, publishCommitted = { value, current ->
+                if (value is ReplayAppendResult.Stored && (!current || !admission.isCurrent() || !request.originalCaptureIsCurrent())) withdrawn = true
+                value
+            }) { tx ->
+                fun admissionNow(): Long? {
+                    if (!nativeRasterAppendIsCurrent(tx, stored, request, admission)) return null
+                    val now = captureClock.wallNowEpochMillis()
+                    if (!replayClockIsCurrent(tx, now) || stored.timestamp > now || stored.expiredAt(now)) return null
+                    return now
+                }
+                val now = admissionNow() ?: return@replayTransaction denied
+                val wrapper = checkNotNull(admission.source.nativeV3)
+                val appended = ReplayQueueStore.appendRaster(tx, stored, checkNotNull(ownerNamespaceHash), checkNotNull(wrapper.base.siteId),
+                    wrapper, now, limits.maximumCount, minOf(limits.maximumBytes, checkNotNull(wrapper.base.limits).queueBytes.toLong()),
+                    admission.policy.maximumRequestBytes, ::admissionNow)
+                if (appended is ReplayAppendResult.Stored && admissionNow() == null) throw ReplaySourceWithdrawn()
+                appended
+            }
+            when (result) {
+                is ReplayAppendResult.Rejected -> NativeReplayAppendOutcome.Rejected(result.reason)
+                is ReplayAppendResult.Stored -> if (withdrawn || !replayOwnerIsLive() || !admission.isCurrent() || !request.originalCaptureIsCurrent())
+                    NativeReplayAppendOutcome.CommittedThenWithdrawn(result) else NativeReplayAppendOutcome.Committed(result)
+            }
+        } catch (error: Throwable) {
+            if (poison != null) use.enrollment.quarantineRaster(request)
+            throw error
+        }
+    }
+
+    private fun nativeRasterAppendIsCurrent(tx: RuntimeQueueTransaction, stored: NativeRasterStoredRequest,
+        request: NativeRasterPreparedRequest, admission: NativeRasterCaptureAdmission): Boolean {
+        if (!admission.belongsTo(nativeOwnerToken) || !admission.isCurrent() || !request.originalCaptureIsCurrent() ||
+            request.sourceIdentity !== admission.permit.sourceIdentity) return false
+        requireNativeCaptureUse(admission.use)
+        val receipt = admission.receipt
+        if (receipt !== nativeReceipt || !receipt.belongsTo(nativeOwnerToken)) return false
+        val current = requireCurrent(tx); val identity = current.state.identity
+        val config = nativeCurrentConfig(current, admission.source, admission.input.observation.capture) ?: return false
+        val session = nativeState(tx).session ?: return false
+        return receipt.namespaceHash == ownerNamespaceHash && receipt.streamId == current.state.stream.streamId &&
+            session.key == receipt.key && session.firstStartAt == receipt.firstStartAt && session.activeEpoch == receipt.epoch &&
+            !session.clockDenied && !session.interrupted && session.remainingMicroseconds > 0 && nativeRasterBaseMayRetain(config) &&
+            admission.source.nativeV3?.raster == admission.policy && request.digest == stored.digest &&
+            stored.replayId == receipt.replayId && stored.sessionId == identity.session?.id &&
+            V1ExactTimestamp.fromEpochMillis(stored.timestamp) >= V1ConfigJson.parseExactTimestamp(checkNotNull(identity.session).startedAt) &&
+            V1ExactTimestamp.fromEpochMillis(stored.timestamp) >= V1ConfigJson.parseExactTimestamp(receipt.firstStartAt) &&
+            stored.anonymousId == identity.anonymousId && stored.userId == identity.userId && stored.identityRevision == identity.revision &&
+            stored.contextRevision == identity.contextRevision && stored.policyRevision == admission.policy.revision &&
+            stored.effectivePolicyHash == admission.policy.effectivePolicyHash && admission.isCurrent() && request.originalCaptureIsCurrent()
     }
 
     /** Read-only values with an original owner/source binding; not recorder permission. */
@@ -1197,7 +1390,8 @@ internal class RuntimeQueueOwner private constructor(
         retention: ReplayMaskingRetention = ReplayMaskingRetention { _, _ -> false },
     ): Future<Boolean> = submit {
         assertUsable()
-        val witness = configurationGate?.snapshot() ?: return@submit false
+        val witness = configurationGate?.snapshot()
+        if (!reconcileRasterSourceOnWorker(witness) || witness == null) return@submit false
         val body = witness.body ?: return@submit false
         val parsed = try { V1ConfigJson.parseConfig(body) } catch (_: Exception) { return@submit false }
         replayTransaction(witness, false) { tx ->
@@ -1300,7 +1494,8 @@ internal class RuntimeQueueOwner private constructor(
         effectivePrivacyBody: String?, nativeAdmission: NativeReplayCaptureAdmission? = null,
         committedThenWithdrawn: () -> Unit = {}): ReplayAppendResult {
         val denied = ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
-        val witness = nativeAdmission?.source ?: configurationGate?.snapshot() ?: return denied
+        val witness = nativeAdmission?.source ?: configurationGate?.snapshot()
+        if (!reconcileRasterSourceOnWorker(witness) || witness == null) return denied
         val parsed = try { V1ConfigJson.parseConfig(witness.body) } catch (_: Exception) { return denied }
         val result = replayTransaction<ReplayAppendResult>(witness, denied, publishCommitted = { value, current ->
             if (current && (nativeAdmission == null || nativeAdmission.isCurrent())) value
@@ -1375,7 +1570,16 @@ internal class RuntimeQueueOwner private constructor(
         database().transaction { tx ->
             requireCurrent(tx)
             ReplayQueueStore.validate(tx, ownerNamespaceHash)
-            if (!tx.replaySchemaPresent()) emptyList() else ReplayQueueStore.headers(tx).map { ReplayQueueStore.read(tx, it) }
+            if (!tx.replaySchemaPresent()) emptyList() else ReplayQueueStore.headers(tx).filterNot { it.raster }.map { ReplayQueueStore.read(tx, it) }
+        }
+    }
+
+    internal fun storedNativeRasterForTesting(): Future<List<NativeRasterStoredChunk>> = submit {
+        assertUsable()
+        database().transaction { tx ->
+            requireCurrent(tx); ReplayQueueStore.validate(tx, ownerNamespaceHash)
+            if (!tx.nativeRasterReplaySchemaPresent()) emptyList()
+            else ReplayQueueStore.headers(tx).filter { it.raster }.map { ReplayQueueStore.readRaster(tx, it) }
         }
     }
 
@@ -1426,8 +1630,9 @@ internal class RuntimeQueueOwner private constructor(
 
     private fun resolveReplayDelivery(tx: RuntimeQueueTransaction, witness: V2ConfigAuthorityWitness,
         policy: ReplayDeliveryPolicy, reconcile: Boolean): ReplayDeliveryAuthorization? {
-        if (!replayOwnerIsLive() || !witness.isCurrent()) return null
+        if (!replayOwnerIsLive() || !witness.isCurrent() || configurationGate?.rasterDenial() != null) return null
         val parsed = try { V1ConfigJson.parseConfig(witness.body) } catch (_: Exception) { return null }
+        if (tx.nativeRasterReplaySchemaPresent() && !ReplayQueueStore.rasterOrdering(tx, witness, parsed)) return null
         val identity = requireCurrent(tx).state.identity
         val now = captureClock.wallNowEpochMillis()
         if (!replayClockIsCurrent(tx, now)) return null
@@ -1454,7 +1659,8 @@ internal class RuntimeQueueOwner private constructor(
 
     private fun claimReplayDelivery(policy: ReplayDeliveryPolicy): Future<ReplayDeliveryClaim?> = submit {
         assertUsable()
-        val witness = configurationGate?.snapshot() ?: return@submit null
+        val witness = configurationGate?.snapshot()
+        if (!reconcileRasterSourceOnWorker(witness) || witness == null) return@submit null
         val claimed = replayTransaction<ReplayDeliveryClaim?>(witness, null) { tx ->
             val authority = resolveReplayDelivery(tx, witness, policy, true) ?: return@replayTransaction null
             val now = captureClock.wallNowEpochMillis()
@@ -1476,7 +1682,8 @@ internal class RuntimeQueueOwner private constructor(
 
     private fun nextReplayDeliveryWake(policy: ReplayDeliveryPolicy): Future<Long?> = submit {
         assertUsable()
-        val witness = configurationGate?.snapshot() ?: return@submit null
+        val witness = configurationGate?.snapshot()
+        if (!reconcileRasterSourceOnWorker(witness) || witness == null) return@submit null
         replayTransaction<Long?>(witness, null) { tx ->
             val authority = resolveReplayDelivery(tx, witness, policy, false) ?: return@replayTransaction null
             ReplayQueueStore.nextWakeDelay(tx, replayDeliveryOwner, authority, replayElapsedMillis())
@@ -1722,6 +1929,10 @@ internal class RuntimeQueueOwner private constructor(
                 return@submit V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.STORAGE)
             }
             val witness = configurationGate?.snapshotFor(configBody)
+            if (!reconcileRasterSourceOnWorker(witness)) {
+                flagConfiguration = null
+                return@submit V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.STALE)
+            }
             if (configurationGate != null && witness == null) {
                 flagConfiguration = null
                 return@submit V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.STALE)
@@ -2149,6 +2360,7 @@ internal class RuntimeQueueOwner private constructor(
         // Enrollment already retained only the original resource holder. Never perform SQL,
         // close the connection/lease, remove installation ownership, or report successful close.
         nativeSettlementUncertain = true
+        configurationGate?.close()
         database = null; lease = null; loaded = null
         throw IllegalStateException("Native capture accounting remains quarantined after physical shutdown")
     }
@@ -2156,6 +2368,10 @@ internal class RuntimeQueueOwner private constructor(
     private fun finishCloseOnWorker() {
         assertWorkerThread()
         try {
+            try {
+                configurationGate?.close() // Fences original source validation before the final denial read.
+                flushRasterSourceDenialOnWorker()
+            } catch (error: Throwable) { nativeSettlementUncertain = true; throw error }
             if (consentStorageUncertain || memorySettlementUncertain) {
                 quarantineConsentResources()
                 throw IllegalStateException("Original memory/consent settlement is unresolved")

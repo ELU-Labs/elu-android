@@ -109,6 +109,8 @@ internal interface RuntimeQueueTransaction {
     /** Native accounting is required only in explicitly activated database versions 5/6. */
     fun nativeReplaySchemaPresent(): Boolean
 
+    fun nativeRasterReplaySchemaPresent(): Boolean
+
     fun readReplayRow(key: String): RuntimeReplayStoredRow?
     fun scanReplayRows(prefix: String, visitor: (RuntimeReplayStoredRow) -> Unit)
     fun putReplayRow(row: RuntimeReplayStoredRow)
@@ -163,6 +165,9 @@ internal interface RuntimeQueueDatabase : Closeable {
 
     /** Atomic 3→5 or 4→6 activation in the existing replay table. */
     fun ensureNativeReplaySchema(initialAuthority: RuntimeReplayStoredRow)
+
+    /** Original replay table/state only; never called by ordinary open. */
+    fun ensureNativeRasterReplaySchema()
 
     /**
      * Executes [block] in a full synchronous transaction. A known pre-commit failure rolls back;

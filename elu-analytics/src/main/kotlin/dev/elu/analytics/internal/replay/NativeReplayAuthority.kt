@@ -13,6 +13,7 @@ import java.util.concurrent.Future
 internal class NativeReplayCapabilities(
     transports: Set<V1ReplayTransport> = emptySet(),
     generations: Set<String> = emptySet(),
+    internal val rasterSupported: Boolean = false,
 ) {
     private val transports = Collections.unmodifiableSet(HashSet(transports))
     private val generations = Collections.unmodifiableSet(HashSet(generations))
@@ -132,6 +133,61 @@ internal class NativeReplayCaptureAdmission private constructor(
     }
 }
 
+/** Distinct declared-region values; never accepted by the old automatic Views projection. */
+internal class NativeRasterPreparedProjection private constructor(
+    private val owner: Any, val input: NativeReplayProjectionInput,
+    val policy: NativeV3ConfigParser.RasterPolicy, val sourceIdentity: AnnotatedRasterSourceIdentity,
+) {
+    fun belongsTo(value: Any) = owner === value
+    fun isCurrent() = input.isCurrent() && sourceIdentity.isCurrent()
+    companion object {
+        fun issue(owner: Any, input: NativeReplayProjectionInput, policy: NativeV3ConfigParser.RasterPolicy,
+            sourceIdentity: AnnotatedRasterSourceIdentity) = NativeRasterPreparedProjection(owner, input, policy, sourceIdentity)
+    }
+}
+internal class NativeRasterPreparedAuthority private constructor(
+    private val owner: Any, internal val invocation: Any, internal val projection: NativeRasterPreparedProjection,
+    internal val selection: NativeReplaySelection,
+) {
+    fun belongsTo(value: Any) = owner === value
+    fun isCurrent() = projection.isCurrent() && selection.isCurrent()
+    companion object {
+        fun issue(owner: Any, invocation: Any, projection: NativeRasterPreparedProjection, selection: NativeReplaySelection) =
+            NativeRasterPreparedAuthority(owner, invocation, projection, selection)
+    }
+}
+internal class NativeRasterPermit private constructor(
+    internal val prepared: NativeRasterPreparedAuthority, internal val started: NativeReplayStartedProjection,
+    private val current: () -> Boolean,
+) {
+    val replayId get() = started.receipt.replayId
+    val sourceIdentity get() = prepared.projection.sourceIdentity
+    val identity get() = prepared.projection.input.identity
+    fun sealingPolicy() = NativeRasterPolicyBinding(prepared.projection.policy.revision,
+        prepared.projection.policy.effectivePolicyHash, identity.contextRevision, prepared.projection.policy.maximumRequestBytes)
+    fun isCurrent() = current() && prepared.selection.isCurrent() && sourceIdentity.isCurrent() && started.guard.isCurrent() && current()
+    companion object {
+        fun issue(prepared: NativeRasterPreparedAuthority, started: NativeReplayStartedProjection, current: () -> Boolean) =
+            NativeRasterPermit(prepared, started, current)
+    }
+}
+internal class NativeRasterCaptureAdmission private constructor(
+    private val owner: Any, internal val permit: NativeRasterPermit, internal val use: NativeReplayCapturePhysicalUse,
+) {
+    private val localPrivacy = NativeViewPrivacy.snapshot()
+    internal val input get() = permit.prepared.projection.input
+    internal val source get() = input.observation.source
+    internal val receipt get() = permit.started.receipt
+    internal val policy get() = permit.prepared.projection.policy
+    private val inputCovered = permit.started.guard.coversUnstartedInput(input.guard, receipt)
+    fun belongsTo(value: Any) = owner === value
+    fun isCurrent() = use.isCurrent() && permit.isCurrent() && localPrivacy.isCurrent() &&
+        (inputCovered || input.isCurrent()) && use.isCurrent()
+    companion object {
+        fun issue(owner: Any, permit: NativeRasterPermit, use: NativeReplayCapturePhysicalUse) = NativeRasterCaptureAdmission(owner, permit, use)
+    }
+}
+
 /** All waits stay on this private serial worker, never main or the queue owner lane. */
 internal class NativeReplayAuthority(
     private val queue: RuntimeQueueOwner,
@@ -150,6 +206,7 @@ internal class NativeReplayAuthority(
     }
     private val permitEpoch = java.util.concurrent.atomic.AtomicReference<Any?>(invocation)
     private var active: NativeReplayPermit? = null
+    private var rasterActive: NativeRasterPermit? = null
     private var receipt: NativeReplayStartReceipt? = null
     private var captureUse: NativeReplayCapturePhysicalUse? = null
 
@@ -181,7 +238,7 @@ internal class NativeReplayAuthority(
 
     fun start(prepared: NativeReplayPreparedAuthority, physicalUse: NativeReplayCapturePhysicalUse? = null): Future<NativeReplayPermit?> = submit {
         val token = prepared.invocation
-        if (!prepared.belongsTo(owner) || receipt != null || active != null || captureUse != null) return@submit null
+        if (!prepared.belongsTo(owner) || receipt != null || active != null || rasterActive != null || captureUse != null) return@submit null
         // Retain the exact enrolled use before a source observation can create a denial or
         // close the queue. Its original settlement lane remains usable after logical close.
         if (physicalUse != null) {
@@ -213,6 +270,45 @@ internal class NativeReplayAuthority(
         if (active !== permit || captureUse !== physicalUse || !permit.isCurrent() || !result.isCurrent()) null else result
     }
 
+    fun prepareRaster(selection: NativeReplaySelection, sourceIdentity: AnnotatedRasterSourceIdentity): Future<NativeRasterPreparedAuthority?> {
+        val token = synchronized(monitor) { if (closed) null else Any().also { invocation = it; permitEpoch.set(it) } }
+            ?: return SdkFuture.completedFuture(null)
+        return submit {
+            if (!capabilities.rasterSupported || receipt != null || captureUse != null || !current(token) ||
+                !sourceIdentity.isCurrent() || !selection.validateCurrent().awaitExact()) return@submit null
+            queue.ensurePreparedReplayStorage().awaitExact()
+            queue.ensureNativeReplayAccounting().awaitExact()
+            if (!current(token) || !sourceIdentity.isCurrent() || !selection.isCurrent() || !queue.ensureNativeRasterStorage().awaitExact()) return@submit null
+            val input = queue.observeNativeReplayProjection().awaitExact() ?: return@submit null
+            val prepared = queue.prepareNativeRasterProjection(input, sourceIdentity, deviceInEuTimezone()).awaitExact() ?: return@submit null
+            if (!current(token) || !prepared.isCurrent() || !selection.validateCurrent().awaitExact() || !current(token)) return@submit null
+            NativeRasterPreparedAuthority.issue(owner, token, prepared, selection)
+        }
+    }
+
+    fun startRaster(prepared: NativeRasterPreparedAuthority, use: NativeReplayCapturePhysicalUse): Future<NativeRasterPermit?> = submit {
+        val token = prepared.invocation
+        if (!capabilities.rasterSupported || !prepared.belongsTo(owner) || receipt != null || active != null || rasterActive != null || captureUse != null) return@submit null
+        if (!queue.nativeReplayCaptureMatches(use)) return@submit null
+        captureUse = use
+        if (!current(token) || !prepared.isCurrent() || !use.isCurrent() || !prepared.selection.validateCurrent().awaitExact()) return@submit null
+        if (!current(token) || !prepared.isCurrent() || captureUse !== use) return@submit null
+        val started = queue.beginNativeRasterAuthority(prepared.projection, use).awaitExact() ?: return@submit null
+        receipt = started.receipt
+        if (!current(token) || !started.guard.isCurrent() || !prepared.projection.sourceIdentity.isCurrent() ||
+            !prepared.selection.validateCurrent().awaitExact() || !current(token)) { stopOnWorker(); return@submit null }
+        val epoch = permitEpoch
+        val permit = NativeRasterPermit.issue(prepared, started) { epoch.get() === token }
+        synchronized(monitor) { if (!closed && invocation === token) rasterActive = permit }
+        if (rasterActive !== permit) { stopOnWorker(); null } else permit
+    }
+
+    fun captureAdmission(permit: NativeRasterPermit, use: NativeReplayCapturePhysicalUse): Future<NativeRasterCaptureAdmission?> = submit {
+        if (rasterActive !== permit || captureUse !== use || receipt !== permit.started.receipt || !permit.isCurrent()) return@submit null
+        val admission = queue.makeNativeRasterCaptureAdmission(permit, use).awaitExact() ?: return@submit null
+        admission.takeIf { rasterActive === permit && captureUse === use && permit.isCurrent() && it.isCurrent() }
+    }
+
     fun stop(): Future<NativeReplayAuthorityStop> {
         withdraw()
         return submit { stopOnWorker() }
@@ -229,7 +325,7 @@ internal class NativeReplayAuthority(
     }
 
     private fun settleOnWorker(): NativeReplayAuthorityStop {
-        active = null
+        active = null; rasterActive = null
         return try {
             captureUse?.let { use ->
                 // Quarantine may make queue accounting unreadable before physical completion.

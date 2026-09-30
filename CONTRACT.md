@@ -544,3 +544,40 @@ public Java get/set offers no compare-and-set protection against foreign races.
 Activation's facade/source/queue/writer JVM tests are authored but uncompiled/unrun
 in this source packet. Earlier one-slot durability tests and hosted suites are separate
 evidence; real exact-artifact process-death/restart and canonical delivery remain gates.
+
+
+### Internal native raster durability checkpoint (not runtime installation)
+
+The optional declared-region collector can now be admitted through the original native authority,
+physical enrollment and queue worker. This path is a separate internal capability, disabled by default;
+it does not change the automatic Views privacy witness or install schema3 delivery. Only a one-shot
+collector frame sealed under the original source identity and copied local intent revision may append.
+Changing that intent after encoding withdraws fresh append without retaining the closed candidate or
+its pixel allocation. The original request bytes, identity, start receipt, clocks and shared session
+budget survive retries; no restored row creates a producer permit.
+
+The existing segmented replay table has a closed raster header/body variant. Ordinals, queue limits,
+opt-out purge and original COMMIT reconciliation are shared with legacy replay. Legacy delivery skips
+raster rows, including cooldown/head scans. A missing raster branch or plain-v2 source retains sealed
+raster bytes; explicit incompatible privacy, consent or replay disable and lawful TTL still remove them.
+The old 42 supported database versions retain their meaning. Only native families 5,6,11,12,29,30,35,36,
+41,42,47,48,53,54 may lazily add128, atomically with the raster state discriminator. Other markers and
+missing/mismatched singleton state fail closed. Existing upgrades preserve the outer marker.
+
+The singleton also retains full-wrapper issuance/hash/conflict independently of embedded-v2 policy.
+An original source-detected conflict carries a bounded immutable denial through its lifecycle and gate;
+null/background/close cannot acknowledge it. The queue commits the restriction before acknowledging
+that exact original receipt. Even before recording was prepared, a denial alone may initialize the
+existing replay/native/raster singleton metadata; it cannot sample, start or authorize capture. The
+gate retains that original restriction channel independently of executable tokens. Gate/queue close
+fences original source validation before draining the final receipt. Failed durable restriction keeps
+the original database/file occupancy quarantined and fails close. An older restriction cannot replace
+a newer durable base or wrapper boundary.
+Equal/older plain-v2 sources cannot bypass committed poison after restart; a newer plain-v2 base may
+resume its existing channels but cannot clear the raster witness or grant raster capture. Capture,
+ordinary delivery, flags and sealed legacy replay all honor that ordering. A process death before the
+SQL restriction commits remains an unavoidable unpersisted observation gap. Unknown COMMIT retains
+original resources/denial until exact reopened state establishes the outcome; timeouts grant nothing.
+
+New Kotlin and instrumentation cases for this checkpoint are authored but have not been compiled or
+executed locally. Source-boundary controls are not device or end-to-end qualification.

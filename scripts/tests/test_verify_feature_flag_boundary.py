@@ -41,6 +41,53 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_raster_durable_exact_schema_and_original_issuers_remain_closed(self) -> None:
+        def errors() -> str:
+            result: list[str] = []
+            BOUNDARY.verify_native_raster_durable_boundary(self.root, result)
+            return "\n".join(result)
+        self.assertEqual("", errors())
+        relative = BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/RuntimeDiagnosticsState.kt"
+        path = self.root / relative; original = path.read_text()
+        for changed in (original.replace("in 25L..54L -> version", "in 25L..55L -> version"),
+                original.replace("181L, 182L ->", "181L, 182L, 183L ->"),
+                original.replace("RUNTIME_RASTER_SCHEMA_OFFSET = 128", "RUNTIME_RASTER_SCHEMA_OFFSET = 129")):
+            path.write_text(changed); self.assertIn("raster durability lost", errors())
+        path.write_text(original)
+        foreign = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/RasterEscape.kt"
+        for source in ("fun escape() = V2RasterConflictReceipt.issue(a, b, c)",
+                "fun escape() = NativeRasterCaptureAdmission.issue(a, b, c)",
+                "fun escape() = V2RasterDenialWitness(a, b, c)",
+                "fun escape() = V2RasterConflictChannel(a)",
+                "fun escape() = owner.appendNativeRaster(a, b, c)",
+                "val rasterSupported = true", "fun escape() = frame.publicationGuard()"):
+            foreign.write_text(source); self.assertTrue(errors())
+        foreign.unlink(); self.assertEqual("", errors())
+
+    def test_raster_durable_denial_and_pixel_free_append_checks_cannot_be_removed(self) -> None:
+        for relative, token in (
+            ("runtime/RuntimeQueueOwner.kt", "if (known) gate.acknowledgeDenial(denial)"),
+            ("runtime/RuntimeQueueOwner.kt", "request.originalCaptureIsCurrent()"),
+            ("replay/NativeRasterSealer.kt", "frame.publicationGuard()"),
+            ("replay/NativeRasterSealer.kt", "originalFrameCurrent() && originalSourceCurrent()"),
+            ("config/V2ConfigAuthorityGate.kt", "pendingDenial === value"),
+            ("config/V2ConfigAuthorityGate.kt", "originalRasterConflicts?.closeSource()"),
+            ("config/V2ConfigSource.kt", "fun closeSource() = original.close()"),
+            ("runtime/RuntimeQueueOwner.kt", "configurationGate?.close() // Fences original source validation"),
+            ("replay/ReplayQueueStore.kt", "V1ConfigJson.parseExactTimestamp(state.issuedAt) >"),
+            ("replay/ReplayQueueStore.kt", "else -> old")):
+            path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal" / relative
+            original = path.read_text(); path.write_text(original.replace(token, "false"))
+            errors: list[str] = []; BOUNDARY.verify_native_raster_durable_boundary(self.root, errors)
+            self.assertTrue(errors, relative); path.write_text(original)
+        storage = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay/NativeRasterStorage.kt"
+        original = storage.read_text()
+        for forbidden in ("GZIPInputStream", "BitmapFactory", "NativeRasterPreparedRequest("):
+            storage.write_text(original + "\n// " + forbidden)
+            errors = []; BOUNDARY.verify_native_raster_durable_boundary(self.root, errors)
+            self.assertIn("restored raster facts cannot decode", "\n".join(errors))
+        storage.write_text(original)
+
     def test_compose_distribution_cannot_enable_remote_publication_or_substitute_project_consumer(self) -> None:
         def errors() -> str:
             result: list[str] = []
@@ -248,7 +295,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_exception_intake_keeps_exact_schema_and_original_commit(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal"
         cases = [
-            ("runtime/AndroidSQLiteRuntimeDatabase.kt", "version !in 1L..12L && version !in 25L..54L", "version < 1L"),
+            ("runtime/AndroidSQLiteRuntimeDatabase.kt", "else -> runtimeNormalizedDatabaseVersion(version)", "else -> version"),
             ("runtime/RuntimeDiagnosticsState.kt", "in 49L..54L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET", "in 49L..60L -> RUNTIME_EXCEPTION_SCHEMA_OFFSET"),
             ("runtime/AndroidSQLiteRuntimeDatabase.kt", "validateTableSql(sqlite, EXCEPTIONS_TABLE, CREATE_EXCEPTIONS)", "Unit"),
             ("runtime/RuntimeQueueOwner.kt", "consumedDigest = imported.report.digest()", "consumedDigest = null"),

@@ -39,7 +39,7 @@ internal object ReplayQueueStore {
         return result
     }
 
-    fun read(tx: RuntimeQueueTransaction, header: ReplayStoredHeader): ReplayStoredChunk = checked {
+    private fun body(tx: RuntimeQueueTransaction, header: ReplayStoredHeader): ByteArray {
         val bytes = ByteArray(header.length)
         var offset = 0
         for (index in 0 until header.segmentCount) {
@@ -49,15 +49,31 @@ internal object ReplayQueueStore {
             offset += segment.payload.size
         }
         require(ReplayJson.digest(bytes) == header.digest)
-        val prepared = PreparedReplayRequest.parse(bytes, header.generation)
+        return bytes
+    }
+
+    fun read(tx: RuntimeQueueTransaction, header: ReplayStoredHeader): ReplayStoredChunk = checked {
+        require(!header.raster)
+        val bytes = body(tx, header)
+        val prepared = try { PreparedReplayRequest.parse(bytes, header.generation) } finally { bytes.fill(0) }
         require(prepared.requestId == header.requestId && prepared.replayId == header.replayId &&
-            prepared.chunkId == header.chunkId && prepared.sequence == header.sequence && prepared.maskingProfileHash == header.profile.hash)
-        ReplayStoredChunk(header.ordinal, header.siteId, header.generation, prepared, header.profile)
+            prepared.chunkId == header.chunkId && prepared.sequence == header.sequence && prepared.maskingProfileHash == checkNotNull(header.profile).hash)
+        ReplayStoredChunk(header.ordinal, header.siteId, header.generation, prepared, checkNotNull(header.profile))
+    }
+
+    fun readRaster(tx: RuntimeQueueTransaction, header: ReplayStoredHeader): NativeRasterStoredChunk = checked {
+        require(header.raster && tx.nativeRasterReplaySchemaPresent())
+        val bytes = body(tx, header)
+        val request = try { NativeRasterStoredRequest.parse(bytes) } finally { bytes.fill(0) }
+        require(request.requestId == header.requestId && request.replayId == header.replayId &&
+            request.chunkId == header.chunkId && request.sequence == header.sequence)
+        NativeRasterStoredChunk(header.ordinal, header.siteId, request)
     }
 
     fun validate(tx: RuntimeQueueTransaction, namespace: String?): ReplayStoredState? = checked {
         val state = state(tx) ?: return@checked null
         require(namespace != null && state.namespaceHash == namespace)
+        require(state.rasterStorage == tx.nativeRasterReplaySchemaPresent())
         require(state.count in 0..MAX_RUNTIME_QUEUE_RECORDS.toLong() && state.bytes in 0..MAX_RUNTIME_QUEUE_BYTES)
         if (state.issuedAt.isEmpty()) require(state.semanticHash.isEmpty() && state.siteId.isEmpty() && state.protocol.isEmpty() && state.count == 0L)
         else {
@@ -75,12 +91,14 @@ internal object ReplayQueueStore {
         val chunks = hashSetOf<Pair<String, String>>()
         val sequences = hashSetOf<Pair<String, Long>>()
         rows.forEach { header ->
-            require(header.ordinal < state.nextOrdinal && header.siteId == state.siteId && header.generation == state.protocol)
+            require(header.ordinal < state.nextOrdinal && header.siteId == state.siteId &&
+                (if (header.raster) state.rasterStorage && header.generation == NativeRasterSealer.GENERATION else header.generation == state.protocol))
             require(requests.add(header.requestId) && chunks.add(header.replayId to header.chunkId) && sequences.add(header.replayId to header.sequence))
-            read(tx, header)
+            if (header.raster) readRaster(tx, header) else read(tx, header)
             total = Math.addExact(total, header.length.toLong())
             require(total <= MAX_RUNTIME_QUEUE_BYTES)
             tx.readReplayRow(ReplayDeliveryMetadata.key(header.ordinal))?.let { metadata ->
+                require(!header.raster) { "Raster delivery is not installed" }
                 val delivery = ReplayDeliveryMetadata.decode(metadata)
                 require(delivery.ordinal == header.ordinal && delivery.digest == header.digest && delivery.protocolGeneration == header.generation)
                 expectedKeys += metadata.key
@@ -150,6 +168,8 @@ internal object ReplayQueueStore {
             config.privacy?.capture?.enabled != true || optedOut || protocol !in supportedGenerations
         val generationChanged = state.protocol.isNotEmpty() && state.protocol != protocol
         val remove = headers(tx).filter { header ->
+            if (header.raster) return@filter optedOut || !nativeRasterBaseMayRetain(config) ||
+                (config.siteId != null && config.siteId != header.siteId) || readRaster(tx, header).request.expiredAt(now)
             val row = read(tx, header)
             disabled || generationChanged || row.prepared.transport !in advertised || row.prepared.transport !in proven ||
                 row.prepared.expiredAt(now) || !retention.mayRetain(row.maskingProfile, config)
@@ -163,7 +183,9 @@ internal object ReplayQueueStore {
     fun expire(tx: RuntimeQueueTransaction, now: Long): Int {
         val current = state(tx) ?: return 0
         if (current.clockDenied || now < current.wallFloor) return 0
-        val expired = headers(tx).filter { read(tx, it).prepared.expiredAt(now) }
+        val expired = headers(tx).filter {
+            if (it.raster) readRaster(tx, it).request.expiredAt(now) else read(tx, it).prepared.expiredAt(now)
+        }
         tx.putReplayRow(delete(tx, current, expired).copy(wallFloor = now).row())
         return expired.size
     }
@@ -187,7 +209,7 @@ internal object ReplayQueueStore {
             (it.replayId == request.replayId && (it.chunkId == request.chunkId || it.sequence == request.sequence)) }
         if (collisions.isNotEmpty()) {
             val existing = collisions.singleOrNull()
-            if (existing == null || existing.digest != request.digest || existing.profile.hash != profile.hash ||
+            if (existing == null || existing.raster || existing.digest != request.digest || checkNotNull(existing.profile).hash != profile.hash ||
                 !read(tx, existing).prepared.copyBytes().contentEquals(request.copyBytes()))
                 return ReplayAppendResult.Rejected(ReplayAppendRejection.CONFLICT)
             val finalNow = admissionNow() ?: return ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
@@ -215,6 +237,85 @@ internal object ReplayQueueStore {
         return ReplayAppendResult.Stored(header.ordinal, false)
     }
 
+    /** Metadata-only restriction: commit before returning denial, independent of replay clock health. */
+    fun rasterOrdering(tx: RuntimeQueueTransaction, source: dev.elu.analytics.internal.config.V2ConfigAuthorityWitness,
+        config: V1ParsedConfig): Boolean {
+        val state = checkNotNull(state(tx)); check(state.rasterStorage)
+        if (state.issuedAt.isNotEmpty()) {
+            val baseOrder = config.issuedAtInstant.compareTo(V1ConfigJson.parseExactTimestamp(state.issuedAt))
+            if (baseOrder < 0 || (baseOrder == 0 && state.poisoned)) return false
+            if (baseOrder == 0 && state.semanticHash != config.configSemanticHash) {
+                tx.putReplayRow(state.copy(poisoned = true).row()); return false
+            }
+        }
+        val old = state.rasterSource
+        val wrapper = source.nativeV3
+        if (wrapper == null) return old == null || !old.conflicted ||
+            config.issuedAtInstant > V1ConfigJson.parseExactTimestamp(old.issuedAt)
+        val (next, allowed) = old?.observe(wrapper.base.issuedAt, wrapper.semanticHash)
+            ?: (NativeRasterSourceLedger(wrapper.base.issuedAt, wrapper.semanticHash) to true)
+        if (next != old) tx.putReplayRow(state.copy(rasterSource = next).row())
+        return allowed
+    }
+
+    fun recordRasterDenial(tx: RuntimeQueueTransaction, receipt: dev.elu.analytics.internal.config.V2RasterConflictReceipt) {
+        val state = checkNotNull(state(tx)); check(state.rasterStorage)
+        if (state.issuedAt.isNotEmpty() && V1ConfigJson.parseExactTimestamp(state.issuedAt) >
+            V1ConfigJson.parseExactTimestamp(receipt.issuedAt)) return
+        val old = state.rasterSource
+        val order = old?.let { V1ConfigJson.parseExactTimestamp(receipt.issuedAt).compareTo(V1ConfigJson.parseExactTimestamp(it.issuedAt)) }
+        val next = when {
+            order == null || order > 0 -> NativeRasterSourceLedger(receipt.issuedAt, receipt.previousSemanticHash, true)
+            order == 0 -> checkNotNull(old).copy(conflicted = true)
+            else -> old
+        }
+        if (next != old) tx.putReplayRow(state.copy(rasterSource = next).row())
+    }
+
+    fun appendRaster(tx: RuntimeQueueTransaction, request: NativeRasterStoredRequest, namespace: String,
+        siteId: String, wrapper: dev.elu.analytics.internal.config.NativeV3ConfigParser.Parsed,
+        now: Long, maximumCount: Int, maximumBytes: Long, requestMaximum: Int,
+        admissionNow: () -> Long?): ReplayAppendResult {
+        val state = checkNotNull(state(tx)); require(state.namespaceHash == namespace && state.rasterStorage)
+        val ledger = state.rasterSource
+        if (state.poisoned || state.siteId != siteId || ledger == null || ledger.conflicted ||
+            ledger.semanticHash != wrapper.semanticHash || V1ConfigJson.parseExactTimestamp(ledger.issuedAt).compareTo(wrapper.base.issuedAtInstant) != 0)
+            return ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
+        if (state.clockDenied || now < state.wallFloor) return ReplayAppendResult.Rejected(ReplayAppendRejection.CLOCK)
+        if (request.expiredAt(now)) return ReplayAppendResult.Rejected(ReplayAppendRejection.EXPIRED)
+        val rows = headers(tx)
+        val collisions = rows.filter { it.requestId == request.requestId ||
+            (it.replayId == request.replayId && (it.chunkId == request.chunkId || it.sequence == request.sequence)) }
+        if (collisions.isNotEmpty()) {
+            val existing = collisions.singleOrNull()
+            if (existing == null || !existing.raster || existing.digest != request.digest ||
+                !readRaster(tx, existing).request.copyBytes().contentEquals(request.copyBytes()))
+                return ReplayAppendResult.Rejected(ReplayAppendRejection.CONFLICT)
+            val finalNow = admissionNow() ?: return ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
+            return if (request.expiredAt(finalNow)) ReplayAppendResult.Rejected(ReplayAppendRejection.EXPIRED)
+                else ReplayAppendResult.Stored(existing.ordinal, true)
+        }
+        val core = checkNotNull(tx.readCore())
+        if (core.queueCount + state.count + 1 > maximumCount) return ReplayAppendResult.Rejected(ReplayAppendRejection.COUNT_LIMIT)
+        if (request.byteCount > requestMaximum || core.queueBytes + state.bytes + request.byteCount > maximumBytes)
+            return ReplayAppendResult.Rejected(ReplayAppendRejection.BYTE_LIMIT)
+        require(state.nextOrdinal < MAX_REPLAY_SAFE_INTEGER)
+        val header = ReplayStoredHeader(state.nextOrdinal, siteId, NativeRasterSealer.GENERATION, request.requestId,
+            request.replayId, request.chunkId, request.sequence, request.byteCount, request.digest, null, true)
+        val bytes = request.copyBytes()
+        try {
+            val row = header.row()
+            val finalNow = admissionNow() ?: return ReplayAppendResult.Rejected(ReplayAppendRejection.AUTHORITY)
+            if (request.expiredAt(finalNow)) return ReplayAppendResult.Rejected(ReplayAppendRejection.EXPIRED)
+            tx.putReplayRow(row)
+            for (i in 0 until header.segmentCount) tx.putReplayRow(RuntimeReplayStoredRow(header.segmentKey(i), 1,
+                bytes.copyOfRange(i * REPLAY_SEGMENT_BYTES, minOf(bytes.size, (i + 1) * REPLAY_SEGMENT_BYTES))))
+            tx.putReplayRow(state.copy(nextOrdinal = state.nextOrdinal + 1, count = state.count + 1,
+                bytes = state.bytes + request.byteCount, wallFloor = finalNow).row())
+            return ReplayAppendResult.Stored(header.ordinal, false)
+        } finally { bytes.fill(0) }
+    }
+
     fun delivery(tx: RuntimeQueueTransaction, ordinal: Long): ReplayDeliveryMetadata? =
         tx.readReplayRow(ReplayDeliveryMetadata.key(ordinal))?.let { checked { ReplayDeliveryMetadata.decode(it) } }
 
@@ -223,7 +324,7 @@ internal object ReplayQueueStore {
         require(elapsedMillis in 0..MAX_REPLAY_SAFE_INTEGER - REPLAY_MAX_RETRY_MILLIS)
         val state = state(tx) ?: return null
         if (state.poisoned || state.clockDenied || now < state.wallFloor) return null
-        val rows = headers(tx)
+        val rows = headers(tx).filterNot { it.raster }
         var occupied = false
         var cooldown = false
         rows.forEach { header ->
@@ -277,7 +378,7 @@ internal object ReplayQueueStore {
     }
 
     fun nextWakeDelay(tx: RuntimeQueueTransaction, owner: String, authority: ReplayDeliveryAuthorization, elapsedMillis: Long): Long? {
-        val rows = headers(tx)
+        val rows = headers(tx).filterNot { it.raster }
         val metadata = rows.mapNotNull { delivery(tx, it.ordinal) }
         if (metadata.any { it.state == ReplayDeliveryState.BLOCKED && it.blockKind == ReplayBlockKind.UNAUTHORIZED.name &&
             it.credentialWitness == authority.credentialWitness && it.scopeWitness == authority.scopeWitness }) return null

@@ -43,7 +43,10 @@ internal class NativeRasterPreparedRequest internal constructor(
     val effectivePolicyHash: String,
     val width: Int,
     val height: Int,
+    internal val sourceIdentity: AnnotatedRasterSourceIdentity,
+    private val originalCaptureCurrent: () -> Boolean,
 ) {
+    internal fun originalCaptureIsCurrent(): Boolean = sourceIdentity.isCurrent() && originalCaptureCurrent()
     private val bytes = body.copyOf()
     val digest: String = ReplayJson.digest(bytes)
     val byteCount: Int get() = bytes.size
@@ -160,8 +163,12 @@ internal class NativeRasterSealer {
             val requestBytes = canonical(envelope(value, requestId)); body = requestBytes
             rasterRequire(requestBytes.size <= policy.maximumRequestBytes, NativeRasterSealingFailure.REQUEST_LIMIT)
             checkSource()
+            // Copy the original predicates, not this sealer or the already-consumed pixel owner.
+            val originalFrameCurrent = frame.publicationGuard()
+            val originalSourceCurrent = sourceIsCurrent
             val result = NativeRasterPreparedRequest(requestBytes, requestId, chunkId, replayId, sessionId,
-                nextSequence, timestamp, policy.contextRevision, policy.effectivePolicyHash, frame.width, frame.height)
+                nextSequence, timestamp, policy.contextRevision, policy.effectivePolicyHash, frame.width, frame.height, sourceIdentity,
+                { originalFrameCurrent() && originalSourceCurrent() })
             prepared = result
             // Settle original frame cleanup before any state advance; encodePng already did this on success.
             frame.close()

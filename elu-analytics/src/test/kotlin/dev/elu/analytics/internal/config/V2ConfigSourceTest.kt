@@ -13,6 +13,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class V2ConfigSourceTest {
@@ -439,6 +440,23 @@ class V2ConfigSourceTest {
             executor.shutdownNow()
             source.close()
         }
+    }
+
+    @Test fun `original conflict denial survives withdrawal close and only exact acknowledgment clears`() {
+        var body = nativeV3SourceFixture().toString()
+        val source = source(format = V2ConfigFormat.NATIVE_V3) { ok(body) }
+        assertTrue(source.refresh() is V2ConfigSourceResult.Document)
+        val originalHash = checkNotNull(source.currentLeaseSnapshot()?.nativeV3).semanticHash
+        body = JSONObject(body).apply { remove("raster") }.toString()
+        assertTrue(source.refresh() is V2ConfigSourceResult.Unavailable)
+        val receipt = checkNotNull(source.rasterConflictReceipt())
+        assertEquals(originalHash, receipt.previousSemanticHash)
+        assertEquals(NativeV3ConfigParser.parse(body.toByteArray()).semanticHash, receipt.conflictingSemanticHash)
+        source.withdraw(); assertSame(receipt, source.rasterConflictReceipt())
+        source.close(); assertSame(receipt, source.rasterConflictReceipt())
+        val equal = V2RasterConflictReceipt.issue(receipt.issuedAt, receipt.previousSemanticHash, receipt.conflictingSemanticHash)
+        assertFalse(source.acknowledgeRasterConflict(equal)); assertSame(receipt, source.rasterConflictReceipt())
+        assertTrue(source.acknowledgeRasterConflict(receipt)); assertNull(source.rasterConflictReceipt())
     }
 
     private fun source(clock: FakeClock = FakeClock(), format: V2ConfigFormat = V2ConfigFormat.V2, fetch: () -> V2ConfigHttpResponse): V2ConfigSource =

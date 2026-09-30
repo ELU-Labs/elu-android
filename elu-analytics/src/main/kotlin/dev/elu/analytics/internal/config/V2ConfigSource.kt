@@ -54,6 +54,31 @@ internal enum class V2ConfigSourceFailure {
     CLOSED,
 }
 
+/** Immutable restriction from the original strict source; never an executable document or lease. */
+internal class V2RasterConflictReceipt private constructor(
+    val issuedAt: String,
+    val previousSemanticHash: String,
+    val conflictingSemanticHash: String,
+) {
+    companion object {
+        // Production construction is restricted to V2ConfigSource by the maintained boundary.
+        internal fun issue(issuedAt: String, previous: String, conflicting: String): V2RasterConflictReceipt {
+            V1ConfigJson.parseExactTimestamp(issuedAt)
+            require(previous.matches(Regex("sha256:[a-f0-9]{64}")) && conflicting.matches(Regex("sha256:[a-f0-9]{64}")))
+            return V2RasterConflictReceipt(issuedAt, previous, conflicting)
+        }
+    }
+}
+
+/** Original source's one restriction slot. No raw document, executable lease, or refresh API. */
+internal class V2RasterConflictChannel internal constructor(private val original: V2ConfigSource) {
+    fun receipt(): V2RasterConflictReceipt? = original.rasterConflictReceipt()
+    fun acknowledge(receipt: V2RasterConflictReceipt) = original.acknowledgeRasterConflict(receipt)
+    // Source.close shares the validation lock: validation either published its denial already,
+    // or the closed generation prevents the outstanding response from publishing anything.
+    fun closeSource() = original.close()
+}
+
 internal sealed interface V2ConfigSourceResult {
     /** Validated data, including disabled/revoked documents. This grants no channel authority. */
     data class Document(val body: String, val status: V1ConfigStatus) : V2ConfigSourceResult
@@ -104,6 +129,13 @@ internal class V2ConfigSource(
     private var leaseBoundary: LeaseBoundary? = null
     /** The base manager cannot see raster changes. Retain the full validated wrapper boundary. */
     private var envelopeBoundary: EnvelopeBoundary? = null
+    // One highest original conflict survives null/background/close until a known durable acknowledgment.
+    private var pendingRasterConflict: V2RasterConflictReceipt? = null
+    internal val rasterConflictChannel = if (format == V2ConfigFormat.NATIVE_V3) V2RasterConflictChannel(this) else null
+    internal fun rasterConflictReceipt(): V2RasterConflictReceipt? = synchronized(lock) { pendingRasterConflict }
+    internal fun acknowledgeRasterConflict(original: V2RasterConflictReceipt) = synchronized(lock) {
+        if (pendingRasterConflict === original) { pendingRasterConflict = null; true } else false
+    }
 
     /** Invoked off the main thread. Concurrent older completions are ignored. */
     fun refresh(): V2ConfigSourceResult {
@@ -168,6 +200,11 @@ internal class V2ConfigSource(
                 if (order != null && order < 0) return@synchronized V2ConfigSourceResult.Superseded
                 if (prior != null && order == 0) {
                     if (prior.conflicted || prior.semanticHash != nativeV3.semanticHash) {
+                        if (!prior.conflicted) {
+                            val receipt = V2RasterConflictReceipt.issue(parsed.issuedAt, prior.semanticHash, nativeV3.semanticHash)
+                            val pending = pendingRasterConflict
+                            if (pending == null || issued > V1ConfigJson.parseExactTimestamp(pending.issuedAt)) pendingRasterConflict = receipt
+                        }
                         prior.conflicted = true
                         return@synchronized unavailable(V2ConfigSourceFailure.CONFIG, V1ConfigRejection.CONFLICT)
                     }

@@ -13,6 +13,8 @@ internal class V2ConfigLifecycleUpdate internal constructor(
     val sequence: Long,
     val kind: V2ConfigLifecycleUpdateKind = V2ConfigLifecycleUpdateKind.CONFIGURATION,
     private val originalLease: V2ConfigLeaseSnapshot? = null,
+    internal val rasterConflict: V2RasterConflictReceipt? = null,
+    internal val rasterConflictChannel: V2RasterConflictChannel? = null,
     private val consumeCurrent: ((String?) -> Unit) -> Boolean,
 ) {
     fun consume(consumer: (String?) -> Unit): Boolean = consumeCurrent(consumer)
@@ -240,13 +242,16 @@ internal class V2ConfigLifecycleDriver(
     private fun publish(snapshot: V2ConfigLeaseSnapshot?, force: Boolean = false,
         kind: V2ConfigLifecycleUpdateKind = V2ConfigLifecycleUpdateKind.CONFIGURATION,
         beforeNotify: ((V2ConfigLifecycleUpdate) -> Unit)? = null) {
-        if (!force && hasPublished && sameReceipt(published, snapshot) && publishedUpdate?.kind == kind) return
+        val conflict = source.rasterConflictReceipt()
+        if (!force && hasPublished && sameReceipt(published, snapshot) && publishedUpdate?.kind == kind &&
+            publishedUpdate?.rasterConflict === conflict) return
         published = snapshot
         hasPublished = true
         if (snapshot == null) cancelExpiry()
         sequence = Math.incrementExact(sequence)
         val noticeSequence = sequence
-        val update = V2ConfigLifecycleUpdate(noticeSequence, kind, snapshot) { consumer -> consume(noticeSequence, consumer) }
+        val update = V2ConfigLifecycleUpdate(noticeSequence, kind, snapshot, conflict,
+            source.rasterConflictChannel) { consumer -> consume(noticeSequence, consumer) }
         publishedUpdate = update
         try {
             beforeNotify?.invoke(update)

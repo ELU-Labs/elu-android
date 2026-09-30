@@ -2,6 +2,7 @@ package dev.elu.analytics.internal.runtime
 
 import dev.elu.analytics.internal.core.CoreStateCodec
 import dev.elu.analytics.internal.replay.NativeReplayAccounting
+import dev.elu.analytics.internal.replay.ReplayStoredState
 import java.util.Collections
 import java.util.TreeMap
 
@@ -46,12 +47,12 @@ private class FakeRuntimeQueueDatabase(
     private var closed = false
 
     override fun initialReplayAudienceState(): RuntimeReplayAudienceState =
-        if (backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unseen else RuntimeReplayAudienceState.Unknown
+        if (runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unseen else RuntimeReplayAudienceState.Unknown
 
     override fun ensureReplayAudienceSchema() = synchronized(backing) {
         check(!closed)
         runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
-        if (backing.databaseSchemaVersion <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+        if (runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
             backing.databaseSchemaVersion += RUNTIME_AUDIENCE_SCHEMA_OFFSET
             backing.core = checkNotNull(backing.core).copy(replayAudience = RuntimeReplayAudienceState.Unknown)
             backing.advanceCommittedMutationGeneration()
@@ -60,10 +61,10 @@ private class FakeRuntimeQueueDatabase(
 
     override fun ensureExceptionSchema() = synchronized(backing) {
         ensureReplayAudienceSchema(); ensurePersonSchema(); ensureExposureSchema(); ensureCaptureRateSchema()
-        if (backing.databaseSchemaVersion <= RUNTIME_EXCEPTION_SCHEMA_OFFSET) {
+        if (runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) <= RUNTIME_EXCEPTION_SCHEMA_OFFSET) {
             val core = checkNotNull(backing.core)
             backing.core = core.copy(exceptions = RuntimeExceptionState(CoreStateCodec.decode(core.stateJson).stream.streamId))
-            backing.databaseSchemaVersion = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt() + RUNTIME_EXCEPTION_SCHEMA_OFFSET
+            backing.databaseSchemaVersion = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt() + RUNTIME_EXCEPTION_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(backing.databaseSchemaVersion.toLong())
             backing.advanceCommittedMutationGeneration()
         }
     }
@@ -71,10 +72,10 @@ private class FakeRuntimeQueueDatabase(
     override fun ensureCaptureRateSchema() = synchronized(backing) {
         check(!closed)
         val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
-        if (backing.databaseSchemaVersion <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) {
-            check(backing.databaseSchemaVersion > RUNTIME_EXPOSURE_SCHEMA_OFFSET)
+        if (runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) {
+            check(runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) > RUNTIME_EXPOSURE_SCHEMA_OFFSET)
             backing.captureRateState = RuntimeCaptureRateState(CoreStateCodec.decode(checkNotNull(backing.core).stateJson).stream.streamId, null)
-            backing.databaseSchemaVersion = base.toInt() + RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(backing.databaseSchemaVersion.toLong())
             backing.advanceCommittedMutationGeneration()
         }
     }
@@ -82,11 +83,11 @@ private class FakeRuntimeQueueDatabase(
     override fun ensureExposureSchema() = synchronized(backing) {
         check(!closed)
         val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
-        if (backing.databaseSchemaVersion <= RUNTIME_EXPOSURE_SCHEMA_OFFSET) {
-            check(backing.databaseSchemaVersion > RUNTIME_PERSON_SCHEMA_OFFSET)
+        if (runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) <= RUNTIME_EXPOSURE_SCHEMA_OFFSET) {
+            check(runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) > RUNTIME_PERSON_SCHEMA_OFFSET)
             val core = checkNotNull(backing.core)
             backing.core = core.copy(exposures = RuntimeFlagExposureState.initial(CoreStateCodec.decode(core.stateJson)))
-            backing.databaseSchemaVersion = base.toInt() + RUNTIME_EXPOSURE_SCHEMA_OFFSET
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_EXPOSURE_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(backing.databaseSchemaVersion.toLong())
             backing.advanceCommittedMutationGeneration()
         }
     }
@@ -94,11 +95,11 @@ private class FakeRuntimeQueueDatabase(
     override fun ensurePersonSchema() = synchronized(backing) {
         check(!closed)
         val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
-        if (backing.databaseSchemaVersion <= RUNTIME_PERSON_SCHEMA_OFFSET) {
-            check(backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+        if (runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) <= RUNTIME_PERSON_SCHEMA_OFFSET) {
+            check(runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
             val core = checkNotNull(backing.core)
             backing.core = core.copy(person = RuntimePersonState.initial(CoreStateCodec.decode(core.stateJson)))
-            backing.databaseSchemaVersion = base.toInt() + RUNTIME_PERSON_SCHEMA_OFFSET
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_PERSON_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(backing.databaseSchemaVersion.toLong())
             backing.advanceCommittedMutationGeneration()
         }
     }
@@ -106,9 +107,9 @@ private class FakeRuntimeQueueDatabase(
     override fun ensureDiagnosticsSchema() = synchronized(backing) {
         check(!closed)
         val base = runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong())
-        if (backing.databaseSchemaVersion <= RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) {
-            check(backing.databaseSchemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
-            backing.databaseSchemaVersion = base.toInt() + RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET
+        if (runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) <= RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) {
+            check(runtimeNormalizedDatabaseVersion(backing.databaseSchemaVersion.toLong()) > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+            backing.databaseSchemaVersion = base.toInt() + RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(backing.databaseSchemaVersion.toLong())
             backing.core = checkNotNull(backing.core).copy(diagnostics = RuntimeDiagnosticsState())
             backing.advanceCommittedMutationGeneration()
         }
@@ -122,7 +123,7 @@ private class FakeRuntimeQueueDatabase(
                     check(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
                     backing.flagRows[initialAuthority.key] = initialAuthority.deepCopy()
                     backing.databaseSchemaVersion = (when (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()).toInt()) { 1 -> 2; 5 -> 6; else -> 4 }) +
-                        runtimeDatabaseFeatureOffset(backing.databaseSchemaVersion.toLong())
+                        runtimeDatabaseFeatureOffset(backing.databaseSchemaVersion.toLong()) + runtimeDatabaseRasterOffset(backing.databaseSchemaVersion.toLong())
                     backing.advanceCommittedMutationGeneration()
                 }
                 RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_REPLAY, RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_NATIVE_REPLAY -> Unit
@@ -137,7 +138,7 @@ private class FakeRuntimeQueueDatabase(
                 check(initialState.key == "state")
                 backing.replayRows[initialState.key] = initialState.deepCopy()
                 backing.databaseSchemaVersion = (if (runtimeBaseDatabaseVersion(backing.databaseSchemaVersion.toLong()) == 1L) 3 else 4) +
-                    runtimeDatabaseFeatureOffset(backing.databaseSchemaVersion.toLong())
+                    runtimeDatabaseFeatureOffset(backing.databaseSchemaVersion.toLong()) + runtimeDatabaseRasterOffset(backing.databaseSchemaVersion.toLong())
                 backing.advanceCommittedMutationGeneration()
             }
             3, 4, 5, 6 -> Unit
@@ -157,7 +158,23 @@ private class FakeRuntimeQueueDatabase(
                 check(CoreStateCodec.decode(checkNotNull(tx.readCore()).stateJson).stream.streamId == initial.streamId)
                 tx.putReplayRow(initialAuthority)
                 (tx as FakeTransaction).schemaVersion = (if (runtimeBaseDatabaseVersion(tx.schemaVersion.toLong()) == 3L) 5 else 6) +
-                    runtimeDatabaseFeatureOffset(tx.schemaVersion.toLong())
+                    runtimeDatabaseFeatureOffset(tx.schemaVersion.toLong()) + runtimeDatabaseRasterOffset(tx.schemaVersion.toLong())
+            }
+        }
+    }
+
+    override fun ensureNativeRasterReplaySchema() {
+        transaction { tx ->
+            check(tx.nativeReplaySchemaPresent())
+            val state = ReplayStoredState.decode(checkNotNull(tx.readReplayRow("state")))
+            if (tx.nativeRasterReplaySchemaPresent()) check(state.rasterStorage)
+            else {
+                check(!state.rasterStorage && state.rasterSource == null)
+                val original = tx as FakeTransaction
+                val target = original.schemaVersion + RUNTIME_RASTER_SCHEMA_OFFSET
+                runtimeNormalizedDatabaseVersion(target.toLong())
+                tx.putReplayRow(state.copy(rasterStorage = true).row())
+                original.schemaVersion = target
             }
         }
     }
@@ -271,12 +288,12 @@ private class FakeRuntimeQueueDatabase(
 
         override fun readCaptureRateState(): RuntimeCaptureRateState? {
             backing.failNextRateRead?.let { backing.failNextRateRead = null; throw it }
-            if (schemaVersion <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) return null
+            if (runtimeNormalizedDatabaseVersion(schemaVersion.toLong()) <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) return null
             return captureRateState ?: throw RuntimeQueueCorruptionException("Missing fake limiter row")
         }
 
         override fun writeCaptureRateState(state: RuntimeCaptureRateState) {
-            check(schemaVersion > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET)
+            check(runtimeNormalizedDatabaseVersion(schemaVersion.toLong()) > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET)
             if (captureRateState?.streamId != state.streamId) throw RuntimeQueueCorruptionException("Fake limiter stream differs")
             backing.failNextRateWrite?.let { backing.failNextRateWrite = null; throw it }
             captureRateState = state
@@ -292,12 +309,12 @@ private class FakeRuntimeQueueDatabase(
                 throw failure
             }
             return core?.copy(stateJson = core!!.stateJson.copyOf(), replayAudience =
-                if (schemaVersion <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unknown else core!!.replayAudience)
+                if (runtimeNormalizedDatabaseVersion(schemaVersion.toLong()) <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unknown else core!!.replayAudience)
         }
 
         override fun insertCore(core: RuntimeStoredCore) {
             check(this.core == null) { "Duplicate fake core row" }
-            if (schemaVersion <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+            if (runtimeNormalizedDatabaseVersion(schemaVersion.toLong()) <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
                 check(core.replayAudience === RuntimeReplayAudienceState.Unknown)
                 schemaVersion += RUNTIME_AUDIENCE_SCHEMA_OFFSET
             }
@@ -307,7 +324,7 @@ private class FakeRuntimeQueueDatabase(
 
         override fun updateCore(core: RuntimeStoredCore) {
             check(this.core != null) { "Missing fake core row" }
-            if (schemaVersion > RUNTIME_AUDIENCE_SCHEMA_OFFSET && this.core!!.replayAudience != core.replayAudience) {
+            if (runtimeNormalizedDatabaseVersion(schemaVersion.toLong()) > RUNTIME_AUDIENCE_SCHEMA_OFFSET && this.core!!.replayAudience != core.replayAudience) {
                 check(this.core!!.replayAudience === RuntimeReplayAudienceState.Unseen && core.replayAudience is RuntimeReplayAudienceState.FirstSession)
             }
             this.core = core.copy(stateJson = core.stateJson.copyOf())
@@ -335,6 +352,8 @@ private class FakeRuntimeQueueDatabase(
         }
 
         override fun replaySchemaPresent(): Boolean = runtimeBaseDatabaseVersion(schemaVersion.toLong()).toInt() in setOf(3, 4, 5, 6)
+        override fun nativeRasterReplaySchemaPresent(): Boolean = runtimeDatabaseRasterOffset(schemaVersion.toLong()) != 0
+
         override fun nativeReplaySchemaPresent(): Boolean = runtimeBaseDatabaseVersion(schemaVersion.toLong()).toInt() in setOf(5, 6)
         private fun requireReplaySchema() { check(replaySchemaPresent()) }
 
