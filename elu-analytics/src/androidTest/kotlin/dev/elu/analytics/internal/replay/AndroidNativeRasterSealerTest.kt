@@ -5,6 +5,7 @@ import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -53,9 +54,10 @@ class AndroidNativeRasterSealerTest {
     private val policyHash = "sha256:" + "a".repeat(64)
     private val time = "2024-01-01T00:00:00.123Z"
 
-    private fun install() {
+    private fun install(windowSized: Boolean = false) {
         rule.setContent {
-            EluAnnotatedReplayRoot(emptyList(), Modifier.size(width.dp, 80.dp).background(Color.Red).drawWithContent {
+            val dimensions = if (windowSized) Modifier.fillMaxSize() else Modifier.size(width.dp, 80.dp)
+            EluAnnotatedReplayRoot(emptyList(), dimensions.background(Color.Red).drawWithContent {
                 drawContent()
                 if (noisy) repeat(32) { y -> repeat(32) { x ->
                     val seed = (x + y * 32) * 1103515245 + 12345
@@ -138,10 +140,45 @@ class AndroidNativeRasterSealerTest {
         assertArrayEquals(request.copyBytes(), V1StrictCanonicalJson.canonicalBytes(ReplayJson.parse(request.copyBytes())))
         val events = payload(request); assertEquals(1, events.length())
         val actual = events.getJSONObject(0); assertEquals("frame", actual.getString("type")); assertEquals(instant, actual.getLong("timestamp"))
-        assertEquals(frame.width, actual.getJSONObject("viewport").getInt("width"))
+        assertEquals(frame.viewportWidth, actual.getJSONObject("viewport").getInt("width"))
+        assertEquals(frame.viewportHeight, actual.getJSONObject("viewport").getInt("height"))
         val png = ReplayBase64.decode(actual.getJSONObject("image").getString("png"))
         try { DeclaredRegionPngEncoder.validate(png, frame.width, frame.height) } finally { png.fill(0) }
         assertThrows(IllegalStateException::class.java) { frame.encodePng() }
+    }
+
+    /** Requires the actual large API36 window, not an injected bitmap or hidden oversized child. */
+    @Test @SdkSuppress(minSdkVersion = 36)
+    fun fullHdActualFrameSealsSmallerPngWithOriginalViewportAndOneShotEpoch() {
+        install(windowSized = true)
+        val frame = capture()
+        frame.use {
+            assertTrue("actual viewport must require downsampling: ${frame.viewportWidth}x${frame.viewportHeight}",
+                frame.viewportWidth.toLong() * frame.viewportHeight > AndroidAnnotatedReplayCollector.MAX_PIXELS ||
+                    frame.viewportWidth > AndroidAnnotatedReplayCollector.MAX_EDGE || frame.viewportHeight > AndroidAnnotatedReplayCollector.MAX_EDGE)
+            assertTrue(frame.width < frame.viewportWidth || frame.height < frame.viewportHeight)
+            assertTrue(frame.width in 1..2048 && frame.height in 1..2048)
+            assertTrue(frame.width.toLong() * frame.height <= 1_048_576)
+            android.util.Log.i("EluRasterTest", "sealerViewport=${frame.viewportWidth}x${frame.viewportHeight};image=${frame.width}x${frame.height}")
+            val original = sealer(frame)
+            val request = original.seal(frame, instant)
+            val actual = payload(request).getJSONObject(0)
+            val viewport = actual.getJSONObject("viewport"); val image = actual.getJSONObject("image")
+            assertEquals(frame.viewportWidth, viewport.getInt("width")); assertEquals(frame.viewportHeight, viewport.getInt("height"))
+            assertEquals(frame.width, image.getInt("width")); assertEquals(frame.height, image.getInt("height"))
+            assertEquals(frame.viewportWidth, request.width); assertEquals(frame.viewportHeight, request.height)
+            val png = ReplayBase64.decode(image.getString("png"))
+            try { DeclaredRegionPngEncoder.validate(png, frame.width, frame.height) } finally { png.fill(0) }
+            assertArrayEquals(request.copyBytes(), V1StrictCanonicalJson.canonicalBytes(ReplayJson.parse(request.copyBytes())))
+            assertEquals(0L, request.sequence)
+            assertThrows(IllegalStateException::class.java) { frame.encodePng() }
+            capture().use { next ->
+                assertSame(frame.sourceIdentity, next.sourceIdentity)
+                val second = original.seal(next, instant + 1_000)
+                assertEquals(1L, second.sequence)
+                assertEquals(request.width, second.width); assertEquals(request.height, second.height)
+            }
+        }
     }
 
     @Test fun requestHashUsesTheExactV3DomainAndOriginalBytesSurviveCallerCopies() {

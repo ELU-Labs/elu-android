@@ -10,7 +10,13 @@ internal class AnnotatedRasterCandidate private constructor(
     val sourceIdentity: AnnotatedRasterSourceIdentity,
     private val current: () -> Boolean,
     private val released: () -> Unit,
+    val viewportWidth: Int,
+    val viewportHeight: Int,
 ) : AutoCloseable {
+    init {
+        check(viewportWidth in 1..AndroidAnnotatedReplayCollector.MAX_VIEWPORT_EDGE &&
+            viewportHeight in 1..AndroidAnnotatedReplayCollector.MAX_VIEWPORT_EDGE)
+    }
     val width: Int = checkNotNull(bitmap).width
     val height: Int = checkNotNull(bitmap).height
     private var cleanupFailed = false
@@ -61,8 +67,9 @@ internal class AnnotatedRasterCandidate private constructor(
     internal companion object {
         /** Called only after original complete collector validation. Not capture/queue authority. */
         fun validated(bitmap: Bitmap, sourceIdentity: AnnotatedRasterSourceIdentity,
-            current: () -> Boolean, released: () -> Unit) =
-            AnnotatedRasterCandidate(bitmap, sourceIdentity, current, released)
+            current: () -> Boolean, released: () -> Unit,
+            viewportWidth: Int = bitmap.width, viewportHeight: Int = bitmap.height) =
+            AnnotatedRasterCandidate(bitmap, sourceIdentity, current, released, viewportWidth, viewportHeight)
 
         fun clear(bitmap: Bitmap) {
             try { bitmap.eraseColor(Color.TRANSPARENT) } finally { bitmap.recycle() }

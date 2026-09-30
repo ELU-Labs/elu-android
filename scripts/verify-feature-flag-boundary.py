@@ -1170,6 +1170,21 @@ def verify_annotated_root_boundary(root: pathlib.Path, errors: list[str]) -> Non
     if not (0 <= collector.find("canvas.clipOutRect(it)") < collector.find("original.host.draw(canvas)") <
             collector.find("validate(original, plan(window, checks))") < collector.find("AnnotatedRasterCandidate.validated")) or collector.count("validate(original, plan(window, checks))") != 2:
         errors.append("annotated output must revalidate original geometry before candidate construction")
+    sizing = (
+        "MAX_PIXELS = 1_048_576", "MAX_EDGE = 2_048", "MAX_VIEWPORT_EDGE = 16_384",
+        "imageWidth.toLong() * imageHeight <= AndroidAnnotatedReplayCollector.MAX_PIXELS",
+        "val dimensions = AnnotatedRasterDimensions.fit(viewport.width(), viewport.height())",
+        "Bitmap.createBitmap(original.dimensions.imageWidth, original.dimensions.imageHeight, Bitmap.Config.ARGB_8888)",
+        "val margin = if (scaled) 1 else 0", "floor(l * scaleX.toDouble())", "ceil(r * scaleX.toDouble())",
+        "floor(t * scaleY.toDouble())", "ceil(b * scaleY.toDouble())",
+        "viewportWidth = original.viewport.width(), viewportHeight = original.viewport.height()",
+        "old.dimensions == fresh.dimensions",
+    )
+    if any(token not in collector for token in sizing) or collector.count("Bitmap.createBitmap(") != 1:
+        errors.append("annotated downsampling must preserve original viewport and bound the only bitmap allocation")
+    if not (0 <= collector.find("canvas.clipOutRect(it)") < collector.find("canvas.scale(original.dimensions.scaleX, original.dimensions.scaleY)") <
+            collector.find("canvas.translate(-original.viewport.left.toFloat(), -original.viewport.top.toFloat())") < collector.find("original.host.draw(canvas)")):
+        errors.append("annotated device-pixel exclusion must precede scaling, translation and original drawing")
     optional_base = pathlib.Path("elu-analytics-compose/src/main/kotlin/dev/elu/analytics/compose")
     optional = load_text(root, optional_base / "EluComposeReplay.kt")
     node = load_text(root, optional_base / "internal/ComposeReplayNodes.kt")
@@ -1236,7 +1251,7 @@ def verify_raster_sealer_boundary(root: pathlib.Path, errors: list[str]) -> None
     for token in ("fun seal(frame: AnnotatedRasterCandidate, timestamp: Long)",
                   "frame.sourceIdentity === sourceIdentity", "sourceIdentity.isCurrent() && sourceIsCurrent()",
                   "private val sourceIsCurrent: () -> Boolean", "fun fork(): NativeRasterSealer",
-                  "timestamp - it >= 1_000", "viewport == null || viewport == Pair(frame.width, frame.height)",
+                  "timestamp - it >= 1_000", "viewport == null || viewport == Pair(frame.viewportWidth, frame.viewportHeight)",
                   '"elu-sdk-replay-request-v3"', '"schemaVersion" to number(3)',
                   '"automaticInputDiscovery" to Value.BooleanValue(false)',
                   '"unknownContentClassification" to Value.BooleanValue(false)',
@@ -1248,6 +1263,12 @@ def verify_raster_sealer_boundary(root: pathlib.Path, errors: list[str]) -> None
     if any(token in source for token in ("Bitmap", "V1AuthorizedConfig", "NativeReplayAuthority", "RuntimeQueue", "SQLite",
                                          "FileOutputStream", "Executors.", "secureInputsMasked", "fun seal(png:", "sourceIsCurrent: () -> Boolean =")):
         errors.append("raster sealer cannot accept raw images, obtain authority or reuse automatic-input policy")
+    if any(token not in source for token in (
+            '"image" to obj("width" to number(frame.width.toLong())',
+            '"viewport" to obj("width" to number(frame.viewportWidth.toLong()), "height" to number(frame.viewportHeight.toLong()))',
+            "viewport = Pair(frame.viewportWidth, frame.viewportHeight)",
+            "policy.effectivePolicyHash, frame.viewportWidth, frame.viewportHeight, sourceIdentity")):
+        errors.append("raster sealer must bind the original display viewport independently of encoded image dimensions")
     registry = load_text(root, replay / "AnnotatedRootRegistry.kt")
     for token in ("originalSource?.withdraw()", "if (intent == null) sourceBindingChanged()",
                   "if (intent == null) owner.sourceBindingChanged()", "originalRoot?.get() === root",

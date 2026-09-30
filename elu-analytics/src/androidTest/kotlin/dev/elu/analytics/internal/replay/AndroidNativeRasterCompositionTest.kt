@@ -33,6 +33,7 @@ import java.util.UUID
 import java.util.ArrayDeque
 import java.util.concurrent.*
 import java.util.concurrent.atomic.*
+import kotlin.math.roundToInt
 import org.json.JSONObject
 import org.json.JSONArray
 import org.junit.Assert.*
@@ -109,8 +110,12 @@ class AndroidNativeRasterCompositionTest {
         rule.runOnUiThread {
             firstView = ComposeView(firstActivity).apply {
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-                setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Red)) {
-                    val view = LocalView.current; SideEffect { host = view }; Box(Modifier.size(16.dp).background(Color.Blue))
+                setContent { Box {
+                    // The original full-window ComposeView imposes exact minimum constraints.
+                    // This real parent lets the declared region keep its intended 64dp size.
+                    EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Red)) {
+                        val view = LocalView.current; SideEffect { host = view }; Box(Modifier.size(16.dp).background(Color.Blue))
+                    }
                 } }
             }
             firstActivity.setContentView(firstView)
@@ -152,7 +157,8 @@ class AndroidNativeRasterCompositionTest {
         var diagnosticView: () -> View? = { if (this::host.isInitialized) host else null }
         var beforeActionFacts = "unobserved"
         var diagnosticRig: Rig? = null
-        fun awaitReady(phase: String, activity: ComponentActivity, expectedRoot: ViewGroup, view: () -> View?) {
+        fun awaitReady(phase: String, activity: ComponentActivity, expectedRoot: ViewGroup,
+            declared: Boolean = true, view: () -> View?) {
             stage = phase; diagnosticActivity = activity; diagnosticRoot = expectedRoot; diagnosticView = view
             rule.waitUntil(5_000) { rule.runOnUiThread {
                 activity.lifecycle.currentState == Lifecycle.State.RESUMED &&
@@ -163,6 +169,13 @@ class AndroidNativeRasterCompositionTest {
                 assertSame(expectedRoot, activity.findViewById<View>(android.R.id.content))
                 assertTrue(expectedRoot.width > 0 && expectedRoot.height > 0)
                 assertTrue(selected.width > 0 && selected.height > 0)
+                val original = AnnotatedRootRegistry.fromHost(selected)
+                if (declared) {
+                    val region = checkNotNull(checkNotNull(original).bindings().single { it.intent == null }.read())
+                    val expected = (64f * selected.resources.displayMetrics.density).roundToInt().toFloat()
+                    assertEquals(expected, region.topRightX - region.topLeftX, .01f)
+                    assertEquals(expected, region.bottomLeftY - region.topLeftY, .01f)
+                } else assertNull(original)
             }
             beforeActionFacts = originalFacts(phase, activity, expectedRoot, view)
         }
@@ -199,9 +212,11 @@ class AndroidNativeRasterCompositionTest {
                         assertSame(firstActivity.application, second.application)
                         val content = ComposeView(second).apply {
                             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-                            setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Green)) {
-                                val view = LocalView.current; SideEffect { secondHost = view }
-                                Box(Modifier.size(16.dp).background(Color.Blue))
+                            setContent { Box {
+                                EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Green)) {
+                                    val view = LocalView.current; SideEffect { secondHost = view }
+                                    Box(Modifier.size(16.dp).background(Color.Blue))
+                                }
                             } }
                         }
                         secondView = content; second.setContentView(content)
@@ -225,7 +240,7 @@ class AndroidNativeRasterCompositionTest {
                         firstRegistry.close(); assertNull(AnnotatedRootRegistry.fromHost(host))
                         second.finish()
                     }
-                    awaitReady("returned-first", firstActivity, firstRoot) { host }
+                    awaitReady("returned-first", firstActivity, firstRoot, declared = false) { host }
                     rule.waitUntil(5_000) { rule.runOnUiThread { second.isDestroyed } }
                     stage = "returned-A-evaluation"
                     assertEquals(NativeReplayCompositionEvaluation.INACTIVE, rig.composition.reevaluate(force = true).get(5, TimeUnit.SECONDS))
@@ -250,6 +265,39 @@ class AndroidNativeRasterCompositionTest {
                 val original = primary
                 if (original == null) throw cleanup else original.addSuppressed(cleanup)
             }
+        }
+    }
+
+    @Test fun actualOversizedRegisteredRootRefusesBeforeProducingACandidate() {
+        rule.runOnUiThread {
+            val original = ComposeView(rule.activity).apply {
+                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+                // Reproduce exact incoming constraints overriding the preferred 64dp size.
+                setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(64.dp).background(Color.Red)) {
+                    val view = LocalView.current; SideEffect { host = view }
+                    Box(Modifier.size(16.dp).background(Color.Blue))
+                } }
+            }
+            rule.activity.setContentView(original, ViewGroup.LayoutParams(16_385, 1))
+        }
+        rule.waitUntil(5_000) { rule.runOnUiThread {
+            this::host.isInitialized && host.isAttachedToWindow && host.hasWindowFocus() &&
+                host.isLaidOut && !host.isLayoutRequested
+        } }
+        rule.runOnUiThread {
+            val original = checkNotNull(AnnotatedRootRegistry.fromHost(host))
+            val region = checkNotNull(original.bindings().single { it.intent == null }.read())
+            assertEquals(16_385f, region.topRightX - region.topLeftX, .01f)
+            assertEquals(1f, region.bottomLeftY - region.topLeftY, .01f)
+            assertTrue(16_385 > AndroidAnnotatedReplayCollector.MAX_VIEWPORT_EDGE)
+            val collector = AndroidAnnotatedReplayCollector(original)
+            // Controlled time isolates the real geometry guard, not emulator performance.
+            assertEquals("viewport-limit", assertThrows(IllegalStateException::class.java) {
+                collector.prepareBinding(rule.activity.window, { true }) { 0L }
+            }.message)
+            assertEquals("viewport-limit", assertThrows(IllegalStateException::class.java) {
+                collector.capture(rule.activity.window, { true }) { 1_000_000_000L }
+            }.message)
         }
     }
 

@@ -127,14 +127,14 @@ internal class NativeRasterSealer {
             rasterRequire(timestamp in 1..253_402_300_799_999L &&
                 lastTimestamp?.let { timestamp >= it && timestamp - it >= 1_000 } != false,
                 NativeRasterSealingFailure.INVALID_TIMESTAMP)
-            rasterRequire(viewport == null || viewport == Pair(frame.width, frame.height), NativeRasterSealingFailure.CHANGED_VIEWPORT)
+            rasterRequire(viewport == null || viewport == Pair(frame.viewportWidth, frame.viewportHeight), NativeRasterSealingFailure.CHANGED_VIEWPORT)
             val time = NativeReplaySealer.timestamp(timestamp)
             val image = frame.encodePng(); png = image
             checkSource()
             val encodedPayload = canonical(Value.ArrayValue(listOf(obj("schemaVersion" to number(1), "type" to text("frame"),
                 "timestamp" to number(timestamp), "image" to obj("width" to number(frame.width.toLong()),
                     "height" to number(frame.height.toLong()), "png" to text(ReplayBase64.encode(image))),
-                "viewport" to obj("width" to number(frame.width.toLong()), "height" to number(frame.height.toLong()))))))
+                "viewport" to obj("width" to number(frame.viewportWidth.toLong()), "height" to number(frame.viewportHeight.toLong()))))))
             payload = encodedPayload
             rasterRequire(encodedPayload.size <= MAX_PAYLOAD_BYTES, NativeRasterSealingFailure.REQUEST_LIMIT)
             checkSource()
@@ -167,13 +167,13 @@ internal class NativeRasterSealer {
             val originalFrameCurrent = frame.publicationGuard()
             val originalSourceCurrent = sourceIsCurrent
             val result = NativeRasterPreparedRequest(requestBytes, requestId, chunkId, replayId, sessionId,
-                nextSequence, timestamp, policy.contextRevision, policy.effectivePolicyHash, frame.width, frame.height, sourceIdentity,
+                nextSequence, timestamp, policy.contextRevision, policy.effectivePolicyHash, frame.viewportWidth, frame.viewportHeight, sourceIdentity,
                 { originalFrameCurrent() && originalSourceCurrent() })
             prepared = result
             // Settle original frame cleanup before any state advance; encodePng already did this on success.
             frame.close()
             checkSource()
-            nextSequence++; lastTimestamp = timestamp; viewport = Pair(frame.width, frame.height)
+            nextSequence++; lastTimestamp = timestamp; viewport = Pair(frame.viewportWidth, frame.viewportHeight)
             accepted = true
             return result
         } catch (error: Throwable) { primary = error; throw error }

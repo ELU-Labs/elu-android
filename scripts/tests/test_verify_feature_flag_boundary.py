@@ -323,6 +323,35 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             path.write_text(changed); self.assertIn(expected, self.run_guard().stderr)
         path.write_text(original)
 
+    def test_downsampling_keeps_caps_original_viewport_and_pretransform_exclusion(self) -> None:
+        replay = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
+        def errors():
+            result = []
+            BOUNDARY.verify_annotated_root_boundary(self.root, result)
+            BOUNDARY.verify_raster_sealer_boundary(self.root, result)
+            return "\n".join(result)
+        self.assertEqual("", errors())
+        cases = (
+            ("AndroidAnnotatedReplayCollector.kt", "MAX_PIXELS = 1_048_576", "MAX_PIXELS = 2_097_152", "only bitmap allocation"),
+            ("AndroidAnnotatedReplayCollector.kt", "MAX_VIEWPORT_EDGE = 16_384", "MAX_VIEWPORT_EDGE = 32_768", "only bitmap allocation"),
+            ("AndroidAnnotatedReplayCollector.kt", "val margin = if (scaled) 1 else 0", "val margin = 0", "only bitmap allocation"),
+            ("AndroidAnnotatedReplayCollector.kt", "Bitmap.createBitmap(original.dimensions.imageWidth, original.dimensions.imageHeight, Bitmap.Config.ARGB_8888)",
+             "Bitmap.createBitmap(original.viewport.width(), original.viewport.height(), Bitmap.Config.ARGB_8888)", "only bitmap allocation"),
+            ("AndroidAnnotatedReplayCollector.kt", "canvas.clipOutRect(it)", "Unit", "device-pixel exclusion"),
+            ("AndroidAnnotatedReplayCollector.kt", "canvas.scale(original.dimensions.scaleX, original.dimensions.scaleY)", "Unit", "device-pixel exclusion"),
+            ("NativeRasterSealer.kt", "Pair(frame.viewportWidth, frame.viewportHeight)", "Pair(frame.width, frame.height)", "original source"),
+            ("NativeRasterSealer.kt", '"viewport" to obj("width" to number(frame.viewportWidth.toLong())',
+             '"viewport" to obj("width" to number(frame.width.toLong())', "original display viewport"),
+        )
+        for name, before, after, expected in cases:
+            path = replay / name; original = path.read_text()
+            with self.subTest(name=name, before=before):
+                self.assertIn(before, original)
+                try:
+                    path.write_text(original.replace(before, after))
+                    self.assertIn(expected, errors())
+                finally: path.write_text(original)
+
     def test_raster_sealer_keeps_original_source_and_only_reuses_two_old_helpers(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
         self.assertEqual(self.run_guard().returncode, 0)

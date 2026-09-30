@@ -23,6 +23,52 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.sqrt
+
+/** Pure size/mask arithmetic. Original viewport coordinates never become image coordinates. */
+internal data class AnnotatedRasterDimensions private constructor(
+    val viewportWidth: Int, val viewportHeight: Int, val imageWidth: Int, val imageHeight: Int,
+) {
+    val scaleX: Float = imageWidth.toFloat() / viewportWidth
+    val scaleY: Float = imageHeight.toFloat() / viewportHeight
+    private val scaled: Boolean get() = imageWidth != viewportWidth || imageHeight != viewportHeight
+
+    /** Same Float factors as Canvas; outward integer clipping happens before any transform. */
+    fun mask(left: Double, top: Double, right: Double, bottom: Double): AnnotatedRasterMask? {
+        check(listOf(left, top, right, bottom).all { it.isFinite() } && right >= left && bottom >= top)
+        val l = left.coerceIn(0.0, viewportWidth.toDouble())
+        val t = top.coerceIn(0.0, viewportHeight.toDouble())
+        val r = right.coerceIn(0.0, viewportWidth.toDouble())
+        val b = bottom.coerceIn(0.0, viewportHeight.toDouble())
+        if (r <= l || b <= t) return null
+        // Device-pixel margin covers rounding/sampling edges; it does not license paint
+        // outside the customer's mandatory clipping wrapper or unsupported effects.
+        val margin = if (scaled) 1 else 0
+        return AnnotatedRasterMask(
+            (floor(l * scaleX.toDouble()).toInt() - margin).coerceIn(0, imageWidth),
+            (floor(t * scaleY.toDouble()).toInt() - margin).coerceIn(0, imageHeight),
+            (ceil(r * scaleX.toDouble()).toInt() + margin).coerceIn(0, imageWidth),
+            (ceil(b * scaleY.toDouble()).toInt() + margin).coerceIn(0, imageHeight))
+    }
+
+    companion object {
+        fun fit(width: Int, height: Int): AnnotatedRasterDimensions {
+            check(width in 1..AndroidAnnotatedReplayCollector.MAX_VIEWPORT_EDGE &&
+                height in 1..AndroidAnnotatedReplayCollector.MAX_VIEWPORT_EDGE) { "viewport-limit" }
+            val scale = minOf(1.0, AndroidAnnotatedReplayCollector.MAX_EDGE.toDouble() / width,
+                AndroidAnnotatedReplayCollector.MAX_EDGE.toDouble() / height,
+                sqrt(AndroidAnnotatedReplayCollector.MAX_PIXELS.toDouble() / (width.toLong() * height)))
+            val imageWidth = maxOf(1, floor(width * scale).toInt())
+            val imageHeight = maxOf(1, floor(height * scale).toInt())
+            check(imageWidth in 1..minOf(width, AndroidAnnotatedReplayCollector.MAX_EDGE) &&
+                imageHeight in 1..minOf(height, AndroidAnnotatedReplayCollector.MAX_EDGE) &&
+                imageWidth.toLong() * imageHeight <= AndroidAnnotatedReplayCollector.MAX_PIXELS) { "image-limit" }
+            return AnnotatedRasterDimensions(width, height, imageWidth, imageHeight)
+        }
+    }
+}
+
+internal data class AnnotatedRasterMask(val left: Int, val top: Int, val right: Int, val bottom: Int)
 
 /** Original-host collector. Production invocation requires the original SDK permit. */
 internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRootRegistry) {
@@ -30,6 +76,7 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
         const val PLACEHOLDER = -11971747 // opaque, content-independent #49535d
         const val MAX_PIXELS = 1_048_576
         const val MAX_EDGE = 2_048
+        const val MAX_VIEWPORT_EDGE = 16_384
         const val PASS_NANOS = 50_000_000L
         const val INTERVAL_NANOS = 1_000_000_000L
     }
@@ -54,7 +101,7 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
     private data class Plan(val host: View, val parent: Any?, val decor: View, val token: Any,
         val version: Long, val policyVersion: Long, val width: Int, val height: Int,
         val screenX: Int, val screenY: Int, val viewport: Rect, val witnesses: List<Witness>,
-        val inputs: List<NativeInput>, val masks: List<Rect>)
+        val dimensions: AnnotatedRasterDimensions, val inputs: List<NativeInput>, val masks: List<Rect>)
 
     /** Validates the original registration without allocating pixels or issuing permission. */
     internal fun prepareBinding(window: Window, current: () -> Boolean,
@@ -87,7 +134,7 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
             lastAttempt = checks.started
             val original = plan(window, checks)
             checks.check()
-            val owned = Bitmap.createBitmap(original.viewport.width(), original.viewport.height(), Bitmap.Config.ARGB_8888)
+            val owned = Bitmap.createBitmap(original.dimensions.imageWidth, original.dimensions.imageHeight, Bitmap.Config.ARGB_8888)
             bitmap = owned
             checks.check()
             owned.eraseColor(PLACEHOLDER)
@@ -96,6 +143,7 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
             val saved = canvas.save()
             try {
                 original.masks.forEach { checks.check(); canvas.clipOutRect(it) }
+                canvas.scale(original.dimensions.scaleX, original.dimensions.scaleY)
                 canvas.translate(-original.viewport.left.toFloat(), -original.viewport.top.toFloat())
                 checks.read { original.host.draw(canvas) }
             } finally { canvas.restoreToCount(saved) }
@@ -121,7 +169,8 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
             val source = registry.sourceIdentity(root.binding, root.geometry, window, original.decor, original.token)
             checks.check()
             val result = AnnotatedRasterCandidate.validated(owned, source,
-                { current() && source.isCurrent() && registry.policyCurrent(acceptedPolicy) }, { occupied.set(false) })
+                { current() && source.isCurrent() && registry.policyCurrent(acceptedPolicy) }, { occupied.set(false) },
+                viewportWidth = original.viewport.width(), viewportHeight = original.viewport.height())
             bitmap = null; transferred = true
             return result
         } catch (error: Throwable) { primary = error; throw error }
@@ -169,9 +218,9 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
             Witness(binding, geometry, rectangle(geometry, at), generation)
         }
         val viewport = inward(witnesses.single { it.binding.intent == null }.rect)
+        val dimensions = AnnotatedRasterDimensions.fit(viewport.width(), viewport.height())
         val width = c.read { view.width }; val height = c.read { view.height }
-        check(viewport.width() in 1..MAX_EDGE && viewport.height() in 1..MAX_EDGE &&
-            viewport.width().toLong() * viewport.height() <= MAX_PIXELS && viewport.left >= 0 && viewport.top >= 0 &&
+        check(viewport.left >= 0 && viewport.top >= 0 &&
             viewport.right <= width && viewport.bottom <= height) { "viewport-limit" }
         val visible = Rect(); val globalOffset = Point()
         check(c.read { view.getGlobalVisibleRect(visible, globalOffset) })
@@ -194,19 +243,23 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
             val clipped = RectF(it.rect)
             // The supported annotation integration confines private paint to its clipping wrapper.
             if (!clipped.intersect(RectF(viewport))) null
-            else outward(clipped).apply { offset(-viewport.left, -viewport.top) }
+            else dimensions.mask(clipped.left.toDouble() - viewport.left, clipped.top.toDouble() - viewport.top,
+                clipped.right.toDouble() - viewport.left, clipped.bottom.toDouble() - viewport.top)?.let { mask ->
+                Rect(mask.left, mask.top, mask.right, mask.bottom)
+            }
         }.toMutableList()
-        if (inputs.isNotEmpty()) masks += Rect(0, 0, viewport.width(), viewport.height())
+        if (inputs.isNotEmpty()) masks += Rect(0, 0, dimensions.imageWidth, dimensions.imageHeight)
         check(masks.size <= 64 && registry.current(version) && registry.policyCurrent(policy)) { "stale-or-excess-regions" }
         c.check()
         return Plan(view, c.read { view.parent }, decor, token, version, policy, width, height,
-            screen[0], screen[1], viewport, witnesses, inputs, masks)
+            screen[0], screen[1], viewport, witnesses, dimensions, inputs, masks)
     }
 
     private fun validate(old: Plan, fresh: Plan) {
         check(old.host === fresh.host && old.parent === fresh.parent && old.decor === fresh.decor && old.token === fresh.token &&
             old.version == fresh.version && old.policyVersion == fresh.policyVersion && old.width == fresh.width && old.height == fresh.height &&
             old.screenX == fresh.screenX && old.screenY == fresh.screenY && old.viewport == fresh.viewport && old.masks == fresh.masks &&
+            old.dimensions == fresh.dimensions &&
             old.witnesses.size == fresh.witnesses.size && old.inputs.size == fresh.inputs.size) { "stale-plan" }
         old.witnesses.zip(fresh.witnesses).forEach { (a, b) ->
             check(a.binding === b.binding && a.bindingGeneration == b.bindingGeneration &&
@@ -233,7 +286,6 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
             maxOf(ax, bx, dx, ex) - origin[0], maxOf(ay, by, dy, ey) - origin[1])
     }
     private fun inward(r: RectF) = Rect(ceil(r.left).toInt(), ceil(r.top).toInt(), floor(r.right).toInt(), floor(r.bottom).toInt())
-    private fun outward(r: RectF) = Rect(floor(r.left).toInt(), floor(r.top).toInt(), ceil(r.right).toInt(), ceil(r.bottom).toInt())
 }
 
 /** Original weak registry plus scalar/atomic currentness only; no pixels, window, grant or issuer. */

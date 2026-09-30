@@ -294,10 +294,11 @@ ordinary labels may contain personal information even when they are not inputs.
 These replay restrictions do not sanitize customer-supplied event properties,
 identity values, or exception messages.
 
-Analytics requires API 23 with app-level core-library desugaring. Current Views
-replay requires API 29 because older versions lack public transition-alpha and
-animation-matrix observations. API 26–28 replay, Compose semantics replay and
-readable custom-subclass text are not supported by this candidate. Exact
+Events, identity and feature flags require Android 6+ (API 23+) with app-level
+core-library desugaring. First-release Views replay requires Android 10+ (API 29+)
+because older versions lack public transition-alpha and animation-matrix
+observations. Replay on API 23–28, Compose semantics replay and readable
+custom-subclass text are not supported. Exact
 AppCompat support still requires current artifact/emulator and R8 qualification.
 Compose applications
 can use the analytics APIs and explicit screen events. These differences remain
@@ -629,4 +630,6 @@ On API29+, retain each private-region identity independently of its conditional 
 
 Only validated redacted output is encoded or retained. A main-thread post-check that rejects a drawn candidate clears and closes that candidate. Root viewport/rebinding changes retire the original source; restoring an earlier size cannot revive it. The first retained prefix requires actual lawful samples spanning the configured minimum duration. Stopping or advancing time without a second sample does not establish that duration. Existing wireframe behavior, original physical cleanup, immutable request retries and durable refusal semantics remain in force.
 
-Core analytics and annotation registration support API23+, while both the Views replay path and this annotated capture path remain API29+. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. API26–28 replay remains an unresolved requirement. The optional module's remote publication and exact two-artifact release qualification remain separate; this source change does not announce an available package version or completed device/engine/player validation.
+Capture preserves the original inward integer display viewport (each edge at most 16,384 pixels). It draws the original host directly into an initialized bitmap of at most 2,048 pixels per edge and 1,048,576 pixels total. A larger lawful viewport is downsampled without allocating a full-size intermediate bitmap. Its original dimensions remain in the frame and epoch; encoded image dimensions are separate. Private rectangles are mapped outward into output pixels, with an additional one-pixel margin when downsampling, and excluded in device coordinates before the Canvas transform. Final redaction and original geometry/currentness checks still gate all retained output. This bounds the SDK's output bitmap, not temporary allocations inside Android's renderer; unsupported paint still requires the declared clipping wrappers or capture refusal. Source, privacy and viewport changes remain epoch boundaries even when rounded output sizes coincide. Full-HD usefulness, renderer behavior and the existing capture deadline require actual large-window device qualification.
+
+Core analytics (events, identity and feature flags) and annotation registration support Android 6+ (API23+). Both Views replay and annotated capture require Android 10+ (API29+); replay is unavailable on API23–28 in the first release. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. The optional module's remote publication and exact two-artifact release qualification remain separate; this source change does not announce an available package version or completed device/engine/player validation.

@@ -9,8 +9,8 @@ is managed from your ELU dashboard and delivered as remote config. See
   key is required in the app.
 - Privacy controls (EU blocking, text/image masking, replay limits) are
   applied **client-side at capture time** and managed from the ELU dashboard.
-- `minSdk 23` for events, identity and feature flags. Native session replay
-  requires API 29 or later and current server authorization.
+- Android 6 or later (API 23+) for events, identity and feature flags. Native session replay
+  requires Android 10 or later (API 29+) and current server authorization.
 
 This source checkout contains the ELU-owned analytics runtime. Its standalone
 0.2.0 release is still undergoing qualification and is not published yet.
@@ -18,10 +18,9 @@ The published 0.1.0 release uses
 the previous runtime; building this checkout does not change an already
 published Maven artifact. Application code continues to use `Elu.*`.
 
-The current standalone replay collector requires API 29 or later. API 26–28
-replay compatibility remains a release requirement; it is not established by
-the API 23 events and identity checks. Replay support will be documented with
-the qualified release.
+The first standalone release supports replay on Android 10 or later (API 29+).
+Replay is unavailable on API 23–28; events, identity and feature flags remain
+available there. Building this candidate does not establish release qualification.
 
 ## Install
 
@@ -613,9 +612,9 @@ requested restrictions are never discarded to continue recording.
 
 Compose semantics replay and readable text from custom view subclasses
 are not yet supported; keep manual `Elu.screen()` navigation events. Analytics
-works on API 23+, while replay currently requires API 29+. API 26–28 replay and
-Compose parity remain qualification gaps, so this source is not yet a complete
-standalone customer release. No Web Vitals or browser long-task metrics are
+works on Android 6+ (API 23+), while first-release replay requires Android 10+
+(API 29+). Exact-artifact Compose qualification remains pending, so this source
+is not yet a complete standalone customer release. No Web Vitals or browser long-task metrics are
 reported as native performance data.
 API 26–28 lack the public transition-alpha and animation-matrix observations
 used to exclude text hidden by framework transitions; ordinary view alpha and
@@ -711,4 +710,4 @@ On API29+, retain each private-region identity independently of its conditional 
 
 Only validated redacted output is encoded or retained. A main-thread post-check that rejects a drawn candidate clears and closes that candidate. Root viewport/rebinding changes retire the original source; restoring an earlier size cannot revive it. The first retained prefix requires actual lawful samples spanning the configured minimum duration. Stopping or advancing time without a second sample does not establish that duration. Existing wireframe behavior, original physical cleanup, immutable request retries and durable refusal semantics remain in force.
 
-Core analytics and annotation registration support API23+, while both the Views replay path and this annotated capture path remain API29+. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. API26–28 replay remains an unresolved requirement. The optional module's remote publication and exact two-artifact release qualification remain separate; this source change does not announce an available package version or completed device/engine/player validation.
+Core analytics (events, identity and feature flags) and annotation registration support Android 6+ (API23+). Both Views replay and annotated capture require Android 10+ (API29+); replay is unavailable on API23–28 in the first release. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. The optional module's remote publication and exact two-artifact release qualification remain separate; this source change does not announce an available package version or completed device/engine/player validation.

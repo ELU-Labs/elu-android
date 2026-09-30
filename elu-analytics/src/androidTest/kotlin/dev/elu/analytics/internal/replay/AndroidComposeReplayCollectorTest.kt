@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -28,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -61,6 +63,8 @@ import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import androidx.test.filters.SdkSuppress
+import kotlin.math.ceil
+import kotlin.math.floor
 
 /** Original mounted UI only. These tests do not grant SDK authority or qualify capture latency. */
 @SdkSuppress(minSdkVersion = 29)
@@ -182,6 +186,78 @@ class AndroidComposeReplayCollectorTest {
         } finally { png.fill(0); bitmap?.recycle() }
     }
     private fun sample(): IntArray = capture().use { pixels(it) }
+
+    @Test fun actualWindowViewportKeepsOriginalCoordinatesAndRedactsOverlappingRegions() {
+        assertOriginalWindowCapture(requireDownsampling = false)
+    }
+
+    /** Focused API36 device case: a small window is a failure, not downsampling evidence. */
+    @Test @SdkSuppress(minSdkVersion = 36)
+    fun fullHdOriginalWindowActuallyDownsamplesBeforeAllocationAndRetainsState() {
+        assertOriginalWindowCapture(requireDownsampling = true)
+    }
+
+    private fun assertOriginalWindowCapture(requireDownsampling: Boolean) {
+        val first = EluReplayPrivateRegion.create(); val second = EluReplayPrivateRegion.create()
+        var counter by mutableIntStateOf(0)
+        install({ listOf(first, second) }, Modifier.fillMaxSize().background(Color.White)) {
+            Box(Modifier.fillMaxSize()) {
+                Box(Modifier.graphicsLayer { translationX = .25f; translationY = .75f }) {
+                    EluReplayMask(first) { Box(Modifier.size(60.dp).background(Color.Magenta)) }
+                }
+                Box(Modifier.offset(30.dp, 30.dp).graphicsLayer { translationX = .75f; translationY = .25f }) {
+                    EluReplayBlock(second) { Box(Modifier.size(60.dp).background(Color.Magenta)) }
+                }
+                Box(Modifier.align(Alignment.BottomEnd).size(24.dp)
+                    .background(if (counter == 0) Color.Red else Color.Blue)
+                    .clickable { counter++ }.testTag("window-counter"))
+            }
+        }
+        val geometry = rule.runOnIdle { registry.bindings().map { it.intent to checkNotNull(it.read()) } }
+        val root = geometry.single { it.first == null }.second
+        val left = ceil(root.topLeftX.toDouble()); val top = ceil(root.topLeftY.toDouble())
+        val width = floor(root.topRightX.toDouble()).toInt() - left.toInt()
+        val height = floor(root.bottomLeftY.toDouble()).toInt() - top.toInt()
+        if (requireDownsampling) assertTrue("actual viewport must exceed the image cap: ${width}x$height",
+            width.toLong() * height > AndroidAnnotatedReplayCollector.MAX_PIXELS ||
+                width > AndroidAnnotatedReplayCollector.MAX_EDGE || height > AndroidAnnotatedReplayCollector.MAX_EDGE)
+        fun inspect(frame: AnnotatedRasterCandidate, publicColor: Int): Int {
+            assertEquals(width, frame.viewportWidth); assertEquals(height, frame.viewportHeight)
+            assertTrue(frame.width in 1..minOf(width, 2048) && frame.height in 1..minOf(height, 2048))
+            assertTrue(frame.width.toLong() * frame.height <= 1_048_576)
+            if (requireDownsampling) assertTrue(frame.width < width || frame.height < height)
+            android.util.Log.i("EluRasterTest", "viewport=${frame.viewportWidth}x${frame.viewportHeight};image=${frame.width}x${frame.height}")
+            val output = pixels(frame)
+            try {
+                assertTrue(output.all { android.graphics.Color.alpha(it) == 255 })
+                assertTrue(output.any { it == android.graphics.Color.WHITE })
+                assertTrue(output.any { it == publicColor })
+                assertFalse(output.any { it == android.graphics.Color.MAGENTA })
+                // Independent expected exclusion from actual mounted window corners.
+                val sx = (frame.width.toFloat() / width).toDouble()
+                val sy = (frame.height.toFloat() / height).toDouble()
+                val margin = if (frame.width != width || frame.height != height) 1 else 0
+                geometry.filter { it.first != null }.forEach { (_, region) ->
+                    val l = (floor((region.topLeftX - left) * sx).toInt() - margin).coerceIn(0, frame.width)
+                    val t = (floor((region.topLeftY - top) * sy).toInt() - margin).coerceIn(0, frame.height)
+                    val r = (ceil((region.topRightX - left) * sx).toInt() + margin).coerceIn(0, frame.width)
+                    val b = (ceil((region.bottomLeftY - top) * sy).toInt() + margin).coerceIn(0, frame.height)
+                    for (y in t until b) for (x in l until r) {
+                        assertEquals("redaction at $x,$y", AndroidAnnotatedReplayCollector.PLACEHOLDER, output[y * frame.width + x])
+                    }
+                }
+                return output.contentHashCode()
+            } finally { output.fill(0) }
+        }
+        val original = capture(); val source = original.sourceIdentity
+        val before = original.use { inspect(it, android.graphics.Color.RED) }
+        rule.onNodeWithTag("window-counter").performClick()
+        assertEquals(1, rule.runOnIdle { counter })
+        capture().use {
+            assertSame(source, it.sourceIdentity)
+            assertNotEquals(before, inspect(it, android.graphics.Color.BLUE))
+        }
+    }
 
     @Test fun originalChildStateScrollAndActualInputRemainOnTheOriginalHost() {
         val private = EluReplayPrivateRegion.create()
