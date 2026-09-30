@@ -104,3 +104,43 @@ not change release state or expose raw evidence in logs.
 This handoff does not itself deploy the engine, activate a registry, or verify a
 published package in production. Coordinated deployment and fresh production
 verification remain separately required after reviewed publication.
+
+## Optional Compose distribution preparation
+
+The optional `dev.elu:elu-analytics-compose:<version>` artifact now has local
+publication metadata, sources/Javadoc and a runtime SBOM. Both versions come
+from `EluVersion.NAME`; its POM and Gradle metadata must retain the exact matching
+core dependency, Compose UI API dependency and Foundation runtime dependency.
+This is candidate preparation, not a released package or functioning recorder.
+
+CI generates both distributions and validates their exact bytes using
+`scripts/validate-compose-distribution.py`. The checker copies the original
+validated AAR/POM/module/source/Javadoc bytes to the fresh
+`build/compose-distribution/repository` layout; it does not invoke Gradle publish,
+reconstruct metadata, alter core signing requirements or overwrite a previous
+stage. A partial stage must be investigated and removed by its owner before a
+new attempt. The staged receipt explicitly denies runtime qualification.
+
+The independent `fixtures/compose-consumer` build resolves only Maven coordinates
+from that exclusive local `dev.elu` repository. It compiles the actual public
+annotation API with both Gradle metadata and POM-only resolution, verifies both
+resolved ELU AAR hashes against the checked stage, and has no SDK project or
+composite-build dependency. CI passes `-Pandroid.useAndroidX=true`; Java/Kotlin
+output remains 11, toolchain 17, with the required desugaring configuration.
+The existing Views-only and historical 0.1.0 consumer checks remain separate.
+
+The optional base publishing plugin has **no repository, Central deployment or
+signing registration**. Any optional Gradle Maven publishing task is rejected
+before execution. Core publication configuration and its signed single-core Lab
+evidence validator remain unchanged; that receipt cannot authorize optional
+publication. Both artifacts' metadata/dependencies/SBOM are scanned in CI, but
+these build checks do not replace exact installed-artifact Lab qualification.
+
+Before enabling optional publication, a separately reviewed Lab/exporter and
+release-consumer change must bind both exact AARs, their source/distribution
+closure and original installed use, including the new raster policy/routes and
+actual customer rendering/privacy. The protected release workflow must then gate
+the entire two-artifact publication set. Current candidate versions must not be
+advertised as available until actual package publication and clean-consumer
+verification finish. Annotation registration on API 23 does not change the
+current API 29+ replay eligibility or waive the API 26–28 gap.

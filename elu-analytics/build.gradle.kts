@@ -19,6 +19,10 @@ plugins {
     id("org.cyclonedx.bom")
 }
 
+// Also bind project-dependency/SBOM identity to the publication version.
+group = "dev.elu"
+version = sdkVersion
+
 android {
     namespace = "dev.elu.analytics"
     compileSdk = 36

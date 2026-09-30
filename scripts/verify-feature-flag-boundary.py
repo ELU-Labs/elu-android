@@ -26,7 +26,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
         "3282da2f4743b7910e8471d814862540d350b5fb38f782b9c04331756f0d2e77",
     "elu-analytics/build.gradle.kts":
-        "8892f4437472ea55bb6d3375568d7c56cafe86f60a9a8a7ae7fb54cb43cda523",
+        "467950f0497da666d721126a2518c3d94a33abf454bb04bfeabf6e45078d87d1",
     "elu-analytics/consumer-rules.pro":
         "4fabc808ed8f99ec3660a83c224cdcf8e3fd041a51c404093195e4cd8bdbb6cb",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/concurrent/SdkFuture.kt":
@@ -41,6 +41,10 @@ PINNED_FILES = {
 ANNOTATED_EXTRA_FILES = (
     "build.gradle.kts",
     "settings.gradle.kts",
+    "fixtures/compose-consumer/settings.gradle.kts",
+    "fixtures/compose-consumer/build.gradle.kts",
+    "fixtures/compose-consumer/src/main/AndroidManifest.xml",
+    "fixtures/compose-consumer/src/main/kotlin/dev/elu/analytics/composeconsumer/MainActivity.kt",
     "elu-analytics/src/main/res/values/elu_annotated_replay_ids.xml",
     "elu-analytics-compose/build.gradle.kts",
     "elu-analytics-compose/src/main/kotlin/dev/elu/analytics/compose/EluComposeReplay.kt",
@@ -1183,6 +1187,39 @@ def verify_annotated_root_boundary(root: pathlib.Path, errors: list[str]) -> Non
     if build.count(option) != 1 or task_set not in build:
         errors.append("Compose runtime-absent option must preserve strict AndroidTest compilation")
 
+def verify_compose_distribution_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    optional = load_text(root, "elu-analytics-compose/build.gradle.kts")
+    for path in ("elu-analytics/build.gradle.kts", "elu-analytics-compose/build.gradle.kts"):
+        build = load_text(root, path)
+        if 'group = "dev.elu"\nversion = sdkVersion' not in build:
+            errors.append("distribution project identity must match the original SDK publication version")
+    required = (
+        'id("com.vanniktech.maven.publish.base")',
+        'configure(AndroidSingleVariantLibrary(javadocJar = JavadocJar.Javadoc(), variant = "release"))',
+        'coordinates("dev.elu", "elu-analytics-compose", sdkVersion)',
+        'check(optionalProject.extensions.getByType<PublishingExtension>().repositories.isEmpty())',
+        'check(allTasks.none { it.project == optionalProject && it is AbstractPublishToMaven })',
+        'api(project(":elu-analytics"))', 'api("androidx.compose.ui:ui:1.7.8")',
+        'implementation("androidx.compose.foundation:foundation:1.7.8")',
+        'includeConfigs = listOf("releaseRuntimeClasspath")', 'testConfigs = emptyList()',
+    )
+    if any(token not in optional for token in required) or re.search(
+            r'publishToMavenCentral\s*\(|signAllPublications\s*\(|id\("com\.vanniktech\.maven\.publish"\)', optional):
+        errors.append("optional Compose distribution must remain local metadata only with exact dependencies and publication refusal")
+    settings = load_text(root, "fixtures/compose-consumer/settings.gradle.kts")
+    build = load_text(root, "fixtures/compose-consumer/build.gradle.kts")
+    if any(token not in settings for token in ('exclusiveContent {', 'filter { includeGroup("dev.elu") }',
+            'url = uri("../../build/compose-distribution/repository")',
+            'if (metadataMode == "module") gradleMetadata()',
+            'mavenPom(); ignoreGradleMetadataRedirection()')) or any(token not in build for token in (
+            'implementation("dev.elu:elu-analytics-compose:$candidateVersion")',
+            'listOf("debugCompileClasspath", "debugRuntimeClasspath")',
+            'check(actual == digest(staged.readBytes()))',
+            'tasks.named("preBuild") { dependsOn(verifyStagedArtifacts) }')) or re.search(
+            r'includeBuild\s*\(|(?:implementation|api)\s*\(\s*project\s*\(', settings + build):
+        errors.append("Compose consumer must use exclusive staged Maven coordinates and verify both original AARs")
+
+
 def verify_raster_sealer_boundary(root: pathlib.Path, errors: list[str]) -> None:
     replay = MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
     path = replay / "NativeRasterSealer.kt"
@@ -1306,6 +1343,7 @@ def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> N
 
 def verify(root: pathlib.Path) -> list[str]:
     errors: list[str] = []
+    verify_compose_distribution_boundary(root, errors)
     verify_native_raster_response_boundary(root, errors)
     verify_native_v3_parser_boundary(root, errors)
     verify_raster_sealer_boundary(root, errors)

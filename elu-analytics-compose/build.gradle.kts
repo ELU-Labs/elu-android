@@ -1,10 +1,31 @@
+import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
+import com.vanniktech.maven.publish.JavadocJar
+import org.cyclonedx.gradle.CyclonedxDirectTask
+import org.cyclonedx.model.Component
+import org.gradle.api.file.RegularFile
+import org.gradle.api.publish.PublishingExtension
+import org.gradle.api.publish.maven.tasks.AbstractPublishToMaven
+
+val sdkVersion =
+    Regex("const val NAME: String = \"([^\"]+)\"")
+        .find(rootProject.file("elu-analytics/src/main/kotlin/dev/elu/analytics/EluVersion.kt").readText())
+        ?.groupValues
+        ?.get(1)
+        ?: error("EluVersion.NAME is the required SDK version source of truth")
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.vanniktech.maven.publish.base")
+    id("org.cyclonedx.bom")
 }
 
 // Optional integration only. The core Views artifact has no Compose dependency.
+// Also bind project-dependency/SBOM identity to the publication version.
+group = "dev.elu"
+version = sdkVersion
+
 android {
     namespace = "dev.elu.analytics.compose"
     compileSdk = 36
@@ -33,4 +54,58 @@ dependencies {
     api(project(":elu-analytics"))
     api("androidx.compose.ui:ui:1.7.8")
     implementation("androidx.compose.foundation:foundation:1.7.8")
+}
+
+// Metadata only. No optional repository, Central deployment or signing registration.
+// The local consumer receives checked copies of these exact outputs, never a publish task.
+mavenPublishing {
+    configure(AndroidSingleVariantLibrary(javadocJar = JavadocJar.Javadoc(), variant = "release"))
+    coordinates("dev.elu", "elu-analytics-compose", sdkVersion)
+    pom {
+        name.set("ELU Analytics Compose annotations")
+        description.set("Optional original-host Compose privacy annotations for ELU Analytics. Annotations alone do not install replay capture.")
+        url.set("https://github.com/ELU-Labs/elu-android")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/license/mit/")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("ELU-Labs")
+                name.set("ELU Labs")
+                url.set("https://elu.dev")
+            }
+        }
+        scm {
+            url.set("https://github.com/ELU-Labs/elu-android")
+            connection.set("scm:git:git://github.com/ELU-Labs/elu-android.git")
+            developerConnection.set("scm:git:ssh://git@github.com/ELU-Labs/elu-android.git")
+        }
+    }
+}
+
+val optionalProject = project
+gradle.taskGraph.whenReady {
+    check(optionalProject.extensions.getByType<PublishingExtension>().repositories.isEmpty()) {
+        "Optional remote publication requires reviewed two-artifact Lab evidence; no repository is permitted yet"
+    }
+    check(allTasks.none { it.project == optionalProject && it is AbstractPublishToMaven }) {
+        "Optional publication is disabled; use the validated local distribution staging checker"
+    }
+}
+
+tasks.named<CyclonedxDirectTask>("cyclonedxDirectBom") {
+    componentGroup = "dev.elu"
+    componentName = "elu-analytics-compose"
+    componentVersion = sdkVersion
+    projectType = Component.Type.LIBRARY
+    includeConfigs = listOf("releaseRuntimeClasspath")
+    testConfigs = emptyList()
+    includeBomSerialNumber = false
+    includeBuildSystem = false
+    jsonOutput = layout.buildDirectory.file("reports/sbom/elu-analytics-compose-release-sbom.json")
+    xmlOutput.convention(null as RegularFile?)
 }

@@ -5,6 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.1.20" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.20" apply false
     id("com.vanniktech.maven.publish") version "0.37.0" apply false
+    id("com.vanniktech.maven.publish.base") version "0.37.0" apply false
     id("org.cyclonedx.bom") version "3.4.1" apply false
 }
 

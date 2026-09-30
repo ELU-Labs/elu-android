@@ -41,6 +41,38 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             text=True,
         )
 
+    def test_compose_distribution_cannot_enable_remote_publication_or_substitute_project_consumer(self) -> None:
+        def errors() -> str:
+            result: list[str] = []
+            BOUNDARY.verify_compose_distribution_boundary(self.root, result)
+            return "\n".join(result)
+        self.assertEqual(errors(), "")
+        cases = [
+            ("elu-analytics/build.gradle.kts", 'version = sdkVersion', 'version = "0.1.0"', "project identity"),
+            ("elu-analytics-compose/build.gradle.kts", 'group = "dev.elu"', 'group = "other"', "project identity"),
+            ("elu-analytics-compose/build.gradle.kts", 'id("com.vanniktech.maven.publish.base")',
+             'id("com.vanniktech.maven.publish")', "metadata only"),
+            ("elu-analytics-compose/build.gradle.kts", 'coordinates("dev.elu", "elu-analytics-compose", sdkVersion)',
+             'coordinates("dev.elu", "elu-analytics-compose", sdkVersion); publishToMavenCentral()', "metadata only"),
+            ("elu-analytics-compose/build.gradle.kts", 'check(allTasks.none { it.project == optionalProject && it is AbstractPublishToMaven })',
+             'check(true)', "metadata only"),
+            ("elu-analytics-compose/build.gradle.kts", 'check(optionalProject.extensions.getByType<PublishingExtension>().repositories.isEmpty())',
+             'check(true)', "metadata only"),
+            ("fixtures/compose-consumer/settings.gradle.kts", 'filter { includeGroup("dev.elu") }',
+             'filter { includeGroup("unrelated") }', "staged Maven"),
+            ("fixtures/compose-consumer/settings.gradle.kts", 'mavenPom(); ignoreGradleMetadataRedirection()',
+             'mavenPom()', "staged Maven"),
+            ("fixtures/compose-consumer/build.gradle.kts", 'implementation("dev.elu:elu-analytics-compose:$candidateVersion")',
+             'implementation(project(":elu-analytics-compose"))', "staged Maven"),
+            ("fixtures/compose-consumer/build.gradle.kts", 'check(actual == digest(staged.readBytes()))',
+             'check(true)', "staged Maven"),
+        ]
+        for relative, before, after, message in cases:
+            with self.subTest(relative=relative, before=before):
+                path = self.root / relative; original = path.read_text()
+                self.assertIn(before, original); path.write_text(original.replace(before, after))
+                self.assertIn(message, errors()); path.write_text(original)
+
     def test_raster_response_binds_original_schema_and_only_static_helpers(self) -> None:
         def errors() -> str:
             result: list[str] = []
