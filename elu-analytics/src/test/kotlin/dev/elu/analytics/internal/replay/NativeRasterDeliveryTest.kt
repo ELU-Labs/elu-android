@@ -112,7 +112,7 @@ class NativeRasterDeliveryTest {
         assertTrue(h.rows().isEmpty())
     }
 
-    @Test fun `divergent ACK reconciliation quarantines original owner rather than deleting suffix`() = Rig().use { h ->
+    @Test fun `divergent ACK reconciliation quarantines original owner rather than deleting suffix`(): Unit = Rig().use { h ->
         h.seed(); h.seed(1); val claim = checkNotNull(h.queue.claim())
         h.rig.expectQuarantinedClose = true
         h.rig.backing.ambiguousNextCommit = FakeAmbiguousOutcome.DIVERGE
@@ -300,7 +300,7 @@ class NativeRasterDeliveryTest {
         }
     }
 
-    @Test fun `raster metadata cannot masquerade as legacy or lose epoch identity`() = Rig().use { h ->
+    @Test fun `raster metadata cannot masquerade as legacy or lose epoch identity`(): Unit = Rig().use { h ->
         h.seed(); val claim = checkNotNull(h.queue.claim()); val metadata = h.metadata(claim.ordinal)
         val row = metadata.row(); assertEquals(2L, row.storageSchemaVersion)
         assertEquals(metadata, ReplayDeliveryMetadata.decode(row))
