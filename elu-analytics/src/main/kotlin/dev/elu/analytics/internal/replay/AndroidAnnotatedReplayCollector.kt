@@ -57,6 +57,7 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
     fun capture(window: Window, current: () -> Boolean,
         clock: () -> Long = SystemClock::elapsedRealtimeNanos): AnnotatedRasterCandidate {
         AnnotatedRootRegistry.main()
+        if (Build.VERSION.SDK_INT < 29) error("unsupported-platform")
         check(occupied.compareAndSet(false, true)) { "outstanding-candidate" }
         var bitmap: Bitmap? = null
         var transferred = false
@@ -114,7 +115,7 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
     }
 
     private fun plan(window: Window, c: Checks): Plan {
-        c.check(); check(Build.VERSION.SDK_INT >= 29)
+        c.check(); if (Build.VERSION.SDK_INT < 29) error("unsupported-platform")
         val version = registry.version(); val policy = registry.policyVersion()
         val view = c.read { registry.host() }
         val decor = checkNotNull(c.read { window.peekDecorView() })

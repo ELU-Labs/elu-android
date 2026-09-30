@@ -60,6 +60,13 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
                 self.assertIn(expected, self.run_guard().stderr)
                 path.write_text(original)
         stack = self.root / BOUNDARY.STACK
+        collector = base / "internal/replay/AndroidAnnotatedReplayCollector.kt"
+        original = collector.read_text()
+        guard = 'if (Build.VERSION.SDK_INT < 29) error("unsupported-platform")'
+        self.assertEqual(original.count(guard), 2)
+        collector.write_text(original.replace(guard, "Unit", 1))
+        self.assertIn("both refuse below API29", self.run_guard().stderr)
+        collector.write_text(original)
         stack.write_text(stack.read_text() + "\n// AndroidAnnotatedReplayCollector(registry)\n")
         self.assertIn("must remain uninstalled", self.run_guard().stderr)
 

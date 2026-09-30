@@ -1122,7 +1122,7 @@ def verify_annotated_root_boundary(root: pathlib.Path, errors: list[str]) -> Non
         "internal/replay/AnnotatedRootRegistry.kt": ["private val host = WeakReference(view)", "private var required:",
             "(previous as? AnnotatedRootRegistry)?.conflict()", "previous !== this", "it.getTag(R.id.elu_annotated_replay_root) === this",
             "private val reader: EluReplayGeometryReader", "if (isClosed) null else reader.read()"],
-        "internal/replay/AndroidAnnotatedReplayCollector.kt": ["check(Build.VERSION.SDK_INT >= 29)", "occupied.compareAndSet(false, true)",
+        "internal/replay/AndroidAnnotatedReplayCollector.kt": ['if (Build.VERSION.SDK_INT < 29) error("unsupported-platform")', "occupied.compareAndSet(false, true)",
             "INTERVAL_NANOS = 1_000_000_000L", "PASS_NANOS = 50_000_000L", "lastAttempt = checks.started",
             "checkNotNull(c.read { binding.read() })", "sameGeometry(a.geometry, b.geometry)",
             "val acceptedPolicy = original.policyVersion", "{ current() && registry.policyCurrent(acceptedPolicy) }",
@@ -1148,6 +1148,8 @@ def verify_annotated_root_boundary(root: pathlib.Path, errors: list[str]) -> Non
     if ".attach(" in prepare or ".setTag(" in prepare:
         errors.append("annotated preparation must not attach before composition commits")
     collector = load_text(root, base / "internal/replay/AndroidAnnotatedReplayCollector.kt")
+    if collector.count('if (Build.VERSION.SDK_INT < 29) error("unsupported-platform")') != 2:
+        errors.append("annotated capture and planning must both refuse below API29 before platform calls")
     if not (0 <= collector.find("canvas.clipOutRect(it)") < collector.find("original.host.draw(canvas)") <
             collector.find("validate(original, plan(window, checks))") < collector.find("AnnotatedRasterCandidate.validated")) or collector.count("validate(original, plan(window, checks))") != 2:
         errors.append("annotated output must revalidate original geometry before candidate construction")

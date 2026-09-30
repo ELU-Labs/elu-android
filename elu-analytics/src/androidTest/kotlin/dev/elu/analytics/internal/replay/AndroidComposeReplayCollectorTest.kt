@@ -145,7 +145,7 @@ class AndroidComposeReplayCollectorTest {
         val initial = sample()
         try {
             rule.onNodeWithTag("counter").performClick()
-            rule.onNodeWithTag("counter-text").assertTextEquals("COUNT 1")
+            rule.onNodeWithTag("counter-text", useUnmergedTree = true).assertTextEquals("COUNT 1")
             val changed = sample()
             try { assertFalse(initial.contentEquals(changed)) } finally { changed.fill(0) }
             rule.onNodeWithTag("input").performClick().apply {
