@@ -546,11 +546,12 @@ in this source packet. Earlier one-slot durability tests and hosted suites are s
 evidence; real exact-artifact process-death/restart and canonical delivery remain gates.
 
 
-### Internal native raster durability checkpoint (not runtime installation)
+### Native raster durability
 
 The optional declared-region collector can now be admitted through the original native authority,
 physical enrollment and queue worker. This path is a separate internal capability, disabled by default;
-it does not change the automatic Views privacy witness or install schema3 delivery. Only a one-shot
+it does not change the automatic Views privacy witness. The explicit setup option below selects the
+original raster capture and delivery branch together. Only a one-shot
 collector frame sealed under the original source identity and copied local intent revision may append.
 Changing that intent after encoding withdraws fresh append without retaining the closed candidate or
 its pixel allocation. The original request bytes, identity, start receipt, clocks and shared session
@@ -618,3 +619,14 @@ capture grant. This survives opt-in/loosening/restart. Deferred removal uses onl
 and is conservative when an enrolled capture remains. No separate tombstone store is added. Unavailable child/support retains bytes without granting permission; explicit incompatible
 base privacy still purges. New delivery tests are authored, not compiled or executed by this source
 checkpoint. Hosted and actual local device/engine/player qualification remain separate requirements.
+
+
+## Explicit declared-region replay setup
+
+`EluOptions(declaredRegionReplayEnabled = true)` opts the original SDK stack into the native-v3 configuration format and declared-region raster implementation together. The default remains false. There is one source, queue, capture owner and delivery coordinator; an unavailable native-v3 response never starts a fallback configuration fetch. An exact server declared-regions child, current consent/identity and replay budget are still required.
+
+On API29+, retain each private-region identity independently of its conditional UI and pass the complete required set to `EluAnnotatedReplayRoot`. Wrap every input, private region and unsupported paint in the corresponding `EluReplayMask` or `EluReplayBlock` clipping wrapper. Missing, stale, duplicate or ambiguous bindings refuse capture. Removing declarations from the same selected root never downgrades it to ordinary Views replay. This integration captures original mounted state at no more than one frame per second; it adds no raster pointer stream and does not automatically discover all Compose inputs or classify unknown drawing.
+
+Only validated redacted output is encoded or retained. A main-thread post-check that rejects a drawn candidate clears and closes that candidate. Root viewport/rebinding changes retire the original source; restoring an earlier size cannot revive it. The first retained prefix requires actual lawful samples spanning the configured minimum duration. Stopping or advancing time without a second sample does not establish that duration. Existing wireframe behavior, original physical cleanup, immutable request retries and durable refusal semantics remain in force.
+
+Core analytics and annotation registration support API23+, while both the Views replay path and this annotated capture path remain API29+. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. API26–28 replay remains an unresolved requirement. The optional module's remote publication and exact two-artifact release qualification remain separate; this source change does not announce an available package version or completed device/engine/player validation.

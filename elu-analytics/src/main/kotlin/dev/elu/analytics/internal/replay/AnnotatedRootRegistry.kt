@@ -43,6 +43,7 @@ internal class AnnotatedRootRegistry(view: View) {
     private val policyRevision = AtomicLong()
     private var overflowed = false
     private var originalSource: AnnotatedRasterSourceIdentity? = null
+    private var originalCorners: List<Float>? = null
     private var originalRoot: WeakReference<AnnotatedGeometryBinding>? = null
     private var originalCoordinates: WeakReference<Any>? = null
     private var originalParent: WeakReference<Any>? = null
@@ -91,7 +92,7 @@ internal class AnnotatedRootRegistry(view: View) {
     }
     internal fun changed() { main(); check(revision.get() != Long.MAX_VALUE); revision.incrementAndGet() }
     internal fun sourceBindingChanged() {
-        main(); originalSource?.withdraw(); originalSource = null
+        main(); originalSource?.withdraw(); originalSource = null; originalCorners = null
         originalRoot = null; originalCoordinates = null; originalParent = null
         originalWindow = null; originalDecor = null; originalWindowToken = null
     }
@@ -103,16 +104,36 @@ internal class AnnotatedRootRegistry(view: View) {
             else !originalParentWasNull && originalParent?.get() === geometry.parentIdentity
         originalSource?.let {
             if (originalRoot?.get() === root && originalCoordinates?.get() === geometry.coordinateIdentity &&
-                parentMatches && originalWindow?.get() === window && originalDecor?.get() === decor &&
+                parentMatches && originalCorners == corners(geometry) && originalWindow?.get() === window && originalDecor?.get() === decor &&
                 originalWindowToken?.get() === token) return it
         }
         sourceBindingChanged()
         originalRoot = WeakReference(root); originalCoordinates = WeakReference(geometry.coordinateIdentity)
+        originalCorners = corners(geometry)
         originalParentWasNull = geometry.parentIdentity == null
         originalParent = geometry.parentIdentity?.let { WeakReference(it) }
         originalWindow = WeakReference(window); originalDecor = WeakReference(decor); originalWindowToken = WeakReference(token)
         return AnnotatedRasterSourceIdentity().also { originalSource = it }
     }
+    /** Restriction-only main callback. A resize followed by restoration cannot revive old bytes. */
+    internal fun rootInvalidated(root: AnnotatedGeometryBinding) {
+        main()
+        if (originalSource == null) return
+        val started = android.os.SystemClock.elapsedRealtimeNanos()
+        val same = runCatching {
+            val geometry = root.read() ?: return@runCatching false
+            val elapsed = android.os.SystemClock.elapsedRealtimeNanos() - started
+            elapsed in 0..AndroidAnnotatedReplayCollector.PASS_NANOS && originalRoot?.get() === root &&
+                originalCoordinates?.get() === geometry.coordinateIdentity &&
+                (if (geometry.parentIdentity == null) originalParentWasNull
+                    else !originalParentWasNull && originalParent?.get() === geometry.parentIdentity) &&
+                originalCorners == corners(geometry)
+        }.getOrDefault(false)
+        if (!same) sourceBindingChanged()
+    }
+    private fun corners(g: EluReplayRegionGeometry) = listOf(g.topLeftX, g.topLeftY, g.topRightX,
+        g.topRightY, g.bottomLeftX, g.bottomLeftY, g.bottomRightX, g.bottomRightY)
+
     fun version(): Long = revision.get()
     fun policyVersion(): Long = policyRevision.get()
     private fun live(): Boolean = attached.get() && !closed.get() && !conflicted.get()
@@ -159,6 +180,7 @@ internal class AnnotatedGeometryBinding(
     fun invalidate() {
         AnnotatedRootRegistry.main(); if (isClosed) return
         check(generation != Long.MAX_VALUE); generation++; owner.changed()
+        if (intent == null) owner.rootInvalidated(this)
     }
     fun read(): EluReplayRegionGeometry? { AnnotatedRootRegistry.main(); return if (isClosed) null else reader.read() }
     fun close() {

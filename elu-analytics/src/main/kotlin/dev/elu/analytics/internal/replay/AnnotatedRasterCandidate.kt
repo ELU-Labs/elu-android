@@ -13,6 +13,9 @@ internal class AnnotatedRasterCandidate private constructor(
 ) : AutoCloseable {
     val width: Int = checkNotNull(bitmap).width
     val height: Int = checkNotNull(bitmap).height
+    private var cleanupFailed = false
+    /** Restriction-only terminal fact; later no-op close cannot erase a failed original cleanup. */
+    @Synchronized internal fun hasCleanupFailure(): Boolean = cleanupFailed
 
     /** Exact collector predicate, including its copied intent revision; no pixels/release callback. */
     internal fun publicationGuard(): () -> Boolean = current
@@ -51,7 +54,8 @@ internal class AnnotatedRasterCandidate private constructor(
     @Synchronized override fun close() {
         val original = bitmap ?: return
         bitmap = null
-        try { clear(original) } finally { released() }
+        try { try { clear(original) } finally { released() } }
+        catch (error: Throwable) { cleanupFailed = true; throw error }
     }
 
     internal companion object {

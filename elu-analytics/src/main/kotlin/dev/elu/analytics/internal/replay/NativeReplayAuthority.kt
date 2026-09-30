@@ -214,6 +214,9 @@ internal class NativeReplayAuthority(
     internal fun belongsTo(queue: RuntimeQueueOwner, prepared: NativeReplayPreparedAuthority): Boolean =
         this.queue === queue && prepared.belongsTo(owner) && current(prepared.invocation)
 
+    internal fun belongsTo(queue: RuntimeQueueOwner, prepared: NativeRasterPreparedAuthority): Boolean =
+        this.queue === queue && prepared.belongsTo(owner) && current(prepared.invocation)
+
     private fun current(token: Any): Boolean = synchronized(monitor) { !closed && invocation === token }
     fun withdraw() = synchronized(monitor) { invocation = Any(); permitEpoch.set(invocation) }
 

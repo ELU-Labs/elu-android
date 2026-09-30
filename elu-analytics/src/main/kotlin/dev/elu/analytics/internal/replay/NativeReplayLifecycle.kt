@@ -198,6 +198,14 @@ internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAc
     }
 }
 
+/** Identity-only restriction fact. It grants neither currentness nor access to the original root. */
+internal class NativeReplayOriginalRootIdentity(root: Any) {
+    private val root = WeakReference(root)
+    fun isCollected(): Boolean = root.get() == null
+    fun sameRoot(other: NativeReplayOriginalRootIdentity): Boolean =
+        root.get()?.let { it === other.root.get() } == true
+}
+
 internal class NativeReplaySelection private constructor(
     private val access: NativeReplaySelectionAccess,
     activity: Any, root: Any, facts: NativeReplayRootFacts,
@@ -227,6 +235,10 @@ internal class NativeReplaySelection private constructor(
         if (!same) rootChanged()
         return same
     }
+
+    /** Opaque weak root identity only; no Activity/access/selection or capture authority is retained. */
+    internal fun originalRootIdentity(): NativeReplayOriginalRootIdentity? =
+        root.get()?.let { NativeReplayOriginalRootIdentity(it) }
 
     fun isCurrent(): Boolean = !withdrawn.get() && api >= 29 && activity.get() != null && root.get() != null &&
         window.get() != null && token.get() != null && originalCurrent() && !withdrawn.get()
@@ -300,6 +312,8 @@ internal class NativeReplaySelection private constructor(
         }
         try {
             access.onMain {
+                var owned: NativeReplayCollectionAttempt? = null
+                fun discard() { val original = owned; owned = null; original?.discard() }
                 try {
                     val selectedActivity = activity.get()
                     val selectedRoot = root.get()
@@ -330,13 +344,16 @@ internal class NativeReplaySelection private constructor(
                         else { withdrawn.set(true); result.complete(null) }
                     } else {
                         val value = consume(checkNotNull(selectedRoot), checkNotNull(window.get()), ::allowed)
-                        if (value != null && stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
+                        owned = value
+                        if (value != null && stopped()) { discard(); result.complete(NativeReplayCollectionAttempt.LocalStop) }
                         else if (value == null || value === NativeReplayCollectionAttempt.LocalStop || !matches()) {
+                            discard()
                             if (value != null && stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
                             else { withdrawn.set(true); result.complete(null) }
-                        } else result.complete(value)
+                        } else { owned = null; result.complete(value) }
                     }
                 } catch (error: Throwable) {
+                    try { discard() } catch (cleanup: Throwable) { if (error !== cleanup) error.addSuppressed(cleanup) }
                     withdrawn.set(true)
                     result.completeExceptionally(error)
                 }

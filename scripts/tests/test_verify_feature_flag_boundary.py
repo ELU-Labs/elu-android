@@ -19,6 +19,33 @@ SPEC.loader.exec_module(BOUNDARY)
 
 
 class FeatureFlagBoundaryGuardTest(unittest.TestCase):
+    def test_declared_bootstrap_default_pairing_cleanup_and_scope(self) -> None:
+        def errors():
+            result = []; BOUNDARY.verify_native_raster_bootstrap_boundary(self.root, result); return "\n".join(result)
+        self.assertEqual("", errors())
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        for relative, token in (
+            ("EluOptions.kt", "private var declaredRegionReplay = false"),
+            ("internal/facade/AndroidStandaloneStack.kt", "rasterSupported = declaredRegionReplayEnabled"),
+            ("internal/replay/NativeReplayLifecycle.kt", "original?.discard()"),
+            ("internal/replay/NativeReplayCaptureOwner.kt", "remainingCandidate?.hasCleanupFailure() == true"),
+            ("internal/replay/AnnotatedRasterCandidate.kt", "cleanupFailed = true"),
+            ("internal/replay/NativeReplayCaptureOwner.kt", "actual.continuous - first < minimum"),
+            ("internal/replay/NativeReplayComposition.kt", "declaredRoots.deniesWireframe(selected.originalRootIdentity())"),
+            ("internal/replay/NativeReplayComposition.kt", "if (roots.size >= 64) { uncertain = true; return }"),
+            ("internal/replay/NativeReplayComposition.kt", "if (uncertain) return true"),
+            ("internal/replay/NativeReplayComposition.kt", "roots.removeAll { it.isCollected() }"),
+            ("internal/replay/NativeReplayLifecycle.kt", "private val root = WeakReference(root)"),
+            ("internal/replay/AnnotatedRootRegistry.kt", "if (!same) sourceBindingChanged()")):
+            path = base / relative; original = path.read_text(); self.assertIn(token, original)
+            path.write_text(original.replace(token, "false")); self.assertIn("bootstrap lost", errors()); path.write_text(original)
+        foreign = base / "ForeignRaster.kt"
+        for body in ("val rasterSupported = enabled", "fun escape() = AnnotatedCaptureBinding(a, b, c, d)",
+                     "fun escape() = discoverAnnotatedRoot(a, b, c)"):
+            foreign.write_text(body); self.assertTrue(errors())
+        foreign.unlink(); self.assertEqual("", errors())
+
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="elu-flag-boundary-")
         self.root = pathlib.Path(self.temporary.name)
@@ -432,7 +459,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
     def test_native_continuity_rejects_missing_original_guards(self) -> None:
         base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/replay"
         cases = [
-            ("NativeReplayComposition.kt", "current(original.intent) && recordingEnabled() && original.privacy() && original.prepared.isCurrent()"),
+            ("NativeReplayComposition.kt", "current(original.intent) && recordingEnabled() && original.privacy() && original.preparedCurrent()"),
             ("NativeReplayComposition.kt", "if (capture === opened) retireFresh()"),
             ("NativeReplayComposition.kt", "if (!rootObservationCurrent(original)) { cancelRootObservation(); return }"),
             ("NativeReplayLifecycle.kt", "return actual === selectedRoot && allowed()"),
@@ -1340,7 +1367,7 @@ internal class WiredTransport : FlagTransport {
     def test_public_setup_cannot_bypass_owned_sink_or_validated_host(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
-        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
+        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
                          ("consent.install(facade, facade::start)", "facade.start()")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))

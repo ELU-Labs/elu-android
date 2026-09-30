@@ -32,6 +32,30 @@ internal data class NativeReplayCompletedCaptureSnapshot(
     val outcome: NativeReplayCaptureOutcome,
 )
 
+/** Restriction-only history, owned by the original serial composition worker. */
+internal class NativeDeclaredRootHistory {
+    private val roots = ArrayList<NativeReplayOriginalRootIdentity>()
+    private var uncertain = false
+
+    fun remember(identity: NativeReplayOriginalRootIdentity?) {
+        if (uncertain) return
+        if (identity == null || identity.isCollected()) { uncertain = true; return }
+        // Only a collected root can be forgotten; detachment/annotation removal cannot erase it.
+        roots.removeAll { it.isCollected() }
+        if (roots.any { it.sameRoot(identity) }) return
+        if (roots.size >= 64) { uncertain = true; return }
+        roots += identity
+    }
+
+    fun deniesWireframe(identity: NativeReplayOriginalRootIdentity?): Boolean {
+        if (uncertain) return true
+        if (identity == null || identity.isCollected()) { uncertain = true; return true }
+        return roots.any { it.sameRoot(identity) }
+    }
+
+    fun hasDeclaredRoots(): Boolean = uncertain || roots.any { !it.isCollected() }
+}
+
 /**
  * Private construction only. The local intent predicate cannot supply source, session, sampling,
  * budget, profile or physical permission. All of those still come from the original queue/authority.
@@ -67,6 +91,8 @@ internal class NativeReplayComposition(
     private var requestedAcceptance: () -> Boolean = { true }
     private var evaluation: SdkFuture<NativeReplayCompositionEvaluation>? = null
     private var capture: NativeReplayCaptureOwner? = null
+    // Weak original root identities survive root switches; losing annotations cannot downgrade them.
+    private val declaredRoots = NativeDeclaredRootHistory()
     private var captureDiagnosticPublished = false // monitor; reset only when publishing a new original capture
     @Volatile private var latestCompletedCapture: NativeReplayCompletedCaptureSnapshot? = null
     private val authority = if (capabilities.hasLocalEvidence()) NativeReplayAuthority(queue, capabilities, deviceInEuTimezone) else null
@@ -270,17 +296,49 @@ internal class NativeReplayComposition(
                                 // observe usable facts for this same identity without a forced retry.
                                 if (selected == null) lastAttempt = null
                                 if (selected != null && accepted()) {
-                                    val prepared = checkNotNull(authority).prepare(selected, nativeStartTrace).awaitExact()
-                                    nativeStartTrace.mark(NativeStartPhase.PREPARE_RESULT, prepared != null)
-                                    if ((prepared != null && accepted() && recordingEnabled() && selected.isCurrent()).also { nativeStartTrace.mark(NativeStartPhase.PREPARE_POSTCHECK, it) }) {
-                                        val weak = WeakReference(this)
-                                        val opened = NativeReplayCaptureOwner.start(queue, authority, checkNotNull(prepared), versions, platform, nativeStartTrace,
-                                            freshIntakeAllowed = { recordingEnabled() && synchronized(monitor) { recordingGeneration === originalRecording } },
-                                            intakeCurrent = { acceptance() && intakeAllowed() && synchronized(monitor) {
-                                                !closed && restrictionGeneration === originalRestriction
-                                            } && acceptance() && intakeAllowed() }) {
-                                            weak.get()?.flushSealed()
+                                    val originalAuthority = checkNotNull(authority)
+                                    val weak = WeakReference(this)
+                                    val fresh = { recordingEnabled() && synchronized(monitor) { recordingGeneration === originalRecording } }
+                                    val intake = { acceptance() && intakeAllowed() && synchronized(monitor) {
+                                        !closed && restrictionGeneration === originalRestriction
+                                    } && acceptance() && intakeAllowed() }
+                                    val committed = { weak.get()?.flushSealed(); Unit }
+                                    val discovery = if (!capabilities.rasterSupported) AnnotatedRootDiscovery.Absent
+                                        else (selected.consumeOriginalWindow(::accepted) { root, window, allowed ->
+                                            NativeReplayCollectionAttempt.RasterDiscovery(
+                                                if (root is android.view.View && window is android.view.Window)
+                                                    discoverAnnotatedRoot(root, window, allowed)
+                                                else AnnotatedRootDiscovery.Unavailable)
+                                        }.awaitExact() as? NativeReplayCollectionAttempt.RasterDiscovery)?.discovery
+                                            ?: AnnotatedRootDiscovery.Unavailable
+                                    val opened = when (discovery) {
+                                        is AnnotatedRootDiscovery.Bound -> {
+                                            declaredRoots.remember(selected.originalRootIdentity())
+                                            val prepared = originalAuthority.prepareRaster(selected, discovery.binding.sourceIdentity).awaitExact()
+                                            if (prepared == null || !accepted() || !recordingEnabled() || !selected.isCurrent()) null
+                                            else NativeReplayCaptureOwner.startRaster(queue, originalAuthority, prepared, discovery.binding,
+                                                versions, platform, fresh, intake, committed)
                                         }
+                                        AnnotatedRootDiscovery.Unavailable -> {
+                                            declaredRoots.remember(selected.originalRootIdentity())
+                                            rootRecoveryRequested = true; lastAttempt = null
+                                            null
+                                        }
+                                        AnnotatedRootDiscovery.Absent -> {
+                                            if (declaredRoots.deniesWireframe(selected.originalRootIdentity())) {
+                                                rootRecoveryRequested = true; lastAttempt = null
+                                                null
+                                            } else {
+                                                val prepared = originalAuthority.prepare(selected, nativeStartTrace).awaitExact()
+                                                nativeStartTrace.mark(NativeStartPhase.PREPARE_RESULT, prepared != null)
+                                                if (prepared == null || !accepted() || !recordingEnabled() || !selected.isCurrent()) null
+                                                else NativeReplayCaptureOwner.start(queue, originalAuthority, prepared, versions, platform,
+                                                    nativeStartTrace, fresh, intake, committed)
+                                            }
+                                        }
+                                    }
+                                    nativeStartTrace.mark(NativeStartPhase.PREPARE_POSTCHECK, opened != null)
+                                    run {
                                         if (opened != null) rootRecoveryRequested = false
                                         synchronized(monitor) { capture = opened; captureDiagnosticPublished = false }
                                         if (!recordingEnabled()) opened?.stopRecording()
@@ -377,7 +435,7 @@ internal class NativeReplayComposition(
     }
 
     private class RootObservation(val key: IdentityKey, val intent: Any, val acceptance: () -> Boolean,
-        val prepared: NativeReplayPreparedProjection, val privacy: () -> Boolean)
+        val preparedCurrent: () -> Boolean, val privacy: () -> Boolean)
 
     /** Cancellation invalidates admission immediately; serial worker ordering joins any main hop. */
     private fun cancelRootObservation() = synchronized(monitor) {
@@ -386,7 +444,7 @@ internal class NativeReplayComposition(
 
     private fun rootObservationCurrent(original: RootObservation): Boolean =
         synchronized(monitor) { !closed && rootObservation === original } && original.acceptance() &&
-            current(original.intent) && recordingEnabled() && original.privacy() && original.prepared.isCurrent() &&
+            current(original.intent) && recordingEnabled() && original.privacy() && original.preparedCurrent() &&
             original.acceptance() && synchronized(monitor) { !closed && rootObservation === original }
 
     private fun observeMissingRoot(key: IdentityKey, original: Any, acceptance: () -> Boolean) {
@@ -394,9 +452,16 @@ internal class NativeReplayComposition(
         // One canonical observation/preparation. Ticks never poll SQLite or renew the source.
         val input = queue.observeNativeReplayProjection().awaitExact() ?: return
         if (IdentityKey(input.identity) != key || !input.isCurrent() || !current(original) || !acceptance()) return
-        val privacy = PrivacyStateProjector.projectNative(input, capabilities, deviceInEuTimezone()) ?: return
-        val prepared = queue.prepareNativeReplayProjection(input, privacy).awaitExact() ?: return
-        val observer = RootObservation(key, original, acceptance, prepared, platform.privacyWitness())
+        val preparedCurrent: () -> Boolean = if (capabilities.rasterSupported && declaredRoots.hasDeclaredRoots()) {
+            // Restrictive readiness only; no pixels, sampling, receipt, or extra source lease.
+            if (input.observation.source.nativeV3?.raster == null) return
+            input::isCurrent
+        } else {
+            val privacy = PrivacyStateProjector.projectNative(input, capabilities, deviceInEuTimezone()) ?: return
+            val prepared = queue.prepareNativeReplayProjection(input, privacy).awaitExact() ?: return
+            prepared::isCurrent
+        }
+        val observer = RootObservation(key, original, acceptance, preparedCurrent, platform.privacyWitness())
         synchronized(monitor) {
             if (closed || intent !== original || rootObservation != null) return
             rootObservation = observer

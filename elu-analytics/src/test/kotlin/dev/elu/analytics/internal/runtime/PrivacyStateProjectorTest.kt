@@ -33,6 +33,16 @@ import org.junit.Before
 import org.junit.Test
 
 class PrivacyStateProjectorTest {
+    @Test fun `declared delivery support is explicit and cannot supply missing privacy`() {
+        val off = PrivacyStateProjector.nativeSealedDeliveryPolicy(dev.elu.analytics.internal.replay.NativeReplayCapabilities()) { false }
+        val on = PrivacyStateProjector.nativeSealedDeliveryPolicy(
+            dev.elu.analytics.internal.replay.NativeReplayCapabilities(rasterSupported = true)) { false }
+        assertEquals(dev.elu.analytics.internal.replay.ReplayDeliverySupport.WIREFRAME_ONLY, off.support)
+        assertEquals(dev.elu.analytics.internal.replay.ReplayDeliverySupport.INCLUDING_RASTER, on.support)
+        assertNull(on.privacy.current(config().copy(privacy = null), state().identity, 1L))
+        assertFalse(on.retention.mayRetain(dev.elu.analytics.internal.replay.ReplayMaskingProfile.parse("{}".toByteArray()), config()))
+    }
+
     private val owners = mutableListOf<RuntimeQueueOwner>()
     private val keyCounter = AtomicInteger()
 

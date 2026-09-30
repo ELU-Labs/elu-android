@@ -19,7 +19,8 @@ public class EluAnnotatedReplayBinding internal constructor(internal val entry: 
 
 /**
  * Declared geometry integration for one original View. Registration is available on API 23+;
- * the currently uninstalled capture path requires API 29+. No recorder or transport is installed.
+ * capture requires API 29+, EluOptions.declaredRegionReplayEnabled and the exact server policy.
+ * Registration alone installs no recorder or transport and grants no capture permission.
  *
  * Every input/private region and unsupported paint must be declared and confined to its clipping
  * wrapper. A geometry reader is customer integration input, not automatic framework attestation.

@@ -12,6 +12,8 @@ import dev.elu.analytics.compose.rememberEluReplayPrivateRegion
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Exercise the actual optional setup API without starting networking in a compile fixture.
+        check(dev.elu.analytics.EluOptions(declaredRegionReplayEnabled = true).declaredRegionReplayEnabled)
         setContentView(ComposeView(this).apply {
             setContent {
                 val mask = rememberEluReplayPrivateRegion()

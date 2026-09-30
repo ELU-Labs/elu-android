@@ -20,7 +20,7 @@ class NativeReplayCompositionTest {
         @Volatile var main: Thread? = null
         val executor = Executors.newSingleThreadExecutor { task -> Thread(task, "fixture-composition-main").also { main = it } }
         val window = Any(); val token = Any(); @Volatile var root = Any(); val activity = Any()
-        @Volatile var width = 100; @Volatile var height = 200
+        @Volatile var width = 100; @Volatile var height = 200; @Volatile var apiLevel = 36
         val rootReads = AtomicInteger(); val watches = AtomicInteger(); val closes = AtomicInteger()
         @Volatile var rootAvailable = true
         @Volatile var factsAvailable = true
@@ -33,7 +33,7 @@ class NativeReplayCompositionTest {
         }
         override fun observe(activity: Any, root: Any, current: () -> Boolean): NativeReplayRootFacts? {
             check(Thread.currentThread() === main); onObserve?.also { onObserve = null }?.invoke()
-            return if (factsAvailable && current()) NativeReplayRootFacts(window, token, width, height, 1f, 36) else null
+            return if (factsAvailable && current()) NativeReplayRootFacts(window, token, width, height, 1f, apiLevel) else null
         }
         override fun watch(root: Any, withdrawn: () -> Unit): AutoCloseable {
             check(Thread.currentThread() === main); watches.incrementAndGet()
@@ -321,6 +321,24 @@ class NativeReplayCompositionTest {
             owner.closeAndWait().get(3, TimeUnit.SECONDS)
         }
     } }
+
+    @Test fun `explicit declared support does not lower original API29 root floor`() {
+        for (declared in listOf(false, true)) Rig().use { rig -> MainAccess().use { access ->
+            rig.minimum(); rig.activate(); access.apiLevel = 28
+            val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val platform = Platform(rig, access); val wire = Transport()
+            val capabilities = NativeReplayCapabilities(setOf(NativeReplayProtocol.V1.transport),
+                setOf(NativeReplayProtocol.V1.generation), rasterSupported = declared)
+            val owner = composition(rig, life, platform, wire, capabilities = capabilities)
+            try {
+                owner.ready().get(3, TimeUnit.SECONDS)
+                assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate(true).get(3, TimeUnit.SECONDS))
+                assertEquals(0, platform.factories.get()); assertEquals(0, platform.collections.get())
+                assertEquals(0, access.watches.get()); assertTrue(rig.rows().isEmpty()); assertTrue(wire.requests.isEmpty())
+                assertEquals(0L, rig.state().nextReplayOrdinal)
+            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } }
+    }
 
     @Test fun `empty local proof never observes a native root platform or network`() = Rig().use { rig -> MainAccess().use { access ->
         val life = NativeReplayLifecycle(access); life.resumed(access.activity); val wire = Transport()

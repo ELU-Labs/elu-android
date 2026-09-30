@@ -182,7 +182,7 @@ internal class NativeReplayCaptureWake {
 /**
  * Private physical interval. Caller exclusively borrows authority/selection until finished, then
  * disposes their resources separately. Neither watcher close nor cancellation is settlement.
- * No public stack constructs this owner; API23-28 and unsupported window geometry remain denied.
+ * Only the original stack composition constructs this owner; API23-28 and unsupported geometry remain denied.
  */
 internal class NativeReplayCaptureOwner private constructor(
     private val fence: NativeReplayCaptureFence,
@@ -224,20 +224,43 @@ internal class NativeReplayCaptureOwner private constructor(
         ): NativeReplayCaptureOwner? {
             // No persistable guard, enrollment, clock sample or thread on unsupported API levels.
             if ((platform.apiLevel < 29 || !authority.belongsTo(queue, prepared)).also { nativeStartTrace.mark(NativeStartPhase.CAPTURE_OWNER_ELIGIBLE, !it) }) return null
+            return launch(freshIntakeAllowed, intakeCurrent) { fence, completion, observation, collectorCurrent ->
+                val run = NativeReplayCaptureRun(queue, authority, prepared, versions, platform, fence, completion,
+                    observation, collectorCurrent, onCommitted, nativeStartTrace);
+                { run.execute() }
+            }
+        }
+
+        fun startRaster(queue: RuntimeQueueOwner, authority: NativeReplayAuthority,
+            prepared: NativeRasterPreparedAuthority, binding: AnnotatedCaptureBinding,
+            versions: RuntimeVersions, platform: NativeReplayCapturePlatform = AndroidNativeReplayCapturePlatform,
+            freshIntakeAllowed: () -> Boolean = { true }, intakeCurrent: () -> Boolean = { true },
+            onCommitted: () -> Unit = {}): NativeReplayCaptureOwner? {
+            if (platform.apiLevel < 29 || !authority.belongsTo(queue, prepared) ||
+                binding.sourceIdentity !== prepared.projection.sourceIdentity || !binding.isCurrent()) return null
+            return launch(freshIntakeAllowed, intakeCurrent) { fence, completion, observation, collectorCurrent ->
+                val run = NativeRasterCaptureRun(queue, authority, prepared, binding, versions, platform,
+                    fence, completion, observation, collectorCurrent, onCommitted);
+                { run.execute() }
+            }
+        }
+        private fun launch(fresh: () -> Boolean, intake: () -> Boolean,
+            makeRun: (NativeReplayCaptureFence, SdkFuture<NativeReplayCaptureOutcome>,
+                AtomicReference<NativeReplayCaptureCompletion?>, AtomicReference<(() -> Boolean)?>) -> (() -> Unit)): NativeReplayCaptureOwner {
             val lifetime = Any()
-            val fence = NativeReplayCaptureFence(WeakReference(lifetime), freshIntakeAllowed, intakeCurrent)
+            val fence = NativeReplayCaptureFence(WeakReference(lifetime), fresh, intake)
             val completion = object : SdkFuture<NativeReplayCaptureOutcome>() {
                 override fun cancel(mayInterruptIfRunning: Boolean) = false
             }
             val observation = AtomicReference<NativeReplayCaptureCompletion?>()
             val collectorCurrent = AtomicReference<(() -> Boolean)?>()
             val owner = NativeReplayCaptureOwner(fence, completion, observation, collectorCurrent, lifetime)
-            val run = NativeReplayCaptureRun(queue, authority, prepared, versions, platform, fence, completion, observation, collectorCurrent, onCommitted, nativeStartTrace)
-            val thread = Thread({ run.execute() }, "elu-native-capture").apply { isDaemon = true }
+            val execute = makeRun(fence, completion, observation, collectorCurrent)
+            val thread = Thread({ execute() }, "elu-native-capture").apply { isDaemon = true }
             try { thread.start() }
-            catch (error: Throwable) {
+            catch (_: Throwable) {
                 fence.withdraw()
-                // Thread.NEW proves no enrollment can have begun; any uncertain start stays pending.
+                // Thread.NEW proves no enrollment; uncertain start remains pending under this same handle.
                 if (thread.state == Thread.State.NEW) {
                     observation.set(NativeReplayCaptureCompletion(NativeCaptureStage.BEFORE_LOOP, 0,
                         NativeCaptureFailureKind.OTHER, NativeReplayCaptureOutcome.SETTLED))
@@ -274,6 +297,15 @@ private class NativeReplayCaptureFence(private val lifetime: WeakReference<Any>,
 
 /** A deadline carries no frame; only the exact original collection callback can create it. */
 internal sealed class NativeReplayCollectionAttempt {
+    /** Owned payloads must be disposed before an original main post-check drops the result. */
+    open fun discard() = Unit
+    class RasterDiscovery(val discovery: AnnotatedRootDiscovery) : NativeReplayCollectionAttempt()
+    class RasterCaptured(val frame: AnnotatedRasterCandidate, val continuous: Long, val timestamp: Long,
+        private val onCleanupFailure: () -> Unit = {}) : NativeReplayCollectionAttempt() {
+        override fun discard() {
+            try { frame.close() } catch (error: Throwable) { onCleanupFailure(); throw error }
+        }
+    }
     class Captured(val frame: NativeMaskedSnapshot, val continuous: Long,
         val projection: NativeTouchProjection? = null, val preceding: List<NativeTouchObservation> = emptyList(),
         val activeTouch: Boolean = false) : NativeReplayCollectionAttempt()
@@ -696,15 +728,7 @@ private class NativeReplayCaptureRun(
         }
         if (enrollment == null) { complete(NativeReplayCaptureOutcome.SETTLED); return }
         try {
-            // All submitted main/CPU/durable work is finished before marking physical completion.
-            if (physicalUse == null) enrollment.cancelUnused() else physicalUse.settle()
-            if (startSubmitted && authority.stop().awaitExact() != NativeReplayAuthorityStop.SETTLED) {
-                enrollment.quarantine(retaining = pendingRequest)
-                complete(NativeReplayCaptureOutcome.QUARANTINED)
-                return
-            }
-            // No-start still needs this exact lane to flush any original prepared-guard denial.
-            if (queue.finishNativeReplayCapture(enrollment).awaitExact() == NativeReplayCaptureFinish.SETTLED) {
+            if (settleNativeCapture(queue, authority, enrollment, physicalUse, startSubmitted)) {
                 // Expose the hint only after the original physical and durable accounting settled.
                 complete(if (recoverRoot) NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED
                     else if (retryablePassDeadline) NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE
@@ -719,4 +743,160 @@ private class NativeReplayCaptureRun(
     }
 
     private companion object { const val MAXIMUM_PASS_NANOSECONDS = 50_000_000L }
+}
+
+/** Called only after every original main, encoding and append operation physically returned. */
+private fun settleNativeCapture(queue: RuntimeQueueOwner, authority: NativeReplayAuthority,
+    enrollment: NativeReplayCaptureEnrollment, use: NativeReplayCapturePhysicalUse?, started: Boolean): Boolean {
+    if (use == null) enrollment.cancelUnused() else use.settle()
+    if (started && authority.stop().awaitExact() != NativeReplayAuthorityStop.SETTLED) return false
+    return queue.finishNativeReplayCapture(enrollment).awaitExact() == NativeReplayCaptureFinish.SETTLED
+}
+
+/** Raster branch of the same physical capture owner; no observer, timer, transport or worker of its own. */
+private class NativeRasterCaptureRun(
+    private val queue: RuntimeQueueOwner, private val authority: NativeReplayAuthority,
+    private val prepared: NativeRasterPreparedAuthority, private val binding: AnnotatedCaptureBinding,
+    private val versions: RuntimeVersions, private val platform: NativeReplayCapturePlatform,
+    private val fence: NativeReplayCaptureFence, private val completion: SdkFuture<NativeReplayCaptureOutcome>,
+    private val observation: AtomicReference<NativeReplayCaptureCompletion?>,
+    private val collectorCurrent: AtomicReference<(() -> Boolean)?>, private val onCommitted: () -> Unit,
+) {
+    private val selected = prepared.selection
+    private val clock = queue.nativeReplayCaptureClock()
+    private val privacy = platform.privacyWitness()
+
+    fun execute() {
+        var enrollment: NativeReplayCaptureEnrollment? = null
+        var use: NativeReplayCapturePhysicalUse? = null
+        var started = false
+        var pending: NativeRasterPreparedRequest? = null
+        var appendSubmitted = false
+        // Set inside the main callback before handing a candidate to its fallible final check.
+        val candidate = AtomicReference<AnnotatedRasterCandidate?>()
+        var failed = false
+        var cleanupFailed = false
+        var frames = 0
+        var stage = NativeCaptureStage.BEFORE_LOOP
+        var recoverRoot = false
+        fun local() = fence.isCurrent() && privacy() && authority.belongsTo(queue, prepared) && selected.isCurrent()
+        try {
+            check(local() && fence.mayCollect() && binding.isCurrent())
+            enrollment = queue.enrollNativeReplayCapture().awaitExact()
+            val originalEnrollment = checkNotNull(enrollment)
+            check(local() && fence.mayCollect())
+            use = checkNotNull(originalEnrollment.takePhysicalUse())
+            val originalUse = checkNotNull(use)
+            check(local() && prepared.isCurrent())
+            started = true
+            val permit = checkNotNull(authority.startRaster(prepared, originalUse).awaitExact())
+            val admission = checkNotNull(authority.captureAdmission(permit, originalUse).awaitExact())
+            fun current() = local() && binding.isCurrent() && permit.isCurrent() && admission.isCurrent() && local()
+            check(current())
+            var sealer = NativeRasterSealer(permit.replayId, permit.identity, permit.sealingPolicy(), versions,
+                binding.sourceIdentity, ::current)
+            var minimumFork: NativeRasterSealer? = null
+            var firstContinuous: Long? = null
+            var previousContinuous: Long? = null
+            val minimum = checkNotNull(admission.input.config.privacy).replay.minimumDurationSeconds.toLong() * 1_000_000_000L
+            fun append() {
+                stage = NativeCaptureStage.DURABLE_APPEND
+                check(current())
+                appendSubmitted = true
+                when (queue.appendNativeRaster(checkNotNull(pending), admission, originalUse).awaitExact()) {
+                    is NativeReplayAppendOutcome.Committed -> { pending = null; frames++; runCatching { onCommitted() } }
+                    is NativeReplayAppendOutcome.CommittedThenWithdrawn -> { pending = null; frames++; error("raster-committed-after-withdrawal") }
+                    is NativeReplayAppendOutcome.Rejected -> { pending?.clearRejected(); pending = null; error("raster-append-refused") }
+                }
+                appendSubmitted = false
+                check(current())
+            }
+            while (!fence.gracefulStopRequested()) {
+                check(current() && fence.mayCollect())
+                stage = NativeCaptureStage.COLLECTOR
+                val result = selected.consumeOriginalWindow(::current, fence::gracefulStopRequested) { _, window, rootCurrent ->
+                    check(rootCurrent() && current() && fence.mayCollect())
+                    val continuous = clock.elapsedRealtimeNanos()
+                    val timestamp = clock.wallNowEpochMillis()
+                    check(continuous >= 0 && timestamp in 1..253_402_300_799_999L)
+                    val frame = binding.capture(window as android.view.Window,
+                        { rootCurrent() && current() && fence.mayCollect() }, clock::elapsedRealtimeNanos)
+                    if (!candidate.compareAndSet(null, frame)) {
+                        try { frame.close() } catch (error: Throwable) { cleanupFailed = true; throw error }
+                        error("outstanding-raster-candidate")
+                    }
+                    check(frame.sourceIdentity === binding.sourceIdentity && binding.isCurrent())
+                    NativeReplayCollectionAttempt.RasterCaptured(frame, continuous, timestamp) { cleanupFailed = true }
+                }.awaitExact()
+                if (result === NativeReplayCollectionAttempt.LocalStop) break
+                val actual = checkNotNull(result as? NativeReplayCollectionAttempt.RasterCaptured)
+                check(candidate.get() === actual.frame && current() && fence.mayCollect())
+                val previous = previousContinuous
+                check(previous == null || actual.continuous >= previous && actual.continuous - previous >= 1_000_000_000L)
+                previousContinuous = actual.continuous
+                collectorCurrent.set { current() && fence.mayCollect() }
+                try {
+                    val first = firstContinuous
+                    if (first == null) {
+                        firstContinuous = actual.continuous
+                        stage = NativeCaptureStage.SEAL_REQUEST
+                        val fork = sealer.fork()
+                        pending = fork.seal(actual.frame, actual.timestamp)
+                        if (minimum == 0L) { append(); sealer = fork } else minimumFork = fork
+                    } else if (minimumFork != null && actual.continuous - first < minimum) {
+                        // A real intermediate sample is discarded, never encoded or advanced.
+                        actual.frame.close()
+                    } else {
+                        minimumFork?.let { append(); sealer = it; minimumFork = null }
+                        check(current() && fence.mayCollect())
+                        stage = NativeCaptureStage.SEAL_REQUEST
+                        val fork = sealer.fork()
+                        pending = fork.seal(actual.frame, actual.timestamp)
+                        append(); sealer = fork
+                    }
+                } finally {
+                    try { actual.frame.close() }
+                    catch (error: Throwable) { cleanupFailed = true; throw error }
+                    finally {
+                        if (actual.frame.hasCleanupFailure()) cleanupFailed = true
+                        candidate.compareAndSet(actual.frame, null)
+                    }
+                }
+                if (!platform.awaitNext(fence.withdrawn)) break
+            }
+            // A stop cannot prove a minimum from elapsed time alone. Drop an unqualified first frame.
+            pending?.clearRejected(); pending = null
+        } catch (_: Throwable) {
+            failed = true
+            if (!appendSubmitted) { pending?.clearRejected(); pending = null }
+            recoverRoot = runCatching {
+                pending == null && fence.mayCollect() && privacy() &&
+                    (selected.observedRootBoundary() || !binding.isCurrent())
+            }.getOrDefault(false)
+        }
+        collectorCurrent.set(null); fence.withdraw()
+        if (binding.hasCleanupFailure()) cleanupFailed = true
+        val remainingCandidate = candidate.getAndSet(null)
+        try { remainingCandidate?.close() } catch (_: Throwable) { cleanupFailed = true }
+        finally { if (remainingCandidate?.hasCleanupFailure() == true) cleanupFailed = true }
+        fun quarantine() {
+            val request = pending
+            if (request == null) enrollment?.quarantine() else enrollment?.quarantineRaster(request)
+        }
+        var outcome = NativeReplayCaptureOutcome.SETTLED
+        if (cleanupFailed) { quarantine(); outcome = NativeReplayCaptureOutcome.QUARANTINED }
+        else if (enrollment != null) {
+            try {
+                if (!settleNativeCapture(queue, authority, checkNotNull(enrollment), use, started)) {
+                    quarantine(); outcome = NativeReplayCaptureOutcome.QUARANTINED
+                }
+            } catch (_: Throwable) { quarantine(); outcome = NativeReplayCaptureOutcome.QUARANTINED }
+        }
+        if (outcome != NativeReplayCaptureOutcome.QUARANTINED) {
+            pending?.clearRejected(); pending = null
+            if (recoverRoot) outcome = NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED
+        }
+        observation.set(NativeReplayCaptureCompletion(stage, frames, if (failed) NativeCaptureFailureKind.OTHER else null, outcome))
+        completion.complete(outcome)
+    }
 }

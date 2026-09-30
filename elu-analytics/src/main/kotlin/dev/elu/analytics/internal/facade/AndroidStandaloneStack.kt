@@ -46,7 +46,10 @@ internal object AndroidStandaloneStack {
         apiHost: String? = null,
         personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
         persistence: dev.elu.analytics.EluPersistenceMode = dev.elu.analytics.EluPersistenceMode.PERSISTENT,
-        rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions()): StandaloneFacade {
+        rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions(),
+        declaredRegionReplayEnabled: Boolean = false,
+        // Original factory test seam: raw transport only, never a parsed grant or replacement source.
+        configurationTransport: dev.elu.analytics.internal.config.V2ConfigTransport? = null): StandaloneFacade {
         val endpointPolicy = LocalEndpointPolicy.fromApiHost(apiHost)
         // Capture fresh identity chronology before Elu.setup can publish this facade.
         val freshIdentityStartedAt = SystemCoreEpochClock.nowEpochMillis()
@@ -55,7 +58,10 @@ internal object AndroidStandaloneStack {
         val gate = V2ConfigAuthorityGate()
         val flagTransport = V2ConfigBoundFlagTransport(siteKey, gate, endpointPolicy)
         val debuggable = (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-        val source = V2ConfigSource(configHost, siteKey, debuggable = debuggable, endpointPolicy = endpointPolicy)
+        val source = V2ConfigSource(configHost, siteKey, transport = configurationTransport,
+            debuggable = debuggable, endpointPolicy = endpointPolicy,
+            format = if (declaredRegionReplayEnabled) dev.elu.analytics.internal.config.V2ConfigFormat.NATIVE_V3
+                else dev.elu.analytics.internal.config.V2ConfigFormat.V2)
         val runtimeRef = AtomicReference<StandaloneRuntime?>()
         val performanceRef = AtomicReference<dev.elu.analytics.internal.performance.AndroidPerformanceMonitor?>()
         val performanceClose = AtomicReference(dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(Unit))
@@ -114,6 +120,7 @@ internal object AndroidStandaloneStack {
                         NativeReplayCapabilities(
                             transports = nativeReplayTransports,
                             generations = nativeReplayGenerations,
+                            rasterSupported = declaredRegionReplayEnabled,
                         ), StandaloneRuntime.defaultVersions(), EluEuGuard::isEuTimezone,
                         facade::nativeReplayIntakeAllowed, recordingAllowed = facade::nativeReplayRecordingAllowed)
                     // Preparation concerns storage only and must finish before runtime publication.

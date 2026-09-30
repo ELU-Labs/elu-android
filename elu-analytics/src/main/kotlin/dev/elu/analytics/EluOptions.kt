@@ -24,6 +24,9 @@ public class EluOptions
     constructor(
         public val configHost: String = "https://elu.dev",
     ) {
+    private var declaredRegionReplay = false
+    /** Explicit annotated-region replay opt-in; API29+, local annotations and server policy are also required. */
+    public val declaredRegionReplayEnabled: Boolean get() = declaredRegionReplay
     private var selfHostedApiHost: String? = null
     private var performanceOptions = EluPerformanceOptions()
     private var diagnosticsOptions = EluDiagnosticsOptions()
@@ -36,6 +39,18 @@ public class EluOptions
     public val diagnostics: EluDiagnosticsOptions get() = diagnosticsOptions
     public val apiHost: String? get() = selfHostedApiHost
     public val personProfiles: EluPersonProfilesMode get() = personProfilesMode
+
+    /** Keeps all previously published constructors unchanged and defaults other setup paths to false. */
+    @JvmOverloads
+    public constructor(declaredRegionReplayEnabled: Boolean,
+        rateLimiting: EluRateLimitingOptions = EluRateLimitingOptions(),
+        persistence: EluPersistenceMode = EluPersistenceMode.PERSISTENT,
+        personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
+        diagnostics: EluDiagnosticsOptions = EluDiagnosticsOptions(), performance: EluPerformanceOptions = EluPerformanceOptions(),
+        configHost: String = "https://elu.dev", apiHost: String? = null) :
+        this(rateLimiting, persistence, personProfiles, diagnostics, performance, configHost, apiHost) {
+        declaredRegionReplay = declaredRegionReplayEnabled
+    }
 
     /** A shared local budget, independent of persistence, identity and remote authority. */
     @JvmOverloads

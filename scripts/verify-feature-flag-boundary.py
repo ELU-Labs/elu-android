@@ -20,11 +20,11 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "d5627ae0e8748ebbddb8ca8d17081e917b7db02db5473375e14badab7561afbd",
+        "5ec8e146d040c117c916190f512acfafaed18dcff58ef5bb33a0dfdca3271ba7",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "3282da2f4743b7910e8471d814862540d350b5fb38f782b9c04331756f0d2e77",
+        "175731874c892cd845a58b3fd53cdc6e8bf5c22eded558191319ce3f86e1ec1d",
     "elu-analytics/build.gradle.kts":
         "467950f0497da666d721126a2518c3d94a33abf454bb04bfeabf6e45078d87d1",
     "elu-analytics/consumer-rules.pro":
@@ -158,7 +158,7 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("private val consent = EluConsentHandoff()" not in public or
         "private val sink get() = consent.sink" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled)") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
         errors.append("public setup must publish the exact owned sink through the consent handoff")
@@ -443,7 +443,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
                           "beginNativeReplayAuthority", "flushNativeReplayClockDenial")
     capture_methods = {
         "consumeOriginalRoot": {lifecycle},
-        "consumeOriginalWindow": {lifecycle, loop},
+        "consumeOriginalWindow": {lifecycle, loop, composition},
         "closeOriginalTouchObserver": {lifecycle, loop},
         "retainOriginalTouch": {accounting, loop},
         "originalTouchSettled": {accounting, loop},
@@ -518,7 +518,11 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     install = capture.find("originalTouch.install()")
     retained = capture.find(".retainOriginalTouch(checkNotNull(physicalUse), originalTouch)")
     cleanup = capture.find("selection.closeOriginalTouchObserver(originalTouch).awaitExact()")
-    physical = capture.find("physicalUse.settle()")
+    physical = capture.find("settleNativeCapture(queue, authority, enrollment, physicalUse, startSubmitted)")
+    settlement = capture.split("private fun settleNativeCapture(", 1)[-1].split("/** Raster branch", 1)[0]
+    if not (0 <= settlement.find("use.settle()") < settlement.find("authority.stop().awaitExact()") <
+            settlement.find("queue.finishNativeReplayCapture(enrollment).awaitExact()")):
+        errors.append("native shared physical settlement order changed")
     if not (0 <= retained < install and 0 <= cleanup < physical):
         errors.append("native touch capture must retain before install and join before physical settlement")
     observer_text = sources.get(touch_observer, "")
@@ -619,7 +623,9 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
             errors.append(f"native capture capability must have exactly one original issuer: {symbol}")
     exact_capture_counts = {
         "nativeReplayCaptureMatches": {OWNER: 1, authority: 2},
-        "consumeOriginalWindow": {lifecycle: 2, loop: 3},
+        "consumeOriginalWindow": {lifecycle: 2, loop: 4, composition: 1},
+        "nativeReplayCaptureClock": {OWNER: 1, loop: 2, composition: 1},
+        "enrollNativeReplayCapture": {OWNER: 1, loop: 2},
         "retainOriginalTouch": {accounting: 3, loop: 1},
     }
     for name, permitted in capture_methods.items():
@@ -734,7 +740,7 @@ def verify_native_authority_boundary(root: pathlib.Path, errors: list[str]) -> N
     if not re.search(r"fun\s+consumeOriginalRoot\s*\(\s*current:\s*\(\)\s*->\s*Boolean,\s*locallyStopped:\s*\(\)\s*->\s*Boolean\s*=\s*\{\s*false\s*\},\s*consume:\s*\(Any,\s*\(\)\s*->\s*Boolean\)\s*->\s*NativeReplayCollectionAttempt\?,\s*\):\s*SdkFuture<NativeReplayCollectionAttempt\?>", life):
         errors.append("native root consumption must return only a detached masked snapshot")
     for relative, source in sources.items():
-        if "NativeReplayCollectionAttempt" in source and relative not in {lifecycle, loop}:
+        if "NativeReplayCollectionAttempt" in source and relative not in {lifecycle, loop, composition}:
             errors.append("native detached collection outcome escaped exact physical owner and selection")
     for required in ["internal sealed class NativeReplayCollectionAttempt",
                      "class Captured(val frame: NativeMaskedSnapshot, val continuous: Long,",
@@ -913,7 +919,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
     base = MAIN_KOTLIN / "dev/elu/analytics"
     required = {
         "EluOptions.kt": ["personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
-        "Elu.kt": ["options.apiHost, options.personProfiles, options.persistence, options.rateLimiting)", "fun reset(resetDeviceId: Boolean)"],
+        "Elu.kt": ["options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled)", "fun reset(resetDeviceId: Boolean)"],
         "internal/facade/AndroidStandaloneStack.kt": ["personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/AndroidRuntimeQueue.kt": ["personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/RuntimeQueueOwner.kt": [
@@ -976,7 +982,7 @@ def verify_replay_controls(root: pathlib.Path, errors: list[str]) -> None:
         "Elu.kt": ["fun startSessionRecording() { sink?.startSessionRecording() }", "fun stopSessionRecording() { sink?.stopSessionRecording() }", "fun sessionRecordingStarted(): Boolean = sink?.sessionRecordingStarted() ?: false"],
         "internal/facade/AndroidStandaloneStack.kt": ["recordingAllowed = facade::nativeReplayRecordingAllowed"],
         "internal/facade/StandaloneFacade.kt": ["@Volatile private var recordingRequested = true", "recordingRequested = false", "stack?.runtime?.stopNativeRecording()", "stack?.runtime?.nativeRecordingStarted() == true"],
-        "internal/replay/NativeReplayComposition.kt": ["old.settleStop().awaitExact()", "original?.stopRecording()", "recordingGeneration === originalRecording", "restrictionGeneration === originalRestriction", "intakeCurrent = { acceptance() && intakeAllowed()", "original?.recordingStarted() == true", "if (includeDelivery) deliveryEpoch.set(null)"],
+        "internal/replay/NativeReplayComposition.kt": ["old.settleStop().awaitExact()", "original?.stopRecording()", "recordingGeneration === originalRecording", "restrictionGeneration === originalRestriction", "val intake = { acceptance() && intakeAllowed()", "original?.recordingStarted() == true", "if (includeDelivery) deliveryEpoch.set(null)"],
         "internal/replay/NativeReplayCaptureOwner.kt": ["collectorCurrent.get()?.invoke() == true", "frames.beginDraining()?.let { prefix -> sealPrefix(prefix) }", "if (captured === NativeReplayCollectionAttempt.LocalStop)", "discardTail = true", "fence.gracefulStopRequested() && !discardTail", "privacyCurrent() && fence.isCurrent()", "!restricted && intakeCurrent() && !restricted", "admission.isCurrent()", "selection.isCurrent()", "if (!fence.acceptFrame { frames.append(captured.frame, captured.continuous) }) break"],
         "internal/replay/NativeReplayFrameBuffer.kt": ["frames.isEmpty() || (!firstChunkCommitted && !ready)"],
         "internal/replay/NativeReplayLifecycle.kt": ["fun stopped(): Boolean = locallyStopped() && authorized() && locallyStopped()", "fun allowed(): Boolean = !locallyStopped() && authorized() && !locallyStopped()"],
@@ -995,7 +1001,7 @@ def verify_replay_continuity(root: pathlib.Path, errors: list[str]) -> None:
     capture = load_text(root, base / "NativeReplayCaptureOwner.kt")
     required = {
         "composition": (composition, ["if (capture === opened) retireFresh()", "capture != null || selection != null || quarantined",
-            "current(original.intent) && recordingEnabled() && original.privacy() && original.prepared.isCurrent()",
+            "current(original.intent) && recordingEnabled() && original.privacy() && original.preparedCurrent()",
             "lifecycle.observeRootReadiness { rootObservationCurrent(original) }.awaitExact()",
             "if (!rootObservationCurrent(original)) { cancelRootObservation(); return }",
             "rootObservation = null; rootTimer?.cancel(false); rootTimer = null"]),
@@ -1260,8 +1266,10 @@ def verify_raster_sealer_boundary(root: pathlib.Path, errors: list[str]) -> None
         errors.append("old sealer may expose only timestamp/gzip helpers for raster reuse")
     for file in (root / MAIN_KOTLIN).rglob("*.kt"):
         relative = file.relative_to(root); text = file.read_text()
-        if relative != path and any(token in text for token in ("NativeRasterSealer(", "NativeRasterPreparedRequest(", ".clearRejected()")):
-            errors.append("raster sealer/request must remain uninstalled")
+        if (relative not in {path, replay / "NativeReplayCaptureOwner.kt"} and
+                any(token in text for token in ("NativeRasterSealer(", ".clearRejected()"))) or (
+                relative != path and "NativeRasterPreparedRequest(" in text):
+            errors.append("raster sealer/request must remain uninstalled outside original capture owner")
         if relative != replay / "AndroidAnnotatedReplayCollector.kt" and "AnnotatedRasterCandidate.validated(" in text:
             errors.append("raster candidate may only originate at the original collector")
         if relative != replay / "AnnotatedRootRegistry.kt" and "AnnotatedRasterSourceIdentity(" in text:
@@ -1351,6 +1359,7 @@ def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> N
 
 
 def verify_native_v3_source_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    verify_native_raster_bootstrap_boundary(root, errors)
     config = MAIN_KOTLIN / "dev/elu/analytics/internal/config"
     required = {
         "V2ConfigTransport.kt": [
@@ -1398,10 +1407,57 @@ def verify_native_v3_source_boundary(root: pathlib.Path, errors: list[str]) -> N
     for file in (root / MAIN_KOTLIN).rglob("*.kt"):
         relative = file.relative_to(root)
         text = file.read_text()
-        if "V2ConfigFormat.NATIVE_V3" in text and relative not in {config / "V2ConfigSource.kt", config / "V2ConfigTransport.kt"}:
+        if "V2ConfigFormat.NATIVE_V3" in text and relative not in {config / "V2ConfigSource.kt", config / "V2ConfigTransport.kt", STACK}:
             errors.append("native v3 request selection must remain uninstalled in production Stack")
         if "NativeV3ConfigParser.parse(" in text and relative != config / "V2ConfigSource.kt":
             errors.append("native v3 parser acquisition belongs only to the original source")
+
+
+def verify_native_raster_bootstrap_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    required = {
+        "EluOptions.kt": ["private var declaredRegionReplay = false", "declaredRegionReplayEnabled: Boolean",
+            "public val declaredRegionReplayEnabled: Boolean get() = declaredRegionReplay"],
+        "internal/facade/AndroidStandaloneStack.kt": ["declaredRegionReplayEnabled: Boolean = false",
+            "format = if (declaredRegionReplayEnabled)", "V2ConfigFormat.NATIVE_V3",
+            "else dev.elu.analytics.internal.config.V2ConfigFormat.V2", "rasterSupported = declaredRegionReplayEnabled"],
+        "internal/runtime/PrivacyStateProjector.kt": ["support = if (capabilities.rasterSupported)",
+            "ReplayDeliverySupport.INCLUDING_RASTER", "else dev.elu.analytics.internal.replay.ReplayDeliverySupport.WIREFRAME_ONLY"],
+        "internal/replay/NativeReplayComposition.kt": ["declaredRoots.deniesWireframe(selected.originalRootIdentity())",
+            "declaredRoots.remember(selected.originalRootIdentity())", "private val declaredRoots = NativeDeclaredRootHistory()",
+            "if (roots.size >= 64) { uncertain = true; return }", "if (uncertain) return true",
+            "roots.removeAll { it.isCollected() }", "originalAuthority.prepareRaster(selected, discovery.binding.sourceIdentity)",
+            "NativeReplayCaptureOwner.startRaster(queue, originalAuthority, prepared, discovery.binding"],
+        "internal/replay/NativeReplayLifecycle.kt": ["original?.discard()", "owned = value",
+            "internal fun originalRootIdentity(): NativeReplayOriginalRootIdentity?", "private val root = WeakReference(root)",
+            "if (value != null && stopped()) { discard();", "try { discard() } catch"],
+        "internal/replay/NativeReplayCaptureOwner.kt": ["binding.sourceIdentity !== prepared.projection.sourceIdentity",
+            "candidate.compareAndSet(null, frame)", "frame.sourceIdentity === binding.sourceIdentity", "val remainingCandidate = candidate.getAndSet(null)", "remainingCandidate?.close()", "actual.frame.hasCleanupFailure()", "remainingCandidate?.hasCleanupFailure() == true", "if (binding.hasCleanupFailure()) cleanupFailed = true", "minimumFork?.let { append();",
+            "actual.continuous - first < minimum", "enrollment?.quarantineRaster(request)",
+            "if (use == null) enrollment.cancelUnused() else use.settle()", "queue.finishNativeReplayCapture(enrollment).awaitExact()"],
+        "internal/replay/AnnotatedRasterCandidate.kt": ["private var cleanupFailed = false", "@Synchronized internal fun hasCleanupFailure()",
+            "catch (error: Throwable) { cleanupFailed = true; throw error }"],
+        "internal/replay/AnnotatedRootRegistry.kt": ["originalCorners == corners(geometry)",
+            "if (intent == null) owner.rootInvalidated(this)", "if (!same) sourceBindingChanged()"],
+        "internal/replay/AndroidAnnotatedReplayCollector.kt": ["internal fun prepareBinding(", "check(registry == null)",
+            "checkNotNull(AnnotatedRootRegistry.fromHost(view))", "return collector.capture(window, { isCurrent() && current() }, clock)", "cleanupFailed.set(true)", "!collector.hasCleanupFailure()"],
+    }
+    for path, tokens in required.items():
+        text = load_text(root, base / path)
+        if any(token not in text for token in tokens):
+            errors.append("declared raster bootstrap lost default, original source, cleanup or privacy boundary: " + path)
+    stack = load_text(root, STACK)
+    if stack.count("V2ConfigFormat.NATIVE_V3") != 1 or stack.count("val source = V2ConfigSource(") != 1:
+        errors.append("native v3 request selection must remain uninstalled in production Stack outside the one explicit option")
+    replay = base / "internal/replay"
+    for file in (root / MAIN_KOTLIN).rglob("*.kt"):
+        relative = file.relative_to(root); text = file.read_text()
+        if re.search(r"\brasterSupported\s*=", text) and relative != STACK:
+            errors.append("raster capability selection escaped original default-off Stack")
+        if "AnnotatedCaptureBinding(" in text and relative != replay / "AndroidAnnotatedReplayCollector.kt":
+            errors.append("annotated binding must originate only at original collector")
+        if "discoverAnnotatedRoot(" in text and relative not in {replay / "AndroidAnnotatedReplayCollector.kt", replay / "NativeReplayComposition.kt"}:
+            errors.append("annotated discovery escaped original composition")
 
 
 def verify_native_raster_durable_boundary(root: pathlib.Path, errors: list[str]) -> None:
@@ -1459,8 +1515,9 @@ def verify_native_raster_durable_boundary(root: pathlib.Path, errors: list[str])
         "prepareNativeRasterProjection": {OWNER, authority},
         "beginNativeRasterAuthority": {OWNER, authority},
         "makeNativeRasterCaptureAdmission": {OWNER, authority},
-        "appendNativeRaster": {OWNER},
-        "prepareRaster": {authority}, "startRaster": {authority},
+        "appendNativeRaster": {OWNER, replay / "NativeReplayCaptureOwner.kt"},
+        "prepareRaster": {authority, replay / "NativeReplayComposition.kt"},
+        "startRaster": {authority, replay / "NativeReplayCaptureOwner.kt", replay / "NativeReplayComposition.kt"},
         "recordRasterDenial": {OWNER, store}, "acknowledgeDenial": {OWNER, gate},
         "publicationGuard": {candidate, sealer},
     }
@@ -1547,8 +1604,8 @@ def verify_native_raster_delivery_boundary(root: pathlib.Path, errors: list[str]
     store = replay / "ReplayQueueStore.kt"
     for file in (root / MAIN_KOTLIN).rglob("*.kt"):
         relative = file.relative_to(root); text = file.read_text()
-        if "ReplayDeliverySupport.INCLUDING_RASTER" in text and relative != OWNER:
-            errors.append("raster delivery support must remain default-off and uninstalled")
+        if "ReplayDeliverySupport.INCLUDING_RASTER" in text and relative not in {OWNER, MAIN_KOTLIN / "dev/elu/analytics/internal/runtime/PrivacyStateProjector.kt"}:
+            errors.append("raster delivery support must remain default-off and uninstalled outside original projection")
         if "ReplayDeliveryClaim.raster(" in text and relative != store:
             errors.append("raster delivery claims belong only to the original queue")
         if "requireNativeRasterApproved(" in text and relative not in {base / "config/LocalEndpointPolicy.kt", replay / "OkHttpReplayTransport.kt"}:

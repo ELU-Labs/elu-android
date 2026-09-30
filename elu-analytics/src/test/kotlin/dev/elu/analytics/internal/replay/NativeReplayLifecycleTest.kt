@@ -50,6 +50,54 @@ internal class TestSelectionAccess : NativeReplaySelectionAccess {
 }
 
 class NativeReplayLifecycleTest {
+    @Test fun `closed selection remembers only original root identity and grants nothing`() {
+        val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform)
+        val activity = Any(); val root = Any(); life.resumed(activity)
+        val original = checkNotNull(life.select(activity, root).get())
+        original.closeAndWait().get(); assertFalse(original.isCurrent())
+        val same = checkNotNull(life.select(activity, root).get())
+        assertTrue(checkNotNull(original.originalRootIdentity()).sameRoot(checkNotNull(same.originalRootIdentity()))); assertFalse(original.isCurrent())
+        same.closeAndWait().get()
+        val different = checkNotNull(life.select(activity, Any()).get())
+        assertFalse(checkNotNull(original.originalRootIdentity()).sameRoot(checkNotNull(different.originalRootIdentity()))); different.closeAndWait().get()
+    }
+
+    @Test fun `declared history retains earlier roots and cannot call customer equality`() {
+        val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any()
+        life.resumed(activity)
+        val first = object {
+            override fun equals(other: Any?): Boolean = error("customer equality")
+            override fun hashCode(): Int = error("customer hashing")
+        }
+        val second = Any(); val ordinary = Any()
+        fun identity(root: Any): NativeReplayOriginalRootIdentity {
+            val selected = checkNotNull(life.select(activity, root).get())
+            return checkNotNull(selected.originalRootIdentity()).also { selected.closeAndWait().get() }
+        }
+        val history = NativeDeclaredRootHistory()
+        history.remember(identity(first)); history.remember(identity(second))
+        assertTrue(history.deniesWireframe(identity(first)))
+        assertTrue(history.deniesWireframe(identity(second)))
+        assertFalse(history.deniesWireframe(identity(ordinary)))
+        assertEquals(5, platform.watcherClosed)
+    }
+
+    @Test fun `declared history overflow and uncertain identity stay restrictive`() {
+        val roots = List(66) { Any() } // Hold real identities strongly so this is not a GC timing test.
+        val history = NativeDeclaredRootHistory()
+        repeat(64) { history.remember(NativeReplayOriginalRootIdentity(roots[it])) }
+        repeat(100) { history.remember(NativeReplayOriginalRootIdentity(roots[0])) }
+        assertFalse(history.deniesWireframe(NativeReplayOriginalRootIdentity(roots[65])))
+        history.remember(NativeReplayOriginalRootIdentity(roots[64]))
+        assertTrue(history.deniesWireframe(NativeReplayOriginalRootIdentity(roots[65])))
+        assertTrue(history.hasDeclaredRoots())
+        val missing = NativeDeclaredRootHistory(); missing.remember(null)
+        assertTrue(missing.deniesWireframe(NativeReplayOriginalRootIdentity(roots[0])))
+        val query = NativeDeclaredRootHistory(); assertTrue(query.deniesWireframe(null))
+        query.remember(NativeReplayOriginalRootIdentity(roots[0]))
+        assertTrue(query.deniesWireframe(NativeReplayOriginalRootIdentity(roots[65])))
+    }
+
     @Test fun `original window borrow is main bound and cannot survive window replacement`() {
         val platform = TestSelectionAccess(); val life = NativeReplayLifecycle(platform); val activity = Any(); val root = Any()
         life.resumed(activity); val selected = checkNotNull(life.select(activity, root).get())

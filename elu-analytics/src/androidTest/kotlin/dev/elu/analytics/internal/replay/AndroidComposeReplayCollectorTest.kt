@@ -65,6 +65,75 @@ import androidx.test.filters.SdkSuppress
 /** Original mounted UI only. These tests do not grant SDK authority or qualify capture latency. */
 @SdkSuppress(minSdkVersion = 29)
 class AndroidComposeReplayCollectorTest {
+    @Test fun originalMainPostCheckDiscardsActualCandidateAndReleasesCollector() {
+        install { BasicText("ordinary") }
+        val lifecycle = NativeReplayLifecycle(); lifecycle.resumed(rule.activity)
+        val selected = checkNotNull(lifecycle.select(rule.activity, host).get())
+        val allowed = java.util.concurrent.atomic.AtomicBoolean(true)
+        var actual: AnnotatedRasterCandidate? = null
+        try {
+            val result = selected.consumeOriginalWindow(allowed::get) { _, window, current ->
+                val frame = collector.capture(window as android.view.Window, current) { 10_000_000_000L }
+                actual = frame
+                allowed.set(false) // Original withdrawal after actual draw, before final main validation.
+                NativeReplayCollectionAttempt.RasterCaptured(frame, 10_000_000_000L, 1_000L)
+            }.get()
+            assertNull(result)
+            assertEquals("closed-frame", assertThrows(IllegalStateException::class.java) { checkNotNull(actual).encodePng() }.message)
+            rule.runOnIdle { collector.capture(rule.activity.window, { true }) { 11_000_000_000L }.close() }
+        } finally { actual?.close(); selected.closeAndWait().get() }
+    }
+
+    @Test fun terminalCleanupFailureSurvivesEncodingAndLaterNoOpClose() {
+        install { BasicText("ordinary") }
+        val original = capture(); val source = original.sourceIdentity; original.close()
+        val pixels = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.RED) }
+        val releases = java.util.concurrent.atomic.AtomicInteger()
+        val expected = IllegalStateException("original-release-failure")
+        // Controlled cleanup fault on an internal candidate; no SDK authority or runtime is forged.
+        val frame = AnnotatedRasterCandidate.validated(pixels, source, { true }, {
+            releases.incrementAndGet(); throw expected
+        })
+        assertSame(expected, assertThrows(IllegalStateException::class.java) { frame.encodePng() })
+        assertTrue(pixels.isRecycled); assertTrue(frame.hasCleanupFailure()); assertEquals(1, releases.get())
+        frame.close()
+        assertTrue(frame.hasCleanupFailure()); assertEquals(1, releases.get())
+        assertThrows(IllegalStateException::class.java) { frame.encodePng() }
+        assertTrue(frame.hasCleanupFailure())
+    }
+
+    @Test fun rootResizeAndRestorePermanentlyRetireOriginalSource() {
+        var size by mutableStateOf(100)
+        rule.setContent { EluAnnotatedReplayRoot(emptyList(), Modifier.size(size.dp).background(Color.White)) {
+            val original = LocalView.current; SideEffect { host = original }; BasicText("ordinary")
+        } }
+        rule.waitForIdle()
+        rule.waitUntil(5_000) { rule.runOnIdle { host.isAttachedToWindow && host.hasWindowFocus() && !host.isLayoutRequested } }
+        rule.runOnIdle { registry = checkNotNull(AnnotatedRootRegistry.fromHost(host)); collector = AndroidAnnotatedReplayCollector(registry) }
+        val first = capture(); val original = first.sourceIdentity; first.close()
+        rule.runOnIdle { size = 110 }; rule.waitForIdle()
+        assertFalse(original.isCurrent())
+        val changed = capture(); val second = changed.sourceIdentity; changed.close()
+        assertNotSame(original, second)
+        rule.runOnIdle { size = 100 }; rule.waitForIdle()
+        assertFalse(second.isCurrent()); assertFalse(original.isCurrent())
+        val restored = capture(); assertNotSame(original, restored.sourceIdentity); restored.close()
+    }
+
+    @Test fun discoveryIsNoPixelAndRejectsForeignPresentTagInsteadOfReportingAbsent() {
+        install { BasicText("ordinary") }
+        rule.runOnIdle {
+            val binding = discoverAnnotatedRoot(host, rule.activity.window, { true })
+            assertTrue(binding is AnnotatedRootDiscovery.Bound)
+            val frame = collector.capture(rule.activity.window, { true }) { 10_000_000_000L }; frame.close()
+            val original = host.getTag(R.id.elu_annotated_replay_root)
+            try {
+                host.setTag(R.id.elu_annotated_replay_root, Any())
+                assertSame(AnnotatedRootDiscovery.Unavailable, discoverAnnotatedRoot(host, rule.activity.window, { true }))
+            } finally { host.setTag(R.id.elu_annotated_replay_root, original) }
+        }
+    }
+
     @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
     private lateinit var host: View
     private lateinit var registry: AnnotatedRootRegistry

@@ -24,7 +24,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 
-/** Dormant original-host collector. Every future invocation also needs the original SDK permit. */
+/** Original-host collector. Production invocation requires the original SDK permit. */
 internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRootRegistry) {
     companion object {
         const val PLACEHOLDER = -11971747 // opaque, content-independent #49535d
@@ -34,6 +34,8 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
         const val INTERVAL_NANOS = 1_000_000_000L
     }
     private val occupied = AtomicBoolean()
+    private val cleanupFailed = AtomicBoolean()
+    internal fun hasCleanupFailure(): Boolean = cleanupFailed.get()
     private var lastAttempt: Long? = null // Main-thread only; close does not reset cadence.
 
     private class Checks(val current: () -> Boolean, val clock: () -> Long) {
@@ -54,10 +56,23 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
         val screenX: Int, val screenY: Int, val viewport: Rect, val witnesses: List<Witness>,
         val inputs: List<NativeInput>, val masks: List<Rect>)
 
+    /** Validates the original registration without allocating pixels or issuing permission. */
+    internal fun prepareBinding(window: Window, current: () -> Boolean,
+        clock: () -> Long = SystemClock::elapsedRealtimeNanos): AnnotatedCaptureBinding {
+        AnnotatedRootRegistry.main()
+        val c = Checks(current, clock)
+        val original = plan(window, c)
+        val root = original.witnesses.single { it.binding.intent == null }
+        val source = registry.sourceIdentity(root.binding, root.geometry, window, original.decor, original.token)
+        c.check()
+        return AnnotatedCaptureBinding(this, source, registry, original.policyVersion)
+    }
+
     fun capture(window: Window, current: () -> Boolean,
         clock: () -> Long = SystemClock::elapsedRealtimeNanos): AnnotatedRasterCandidate {
         AnnotatedRootRegistry.main()
         if (Build.VERSION.SDK_INT < 29) error("unsupported-platform")
+        check(!cleanupFailed.get()) { "unsettled-collector-cleanup" }
         check(occupied.compareAndSet(false, true)) { "outstanding-candidate" }
         var bitmap: Bitmap? = null
         var transferred = false
@@ -112,7 +127,10 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
         } catch (error: Throwable) { primary = error; throw error }
         finally {
             try { bitmap?.let { AnnotatedRasterCandidate.clear(it) } }
-            catch (cleanup: Throwable) { if (primary == null) throw cleanup else primary.addSuppressed(cleanup) }
+            catch (cleanup: Throwable) {
+                cleanupFailed.set(true)
+                if (primary == null) throw cleanup else primary.addSuppressed(cleanup)
+            }
             finally { if (!transferred) occupied.set(false) }
         }
     }
@@ -216,4 +234,62 @@ internal class AndroidAnnotatedReplayCollector(private val registry: AnnotatedRo
     }
     private fun inward(r: RectF) = Rect(ceil(r.left).toInt(), ceil(r.top).toInt(), floor(r.right).toInt(), floor(r.bottom).toInt())
     private fun outward(r: RectF) = Rect(floor(r.left).toInt(), floor(r.top).toInt(), ceil(r.right).toInt(), ceil(r.bottom).toInt())
+}
+
+/** Original weak registry plus scalar/atomic currentness only; no pixels, window, grant or issuer. */
+internal class AnnotatedCaptureBinding internal constructor(
+    private val collector: AndroidAnnotatedReplayCollector,
+    val sourceIdentity: AnnotatedRasterSourceIdentity,
+    private val registry: AnnotatedRootRegistry,
+    private val policyRevision: Long,
+) {
+    fun isCurrent(): Boolean = sourceIdentity.isCurrent() && registry.policyCurrent(policyRevision) && !collector.hasCleanupFailure()
+    fun hasCleanupFailure(): Boolean = collector.hasCleanupFailure()
+    fun capture(window: Window, current: () -> Boolean, clock: () -> Long): AnnotatedRasterCandidate {
+        check(isCurrent()) { "withdrawn-annotated-binding" }
+        // Return ownership directly. The original capture run retains this candidate before
+        // any additional fallible source/post-check, then rejects a foreign source there.
+        return collector.capture(window, { isCurrent() && current() }, clock)
+    }
+}
+
+internal sealed interface AnnotatedRootDiscovery {
+    data object Absent : AnnotatedRootDiscovery
+    data object Unavailable : AnnotatedRootDiscovery
+    class Bound(val binding: AnnotatedCaptureBinding) : AnnotatedRootDiscovery
+}
+
+/** Main-only original-tree discovery. A present invalid tag is never absence. */
+internal fun discoverAnnotatedRoot(root: View, window: Window, current: () -> Boolean,
+    clock: () -> Long = SystemClock::elapsedRealtimeNanos): AnnotatedRootDiscovery {
+    AnnotatedRootRegistry.main()
+    val start = clock()
+    var previous = start
+    fun checkCurrent() {
+        val now = clock()
+        check(start >= 0 && now >= previous && now - start <= AndroidAnnotatedReplayCollector.PASS_NANOS && current())
+        previous = now
+    }
+    return try {
+        val pending = ArrayDeque<Pair<View, Int>>(); pending.add(root to 0)
+        var count = 0
+        var registry: AnnotatedRootRegistry? = null
+        while (pending.isNotEmpty()) {
+            checkCurrent(); val (view, depth) = pending.removeLast()
+            check(++count <= 2048 && depth <= 64)
+            val tag = view.getTag(dev.elu.analytics.R.id.elu_annotated_replay_root); checkCurrent()
+            if (tag != null) {
+                check(registry == null)
+                registry = checkNotNull(AnnotatedRootRegistry.fromHost(view))
+            }
+            if (view is ViewGroup) {
+                val size = view.childCount; checkCurrent(); check(size <= 2048 - count - pending.size)
+                repeat(size) { checkCurrent(); pending.add(view.getChildAt(it) to depth + 1); checkCurrent() }
+            }
+        }
+        checkCurrent()
+        val original = registry
+        if (original == null) AnnotatedRootDiscovery.Absent
+        else AnnotatedRootDiscovery.Bound(AndroidAnnotatedReplayCollector(original).prepareBinding(window, { checkCurrent(); true }, clock))
+    } catch (_: Throwable) { AnnotatedRootDiscovery.Unavailable }
 }

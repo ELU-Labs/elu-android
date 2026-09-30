@@ -127,6 +127,8 @@ internal object PrivacyStateProjector {
                     required.privacy?.masking, V1PrivacyPlatform.ANDROID) ==
                     dev.elu.analytics.internal.replay.NativeMaskingRetention.COMPATIBLE
             },
+            support = if (capabilities.rasterSupported) dev.elu.analytics.internal.replay.ReplayDeliverySupport.INCLUDING_RASTER
+                else dev.elu.analytics.internal.replay.ReplayDeliverySupport.WIREFRAME_ONLY,
         )
 
     fun project(input: PrivacyProjectionInput): V1EffectivePrivacyState {
