@@ -1609,8 +1609,8 @@ class StandaloneFacadeTest {
         assertEquals(listOf("first:$current", "second:$current"), completed)
     }
 
-    @Test fun `reload completion waits through quiet capture intent and cannot cross an identity reset`() {
-        for (reset in listOf(false, true)) {
+    @Test fun `reload completion waits through quiet capture intent and cannot cross a later identity intent`() {
+        for (change in listOf("quiet", "reset", "identify")) {
             val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
             val queued = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
             val transport = RespondingFlagTransport()
@@ -1624,15 +1624,18 @@ class StandaloneFacadeTest {
             try {
                 assertTrue(entered.await(5, TimeUnit.SECONDS))
                 h.facade.reloadFeatureFlags { completed++ }
-                if (reset) h.facade.reset()
-                else h.facade.capture("quiet", null, EluCaptureOptions(set = mapOf("plan" to "paid")))
+                when (change) {
+                    "reset" -> h.facade.reset()
+                    "identify" -> h.facade.identify("later-identity", null)
+                    else -> h.facade.capture("quiet", null, EluCaptureOptions(set = mapOf("plan" to "paid")))
+                }
             } finally { release.countDown() }
             assertTrue(transport.requestObserved.await(5, TimeUnit.SECONDS))
             h.diagnostics()
             assertTrue("No premature completion from a deferred command", queued.isEmpty())
             transport.releaseHeld(); h.settle()
             while (true) (queued.poll() ?: break).run()
-            assertEquals(if (reset) 0 else 1, completed)
+            assertEquals(change, if (change == "quiet") 1 else 0, completed)
             assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
         }
     }

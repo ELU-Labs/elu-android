@@ -416,6 +416,7 @@ class V2ConfigCompositionTest {
     @Test fun `context intent settles before following explicit reload completion`() {
         val changes: List<(StandaloneFacade) -> Unit> = listOf(
             { it.identify("next-user", null) },
+            { it.reset() },
             { it.setPersonPropertiesForFlags(mapOf("role" to "next")) },
         )
         changes.forEach { change -> Rig(withFlags = true).use { rig ->

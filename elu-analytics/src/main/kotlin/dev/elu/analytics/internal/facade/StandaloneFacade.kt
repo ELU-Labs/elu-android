@@ -198,6 +198,7 @@ internal class StandaloneFacade(
     private val dropCounts = EnumMap<EluFacadeDropReason, Int>(EluFacadeDropReason::class.java)
     private val projectionLock = Any()
     private var pendingIdentityOperations = 0
+    private var identityIntentRevision = 0L // guarded by projectionLock; advances at caller acceptance
     private var pendingFlagReloadRequested = false // guarded by projectionLock
     @Volatile private var pendingFlagOperations = 0
     @Volatile private var flagIntentRevision = 0L
@@ -913,14 +914,21 @@ internal class StandaloneFacade(
     override fun reloadFeatureFlags(completion: (() -> Unit)?) {
         // A completion belongs to this accepted command, including a deferred physical reload.
         val completionRequest = synchronized(projectionLock) {
-            completion?.let { ReloadCompletion(it, identity, consentIntentRevision, configDocument, flagConfiguration) }
+            completion?.let { ReloadCompletion(it, null, identityIntentRevision, consentIntentRevision, configDocument, flagConfiguration) }
         }
         submit {
             if (!hasCurrentFlags()) {
                 countDrop(currentDropReason())
                 return@submit
             }
-            completionRequest?.takeIf(::reloadCompletionIsCurrent)?.let { reloadCompletions += it }
+            // Prior identity commands have now settled on this same lane. Bind their actual
+            // result here; a later caller identity intent cannot adopt this earlier completion.
+            synchronized(projectionLock) {
+                completionRequest?.takeIf(::reloadCompletionIntentIsCurrent)?.let { request ->
+                    reloadCompletions += ReloadCompletion(request.callback, identity, request.identityIntent,
+                        request.consentRevision, request.configurationBody, request.source)
+                }
+            }
             synchronized(projectionLock) {
                 if (pendingFlagOperations != 0) pendingFlagReloadRequested = true
             }
@@ -1434,20 +1442,24 @@ internal class StandaloneFacade(
     // ---- flag snapshot, listeners and exposure -------------------------------
 
     private class FlagListener(val callback: EluFeatureFlagSnapshot.Listener, val cancellation: FeatureFlagCancellation)
-    private class ReloadCompletion(val callback: () -> Unit, val identity: IdentityState?,
+    private class ReloadCompletion(val callback: () -> Unit, val identity: IdentityState?, val identityIntent: Long,
         val consentRevision: Long, val configurationBody: String?, val source: V2ConfigAuthorityWitness?)
     private class FlagPublication(val snapshot: EluFeatureFlagSnapshot, val read: FlagSnapshotReadResult.Found?,
         val generation: Long, val intent: Long, val source: V2ConfigAuthorityWitness?)
     private class FlagEntry(val present: Boolean, val value: Any?, val payload: Any?, val read: FlagReadResult)
 
+    private fun reloadCompletionIntentIsCurrent(request: ReloadCompletion): Boolean = synchronized(projectionLock) {
+        !closed && !closeRequested.get() && !isOptedOut() && request.identityIntent == identityIntentRevision &&
+            request.consentRevision == consentIntentRevision && request.configurationBody == configDocument &&
+            (configurationGate == null || request.source?.isCurrent() == true)
+    }
+
     private fun reloadCompletionIsCurrent(request: ReloadCompletion): Boolean = synchronized(projectionLock) {
         val original = request.identity
         val current = identity
-        !closed && !closeRequested.get() && !isOptedOut() &&
+        reloadCompletionIntentIsCurrent(request) &&
             original?.anonymousId == current?.anonymousId && original?.userId == current?.userId &&
-            original?.revision == current?.revision && request.consentRevision == consentIntentRevision &&
-            request.configurationBody == configDocument &&
-            (configurationGate == null || request.source?.isCurrent() == true)
+            original?.revision == current?.revision
     }
 
     private fun publicationIsCurrent(publication: FlagPublication): Boolean =
@@ -1684,6 +1696,7 @@ internal class StandaloneFacade(
     private class ProjectedIdentity(val distinctId: String?)
 
     private fun projectIdentity(projection: ProjectedIdentity): Boolean {
+        synchronized(projectionLock) { identityIntentRevision = Math.incrementExact(identityIntentRevision) }
         if (state !is EluFacadeState.Enabled) return false
         stack?.runtime?.withdrawAutomaticExceptions(retire = true)
         synchronized(projectionLock) {
