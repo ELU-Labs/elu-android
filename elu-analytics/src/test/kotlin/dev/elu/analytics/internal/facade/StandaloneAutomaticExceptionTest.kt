@@ -159,7 +159,10 @@ class StandaloneAutomaticExceptionTest {
     }
     @Test fun `quota refused report stays reserved and retries only after real queue capacity is available`() {
         Harness(capacity = 1).use { h ->
-            h.activity(); h.installed(); h.crash(); h.settle()
+            h.activity(); h.installed(); h.armed()
+            // Facade/control barriers do not join the independent report writer.
+            val publication = h.intake().reportSettlement
+            h.crash(); publication.get(3, TimeUnit.SECONDS); h.settle()
             assertTrue(h.exceptions().isEmpty()); val retained = checkNotNull(h.spool.report)
             assertNull(h.backing.core!!.exceptions!!.consumedDigest)
             val queued = h.owner.peek(10, 100_000).await()
