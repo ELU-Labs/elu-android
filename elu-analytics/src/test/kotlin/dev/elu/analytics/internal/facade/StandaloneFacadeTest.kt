@@ -1780,6 +1780,7 @@ class StandaloneFacadeTest {
             h.facade.reloadFeatureFlags { completed++ }
             assertTrue(transport.requestObserved.await(5, TimeUnit.SECONDS))
             val rejectedRequest = transport.requests.last().getString("requestId")
+            val requestCount = transport.requests.size
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
             try {
@@ -1798,7 +1799,19 @@ class StandaloneFacadeTest {
             } finally { release.countDown() }
             h.settle()
             assertEquals(change, 0, completed)
-            assertFalse(rejectedRequest == h.facade.getFeatureFlagSnapshot()?.requestId)
+            if (change == "source") {
+                // The response was accepted by the client before the same document received a
+                // new gate token. Its cache remains valid; the original REMOTE completion does not.
+                val cached = checkNotNull(h.facade.getFeatureFlagSnapshot())
+                assertEquals(rejectedRequest, cached.requestId)
+                assertEquals(EluFeatureFlagSnapshot.Source.CACHE, cached.source)
+                assertNull(cached.error)
+                assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+                assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false, fresh = true)))
+                assertEquals(requestCount, transport.requests.size)
+            } else {
+                assertFalse(change, rejectedRequest == h.facade.getFeatureFlagSnapshot()?.requestId)
+            }
             assertTrue(h.queued().isEmpty())
         }
     }
@@ -2077,8 +2090,14 @@ class StandaloneFacadeTest {
         h.facade.applyConfiguration(config()); h.settle()
         h.facade.screen("Home", mapOf("private" to "hidden"))
         h.facade.captureException(IllegalStateException("example"), mapOf("private" to "hidden")); h.settle()
-        assertEquals(listOf("\$screen", "\$exception"), seen)
+        assertEquals(listOf("Home", "\$exception"), seen)
         assertEquals(2, h.records().size); assertTrue(h.records().all { it is RuntimeQueuedRecord.Event })
+        val screen = (h.records().first() as RuntimeQueuedRecord.Event).record
+        assertEquals(RuntimeEventKind.SCREEN, screen.kind); assertEquals("Home", screen.name)
+        assertEquals("Home", screen.properties["\$screen_name"])
+        val wire = JSONObject(String(dev.elu.analytics.internal.runtime.RuntimeRecordCodec.encodeEvent(screen), StandardCharsets.UTF_8))
+        assertEquals("screen", wire.getString("kind")); assertEquals("Home", wire.getString("name"))
+        assertEquals("Home", wire.getJSONObject("properties").getString("\$screen_name"))
     }
 
     private fun harness(
