@@ -113,6 +113,9 @@ internal enum class RuntimeCaptureRejection {
     EXPOSURE_ALREADY_REPORTED,
     EXCEPTION_ALREADY_REPORTED,
     RATE_LIMITED,
+    FILTER_DROPPED,
+    FILTER_INVALID,
+    FILTER_PERSON_UNSUPPORTED,
 }
 
 internal sealed interface RuntimeCaptureResult {

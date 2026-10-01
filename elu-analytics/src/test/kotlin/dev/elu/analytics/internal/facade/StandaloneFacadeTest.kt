@@ -38,8 +38,12 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -1640,6 +1644,443 @@ class StandaloneFacadeTest {
         }
     }
 
+    @Test fun `hook transforms accepted manual person maps in order and does not manufacture empty mutations`() {
+        val filter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+            if (it.event == "person") {
+                it.event = "accepted-person"; it.set = mutableMapOf("tier" to "hook")
+                it.setOnce = mutableMapOf("origin" to "hook")
+            } else { it.set = null; it.setOnce = null }
+            it
+        })
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY, eventFilter = filter)
+        h.facade.applyConfiguration(config()); h.settle()
+        val loads = h.flagTransport.requests.size
+        h.facade.capture("person", null, EluCaptureOptions(set = mapOf("tier" to "caller")))
+        h.settle()
+        assertEquals(listOf("event:accepted-person", "mutation:setPersonProperties"), h.queued())
+        val event = (h.records()[0] as RuntimeQueuedRecord.Event).record
+        val person = (h.records()[1] as RuntimeQueuedRecord.Mutation).envelope.mutation
+        assertEquals(event.sequence + 1, person.sequence)
+        assertEquals(event.identity.revision, person.subject.identityRevision)
+        assertEquals(mapOf("tier" to "hook", "origin" to "hook"), h.owner.snapshot().get().state.flagContext.personProperties)
+        assertEquals(loads, h.flagTransport.requests.size)
+        h.facade.capture("removed", null, EluCaptureOptions(set = mapOf("should" to "not persist")))
+        h.facade.capture("ordinary", null, Date(NOW_MS)); h.settle()
+        assertEquals(listOf("event:accepted-person", "mutation:setPersonProperties", "event:removed", "event:ordinary"), h.queued())
+        assertFalse(h.owner.snapshot().get().state.flagContext.personProperties.containsKey("should"))
+    }
+
+    @Test fun `quiet hook reread preserves exact cached load metadata and original retry without notifying`() {
+        for (cached in listOf(false, true)) {
+            val backing = FakeRuntimeQueueBacking()
+            if (cached) {
+                val first = harness(backing = backing)
+                first.facade.applyConfiguration(config()); first.settle()
+                first.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+            }
+            val scheduler = ManualFlagRetryScheduler()
+            val transport = RespondingFlagTransport().apply { failing = cached }
+            val h = harness(backing = backing, suppliedFlagTransport = transport, retryScheduler = scheduler,
+                eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                    if (cached) null else it
+                }))
+            h.facade.applyConfiguration(config()); h.settle()
+            if (!cached) {
+                transport.invalidBytes = true
+                h.facade.reloadFeatureFlags(null); h.settle()
+            }
+            val before = checkNotNull(h.facade.getFeatureFlagSnapshot())
+            val retry = scheduler.entries.single()
+            assertEquals(if (cached) EluFeatureFlagSnapshot.Source.CACHE else EluFeatureFlagSnapshot.Source.REMOTE, before.source)
+            assertEquals(if (cached) EluFeatureFlagSnapshot.LoadError.TRANSPORT else EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE, before.error)
+            var callbacks = 0
+            h.facade.subscribeToFeatureFlags { callbacks++ }; h.settle()
+            val loads = transport.requests.size
+            val ledger = h.owner.snapshot().get().exposures
+            h.facade.capture("quiet-metadata", null, Date(NOW_MS)); h.settle()
+            val after = checkNotNull(h.facade.getFeatureFlagSnapshot())
+            assertNotSame(before, after) // A fresh getter guard, never a revived old publication.
+            assertEquals(before.requestId, after.requestId); assertEquals(before.source, after.source)
+            assertEquals(before.error, after.error); assertArrayEquals(before.flagsJSON, after.flagsJSON)
+            assertArrayEquals(before.payloadsJSON, after.payloadsJSON)
+            assertEquals(before.evaluatedAt, after.evaluatedAt); assertEquals(before.expiresAt, after.expiresAt)
+            assertEquals(1, callbacks); assertEquals(loads, transport.requests.size)
+            assertEquals(ledger, h.owner.snapshot().get().exposures)
+            assertSame(retry, scheduler.entries.single()); assertFalse(retry.canceled)
+            assertEquals(5_000_000_000L, retry.delay)
+            retry.task(); h.settle()
+            assertEquals(loads + 1, transport.requests.size)
+            assertEquals(10_000_000_000L, scheduler.entries.last().delay)
+        }
+    }
+
+    @Test fun `original inflight reload survives quiet pass and drop before or after its actual outcome`() {
+        for (invalid in listOf(false, true)) for (duringQuiet in listOf(false, true)) {
+            val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val transport = RespondingFlagTransport()
+            val scheduler = ManualFlagRetryScheduler()
+            val h = harness(facadeLane = lane, suppliedFlagTransport = transport, retryScheduler = scheduler,
+                eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(
+                    callback = dev.elu.analytics.EluEvent.Filter { if (invalid) null else it }))
+            h.facade.applyConfiguration(config()); h.settle()
+            val original = checkNotNull(h.facade.getFeatureFlagSnapshot())
+            var notifications = 0
+            h.facade.subscribeToFeatureFlags { notifications++ }; h.settle()
+            val completed = mutableListOf<EluFeatureFlagSnapshot>()
+            val loads = transport.requests.size
+            transport.invalidBytes = invalid; transport.hold = true; transport.requestObserved = CountDownLatch(1)
+            h.facade.reloadFeatureFlags { completed += checkNotNull(h.facade.getFeatureFlagSnapshot()) }
+            assertTrue(transport.requestObserved.await(5, TimeUnit.SECONDS))
+            if (duringQuiet) {
+                val entered = CountDownLatch(1); val release = CountDownLatch(1)
+                lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+                try {
+                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    transport.releaseHeld()
+                    // Join the original client's actual finalization before the facade can
+                    // consume it. The quiet caller then withholds reads synchronously.
+                    h.flagClient.readSnapshot().get(5, TimeUnit.SECONDS)
+                    h.facade.capture("quiet-inflight", null, Date(NOW_MS))
+                    assertNull(h.facade.getFeatureFlagSnapshot()); assertTrue(completed.isEmpty())
+                } finally { release.countDown() }
+            } else {
+                h.facade.capture("quiet-inflight", null, Date(NOW_MS))
+                assertTrue(h.diagnostics().flagReloadInFlight)
+                assertNull(h.facade.getFeatureFlagSnapshot()); assertTrue(completed.isEmpty())
+                assertEquals(loads + 1, transport.requests.size)
+                transport.releaseHeld()
+            }
+            h.settle()
+            val actual = checkNotNull(h.facade.getFeatureFlagSnapshot())
+            assertEquals(1, completed.size); assertSame(actual, completed.single())
+            assertEquals(EluFeatureFlagSnapshot.Source.REMOTE, actual.source)
+            assertEquals(if (invalid) EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE else null, actual.error)
+            if (invalid) assertEquals(original.requestId, actual.requestId)
+            else assertFalse(original.requestId == actual.requestId)
+            assertEquals(loads + 1, transport.requests.size); assertEquals(2, notifications)
+            assertTrue(h.exposures().isEmpty())
+            assertEquals(if (invalid) emptyList<String>() else listOf("event:quiet-inflight"), h.queued())
+            assertEquals(if (invalid) listOf(5_000_000_000L) else emptyList<Long>(), scheduler.entries.map { it.delay })
+        }
+    }
+
+    @Test fun `original inflight outcome cannot cross identity consent or source replacement`() {
+        for (change in listOf("identity", "consent", "source")) {
+            val gate = dev.elu.analytics.internal.config.V2ConfigAuthorityGate()
+            val body = config()
+            gate.update(dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate(1) { consumer -> consumer(body); true })
+            val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val transport = RespondingFlagTransport()
+            val h = harness(configurationGate = gate, facadeLane = lane, suppliedFlagTransport = transport,
+                eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(
+                    callback = dev.elu.analytics.EluEvent.Filter { null }))
+            h.facade.configurationChanged(); h.settle()
+            transport.hold = true; transport.requestObserved = CountDownLatch(1)
+            var completed = 0
+            h.facade.reloadFeatureFlags { completed++ }
+            assertTrue(transport.requestObserved.await(5, TimeUnit.SECONDS))
+            val rejectedRequest = transport.requests.last().getString("requestId")
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                transport.releaseHeld(); h.flagClient.readSnapshot().get(5, TimeUnit.SECONDS)
+                h.facade.capture("quiet-before-restriction", null, Date(NOW_MS))
+                when (change) {
+                    "identity" -> h.facade.reset()
+                    "consent" -> h.facade.optOut()
+                    else -> {
+                        gate.update(dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate(2) { consumer -> consumer(body); true })
+                        h.facade.configurationChanged()
+                    }
+                }
+                assertNull(h.facade.getFeatureFlagSnapshot())
+            } finally { release.countDown() }
+            h.settle()
+            assertEquals(change, 0, completed)
+            assertFalse(rejectedRequest == h.facade.getFeatureFlagSnapshot()?.requestId)
+            assertTrue(h.queued().isEmpty())
+        }
+    }
+
+    @Test fun `actual completion survives listener quiet capture while preserving original callback order`() {
+        for (queued in listOf(false, true)) {
+            val callbacks = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+            val h = harness(callbackDelivery = { if (queued) callbacks.add(it) else it.run() },
+                eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(
+                    callback = dev.elu.analytics.EluEvent.Filter { null }))
+            h.facade.applyConfiguration(config()); h.settle()
+            val order = mutableListOf<String>()
+            var notifications = 0
+            h.facade.subscribeToFeatureFlags {
+                notifications++; order += "listener-$notifications"
+                if (notifications == 2) h.facade.capture("listener-before-completion", null, Date(NOW_MS))
+            }; h.settle()
+            while (true) (callbacks.poll() ?: break).run()
+            h.facade.reloadFeatureFlags { order += "completion" }; h.settle()
+            // In queued mode the original listener runs before the original completion task.
+            // Its quiet capture then settles on the same facade lane before completion resumes.
+            while (true) (callbacks.poll() ?: break).run()
+            h.settle()
+            while (true) (callbacks.poll() ?: break).run()
+            assertEquals(listOf("listener-1", "listener-2", "completion"), order)
+            assertEquals(2, h.flagTransport.requests.size); assertTrue(h.queued().isEmpty())
+            assertNotNull(h.facade.getFeatureFlagSnapshot())
+        }
+    }
+
+    @Test fun `quiet call during original full read retains the physical result until its own settlement`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val holdRead = java.util.concurrent.atomic.AtomicBoolean(false)
+        val h = harness(eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(
+            callback = dev.elu.analytics.EluEvent.Filter { null }), flagClientDecorator = { original ->
+                object : FacadeFlagClient by original {
+                    override fun readSnapshot(): SdkFuture<dev.elu.analytics.internal.flags.FlagSnapshotReadResult> {
+                        val actual = original.readSnapshot()
+                        if (!holdRead.compareAndSet(true, false)) return actual
+                        val joined = SdkFuture<dev.elu.analytics.internal.flags.FlagSnapshotReadResult>()
+                        actual.whenComplete { value, error ->
+                            entered.countDown()
+                            try {
+                                check(release.await(5, TimeUnit.SECONDS))
+                                if (error != null) joined.completeExceptionally(error) else joined.complete(checkNotNull(value))
+                            } catch (failure: Throwable) { joined.completeExceptionally(failure) }
+                        }
+                        return joined
+                    }
+                }
+            })
+        h.facade.applyConfiguration(config()); h.settle()
+        var completed = 0; var notifications = 0
+        h.facade.subscribeToFeatureFlags { notifications++ }; h.settle()
+        holdRead.set(true)
+        try {
+            h.facade.reloadFeatureFlags { completed++ }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            h.facade.capture("quiet-during-read", null, Date(NOW_MS))
+            assertNull(h.facade.getFeatureFlagSnapshot()); assertEquals(0, completed)
+        } finally { release.countDown() }
+        h.settle()
+        assertEquals(1, completed); assertEquals(2, notifications)
+        assertEquals(2, h.flagTransport.requests.size); assertTrue(h.queued().isEmpty())
+        assertEquals(EluFeatureFlagSnapshot.Source.REMOTE, checkNotNull(h.facade.getFeatureFlagSnapshot()).source)
+    }
+
+    @Test fun `initial unavailable load keeps its actual error and completion through listener quiet capture`() {
+        for (queued in listOf(false, true)) for (transportFailure in listOf(false, true)) {
+            val callbacks = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+            val transport = RespondingFlagTransport().apply { hold = true; invalidBytes = !transportFailure }
+            val scheduler = ManualFlagRetryScheduler()
+            val h = harness(suppliedFlagTransport = transport, retryScheduler = scheduler,
+                callbackDelivery = { if (queued) callbacks.add(it) else it.run() },
+                eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(
+                    callback = dev.elu.analytics.EluEvent.Filter { null }))
+            val observed = mutableListOf<EluFeatureFlagSnapshot>()
+            val order = mutableListOf<String>()
+            h.facade.subscribeToFeatureFlags {
+                observed += it; order += "listener"
+                if (observed.size == 1) h.facade.capture("quiet-unavailable", null, Date(NOW_MS))
+            }
+            h.facade.applyConfiguration(config())
+            assertTrue(transport.requestObserved.await(5, TimeUnit.SECONDS))
+            assertNull(h.facade.getFeatureFlagSnapshot())
+            h.facade.reloadFeatureFlags {
+                observed += checkNotNull(h.facade.getFeatureFlagSnapshot()); order += "completion"
+            }
+            h.diagnostics() // The explicit caller joined the same original held physical load.
+            transport.releaseHeld(if (transportFailure) java.io.IOException("offline") else null)
+            h.settle()
+            while (true) (callbacks.poll() ?: break).run()
+            h.settle()
+            while (true) (callbacks.poll() ?: break).run()
+            val current = checkNotNull(h.facade.getFeatureFlagSnapshot())
+            assertEquals(listOf("listener", "completion"), order)
+            assertEquals(2, observed.size)
+            (observed + current).forEach {
+                assertEquals(EluFeatureFlagSnapshot.Source.UNAVAILABLE, it.source)
+                assertEquals(if (transportFailure) EluFeatureFlagSnapshot.LoadError.TRANSPORT else
+                    EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE, it.error)
+                assertFalse(it.isAvailable); assertTrue(it.entries.isEmpty()); assertNull(it.requestId)
+                assertNull(it.evaluatedAt); assertNull(it.expiresAt)
+            }
+            assertNotSame(observed.first(), current)
+            assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+            assertEquals(1, transport.requests.size); assertTrue(h.queued().isEmpty())
+            assertEquals(listOf(5_000_000_000L), scheduler.entries.map { it.delay })
+            assertFalse(scheduler.entries.single().canceled)
+            h.facade.optOut(); h.settle()
+            assertNull(h.facade.getFeatureFlagSnapshot()); assertTrue(scheduler.entries.single().canceled)
+        }
+    }
+
+    @Test fun `quiet session renewal restores only the same original gate token and complete cache lease`() {
+        val gate = dev.elu.analytics.internal.config.V2ConfigAuthorityGate()
+        val body = config()
+        val originalToken = dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate(1) { consumer ->
+            consumer(body); true
+        }
+        gate.update(originalToken)
+        val renewals = AtomicInteger()
+        val scheduler = ManualFlagRetryScheduler()
+        val transport = RespondingFlagTransport()
+        val h = harness(configurationGate = gate, suppliedFlagTransport = transport, retryScheduler = scheduler,
+            startupObserver = RuntimeStartupObserver {
+                if (it.phase == RuntimeStartupPhase.AUTHORITY_BEGIN) renewals.incrementAndGet()
+            }, eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(
+                callback = dev.elu.analytics.EluEvent.Filter { it }))
+        h.facade.configurationChanged(); h.settle()
+        assertNull(h.owner.snapshot().get().state.identity.session)
+        transport.invalidBytes = true; h.facade.reloadFeatureFlags(null); h.settle()
+        val before = checkNotNull(h.facade.getFeatureFlagSnapshot())
+        val original = checkNotNull(gate.snapshot()); val timer = scheduler.entries.single()
+        val beforeRenewals = renewals.get(); val loads = transport.requests.size
+        h.facade.capture("first-session", null, Date(NOW_MS)); h.settle()
+        assertNotNull(h.owner.snapshot().get().state.identity.session)
+        assertTrue("Accepted session creation renewed the original authority", renewals.get() > beforeRenewals)
+        val current = checkNotNull(gate.snapshot())
+        assertNotSame(original, current); assertSame(original.token, current.token)
+        assertTrue(original.isCurrent()); assertTrue(current.isCurrent())
+        val after = checkNotNull(h.facade.getFeatureFlagSnapshot())
+        assertEquals(before.requestId, after.requestId); assertEquals(before.source, after.source)
+        assertEquals(EluFeatureFlagSnapshot.Source.REMOTE, after.source)
+        assertEquals(EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE, after.error)
+        assertEquals(before.expiresAt, after.expiresAt); assertEquals(loads, transport.requests.size)
+        assertSame(timer, scheduler.entries.single()); assertFalse(timer.canceled)
+        // Equal document text under a new original lifecycle token does not revive the old read.
+        gate.update(dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate(2) { consumer -> consumer(body); true })
+        assertFalse(original.isCurrent()); assertNull(h.facade.getFeatureFlagSnapshot())
+        h.facade.configurationChanged(); h.settle()
+        assertTrue(timer.canceled)
+        val replacementLoads = transport.requests.size
+        timer.task(); h.settle()
+        assertEquals(replacementLoads, transport.requests.size)
+    }
+
+    @Test fun `original due flag retry waits for quiet work without resetting its backoff`() {
+        val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val scheduler = ManualFlagRetryScheduler()
+        val transport = RespondingFlagTransport()
+        val observedLoads = AtomicInteger(-1)
+        val h = harness(facadeLane = lane, suppliedFlagTransport = transport, retryScheduler = scheduler,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                observedLoads.set(transport.requests.size); null
+            }))
+        h.facade.applyConfiguration(config()); h.settle()
+        transport.failing = true; h.facade.reloadFeatureFlags(null); h.settle()
+        val loads = transport.requests.size; val retry = scheduler.entries.single()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            retry.task() // Queue the actual original deadline before the quiet operation.
+            h.facade.capture("quiet-due", null, Date(NOW_MS))
+            assertNull(h.facade.getFeatureFlagSnapshot())
+            assertEquals(loads, transport.requests.size)
+        } finally { release.countDown() }
+        h.settle()
+        assertEquals(loads, observedLoads.get())
+        assertEquals(loads + 1, transport.requests.size)
+        assertEquals(listOf(5_000_000_000L, 10_000_000_000L), scheduler.entries.map { it.delay })
+        assertTrue(h.queued().isEmpty())
+        val next = scheduler.entries.last()
+        h.facade.optOut(); h.settle()
+        assertTrue(next.canceled)
+        val stoppedLoads = transport.requests.size
+        retry.task(); next.task(); h.settle()
+        assertEquals(stoppedLoads, transport.requests.size)
+    }
+
+    @Test fun `quiet listener capture does not recursively announce the same flag load`() {
+        val h = harness(eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(
+            callback = dev.elu.analytics.EluEvent.Filter { null }))
+        var callbacks = 0
+        h.facade.subscribeToFeatureFlags {
+            callbacks++
+            if (callbacks <= 3) h.facade.capture("listener-capture", null, Date(NOW_MS))
+        }
+        h.facade.applyConfiguration(config()); h.settle()
+        assertEquals(1, callbacks); assertEquals(1, h.flagTransport.requests.size)
+        assertNotNull(h.facade.getFeatureFlagSnapshot()); assertTrue(h.queued().isEmpty())
+        h.facade.reloadFeatureFlags(null); h.settle()
+        assertEquals(2, callbacks); assertEquals(2, h.flagTransport.requests.size)
+    }
+
+    @Test fun `later quiet capture does not withdraw an earlier running hook or its accepted person continuation`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val calls = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                calls += it.event
+                if (it.event == "first") { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+                it.set = mutableMapOf("last" to it.event)
+                it.setOnce = mutableMapOf("first" to it.event)
+                it
+            }))
+        h.facade.applyConfiguration(config()); h.settle()
+        val loads = h.flagTransport.requests.size
+        h.facade.capture("first", null, EluCaptureOptions(set = mapOf("caller" to "first")))
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            h.facade.capture("second", null, EluCaptureOptions(set = mapOf("caller" to "second")))
+            assertNull("Pending quiet work still withholds flag reads", h.facade.getFeatureFlagSnapshot())
+        } finally { release.countDown() }
+        h.settle()
+        assertEquals(listOf("first", "second"), calls)
+        assertEquals(listOf("event:first", "mutation:setPersonProperties", "event:second", "mutation:setPersonProperties"), h.queued())
+        assertEquals(mapOf("last" to "second", "first" to "first"), h.owner.snapshot().get().state.flagContext.personProperties)
+        assertEquals(loads, h.flagTransport.requests.size)
+    }
+
+    @Test fun `dropped event and reentrant consent or identity intent cannot append transformed person data`() {
+        for (change in listOf("drop", "reset", "optout")) {
+            lateinit var target: StandaloneFacade
+            val filter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                it.set = mutableMapOf("private" to "rejected")
+                when (change) {
+                    "drop" -> null
+                    "reset" -> { target.reset(); it }
+                    else -> { target.optOut(); it }
+                }
+            })
+            val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY, eventFilter = filter)
+            target = h.facade; target.applyConfiguration(config()); h.settle()
+            target.capture("blocked", null, EluCaptureOptions(set = mapOf("original" to true))); h.settle()
+            assertFalse(change, h.records().any { it is RuntimeQueuedRecord.Event })
+            assertFalse(change, h.queued().contains("mutation:setPersonProperties"))
+            assertTrue(change, h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+            if (change == "drop") assertNotNull(h.facade.getFeatureFlagSnapshot()) // Original quiet intent settled.
+        }
+    }
+
+    @Test fun `dropped exposure leaves original marker available and retry does not expose stale identity`() {
+        var allow = false
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                if (it.event == "\$feature_flag_called" && !allow) null else it
+            }))
+        h.facade.applyConfiguration(config()); h.settle()
+        val before = h.owner.snapshot().get().exposures
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant")); h.settle()
+        assertTrue(h.exposures().isEmpty()); assertEquals(before, h.owner.snapshot().get().exposures)
+        allow = true
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant")); h.settle()
+        assertEquals(1, h.exposures().size)
+        h.facade.getFeatureFlag("variant"); h.settle(); assertEquals(1, h.exposures().size)
+    }
+
+    @Test fun `screen and handled exception share original filter and default callback adds no person mutation`() {
+        val seen = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(listOf("private"), dev.elu.analytics.EluEvent.Filter {
+                seen += it.event; assertFalse(it.properties.containsKey("private")); it
+            }))
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.screen("Home", mapOf("private" to "hidden"))
+        h.facade.captureException(IllegalStateException("example"), mapOf("private" to "hidden")); h.settle()
+        assertEquals(listOf("\$screen", "\$exception"), seen)
+        assertEquals(2, h.records().size); assertTrue(h.records().all { it is RuntimeQueuedRecord.Event })
+    }
+
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
@@ -1661,7 +2102,11 @@ class StandaloneFacadeTest {
         rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
         startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
         callbackDelivery: (Runnable) -> Unit = { it.run() },
+        eventFilter: dev.elu.analytics.internal.runtime.RuntimeEventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(),
+        configurationGate: dev.elu.analytics.internal.config.V2ConfigAuthorityGate? = null,
+        flagClientDecorator: (FacadeFlagClient) -> FacadeFlagClient = { it },
     ): Harness {
+        lateinit var facade: StandaloneFacade
         val owner =
             RuntimeQueueOwner.open(
                 ownershipKey = "facade-${keyCounter.incrementAndGet()}",
@@ -1670,6 +2115,7 @@ class StandaloneFacadeTest {
                 legacyStateLoader = ::initialState,
                 personProfiles = personProfiles,
                 rateLimiting = rateLimiting,
+                eventFilter = eventFilter.boundTo { facade.eventFilterAdmission() },
                 trustedSiteKey = SITE_KEY,
                 captureClock = object : RuntimeCaptureClock {
                     override fun wallNowEpochMillis() = wall()
@@ -1677,6 +2123,7 @@ class StandaloneFacadeTest {
                 },
             ).get(10, TimeUnit.SECONDS)
         owners += owner
+        if (configurationGate != null) owner.bindConfigurationGate(configurationGate).get()
         val transport = RecordingBatchTransport()
         val runtime =
             StandaloneRuntime(
@@ -1685,6 +2132,7 @@ class StandaloneFacadeTest {
                 wallClock = wall,
                 transportFactory = { transport },
                 deviceInEuTimezone = { deviceInEu },
+                configurationGate = configurationGate,
             )
         val flagTransport = suppliedFlagTransport
         val flags =
@@ -1695,12 +2143,14 @@ class StandaloneFacadeTest {
                 flagClock,
                 FlagOpaqueIdSource { "flags_request_${flagTransport.requestIds.incrementAndGet()}" },
                 FlagOpaqueIdSource { "store_epoch_1" },
+                configurationGate = configurationGate,
             )
-        val facade =
+        facade =
             StandaloneFacade(
-                open = { beforeOpen(); StandaloneStack(runtime, owner, flags) },
+                open = { beforeOpen(); StandaloneStack(runtime, owner, flagClientDecorator(flags)) },
                 deliverCallback = callbackDelivery,
                 wallClock = wall,
+                configurationGate = configurationGate,
                 bufferLimit = bufferLimit,
                 onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
                 lane = facadeLane,
@@ -1710,11 +2160,12 @@ class StandaloneFacadeTest {
                 networkApiHost = networkApiHost,
                 onCloseSettled = onCloseSettled,
                 personProfiles = personProfiles ?: dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+                eventFilter = eventFilter,
                 startupObserver = startupObserver,
             )
         facades += facade
         if (autoStart) facade.start()
-        return Harness(owner, facade, transport, flagTransport)
+        return Harness(owner, facade, transport, flagTransport, flags)
     }
 
     private class Harness(
@@ -1722,6 +2173,7 @@ class StandaloneFacadeTest {
         val facade: StandaloneFacade,
         val transport: RecordingBatchTransport,
         val flagTransport: RespondingFlagTransport,
+        val flagClient: AndroidFeatureFlagClient,
     ) {
         fun settle() {
             // A flag reload leaves the lane and comes back as another lane task, so drain until
@@ -1775,9 +2227,11 @@ class StandaloneFacadeTest {
         @Volatile var hold = false
         @Volatile var requestObserved = CountDownLatch(1)
         private val held = mutableListOf<Pair<SdkFuture<ByteArray>, ByteArray>>()
-        @Synchronized fun releaseHeld() {
+        @Synchronized fun releaseHeld(failure: Throwable? = null) {
             val pending = held.toList(); held.clear(); hold = false
-            pending.forEach { (future, bytes) -> future.complete(bytes) }
+            pending.forEach { (future, bytes) ->
+                if (failure == null) future.complete(bytes) else future.completeExceptionally(failure)
+            }
         }
 
         @Synchronized

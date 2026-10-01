@@ -203,6 +203,30 @@ choice cannot survive process death before durable storage has been opened.
 set-once values. Flag result getters return null when no currently valid result
 exists; a result contains its key, enabled state, variant and payload.
 
+## Event property filtering
+
+`EluOptions.propertyDenylist` and `beforeSend` are copied at setup. Exact top-level
+UTF-16 property names are removed from the merged super/event map before the
+callback; nested values and person maps are separate. The callback can deliberately
+reintroduce an ordinary denied field. Protected identity/session/profile fields,
+`$elu_*` and `$epp` are removed and owned metadata is rederived afterward.
+
+The original capture worker reads a bounded input under its existing storage owner,
+then invokes the callback outside the database transaction and SDK locks. Input and
+output JSON are detached, with depth 16, 1,024 members per container, 4,096 nodes and
+a conservative 10 MiB text budget. Invalid Unicode, cycles, non-JSON values, callback
+errors and null output refuse capture. Original native fixed-name/provenance checks
+remain enforced. Authority, identity, source and caller-intent currentness are
+checked again before and after writes. Known rollback and authority renewal reuse
+the original detached filter result; no callback runs inside transaction retry.
+
+Only manual capture can continue with transformed person maps after event acceptance,
+on its original facade operation and with the original identity/consent fences.
+Automatic event output containing person maps is explicitly unsupported and refuses
+the event. Standalone person/identify/alias/group mutation filtering and automatic
+person continuation remain follow-on work; this is not complete browser filtering
+parity. Replay capture is unaffected. Default setup has no filter or denylist.
+
 ## Explicit capture time and associated person properties
 
 The existing capture overloads are unchanged. `capture(event, properties,
@@ -507,7 +531,8 @@ ordinary queue record. Native drops use `RATE_LIMITED`.
 All public capture/screen/manual-exception, lifecycle, exposure, HTTP/performance and
 startup event paths share this budget. Identity/local mutations and replay chunks are
 exempt. Native bounded caller-value detachment happens before the serialized owner;
-there are no customer capture hooks or browser console logging on Android. Additional
+the event filter runs after the debit and before the event transaction. Android
+does not install browser console logging. Additional
 metadata I/O and current JVM/SQLite/artifact/device performance remain validation
 requirements; authored tests are not execution evidence.
 

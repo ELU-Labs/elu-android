@@ -92,6 +92,17 @@ class EluFacadeSafetyTest {
         assertEquals(java.util.Date::class.java, EluFeatureFlagSnapshot::class.java.getMethod("getEvaluatedAt").returnType)
     }
 
+    @Test fun `event filter preserves old setup constructor and exposes a Java SAM`() {
+        val options = EluOptions::class.java.getConstructor().newInstance()
+        assertTrue(options.propertyDenylist.isEmpty()); assertNull(options.beforeSend)
+        val callback = EluEvent.Filter::class.java.declaredMethods.single()
+        assertEquals(EluEvent::class.java, callback.returnType)
+        assertEquals(listOf(EluEvent::class.java), callback.parameterTypes.toList())
+        assertEquals(java.lang.Void.TYPE, EluOptions::class.java.getMethod("setBeforeSend", EluEvent.Filter::class.java).returnType)
+        assertEquals(java.lang.Void.TYPE, EluOptions::class.java.getMethod("setPropertyDenylist", List::class.java).returnType)
+        assertEquals(java.util.Date::class.java, EluEvent::class.java.getMethod("getTimestamp").returnType)
+    }
+
     @Test
     fun `public consent survives pre-setup calls and reset`() {
         try {

@@ -19,10 +19,12 @@ PINNED_FILES = {
     "elu-analytics/src/main/AndroidManifest.xml":
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
+    "elu-analytics/src/main/kotlin/dev/elu/analytics/EluEvent.kt":
+        "81e169d45a0add24c4a01493353a8184594210b9949b5aea8a8959922fa05bf1",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluCaptureOptions.kt":
         "7e7be13379168018540470848f11be2796b80f3294bceb12b6a9cfccead37299",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "5aeffd6393238d5fbbfa1c4362e72fe5d72195b3c91ee77c4cfc4d2d40d9f3a3",
+        "49d170182ebd6f646391f3705acddd3c2eed10082f19670bfd70c3fae8184ef2",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagSnapshot.kt":
         "b6d3cea48f349c60bdd6d4f126d3b805f6d542377b212d19011909cf7c73dd6d",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagSubscription.kt":
@@ -32,7 +34,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "175731874c892cd845a58b3fd53cdc6e8bf5c22eded558191319ce3f86e1ec1d",
+        "6ba1f7cc2ecd96f7f3609641f7fc386d1627f33acf290cb80b7a43c39c5e670e",
     "elu-analytics/build.gradle.kts":
         "467950f0497da666d721126a2518c3d94a33abf454bb04bfeabf6e45078d87d1",
     "elu-analytics/consumer-rules.pro":
@@ -167,7 +169,7 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     public = sources.get(MAIN_KOTLIN / "dev/elu/analytics/Elu.kt", "")
     if ("private val consent = EluConsentHandoff()" not in public or
         "private val sink get() = consent.sink" not in public or
-        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled)") != 1):
+        public.count("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled,\n                    eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(options.propertyDenylist, options.beforeSend))") != 1):
         errors.append("public setup must construct exactly the owned standalone sink with the validated host")
     if not (0 <= public.find("val facade = AndroidStandaloneStack.facade(") < public.find("consent.install(facade, facade::start)")):
         errors.append("public setup must publish the exact owned sink through the consent handoff")
@@ -849,7 +851,7 @@ def verify_network_observer_boundary(root: pathlib.Path, errors: list[str]) -> N
         errors.append("network durable enqueue must roll back final context withdrawal")
     for required in ["val passive = source.expectation != null || source.networkExpectation?.sessionId != null",
                      "if (passive) RuntimeEventSessionUpdate.Preserve",
-                     "passiveCaptureAt = command.occurredAt.takeIf { passive }"]:
+                     "passiveCaptureAt = projected.occurredAt.takeIf { passive }"]:
         if required not in owner:
             errors.append("network durable enqueue must preserve existing session activity")
 
@@ -928,7 +930,7 @@ def verify_person_selection(root: pathlib.Path, errors: list[str]) -> None:
     base = MAIN_KOTLIN / "dev/elu/analytics"
     required = {
         "EluOptions.kt": ["personProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
-        "Elu.kt": ["options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled)", "fun reset(resetDeviceId: Boolean)"],
+        "Elu.kt": ["options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled,\n                    eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(options.propertyDenylist, options.beforeSend))", "fun reset(resetDeviceId: Boolean)"],
         "internal/facade/AndroidStandaloneStack.kt": ["personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/AndroidRuntimeQueue.kt": ["personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY"],
         "internal/runtime/RuntimeQueueOwner.kt": [
@@ -1037,6 +1039,65 @@ def verify_replay_continuity(root: pathlib.Path, errors: list[str]) -> None:
             errors.append("native root observer must not renew authority or poll SQLite: " + method)
     if any(token in tick for token in ("queue.", "authority.", "observeMissingRoot(")):
         errors.append("native root observer must not renew authority or poll SQLite")
+
+
+def verify_event_filter_boundary(root: pathlib.Path, errors: list[str]) -> None:
+    base = MAIN_KOTLIN / "dev/elu/analytics"
+    required = {
+        "internal/runtime/RuntimeEventFilter.kt": (
+            "denied.isNotEmpty() || callback != null", "if (callback == null) input else callback.filter(input)",
+            "outputCopy.objectValue(output.properties)", "keys.removeAll(::protected)",
+            "depth <= 16 && ++nodes <= 4096", "bytes <= 10_485_760L",
+            "owner === originalOwner && command == originalCommand", "input != originalInput || !isCurrent()",
+            "RuntimeCaptureRejection.FILTER_DROPPED", "RuntimeCaptureRejection.FILTER_INVALID",
+            "RuntimeCaptureRejection.FILTER_PERSON_UNSUPPORTED"),
+        "internal/runtime/RuntimeCaptureRateLimiter.kt": ("val filter: RuntimeEventFilterAttempt = RuntimeEventFilterAttempt()",),
+        "internal/runtime/RuntimeQueueOwner.kt": (
+            "val originalIntake = eventFilter.originalAdmission()", "attempt.filter.prepare(this, command, binding,",
+            "eventFilter.apply(command, binding.properties, attempt.filter.person, attempt.filter.allowsPersonChanges)",
+            "before.state.identity == original.identity && before.state.stream.streamId == original.streamId",
+            "attempt.filter.isCurrent()", "val mergedProperties = filtered?.properties ?:"),
+        "internal/facade/AndroidStandaloneStack.kt": ("eventFilter = eventFilter.boundTo { facade.eventFilterAdmission() }",),
+        "internal/facade/StandaloneFacade.kt": (
+            "val intent = eventFilterIntentRevision", "intent == eventFilterIntentRevision && identityIntent == identityIntentRevision",
+            "restrictsEventFilter = hasContextMutation(eventProperties)",
+            "if (restrictsEventFilter) eventFilterIntentRevision = Math.incrementExact(eventFilterIntentRevision)",
+            "attempt.filter.acceptedPerson()", "personProfiles == EluPersonProfilesMode.NEVER",
+            "current.contextRevision == original.identity.contextRevision",
+            "if (flagReloadOutcome != null) drainFlagReloadOutcome()",
+            "else if (flagReloadGeneration == null) publishFlagRead(null, null, restoring = retained)",
+            "outcome.generation == flagGeneration && outcome.restriction == eventFilterIntentRevision",
+            "hasCurrentFlags() && sameFlagSource(outcome.source, flagConfiguration)",
+            "submit { retainFlagReloadOutcome(FlagReloadOutcome(generation, restriction, source, result, error)) }",
+            "if (flagReloadScopeIsCurrent(outcome) && !flagIntentIsCurrent(intent)) return",
+            "restoring = flagPublication, preserveLoadError = false",
+            "publication?.let(::fireFlagListeners)\n        finishFlagReload(publication)",
+            "completed.publication.generation == flagGeneration",
+            "sameFlagSource(completed.publication.source, flagConfiguration)",
+            "current.read?.cacheLeaseToken == original.read?.cacheLeaseToken",
+            "current.snapshot.source == original.snapshot.source && current.snapshot.error == original.snapshot.error",
+            "else if (flagIntentRevision != completed.deferredIntent)",
+            "it.generation == generation && sameFlagSource(it.source, source)",
+            "if (found == null) it.read == null && it.snapshot.source == EluFeatureFlagSnapshot.Source.UNAVAILABLE",
+            "else it.read?.cacheLeaseToken == found.cacheLeaseToken",
+            "if (found == null && !publishUnavailable && restored == null) return null",
+            "original.token === current.token", "original.receiptBody == current.receiptBody",
+            "original.nativeV3 === current.nativeV3 && original.isCurrent() && current.isCurrent()",
+            "if (preserveLoadError && restored != null) restored.snapshot.error else error",
+            "flagRetryRestriction == eventFilterIntentRevision",
+            "flagRetryDue && pendingFlagOperations == 0 && flagRetryScopeIsCurrent()"),
+    }
+    for relative, tokens in required.items():
+        text = load_text(root, base / relative)
+        for token in tokens:
+            if token not in text:
+                errors.append("event filter lost original bounded admission: " + relative + ": " + token)
+    policy = load_text(root, base / "internal/runtime/RuntimeEventFilter.kt")
+    if policy.count("callback.filter(input)") != 1:
+        errors.append("event filter must have exactly one detached customer callback site")
+    owner = load_text(root, OWNER)
+    if owner.count("eventFilter.apply(") != 1:
+        errors.append("event filter must run once through the original capture attempt")
 
 
 def verify_capture_rate_limiter(root: pathlib.Path, errors: list[str]) -> None:
@@ -1669,6 +1730,7 @@ def verify(root: pathlib.Path) -> list[str]:
     verify_annotated_root_boundary(root, errors)
     verify_exception_intake(root, errors)
     verify_capture_rate_limiter(root, errors)
+    verify_event_filter_boundary(root, errors)
     verify_replay_controls(root, errors)
     verify_replay_continuity(root, errors)
     verify_durable_flag_exposures(root, errors)

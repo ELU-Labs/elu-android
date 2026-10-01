@@ -24,6 +24,10 @@ public class EluOptions
     constructor(
         public val configHost: String = "https://elu.dev",
     ) {
+    /** Exact top-level merged event property names removed before beforeSend. Copied at setup. */
+    public var propertyDenylist: List<String> = emptyList()
+    /** Optional synchronous event filter. Copied at setup; null keeps ordinary capture behavior. */
+    public var beforeSend: EluEvent.Filter? = null
     private var declaredRegionReplay = false
     /** Explicit annotated-region replay opt-in; API29+, local annotations and server policy are also required. */
     public val declaredRegionReplayEnabled: Boolean get() = declaredRegionReplay

@@ -157,6 +157,7 @@ internal class StandaloneFacade(
     private val networkConfigHost: String? = null,
     private val networkApiHost: String? = null,
     private val personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
+    private val eventFilter: dev.elu.analytics.internal.runtime.RuntimeEventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(),
     private val flagRetryScheduler: dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler = dev.elu.analytics.internal.config.ScheduledV2ConfigLifecycleScheduler(),
     private val flagRetryJitter: () -> Double = Math::random,
     private val lane: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
@@ -175,14 +176,18 @@ internal class StandaloneFacade(
     private val listeners = mutableListOf<() -> Unit>()
     private val snapshotListeners = mutableListOf<FlagListener>()
     private val reloadCompletions = mutableListOf<ReloadCompletion>()
+    private val completedFlagReloads = mutableListOf<CompletedFlagReload>()
     @Volatile private var flagPublication: FlagPublication? = null
     /** Identifies the loaded flags; a reset abandons the reload started for the previous one. */
     @Volatile private var flagGeneration = 0L
     private var flagReloadGeneration: Long? = null
+    private var flagReloadOutcome: FlagReloadOutcome? = null
     private var flagReloadAttempts = 0
     private var flagRetryAttempt = 0
     private var flagRetryTask: dev.elu.analytics.internal.config.V2ConfigLifecycleTask? = null
     private var flagRetryGeneration = 0L
+    private var flagRetryRestriction: Long? = null
+    private var flagRetryDue = false
     @Volatile private var stack: StandaloneStack? = null
     @Volatile private var configDocument: String? = null
     private var hasConfigDecision = false
@@ -202,6 +207,7 @@ internal class StandaloneFacade(
     private var pendingFlagReloadRequested = false // guarded by projectionLock
     @Volatile private var pendingFlagOperations = 0
     @Volatile private var flagIntentRevision = 0L
+    private var eventFilterIntentRevision = 0L // guarded by projectionLock; quiet captures do not cancel each other
     private var nativeIntentEpoch: Any = Any()
     private var pendingNativeOperations = 0
     private var nativeLifecycleEligible = true
@@ -440,6 +446,21 @@ internal class StandaloneFacade(
         return closeResult
     }
 
+    /** Restriction only: later synchronous identity/consent/context intentions fence the original
+     * hook call even while the facade lane is waiting for its queue result. */
+    internal fun eventFilterAdmission(): () -> Boolean = synchronized(projectionLock) {
+        val intent = eventFilterIntentRevision
+        val identityIntent = identityIntentRevision
+        val consent = consentIntentRevision
+        val original = identity
+        val check: () -> Boolean = { synchronized(projectionLock) {
+            !closeRequested.get() && !closed && !isOptedOut() && pendingIdentityOperations == 0 &&
+                intent == eventFilterIntentRevision && identityIntent == identityIntentRevision &&
+                consent == consentIntentRevision && identity == original && hasCurrentCapture()
+        } }
+        check
+    }
+
     // ---- events --------------------------------------------------------------
 
     override fun capture(
@@ -447,6 +468,10 @@ internal class StandaloneFacade(
         properties: Map<String, Any>?,
         timestamp: Date,
     ) {
+        if (eventFilter.enabled) {
+            capture(event, properties, EluCaptureOptions(timestamp = Date(timestamp.time)))
+            return
+        }
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_CALL) }
         val eventProperties = withoutReservedKeys(properties)
         // The caller's timestamp, so a call held while pending is not re-stamped at release.
@@ -474,17 +499,25 @@ internal class StandaloneFacade(
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
-        val hasPersonIntent = options.set != null || options.setOnce != null
+        val hasPersonIntent = options.set != null || options.setOnce != null || eventFilter.hasCallback
         dispatch(OperationKind.ACTIVITY, affectsFlags = hasPersonIntent || hasContextMutation(eventProperties),
-            reloadFlagsAfter = hasContextMutation(eventProperties)) {
+            reloadFlagsAfter = hasContextMutation(eventProperties),
+            restrictsEventFilter = hasContextMutation(eventProperties)) {
             val consentRevision = synchronized(projectionLock) { consentIntentRevision }
-            val accepted = captureThrough { attempt ->
-                requireStack().runtime.capture(event, eventProperties, occurredAt, attempt)
+            val attempt = RuntimeCaptureRateAttempt(dev.elu.analytics.internal.runtime.RuntimeEventFilterAttempt(
+                dev.elu.analytics.internal.runtime.RuntimeEventPerson(set.takeIf { options.set != null },
+                    setOnce.takeIf { options.setOnce != null }), allowsPersonChanges = true))
+            val accepted = captureThrough(attempt) { originalAttempt ->
+                requireStack().runtime.capture(event, eventProperties, occurredAt, originalAttempt)
             } ?: return@dispatch
+            val transformedPerson = if (eventFilter.enabled) attempt.filter.acceptedPerson()
+                else dev.elu.analytics.internal.runtime.RuntimeEventPerson(set, setOnce)
             if (!hasPersonIntent || personProfiles == EluPersonProfilesMode.NEVER) return@dispatch
+            if (eventFilter.enabled && transformedPerson?.set.isNullOrEmpty() && transformedPerson?.setOnce.isNullOrEmpty()) return@dispatch
             // The original lane cannot execute a later identity operation between these writes.
             // Also fence synchronous reset/consent intentions arriving during event admission.
-            appendPersonProperties(set, reloadFlags = false, occurredAt = mutationOccurredAt, setOnce = setOnce,
+            appendPersonProperties(transformedPerson?.set.orEmpty(), reloadFlags = false, occurredAt = mutationOccurredAt,
+                setOnce = transformedPerson?.setOnce.orEmpty(),
                 captureAdmission = {
                     val original = accepted.snapshot.state
                     val current = identity
@@ -1077,6 +1110,7 @@ internal class StandaloneFacade(
         projected: Boolean = false,
         affectsFlags: Boolean = false,
         reloadFlagsAfter: Boolean = true,
+        restrictsEventFilter: Boolean = affectsFlags,
         onDropped: (() -> Unit)? = null,
         run: () -> Unit,
     ) {
@@ -1087,6 +1121,7 @@ internal class StandaloneFacade(
             pendingFlagOperations += 1
             pendingFlagReloadRequested = pendingFlagReloadRequested || reloadFlagsAfter
             flagIntentRevision = Math.incrementExact(flagIntentRevision)
+            if (restrictsEventFilter) eventFilterIntentRevision = Math.incrementExact(eventFilterIntentRevision)
         }
         val nativeChange = if (affectsFlags) acceptNativeChange(restrictive = false) else null
         val nativeEpoch = synchronized(projectionLock) { nativeIntentEpoch }
@@ -1176,11 +1211,24 @@ internal class StandaloneFacade(
             pendingFlagReloadRequested.also { pendingFlagReloadRequested = false }
         }
         val apply = {
-            invalidateFlagProjection()
-            if (reload) synchronized(projectionLock) {
+            // Quiet work withdraws getters immediately, but is not a new load outcome.
+            // Restore metadata only after rereading the same original cache lease. Keep an
+            // existing retry's original timer/attempt; a due timer waits for this quiet batch.
+            val retained = flagPublication
+            if (reload) {
+                invalidateFlagProjection()
                 // A new quiet intent can arrive after the last old intent settled. Transfer the
                 // requested reload to that batch, or submit it now without awaiting its result.
-                if (pendingFlagOperations != 0) pendingFlagReloadRequested = true else startFlagReload()
+                synchronized(projectionLock) {
+                    if (pendingFlagOperations != 0) pendingFlagReloadRequested = true else startFlagReload()
+                }
+            } else {
+                // The pending intent already withheld old getters. Quiet work must not abandon
+                // the original physical request or replace its eventual load metadata with CACHE.
+                if (flagReloadOutcome != null) drainFlagReloadOutcome()
+                else if (flagReloadGeneration == null) publishFlagRead(null, null, restoring = retained)
+                drainCompletedFlagReloads()
+                runDueFlagRetry()
             }
         }
         // Successful/discarded lane work must settle before the next reload command. Only a
@@ -1291,6 +1339,11 @@ internal class StandaloneFacade(
 
     private fun captureThrough(send: (RuntimeCaptureRateAttempt) -> Future<RuntimeCaptureResult>): RuntimeCaptureResult.Accepted? {
         val attempt = RuntimeCaptureRateAttempt()
+        return captureThrough(attempt, send)
+    }
+
+    private fun captureThrough(attempt: RuntimeCaptureRateAttempt,
+        send: (RuntimeCaptureRateAttempt) -> Future<RuntimeCaptureResult>): RuntimeCaptureResult.Accepted? {
         val first = send(attempt).await()
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_FIRST,
             captureAccepted = first is RuntimeCaptureResult.Accepted, captureRejection = (first as? RuntimeCaptureResult.Rejected)?.reason) }
@@ -1444,8 +1497,13 @@ internal class StandaloneFacade(
     private class FlagListener(val callback: EluFeatureFlagSnapshot.Listener, val cancellation: FeatureFlagCancellation)
     private class ReloadCompletion(val callback: () -> Unit, val identity: IdentityState?, val identityIntent: Long,
         val consentRevision: Long, val configurationBody: String?, val source: V2ConfigAuthorityWitness?)
+    private class CompletedFlagReload(val request: ReloadCompletion, val publication: FlagPublication) {
+        @Volatile var deferredIntent: Long = publication.intent
+    }
     private class FlagPublication(val snapshot: EluFeatureFlagSnapshot, val read: FlagSnapshotReadResult.Found?,
         val generation: Long, val intent: Long, val source: V2ConfigAuthorityWitness?)
+    private class FlagReloadOutcome(val generation: Long, val restriction: Long,
+        val source: V2ConfigAuthorityWitness?, val result: FlagReloadResult?, val error: Throwable?)
     private class FlagEntry(val present: Boolean, val value: Any?, val payload: Any?, val read: FlagReadResult)
 
     private fun reloadCompletionIntentIsCurrent(request: ReloadCompletion): Boolean = synchronized(projectionLock) {
@@ -1500,7 +1558,8 @@ internal class StandaloneFacade(
 
     /** One original client read, not a collection of public keyed reads or exposures. */
     private fun publishFlagRead(remoteToken: FlagCacheLeaseToken?, error: EluFeatureFlagSnapshot.LoadError?,
-        publishUnavailable: Boolean = false): FlagPublication? {
+        publishUnavailable: Boolean = false, restoring: FlagPublication? = null,
+        preserveLoadError: Boolean = true): FlagPublication? {
         val generation = flagGeneration
         val intent = flagIntentRevision
         val source = flagConfiguration
@@ -1513,19 +1572,31 @@ internal class StandaloneFacade(
             (configurationGate != null && source?.isCurrent() != true)) return null
         if (remoteToken != null && found?.cacheLeaseToken != remoteToken) return null
         if (found != null && stack?.flags?.isCacheLeaseCurrent(found.cacheLeaseToken) != true) return null
-        if (found == null && !publishUnavailable) return null
-        val previous = currentFlagPublication()
+        val restored = restoring?.takeIf {
+            it.generation == generation && sameFlagSource(it.source, source) &&
+                if (found == null) it.read == null && it.snapshot.source == EluFeatureFlagSnapshot.Source.UNAVAILABLE
+                else it.read?.cacheLeaseToken == found.cacheLeaseToken
+        }
+        if (found == null && !publishUnavailable && restored == null) return null
+        val previous = restored ?: currentFlagPublication()
         val remote = found != null && (remoteToken == found.cacheLeaseToken ||
             previous?.snapshot?.source == EluFeatureFlagSnapshot.Source.REMOTE &&
                 previous.read?.cacheLeaseToken == found.cacheLeaseToken)
         val origin = if (found == null) EluFeatureFlagSnapshot.Source.UNAVAILABLE
             else if (remote) EluFeatureFlagSnapshot.Source.REMOTE else EluFeatureFlagSnapshot.Source.CACHE
-        val snapshot = EluFeatureFlagSnapshot(found?.response, origin, error)
+        val snapshot = EluFeatureFlagSnapshot(found?.response, origin,
+            if (preserveLoadError && restored != null) restored.snapshot.error else error)
         val publication = FlagPublication(snapshot, found, generation, intent, source)
         flagPublication = publication
         flagsLoaded = true
         return publication.takeIf(::publicationIsCurrent)
     }
+
+    private fun sameFlagSource(original: V2ConfigAuthorityWitness?, current: V2ConfigAuthorityWitness?): Boolean =
+        if (configurationGate == null) original == null && current == null else
+            original != null && current != null && original.token === current.token &&
+                original.body == current.body && original.receiptBody == current.receiptBody &&
+                original.nativeV3 === current.nativeV3 && original.isCurrent() && current.isCurrent()
 
     /**
      * Starts one reload. Concurrent requests join the reload already running, and the lane never
@@ -1547,104 +1618,154 @@ internal class StandaloneFacade(
         val generation = flagReloadGeneration
         if (client == null || generation == null) return
         flagReloadAttempts += 1
-        val intent = flagIntentRevision
+        val restriction = synchronized(projectionLock) { eventFilterIntentRevision }
+        val source = flagConfiguration
         val pending =
             try {
                 client.reload()
             } catch (error: Throwable) {
-                countDrop(classify(error))
-                publishFlagRead(null, EluFeatureFlagSnapshot.LoadError.TRANSPORT, true)?.let(::fireFlagListeners)
-                finishFlagReload()
-                scheduleFlagRetry()
+                retainFlagReloadOutcome(FlagReloadOutcome(generation, restriction, source, null, error))
                 return
             }
         pending.whenComplete { result, error ->
-            submit { if (flagIntentIsCurrent(intent)) settleFlagReload(generation, result, error) }
+            submit { retainFlagReloadOutcome(FlagReloadOutcome(generation, restriction, source, result, error)) }
         }
     }
 
-    private fun settleFlagReload(
-        generation: Long,
-        result: FlagReloadResult?,
-        error: Throwable?,
-    ) {
-        // A reload the identity outlived is discarded: its flags belong to the identity that ended.
-        if (generation != flagReloadGeneration) return
-        if (error != null) {
-            countDrop(classify(error))
-            publishFlagRead(null, EluFeatureFlagSnapshot.LoadError.TRANSPORT, true)?.let(::fireFlagListeners)
-            finishFlagReload()
-            scheduleFlagRetry()
+    private fun flagReloadScopeIsCurrent(outcome: FlagReloadOutcome): Boolean = synchronized(projectionLock) {
+        !closed && !closeRequested.get() && outcome.generation == flagReloadGeneration &&
+            outcome.generation == flagGeneration && outcome.restriction == eventFilterIntentRevision &&
+            hasCurrentFlags() && sameFlagSource(outcome.source, flagConfiguration)
+    }
+
+    private fun retainFlagReloadOutcome(outcome: FlagReloadOutcome) {
+        if (!flagReloadScopeIsCurrent(outcome)) return
+        flagReloadOutcome = outcome
+        drainFlagReloadOutcome()
+    }
+
+    private fun drainFlagReloadOutcome() {
+        val outcome = flagReloadOutcome ?: return
+        if (!flagReloadScopeIsCurrent(outcome)) { finishFlagReload(); return }
+        val intent = flagIntentRevision
+        if (!flagIntentIsCurrent(intent)) return // The last original quiet operation drains it.
+        val result = outcome.result
+        if (result == FlagReloadResult.Stale && outcome.error == null) {
+            flagReloadOutcome = null
+            if (flagReloadAttempts < MAX_FLAG_RELOAD_ATTEMPTS) beginFlagReloadAttempt()
+            else finishFlagReload()
             return
         }
-        if (closed || !hasCurrentFlags()) {
-            finishFlagReload()
-            return
-        }
-        when (result) {
-            is FlagReloadResult.Updated -> {
-                val token = result.cacheLeaseToken
-                if (token != null) publishFlagRead(token, null)?.let(::fireFlagListeners)
-                finishFlagReload()
+        val retry = outcome.error != null || result is FlagReloadResult.Failed
+        val loadError = if (outcome.error != null) EluFeatureFlagSnapshot.LoadError.TRANSPORT else
+            when ((result as? FlagReloadResult.Failed)?.reason) {
+                "transport-failure" -> EluFeatureFlagSnapshot.LoadError.TRANSPORT
+                "protocol-failure" -> EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE
+                else -> null
             }
-            // The reload was superseded by a context or configuration change; the next attempt
-            // evaluates the current witness.
-            FlagReloadResult.Stale ->
-                if (flagReloadAttempts < MAX_FLAG_RELOAD_ATTEMPTS) {
-                    beginFlagReloadAttempt()
-                } else {
-                    finishFlagReload()
-                }
-            else -> {
-                val loadError = when ((result as? FlagReloadResult.Failed)?.reason) {
-                    "transport-failure" -> EluFeatureFlagSnapshot.LoadError.TRANSPORT
-                    "protocol-failure" -> EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE
-                    else -> null
-                }
-                if (result is FlagReloadResult.Failed) {
-                    publishFlagRead(null, loadError, publishUnavailable = true)?.let(::fireFlagListeners)
-                }
-                finishFlagReload()
-                if (result is FlagReloadResult.Failed) scheduleFlagRetry()
-            }
-        }
+        val token = (result as? FlagReloadResult.Updated)?.cacheLeaseToken
+        val publication = if (retry || token != null) publishFlagRead(token, loadError, publishUnavailable = retry,
+            restoring = flagPublication, preserveLoadError = false) else null
+        // A new quiet call may have arrived during the original client read. Keep the actual
+        // outcome for its last settlement; never consume a completion or error as a cache reread.
+        if (flagReloadScopeIsCurrent(outcome) && !flagIntentIsCurrent(intent)) return
+        if (!flagReloadScopeIsCurrent(outcome)) { finishFlagReload(); return }
+        outcome.error?.let { countDrop(classify(it)) }
+        // Preserve listener-before-completion order. A listener's quiet capture may withdraw
+        // this publication, but cannot erase a completion bound to the same original cache.
+        publication?.let(::fireFlagListeners)
+        finishFlagReload(publication)
+        if (retry) scheduleFlagRetry()
     }
 
     private fun cancelFlagRetry() {
         flagRetryGeneration = Math.incrementExact(flagRetryGeneration)
         flagRetryTask?.cancel()
         flagRetryTask = null
+        flagRetryRestriction = null
+        flagRetryDue = false
+    }
+
+    private fun flagRetryScopeIsCurrent(): Boolean = synchronized(projectionLock) {
+        !closed && hasCurrentFlags() && flagRetryRestriction != null &&
+            flagRetryRestriction == eventFilterIntentRevision
+    }
+
+    private fun runDueFlagRetry() = synchronized(projectionLock) {
+        if (flagRetryDue && pendingFlagOperations == 0 && flagRetryScopeIsCurrent()) {
+            flagRetryDue = false
+            startFlagReload(resetRetry = false)
+        }
     }
 
     private fun scheduleFlagRetry() {
         if (closed || !hasCurrentFlags() || flagRetryAttempt >= 6) return
         cancelFlagRetry()
         val generation = flagRetryGeneration
-        val intent = flagIntentRevision
-        val evaluationGeneration = flagGeneration
+        flagRetryRestriction = synchronized(projectionLock) { eventFilterIntentRevision }
         val floorMillis = 5_000L * (1L shl flagRetryAttempt++)
         val jitter = runCatching { flagRetryJitter() }.getOrDefault(0.0).takeIf { it.isFinite() && it in 0.0..1.0 } ?: 0.0
         val delayMillis = minOf(300_000L, floorMillis + (floorMillis * .2 * jitter).toLong())
         try {
             flagRetryTask = flagRetryScheduler.schedule(delayMillis * 1_000_000L) {
                 submit {
-                    if (generation == flagRetryGeneration && evaluationGeneration == flagGeneration && flagIntentIsCurrent(intent) && hasCurrentFlags()) {
-                        flagRetryTask = null
-                        startFlagReload(resetRetry = false)
+                    if (generation == flagRetryGeneration) {
+                        if (!flagRetryScopeIsCurrent()) cancelFlagRetry()
+                        else {
+                            flagRetryTask = null
+                            flagRetryDue = true
+                            runDueFlagRetry()
+                        }
                     }
                 }
             }
-        } catch (_: Exception) { flagRetryTask = null }
+        } catch (_: Exception) { cancelFlagRetry() }
     }
 
-    private fun finishFlagReload() {
+    private fun finishFlagReload(publication: FlagPublication? = currentFlagPublication()) {
         flagReloadGeneration = null
-        val publication = currentFlagPublication()
+        flagReloadOutcome = null
         val completions = reloadCompletions.toList()
         reloadCompletions.clear()
         if (publication != null) completions.filter(::reloadCompletionIsCurrent).forEach { request ->
-            deliverFlagCallback({ if (reloadCompletionIsCurrent(request)) request.callback() }, publication)
+            deliverCompletedFlagReload(CompletedFlagReload(request, publication))
         }
+    }
+
+    private fun completedFlagReloadIsCurrent(completed: CompletedFlagReload): Boolean =
+        reloadCompletionIsCurrent(completed.request) && completed.publication.generation == flagGeneration &&
+            sameFlagSource(completed.publication.source, flagConfiguration)
+
+    private fun deliverCompletedFlagReload(completed: CompletedFlagReload) {
+        deliver {
+            if (!completedFlagReloadIsCurrent(completed)) return@deliver
+            val current = currentFlagPublication()
+            val original = completed.publication
+            val admitted = current != null && current.read?.cacheLeaseToken == original.read?.cacheLeaseToken &&
+                current.snapshot.source == original.snapshot.source && current.snapshot.error == original.snapshot.error &&
+                publicationIsCurrent(current) && completedFlagReloadIsCurrent(completed)
+            if (admitted) completed.request.callback()
+            else if (flagIntentRevision != completed.deferredIntent) {
+                // Transfer this same callback back to the original lane. The last quiet
+                // settlement drains it once, including a full reread after the counter reached
+                // zero. At most one transfer per accepted intent; an unavailable read never spins.
+                val intent = flagIntentRevision
+                submit {
+                    if (completedFlagReloadIsCurrent(completed)) {
+                        completed.deferredIntent = intent
+                        completedFlagReloads += completed
+                        drainCompletedFlagReloads()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun drainCompletedFlagReloads() {
+        if (pendingFlagOperations != 0) return
+        val completed = completedFlagReloads.toList()
+        completedFlagReloads.clear()
+        completed.forEach(::deliverCompletedFlagReload)
     }
 
     private fun clearFlags() = invalidateFlagProjection()
@@ -1656,6 +1777,8 @@ internal class StandaloneFacade(
         flagsLoaded = false
         flagGeneration = Math.incrementExact(flagGeneration)
         flagReloadGeneration = null
+        flagReloadOutcome = null
+        completedFlagReloads.clear()
         flagReloadAttempts = 0
         // A same-identity command deferred by a context intent still owns its completion.
         reloadCompletions.removeAll { !reloadCompletionIsCurrent(it) }
@@ -1800,7 +1923,8 @@ internal class StandaloneFacade(
         fun dropReasonFor(reason: RuntimeCaptureRejection): EluFacadeDropReason =
             when (reason) {
                 RuntimeCaptureRejection.OPTED_OUT -> EluFacadeDropReason.OPTED_OUT
-                RuntimeCaptureRejection.EVENT_INVALID -> EluFacadeDropReason.INVALID_INPUT
+                RuntimeCaptureRejection.EVENT_INVALID, RuntimeCaptureRejection.FILTER_DROPPED,
+                RuntimeCaptureRejection.FILTER_INVALID, RuntimeCaptureRejection.FILTER_PERSON_UNSUPPORTED -> EluFacadeDropReason.INVALID_INPUT
                 RuntimeCaptureRejection.QUEUE_LIMIT -> EluFacadeDropReason.STORAGE
                 RuntimeCaptureRejection.RATE_LIMITED -> EluFacadeDropReason.RATE_LIMITED
                 else -> EluFacadeDropReason.UNAUTHORIZED

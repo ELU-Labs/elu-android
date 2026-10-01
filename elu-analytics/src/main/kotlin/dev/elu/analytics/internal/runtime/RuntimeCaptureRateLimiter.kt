@@ -63,7 +63,9 @@ internal class RuntimeCaptureRateLimiter(val options: EluRateLimitingOptions) {
 }
 
 /** One original call may renew authority, but never acquire another debit or a caller bypass. */
-internal class RuntimeCaptureRateAttempt {
+internal class RuntimeCaptureRateAttempt(
+    val filter: RuntimeEventFilterAttempt = RuntimeEventFilterAttempt(),
+) {
     private var owner: Any? = null
     private var command: RuntimeCaptureCommand? = null
 

@@ -46,6 +46,55 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
         foreign.unlink(); self.assertEqual("", errors())
 
 
+    def test_event_filter_keeps_original_attempt_source_binding_and_output_bounds(self) -> None:
+        def errors():
+            found = []; BOUNDARY.verify_event_filter_boundary(self.root, found); return "\n".join(found)
+        self.assertEqual("", errors())
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        for relative, token in (
+            ("internal/runtime/RuntimeEventFilter.kt", "keys.removeAll(::protected)"),
+            ("internal/runtime/RuntimeEventFilter.kt", "depth <= 16 && ++nodes <= 4096"),
+            ("internal/runtime/RuntimeEventFilter.kt", "input != originalInput || !isCurrent()"),
+            ("internal/runtime/RuntimeEventFilter.kt", "RuntimeCaptureRejection.FILTER_PERSON_UNSUPPORTED"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "before.state.identity == original.identity && before.state.stream.streamId == original.streamId"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "val originalIntake = eventFilter.originalAdmission()"),
+            ("internal/facade/AndroidStandaloneStack.kt", "eventFilter = eventFilter.boundTo { facade.eventFilterAdmission() }")):
+            path = base / relative; original = path.read_text(); self.assertIn(token, original)
+            try:
+                path.write_text(original.replace(token, "removedBoundary"))
+                self.assertIn("event filter lost", errors())
+            finally: path.write_text(original)
+        self.assertEqual("", errors())
+
+    def test_event_filter_quiet_intent_and_single_callback_cannot_be_replaced(self) -> None:
+        def errors():
+            found = []; BOUNDARY.verify_event_filter_boundary(self.root, found); return "\n".join(found)
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        for relative, old, new in (
+            ("internal/facade/StandaloneFacade.kt", "val intent = eventFilterIntentRevision", "val intent = flagIntentRevision"),
+            ("internal/facade/StandaloneFacade.kt", "restrictsEventFilter = hasContextMutation(eventProperties)", "restrictsEventFilter = true"),
+            ("internal/runtime/RuntimeEventFilter.kt", "callback.filter(input)", "callback.filter(input).also { callback.filter(input) }"),
+            ("internal/facade/StandaloneFacade.kt", "if (preserveLoadError && restored != null) restored.snapshot.error else error", "error"),
+            ("internal/facade/StandaloneFacade.kt", "sameFlagSource(it.source, source)", "it.source === source"),
+            ("internal/facade/StandaloneFacade.kt", "it.generation == generation && sameFlagSource(it.source, source)", "sameFlagSource(it.source, source)"),
+            ("internal/facade/StandaloneFacade.kt", "if (found == null) it.read == null && it.snapshot.source == EluFeatureFlagSnapshot.Source.UNAVAILABLE", "if (found == null) true"),
+            ("internal/facade/StandaloneFacade.kt", "if (found == null && !publishUnavailable && restored == null) return null", "if (found == null && !publishUnavailable) return null"),
+            ("internal/facade/StandaloneFacade.kt", "flagRetryDue && pendingFlagOperations == 0 && flagRetryScopeIsCurrent()", "flagRetryDue"),
+            ("internal/facade/StandaloneFacade.kt", "if (flagReloadOutcome != null) drainFlagReloadOutcome()", "invalidateFlagProjection()"),
+            ("internal/facade/StandaloneFacade.kt", "outcome.restriction == eventFilterIntentRevision", "true"),
+            ("internal/facade/StandaloneFacade.kt", "sameFlagSource(outcome.source, flagConfiguration)", "true"),
+            ("internal/facade/StandaloneFacade.kt", "if (flagReloadScopeIsCurrent(outcome) && !flagIntentIsCurrent(intent)) return", "// outcome discarded during quiet read"),
+            ("internal/facade/StandaloneFacade.kt", "restoring = flagPublication, preserveLoadError = false", "restoring = flagPublication"),
+            ("internal/facade/StandaloneFacade.kt", "completed.publication.generation == flagGeneration", "true"),
+            ("internal/facade/StandaloneFacade.kt", "publication?.let(::fireFlagListeners)\n        finishFlagReload(publication)", "finishFlagReload(publication)\n        publication?.let(::fireFlagListeners)"),
+            ("internal/facade/StandaloneFacade.kt", "current.read?.cacheLeaseToken == original.read?.cacheLeaseToken", "true"),
+            ("internal/facade/StandaloneFacade.kt", "else if (flagIntentRevision != completed.deferredIntent)", "else")):
+            path = base / relative; original = path.read_text(); self.assertIn(old, original)
+            try:
+                path.write_text(original.replace(old, new)); self.assertTrue(errors())
+            finally: path.write_text(original)
+        self.assertEqual("", errors())
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="elu-flag-boundary-")
         self.root = pathlib.Path(self.temporary.name)
@@ -1402,7 +1451,7 @@ internal class WiredTransport : FlagTransport {
     def test_public_setup_cannot_bypass_owned_sink_or_validated_host(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/Elu.kt"
         original = path.read_text()
-        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled)", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
+        for old, new in [("AndroidStandaloneStack.facade(appContext, key, configHost, options.performance, options.diagnostics, options.apiHost, options.personProfiles, options.persistence, options.rateLimiting, options.declaredRegionReplayEnabled,\n                    eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(options.propertyDenylist, options.beforeSend))", "AndroidStandaloneStack.facade(appContext, key, anotherHost)"),
                          ("consent.install(facade, facade::start)", "facade.start()")]:
             with self.subTest(old=old):
                 self.assertIn(old, original); path.write_text(original.replace(old, new))

@@ -27,6 +27,7 @@ import dev.elu.analytics.internal.config.V1UnsupportedConfigSchemaException
 import dev.elu.analytics.internal.core.CoreIdentifierGenerator
 import dev.elu.analytics.internal.core.CoreStateCodec
 import dev.elu.analytics.internal.core.FlagContextState
+import dev.elu.analytics.internal.core.IdentityState
 import dev.elu.analytics.internal.core.JsonValues
 import dev.elu.analytics.internal.core.PersistedCoreState
 import dev.elu.analytics.internal.core.SessionLifecycle
@@ -152,6 +153,7 @@ internal class RuntimeQueueOwner private constructor(
     private val explicitConsentStore: RuntimeExplicitConsentStore?,
     rateLimiting: dev.elu.analytics.EluRateLimitingOptions?,
     private val exceptionSpoolFactory: (() -> NativeExceptionSpool)?,
+    private val eventFilter: RuntimeEventFilter,
 ) {
     @Volatile private var exceptionIntake: NativeExceptionIntake? = null
     private var exceptionSpool: NativeExceptionSpool? = null
@@ -3093,6 +3095,8 @@ internal class RuntimeQueueOwner private constructor(
         return null
     }
 
+    private data class CaptureFilterInput(val identity: IdentityState, val streamId: String, val properties: Map<String, Any?>)
+
     private fun captureOnWorker(command: RuntimeCaptureCommand,
         backgroundBoundary: dev.elu.analytics.internal.config.V2ConfigApplicationBackgrounded? = null,
         attempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
@@ -3134,6 +3138,41 @@ internal class RuntimeQueueOwner private constructor(
                 return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
             }
 
+        // Read the final merged customer input under the original storage owner, then leave
+        // SQLite before invoking application code. No session, sequence or exposure is written.
+        var filterBinding: CaptureFilterInput? = null
+        val filtered = if (eventFilter.enabled) {
+            var refused: RuntimeCaptureRejection? = null
+            filterBinding = try { database().transaction { tx ->
+                val before = requireCurrent(tx)
+                refused = captureAuthorityRejection(before, backgroundBoundary) ?:
+                    captureSourceRejection(tx, before, source, checkExposureLedger = true)
+                if (refused != null) null else CaptureFilterInput(before.state.identity, before.state.stream.streamId,
+                    LinkedHashMap(if (source.startupMeasurement == null && source.exceptionImport == null)
+                        before.state.identity.superProperties else emptyMap()).apply { putAll(captureProperties) })
+            } } catch (_: IllegalArgumentException) {
+                return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
+            }
+            refused?.let { return RuntimeCaptureResult.Rejected(it, requireLoaded().publicSnapshot) }
+            val binding = checkNotNull(filterBinding)
+            val originalSource = captureConfiguration
+            val originalIntake = eventFilter.originalAdmission()
+            val result = attempt.filter.prepare(this, command, binding, {
+                synchronized(lifecycleLock) { acceptingTasks && poison == null } && originalIntake() &&
+                    (configurationGate == null || (captureConfiguration === originalSource &&
+                        if (backgroundBoundary == null) originalSource?.isCurrent() == true
+                        else backgroundBoundary.authorizes(originalSource)))
+            }) { eventFilter.apply(command, binding.properties, attempt.filter.person, attempt.filter.allowsPersonChanges) }
+            if (result is RuntimeEventFilterResult.Refused)
+                return RuntimeCaptureResult.Rejected(result.reason, requireLoaded().publicSnapshot)
+            result as RuntimeEventFilterResult.Prepared
+        } else null
+        val projected = filtered?.let { command.copy(name = it.name, occurredAt = it.occurredAt, properties = it.properties) } ?: command
+        // Fixed automatic names/provenance still have their original validator. Its properties
+        // compare against the original native observation, never fabricated hook metadata.
+        if (!isValidCaptureCommand(projected.copy(properties = command.properties)))
+            return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.FILTER_INVALID, requireLoaded().publicSnapshot)
+
         var provenNotCommittedRetryUsed = false
         while (true) {
             var prepared: PreparedAppend? = null
@@ -3159,20 +3198,23 @@ internal class RuntimeQueueOwner private constructor(
                             ledger.adding(exposure.digest) ?: return@transaction CaptureCommit(
                                 RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.QUEUE_LIMIT, before.publicSnapshot), null)
                         }
-                        val session = planCaptureSession(before.state, command.occurredAt, authority)
+                        val session = planCaptureSession(before.state, projected.occurredAt, authority)
                         fun originalContextMatches(): Boolean = captureSourceRejection(transaction, before, source,
-                            plannedSession = session) == null
+                            plannedSession = session) == null && (filterBinding?.let { original ->
+                                before.state.identity == original.identity && before.state.stream.streamId == original.streamId &&
+                                    attempt.filter.isCurrent()
+                            } ?: true)
                         if (!originalContextMatches()) return@transaction CaptureCommit(
                             RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
-                        val mergedProperties =
+                        val mergedProperties = filtered?.properties ?:
                             LinkedHashMap(if (source.startupMeasurement == null && source.exceptionImport == null) before.state.identity.superProperties else emptyMap()).apply {
                                 putAll(captureProperties)
                             }
                         val draft =
                             RuntimeRecordDraft.Event(
                                 kind = command.kind,
-                                name = command.name,
-                                occurredAt = command.occurredAt,
+                                name = projected.name,
+                                occurredAt = projected.occurredAt,
                                 expectedSessionId = session.id,
                                 properties = mergedProperties,
                                 versions = command.versions,
@@ -3188,7 +3230,7 @@ internal class RuntimeQueueOwner private constructor(
                                     if (passive) RuntimeEventSessionUpdate.Preserve
                                     else RuntimeEventSessionUpdate.Replace(before.state.identity.session?.id, session),
                                     listOf(draft),
-                                    passiveCaptureAt = command.occurredAt.takeIf { passive },
+                                    passiveCaptureAt = projected.occurredAt.takeIf { passive },
                                 ),
                                 ReplayQueueStore.state(transaction),
                             )
@@ -4915,6 +4957,7 @@ internal class RuntimeQueueOwner private constructor(
             explicitConsentStore: RuntimeExplicitConsentStore? = null,
             rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
             exceptionSpoolFactory: (() -> NativeExceptionSpool)? = null,
+            eventFilter: RuntimeEventFilter = RuntimeEventFilter(),
         ): Future<RuntimeQueueOwner> {
             require(rateLimiting == null || personProfiles != null) { "Capture limiting requires a selected production profile mode" }
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
@@ -4963,6 +5006,7 @@ internal class RuntimeQueueOwner private constructor(
                                 explicitConsentStore,
                                 rateLimiting,
                                 exceptionSpoolFactory,
+                                eventFilter,
                             )
                         owner.initialize()
                         owner.reconcileExplicitConsentOnWorker()

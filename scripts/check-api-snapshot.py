@@ -24,6 +24,7 @@ SNAPSHOT = API_DIR / "public-api.txt"
 CLASS_INVENTORY = API_DIR / "jvm-classes.txt"
 PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions",
                   "dev.elu.analytics.EluFeatureFlagOptions", "dev.elu.analytics.EluCaptureOptions",
+                  "dev.elu.analytics.EluEvent", "dev.elu.analytics.EluEvent$Filter",
                   "dev.elu.analytics.EluFeatureFlagSnapshot", "dev.elu.analytics.EluFeatureFlagSubscription",
                   "dev.elu.analytics.EluFeatureFlagSnapshot$Source", "dev.elu.analytics.EluFeatureFlagSnapshot$LoadError",
                   "dev.elu.analytics.EluFeatureFlagSnapshot$Listener", "dev.elu.analytics.EluFeatureFlagSnapshot$Entry",

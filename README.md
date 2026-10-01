@@ -429,8 +429,44 @@ it does not trigger a flag reload. `NEVER` person-profile mode keeps the event
 without the associated person update. These are separate durable writes: a
 storage failure or process death between them can leave only the event. Event
 timestamps retain the existing validation and ordering rules; a future event
-time can make the following call-time person update inadmissible. Capture hooks
-are not currently available.
+time can make the following call-time person update inadmissible.
+
+### Filtering captured events
+
+Configure the filter before `setup`; setup copies the denylist and callback once:
+
+```kotlin
+val options = EluOptions().apply {
+    propertyDenylist = listOf("email", "phone")
+    beforeSend = EluEvent.Filter { event ->
+        if (event.event == "internal_debug") null
+        else event.apply { properties.remove("access_token") }
+    }
+}
+Elu.setup(applicationContext, "your-site-key", options)
+```
+
+`propertyDenylist` removes exact top-level names after event properties and super
+properties are merged. `beforeSend` receives a detached `EluEvent` with mutable
+properties, event name, `Date`, and optional `set`/`setOnce`. It may return a
+modified event or null to drop it. The callback runs synchronously on the capture
+worker, outside storage transactions and SDK locks. Keep it short; do not perform
+UI/network work or wait for other SDK operations. Throws, invalid JSON, malformed
+Unicode or oversized output discard the event. A transaction retry reuses the
+validated result without calling the filter again.
+
+Filtering covers manual and automatic event captures, including screens, flag
+exposures, exceptions and enabled performance/network events. SDK identity/session
+metadata is reconstructed after filtering and cannot be supplied by the callback.
+Original consent and configuration checks still apply. A dropped exposure does
+not consume its durable report marker. Rate limiting occurs before filtering.
+
+For manual `capture`, accepted transformed `set`/`setOnce` values continue through
+the same ordered person update. Automatic events currently refuse callback output
+containing person fields. The denylist applies to event properties, not nested
+fields, replay pixels, person/group properties or identity mutations. Filtering of
+standalone identify/person/group operations and automatic person updates is not
+implemented in this slice.
 
 Activity-based apps get `$screen` events automatically on every foreground
 Activity start. **Compose (single-Activity) apps must call `Elu.screen()`
@@ -736,9 +772,9 @@ clock creates debt rather than free capacity. Optional storage I/O failures may 
 the held process bucket; the next successful durable read takes precedence. Unknown
 transaction outcomes stop the original owner. This adds a small separate SQLite
 metadata transaction per attempted event; current overhead and exact-artifact
-qualification remain pending. Unlike the browser, Android has no customer capture
-hooks or console rate-limit logger; bounded caller-value conversion precedes the
-serialized capture admission.
+qualification remain pending. Android does not install a console rate-limit logger. Bounded caller-value
+conversion precedes serialized capture admission; the event filter runs after
+rate admission and before the event transaction.
 
 ### Local replay controls
 

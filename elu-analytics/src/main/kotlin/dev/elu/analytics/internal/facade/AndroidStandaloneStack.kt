@@ -49,7 +49,8 @@ internal object AndroidStandaloneStack {
         rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions(),
         declaredRegionReplayEnabled: Boolean = false,
         // Original factory test seam: raw transport only, never a parsed grant or replacement source.
-        configurationTransport: dev.elu.analytics.internal.config.V2ConfigTransport? = null): StandaloneFacade {
+        configurationTransport: dev.elu.analytics.internal.config.V2ConfigTransport? = null,
+        eventFilter: dev.elu.analytics.internal.runtime.RuntimeEventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter()): StandaloneFacade {
         val endpointPolicy = LocalEndpointPolicy.fromApiHost(apiHost)
         // Capture fresh identity chronology before Elu.setup can publish this facade.
         val freshIdentityStartedAt = SystemCoreEpochClock.nowEpochMillis()
@@ -108,6 +109,7 @@ internal object AndroidStandaloneStack {
                     personProfiles = personProfiles,
                     persistence = persistence,
                     rateLimiting = rateLimiting,
+                    eventFilter = eventFilter.boundTo { facade.eventFilterAdmission() },
                     assertStartupCurrent = { check(!closing.get()) { "Standalone stack is closed" } }).get()
                 var native: NativeReplayComposition? = null
                 try {
@@ -164,6 +166,7 @@ internal object AndroidStandaloneStack {
             networkConfigHost = java.net.URI(configHost).host,
             networkApiHost = endpointPolicy.apiHost,
             personProfiles = personProfiles,
+            eventFilter = eventFilter,
             onOpened = {
                 if (performanceOptions.enabled && !closing.get()) {
                     val monitor = dev.elu.analytics.internal.performance.AndroidPerformanceMonitor(

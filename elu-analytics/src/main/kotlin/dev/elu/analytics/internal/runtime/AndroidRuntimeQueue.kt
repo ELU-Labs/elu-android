@@ -44,6 +44,7 @@ internal object AndroidRuntimeQueue {
         personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
         persistence: EluPersistenceMode = EluPersistenceMode.PERSISTENT,
         rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions(),
+        eventFilter: RuntimeEventFilter = RuntimeEventFilter(),
     ): Future<RuntimeQueueOwner> {
         val applicationContext = context.applicationContext ?: context
         val databaseFile = databaseFileFor(applicationContext, constructorSiteKey, endpointPolicy).canonicalFile
@@ -75,6 +76,7 @@ internal object AndroidRuntimeQueue {
             endpointPolicy = endpointPolicy,
             personProfiles = personProfiles,
             rateLimiting = rateLimiting,
+            eventFilter = eventFilter,
             // Only a factory is retained. No directory/writer/handler exists until the future
             // closed exception policy consumer explicitly prepares the original queue intake.
             exceptionSpoolFactory = if (persistence == EluPersistenceMode.PERSISTENT)
