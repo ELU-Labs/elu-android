@@ -1,13 +1,33 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluFeatureFlagSnapshot
+import dev.elu.analytics.EluFeatureFlagSubscription
+import dev.elu.analytics.FeatureFlagCancellation
+import dev.elu.analytics.EluCaptureOptions
+import dev.elu.analytics.EluPersonProfilesMode
+
+import dev.elu.analytics.EluFeatureFlagResult
+import dev.elu.analytics.EluFeatureFlagOptions
+import dev.elu.analytics.internal.runtime.NativeStartTrace
+import dev.elu.analytics.internal.runtime.NativeStartPhase
+
+import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
+import dev.elu.analytics.internal.config.V2ConfigAuthorityWitness
 import dev.elu.analytics.internal.config.V1FlagAuthorizationResolution
+import dev.elu.analytics.internal.core.JsonValues
 import dev.elu.analytics.internal.core.IdentityState
+import dev.elu.analytics.internal.flags.FlagCacheLeaseToken
 import dev.elu.analytics.internal.flags.FlagJsonValue
+import dev.elu.analytics.internal.flags.FlagSnapshotReadResult
+import dev.elu.analytics.internal.flags.forKey
+import dev.elu.analytics.internal.flags.validFlagKey
 import dev.elu.analytics.internal.flags.FlagReadResult
 import dev.elu.analytics.internal.flags.FlagReloadResult
+import dev.elu.analytics.internal.runtime.RuntimeAppendRejection
 import dev.elu.analytics.internal.runtime.RuntimeAppendResult
 import dev.elu.analytics.internal.runtime.RuntimeCaptureAuthorityTerminalReason
 import dev.elu.analytics.internal.runtime.RuntimeCaptureAuthorityUpdateResult
+import dev.elu.analytics.internal.runtime.RuntimeCaptureRateAttempt
 import dev.elu.analytics.internal.runtime.RuntimeCaptureRejection
 import dev.elu.analytics.internal.runtime.RuntimeCaptureResult
 import dev.elu.analytics.internal.runtime.RuntimeLocalStateChange
@@ -17,9 +37,15 @@ import dev.elu.analytics.internal.runtime.RuntimeRecordDraft
 import dev.elu.analytics.internal.runtime.RuntimeVersions
 import dev.elu.analytics.internal.runtime.RuntimeWallTimestamps
 import dev.elu.analytics.internal.runtime.StandaloneRuntime
+import dev.elu.analytics.internal.runtime.RuntimeStartupObserver
+import dev.elu.analytics.internal.runtime.RuntimeStartupObservation
+import dev.elu.analytics.internal.runtime.RuntimeStartupPhase
+import dev.elu.analytics.internal.runtime.RuntimeStartupLane
+import dev.elu.analytics.internal.runtime.RuntimeStartupDrop
+import dev.elu.analytics.internal.runtime.observeStartup
 import java.util.Date
 import java.util.EnumMap
-import java.util.concurrent.CompletableFuture
+import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -29,15 +55,19 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The feature-flag operations the facade needs. The owned flag client conforms to it; the facade
- * never names that client, so the client keeps its release boundary of having no production
- * construction and no concrete transport.
+ * depends on injected operations while the internal standalone stack owns transport and lifetime.
  */
 internal interface FacadeFlagClient : AutoCloseable {
-    fun applyConfiguration(configBody: String?): CompletableFuture<V1FlagAuthorizationResolution>
+    fun applyConfiguration(configBody: String?): SdkFuture<V1FlagAuthorizationResolution>
 
-    fun reload(): CompletableFuture<FlagReloadResult>
+    fun reload(): SdkFuture<FlagReloadResult>
 
-    fun read(key: String): CompletableFuture<FlagReadResult>
+    fun read(key: String): SdkFuture<FlagReadResult>
+
+    fun readSnapshot(): SdkFuture<FlagSnapshotReadResult>
+
+    /** Checks the original client-owned wall/monotonic cache lease without extending it. */
+    fun isCacheLeaseCurrent(token: FlagCacheLeaseToken): Boolean
 }
 
 /** The owned runtime pieces one facade drives. All three share the owner's single storage lane. */
@@ -56,6 +86,7 @@ internal enum class EluFacadeDropReason {
     CLOSED,
     INVALID_INPUT,
     RESERVED_PROPERTY,
+    RATE_LIMITED,
     STORAGE,
 }
 
@@ -99,14 +130,13 @@ internal data class EluFacadeDiagnostics(
  * - `enabled`: executable capture authority exists and the identity is not opted out. Calls map
  *   onto the runtime through one serialized lane, in call order.
  * - `disabled`: the region policy blocks the device, the identity is opted out, or there is no
- *   executable capture authority. Every activity call is accepted and discarded with that reason —
- *   nothing is stored, nothing is sent, no flag request leaves. `reset` still applies, because it
- *   is how a device leaves an opted-out identity.
+ *   executable capture authority. Activity calls are discarded with that reason. Feature flags
+ *   use their independent current configuration/privacy authorization. `reset` still applies,
+ *   while preserving the visitor's consent choice.
  *
  * Identity continuity with the embedded runtime is deliberately NOT implemented here. With this
  * runtime selected, a fresh install starts a fresh ELU identity: nothing in this file reads the
- * previous runtime's storage. Reading that storage is separate work with its own review, and the
- * selector must not be mistaken for a migration.
+ * previous runtime's storage. Reading that storage requires a separately qualified migration.
  *
  * Every entry point returns without waiting on storage or the network: work is submitted to one
  * lane thread, and synchronous getters read the projections that lane publishes.
@@ -118,25 +148,54 @@ internal class StandaloneFacade(
     private val wallClock: () -> Long = System::currentTimeMillis,
     private val bufferLimit: Int = PRE_INIT_BUFFER_LIMIT,
     private val versions: RuntimeVersions = StandaloneRuntime.defaultVersions(),
+    private val configurationGate: V2ConfigAuthorityGate? = null,
+    private val onOpened: () -> Unit = {},
+    private val onCloseRequested: () -> Unit = {},
+    private val onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
+    private val startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
+    private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
+    private val networkConfigHost: String? = null,
+    private val networkApiHost: String? = null,
+    private val personProfiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
+    private val eventFilter: dev.elu.analytics.internal.runtime.RuntimeEventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(),
+    private val flagRetryScheduler: dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler = dev.elu.analytics.internal.config.ScheduledV2ConfigLifecycleScheduler(),
+    private val flagRetryJitter: () -> Double = Math::random,
+    private val lane: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "elu-facade").apply { isDaemon = true }
+    },
 ) : EluFacadeSink, AutoCloseable {
-    private val lane: ExecutorService =
-        Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "elu-facade").apply { isDaemon = true }
-        }
+    // Serializes acceptance with queue insertion, never a storage wait.
+    private val consentIntakeLock = Any()
+    private var startupConsent: ConsentIntent? = null // guarded by consentIntakeLock
+    private var appliedConsentRevision = 0L // facade lane only
+    private data class ConsentIntent(val revision: Long, val optedOut: Boolean,
+        val eventName: String? = null, val properties: Map<String, Any?> = emptyMap())
 
     // Lane-confined.
     private val buffer = ArrayDeque<Operation>()
     private val listeners = mutableListOf<() -> Unit>()
-    private val observedFlagKeys = LinkedHashSet<String>()
-    private val exposures = HashSet<String>()
-    private val reloadCompletions = mutableListOf<() -> Unit>()
-    private var exposureIdentityRevision: Long? = null
+    private val snapshotListeners = mutableListOf<FlagListener>()
+    private val reloadCompletions = mutableListOf<ReloadCompletion>()
+    private val completedFlagReloads = mutableListOf<CompletedFlagReload>()
+    @Volatile private var flagPublication: FlagPublication? = null
     /** Identifies the loaded flags; a reset abandons the reload started for the previous one. */
-    private var flagGeneration = 0L
+    @Volatile private var flagGeneration = 0L
     private var flagReloadGeneration: Long? = null
+    private var flagReloadOutcome: FlagReloadOutcome? = null
     private var flagReloadAttempts = 0
-    private var stack: StandaloneStack? = null
-    private var configDocument: String? = null
+    private var flagRetryAttempt = 0
+    private var flagRetryTask: dev.elu.analytics.internal.config.V2ConfigLifecycleTask? = null
+    private var flagRetryGeneration = 0L
+    private var flagRetryRestriction: Long? = null
+    private var flagRetryDue = false
+    @Volatile private var stack: StandaloneStack? = null
+    @Volatile private var configDocument: String? = null
+    private var hasConfigDecision = false
+    @Volatile private var appliedConfiguration: V2ConfigAuthorityWitness? = null
+    @Volatile private var flagsAuthorized = false
+    @Volatile private var flagConfiguration: V2ConfigAuthorityWitness? = null
+    private var appliedFlagConfigBody: String? = null
+    private val closeRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     private var cachedPersonProperties: String? = null
     private val listenerErrors = AtomicInteger()
 
@@ -144,34 +203,92 @@ internal class StandaloneFacade(
     private val dropCounts = EnumMap<EluFacadeDropReason, Int>(EluFacadeDropReason::class.java)
     private val projectionLock = Any()
     private var pendingIdentityOperations = 0
+    private var identityIntentRevision = 0L // guarded by projectionLock; advances at caller acceptance
+    private var pendingFlagReloadRequested = false // guarded by projectionLock
+    @Volatile private var pendingFlagOperations = 0
+    @Volatile private var flagIntentRevision = 0L
+    private var eventFilterIntentRevision = 0L // guarded by projectionLock; quiet captures do not cancel each other
+    private var nativeIntentEpoch: Any = Any()
+    private var pendingNativeOperations = 0
+    private var nativeLifecycleEligible = true
+    // Independent of consent/source epochs. Never held by capture or native status callbacks.
+    private val recordingControlLock = Any()
+    @Volatile private var recordingRequested = true
+    private var executingNativeEpoch: Any? = null // facade lane only
+    private var nativeSessionRefreshNeeded = false // facade lane only
+    private val closeResult = object : SdkFuture<Unit>() {
+        override fun cancel(mayInterruptIfRunning: Boolean) = false
+    }
 
     @Volatile private var state: EluFacadeState = EluFacadeState.Pending
 
     @Volatile private var closed = false
+    @Volatile private var requestedOptOut = false
+    private var consentIntentRevision = 0L // guarded by projectionLock
+    // One process-owned facade; no identity, consent or configuration operation resets this cap.
+    private var networkObservations = 0
+    @Volatile private var performanceConfiguration: dev.elu.analytics.internal.config.V1CapturePerformance? = null
 
     @Volatile private var identity: IdentityState? = null
 
     /** Non-null while a queued identity call has not settled, so getters follow call order. */
     @Volatile private var projectedIdentity: ProjectedIdentity? = null
 
-    @Volatile private var flagProjection: Map<String, FlagEntry> = emptyMap()
-
     @Volatile private var flagsLoaded = false
+
+    /** Called on the existing facade lane only; no authority getter is sampled. */
+    private fun observeLane(phase: RuntimeStartupPhase) = observeStartup(startupObserver) {
+        val observedLane = when (val current = state) {
+            EluFacadeState.Pending -> RuntimeStartupLane.PENDING
+            EluFacadeState.Enabled -> RuntimeStartupLane.ENABLED
+            EluFacadeState.Closed -> RuntimeStartupLane.CLOSED
+            is EluFacadeState.Disabled -> RuntimeStartupLane.valueOf(current.reason.name)
+        }
+        RuntimeStartupObservation(phase, lane = observedLane, buffered = buffer.size)
+    }
 
     // ---- lifecycle -----------------------------------------------------------
 
     /** Opens the owned runtime on the facade lane. Calls made before it completes are held. */
     fun start() {
         submit {
-            if (closed || stack != null) return@submit
+            if (closed || closeRequested.get() || stack != null) return@submit
             try {
+                observeLane(RuntimeStartupPhase.OPEN_BEGIN)
                 val opened = open()
-                stack = opened
+                val pendingConsent = synchronized(consentIntakeLock) {
+                    stack = opened
+                    startupConsent.also { startupConsent = null }
+                }
                 syncIdentity(opened.owner.snapshot().await().state.identity)
-            } catch (_: Throwable) {
+                if (requestedOptOut) opened.runtime.restrictForConsent()
+                pendingConsent?.let { intent ->
+                    applyConsentOnLane(intent)
+                    // A failed initial choice must not launch lifecycle/configuration work.
+                    check(!isCurrentConsent(intent) || identity?.optedOut == intent.optedOut)
+                }
+                onOpened()
+                observeLane(RuntimeStartupPhase.OPEN_READY)
+            } catch (error: Throwable) {
+                observeLane(RuntimeStartupPhase.OPEN_FAILED)
                 // Storage the facade cannot open fails closed: nothing is captured this run.
+                closeRequested.set(true)
+                flagRetryScheduler.close()
                 countDrop(EluFacadeDropReason.STORAGE)
                 transition(EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED))
+                runCatching { onCloseRequested() }
+                val held = buffer.toList(); buffer.clear()
+                held.forEach { discard(it, EluFacadeDropReason.CLOSED) }
+                val opened = stack
+                runCatching { opened?.flags?.close() }
+                val originalClose = opened?.runtime?.closeAndWait()
+                if (originalClose == null) closeResult.completeExceptionally(error)
+                else originalClose.whenComplete { _, cleanup ->
+                    if (cleanup != null && cleanup !== error) error.addSuppressed(cleanup)
+                    closeResult.completeExceptionally(error)
+                }
+                stack = null
+                lane.shutdown()
                 return@submit
             }
             renewAuthority()
@@ -183,14 +300,100 @@ internal class StandaloneFacade(
      * then loads flags once, so the initial evaluation sees the identity those calls established.
      */
     fun applyConfiguration(configBody: String?) {
+        stack?.runtime?.withdrawAutomaticExceptions()
+        val token = acceptNativeChange(restrictive = true)
+        val accepted = submit {
+            try {
+                if (!closed) {
+                    configDocument = configBody; hasConfigDecision = true
+                    renewAuthority(token?.epoch)
+                }
+            } finally { settleNativeChange(token, onLane = true) }
+        }
+        if (!accepted) settleNativeChange(token, onLane = false)
+    }
+
+    /** Gate publication already revokes the old source; this original local epoch never renews it. */
+    internal fun configurationChanged() {
+        stack?.runtime?.withdrawAutomaticExceptions()
+        val token = acceptNativeChange(restrictive = true)
+        val accepted = submit {
+            try { if (!closed) { hasConfigDecision = true; renewAuthority(token?.epoch) } }
+            finally { settleNativeChange(token, onLane = true) }
+        }
+        if (!accepted) settleNativeChange(token, onLane = false)
+    }
+
+    /** A fresh GET of the same immutable document asks for flags without minting authority. */
+    internal fun configurationRefreshed(token: dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate) {
         submit {
-            if (closed) return@submit
-            configDocument = configBody
-            renewAuthority()
+            val witness = flagConfiguration
+            if (witness?.token === token && witness.isCurrent() && hasCurrentFlags()) startFlagReload()
         }
     }
 
-    fun state(): EluFacadeState = state
+    /** Actual lifecycle facts still come from the sole observer. True is only a reevaluation request. */
+    internal fun nativeReplayLifecycleChanged(eligible: Boolean) {
+        if (!eligible) stack?.runtime?.withdrawAutomaticExceptions()
+        nativeStartTrace.mark(NativeStartPhase.FACADE_LIFECYCLE, eligible)
+        val token = acceptNativeChange(restrictive = true, lifecycleEligible = eligible) ?: return
+        val accepted = submit {
+            try { if (eligible && nativeEpochIsCurrent(token.epoch)) renewAuthority(token.epoch) }
+            finally { settleNativeChange(token, onLane = true) }
+        }
+        if (!accepted) settleNativeChange(token, onLane = false)
+    }
+
+    override fun startSessionRecording() {
+        synchronized(recordingControlLock) {
+            if (closed || closeRequested.get() || recordingRequested) return
+            recordingRequested = true
+            stack?.runtime?.startNativeRecording()
+            submit {
+                if (nativeReplayRecordingAllowed()) {
+                    requestNativeEvaluation(synchronized(projectionLock) { nativeIntentEpoch }, force = true)
+                }
+            }
+        }
+    }
+
+    override fun stopSessionRecording() {
+        synchronized(recordingControlLock) {
+            if (closed || closeRequested.get() || !recordingRequested) return
+            recordingRequested = false
+            stack?.runtime?.stopNativeRecording()
+        }
+    }
+
+    override fun sessionRecordingStarted(): Boolean = nativeReplayRecordingAllowed() &&
+        nativeReplayIntakeAllowed() && stack?.runtime?.nativeRecordingStarted() == true &&
+        nativeReplayRecordingAllowed() && nativeReplayIntakeAllowed()
+
+    internal fun nativeReplayRecordingAllowed(): Boolean =
+        recordingRequested && !closeRequested.get() && !closed
+
+    internal fun nativeReplayIntakeAllowed(): Boolean = synchronized(projectionLock) {
+        !closeRequested.get() && !closed && !isOptedOut() && pendingNativeOperations == 0 && nativeLifecycleEligible
+    }
+
+    /** Consent/context and foreground fence, independent of the local replay recording switch. */
+    internal fun automaticExceptionIntakeAllowed(): Boolean = synchronized(projectionLock) {
+        !closeRequested.get() && !closed && state is EluFacadeState.Enabled && !isOptedOut() &&
+            pendingNativeOperations == 0 && pendingIdentityOperations == 0 && pendingFlagOperations == 0 &&
+            nativeLifecycleEligible && hasCurrentConfiguration()
+    }
+
+    fun state(): EluFacadeState = if (isOptedOut() && state !is EluFacadeState.Closed) {
+        EluFacadeState.Disabled(EluFacadeDisabledReason.OPTED_OUT)
+    } else if (state is EluFacadeState.Enabled && !hasCurrentConfiguration()) {
+        EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED)
+    } else state
+
+    private fun hasCurrentConfiguration(): Boolean =
+        !closeRequested.get() && (configurationGate == null || appliedConfiguration?.isCurrent() == true)
+
+    private fun hasCurrentFlags(): Boolean = !closeRequested.get() && !isOptedOut() && flagsAuthorized &&
+        (configurationGate == null || flagConfiguration?.isCurrent() == true)
 
     /** Completes once every call submitted before it has run. */
     fun settled(): Future<Unit> = lane.submit<Unit> { }
@@ -206,23 +409,56 @@ internal class StandaloneFacade(
             )
         }
 
-    override fun close() {
+    override fun close() { closeAndWait() }
+
+    internal fun closeAndWait(): SdkFuture<Unit> {
+        if (!closeRequested.compareAndSet(false, true)) return closeResult
+        stack?.runtime?.withdrawAutomaticExceptions()
+        flagRetryScheduler.close()
+        synchronized(projectionLock) { nativeIntentEpoch = Any() }
+        stack?.runtime?.withdrawNativeReplay(restrictive = true)
+        runCatching { onCloseRequested() }
+        configurationGate?.close()
         try {
             lane.execute {
-                if (closed) return@execute
                 closed = true
-                countDrops(EluFacadeDropReason.CLOSED, buffer.size)
-                buffer.clear()
+                val held = buffer.toList(); buffer.clear()
+                held.forEach { discard(it, EluFacadeDropReason.CLOSED) }
                 state = EluFacadeState.Closed
-                stack?.let { open ->
-                    runCatching { open.flags?.close() }
-                    runCatching { open.runtime.close() }
+                snapshotListeners.forEach { it.cancellation.cancel() }; snapshotListeners.clear()
+                listeners.clear(); reloadCompletions.clear(); flagPublication = null
+                val opened = stack
+                var flagFailure: Throwable? = null
+                try { opened?.flags?.close() } catch (error: Throwable) { flagFailure = error }
+                val originalClose = opened?.runtime?.closeAndWait() ?: SdkFuture.completedFuture(Unit)
+                val additionalClose = try { onCloseSettled() } catch (error: Throwable) {
+                    SdkFuture<Unit>().also { it.completeExceptionally(error) }
+                }
+                originalClose.whenComplete { _, runtimeError ->
+                    additionalClose.whenComplete { _, cleanupError ->
+                        val error = runtimeError ?: flagFailure ?: cleanupError
+                        if (error == null) closeResult.complete(Unit) else closeResult.completeExceptionally(error)
+                    }
                 }
             }
-        } catch (_: RejectedExecutionException) {
-            // Already closing.
-        }
+        } catch (error: RejectedExecutionException) { closeResult.completeExceptionally(error) }
         lane.shutdown()
+        return closeResult
+    }
+
+    /** Restriction only: later synchronous identity/consent/context intentions fence the original
+     * hook call even while the facade lane is waiting for its queue result. */
+    internal fun eventFilterAdmission(allowPendingIdentity: Boolean = false): () -> Boolean = synchronized(projectionLock) {
+        val intent = eventFilterIntentRevision
+        val identityIntent = identityIntentRevision
+        val consent = consentIntentRevision
+        val original = identity
+        val check: () -> Boolean = { synchronized(projectionLock) {
+            !closeRequested.get() && !closed && !isOptedOut() && (allowPendingIdentity || pendingIdentityOperations == 0) &&
+                intent == eventFilterIntentRevision && identityIntent == identityIntentRevision &&
+                consent == consentIntentRevision && identity == original
+        } }
+        check
     }
 
     // ---- events --------------------------------------------------------------
@@ -232,16 +468,67 @@ internal class StandaloneFacade(
         properties: Map<String, Any>?,
         timestamp: Date,
     ) {
-        if (event.isEmpty()) {
-            countDrop(EluFacadeDropReason.INVALID_INPUT)
+        if (eventFilter.enabled) {
+            capture(event, properties, EluCaptureOptions(timestamp = Date(timestamp.time)))
             return
         }
+        observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_CALL) }
         val eventProperties = withoutReservedKeys(properties)
         // The caller's timestamp, so a call held while pending is not re-stamped at release.
         val occurredAt = RuntimeWallTimestamps.rfc3339(timestamp.time)
-        dispatch(OperationKind.ACTIVITY) {
+        dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(eventProperties)) {
             val runtime = requireStack().runtime
-            captureThrough { runtime.capture(event, eventProperties, occurredAt) }
+            captureThrough { attempt -> runtime.capture(event, eventProperties, occurredAt, attempt) }
+        }
+    }
+
+    override fun capture(event: String, properties: Map<String, Any>?, options: EluCaptureOptions) {
+        observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_CALL) }
+        // Snapshot all caller-owned input before a pending/queued operation can outlive the call.
+        val callTime = wallClock()
+        val occurredAt = RuntimeWallTimestamps.rfc3339(options.timestamp?.time ?: callTime)
+        val mutationOccurredAt = RuntimeWallTimestamps.rfc3339(callTime)
+        val eventProperties: Map<String, Any?>
+        val set: Map<String, Any?>
+        val setOnce: Map<String, Any?>
+        try {
+            eventProperties = JsonValues.objectValue(withoutReservedKeys(properties), "capture.properties")
+            set = JsonValues.objectValue(options.set.orEmpty(), "capture.set")
+            setOnce = JsonValues.objectValue(options.setOnce.orEmpty(), "capture.setOnce")
+        } catch (_: IllegalArgumentException) {
+            countDrop(EluFacadeDropReason.INVALID_INPUT)
+            return
+        }
+        val hasPersonIntent = options.set != null || options.setOnce != null || eventFilter.hasCallback
+        dispatch(OperationKind.ACTIVITY, affectsFlags = hasPersonIntent || hasContextMutation(eventProperties),
+            reloadFlagsAfter = hasContextMutation(eventProperties),
+            restrictsEventFilter = hasContextMutation(eventProperties)) {
+            val consentRevision = synchronized(projectionLock) { consentIntentRevision }
+            val attempt = RuntimeCaptureRateAttempt(dev.elu.analytics.internal.runtime.RuntimeEventFilterAttempt(
+                dev.elu.analytics.internal.runtime.RuntimeEventPerson(set.takeIf { options.set != null },
+                    setOnce.takeIf { options.setOnce != null }), allowsPersonChanges = true, deferPersonContinuation = true))
+            val accepted = captureThrough(attempt) { originalAttempt ->
+                requireStack().runtime.capture(event, eventProperties, occurredAt, originalAttempt)
+            } ?: return@dispatch
+            val transformedPerson = if (eventFilter.enabled) attempt.filter.acceptedPerson()
+                else dev.elu.analytics.internal.runtime.RuntimeEventPerson(set, setOnce)
+            if (!hasPersonIntent || personProfiles == EluPersonProfilesMode.NEVER) return@dispatch
+            if (eventFilter.enabled && transformedPerson?.set.isNullOrEmpty() && transformedPerson?.setOnce.isNullOrEmpty()) return@dispatch
+            // The original lane cannot execute a later identity operation between these writes.
+            // Also fence synchronous reset/consent intentions arriving during event admission.
+            appendPersonProperties(transformedPerson?.set.orEmpty(), reloadFlags = false, occurredAt = mutationOccurredAt,
+                setOnce = transformedPerson?.setOnce.orEmpty(),
+                captureAdmission = {
+                    val original = accepted.snapshot.state
+                    val current = identity
+                    !closeRequested.get() && !closed && !requestedOptOut &&
+                        consentIntentRevision == consentRevision && pendingIdentityOperations == 0 &&
+                        hasCurrentCapture() && current != null && !current.optedOut &&
+                        current.revision == original.identity.revision &&
+                        current.anonymousId == original.identity.anonymousId && current.userId == original.identity.userId &&
+                        current.contextRevision == original.identity.contextRevision &&
+                        accepted.record.record.streamId == original.stream.streamId
+                })
         }
     }
 
@@ -249,15 +536,12 @@ internal class StandaloneFacade(
         name: String,
         properties: Map<String, Any>?,
     ) {
-        if (name.isEmpty()) {
-            countDrop(EluFacadeDropReason.INVALID_INPUT)
-            return
-        }
         val screenProperties = withoutReservedKeys(properties)
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY) {
+        dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(screenProperties) || eventFilter.hasCallback,
+            reloadFlagsAfter = false, restrictsEventFilter = false) {
             val runtime = requireStack().runtime
-            captureThrough { runtime.screen(name, screenProperties, occurredAt) }
+            captureThrough { attempt -> runtime.screen(name, screenProperties, occurredAt, attempt) }
         }
     }
 
@@ -267,63 +551,251 @@ internal class StandaloneFacade(
     ) {
         val exceptionProperties = withoutReservedKeys(properties)
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY) {
+        dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(exceptionProperties) || eventFilter.hasCallback,
+            reloadFlagsAfter = false, restrictsEventFilter = false) {
             val runtime = requireStack().runtime
-            captureThrough { runtime.captureException(error, exceptionProperties, occurredAt) }
+            captureThrough { attempt -> runtime.captureException(error, exceptionProperties, occurredAt, attempt) }
         }
     }
 
     // ---- identity ------------------------------------------------------------
 
+    override fun identify(distinctId: String, userProperties: Map<String, Any>?) = identify(distinctId, userProperties, null)
+
     override fun identify(
         distinctId: String,
         userProperties: Map<String, Any>?,
+        userPropertiesOnce: Map<String, Any>?,
     ) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (!isUsableIdentifier(distinctId) || distinctId == "distinct_id") {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
         val set = userProperties?.toMap().orEmpty()
+        val setOnce = userPropertiesOnce?.toMap().orEmpty()
+        val occurredAt = now()
         val projected = projectIdentity(ProjectedIdentity(distinctId))
-        dispatch(OperationKind.ACTIVITY, projected) { identifyOnLane(distinctId, set) }
+        dispatch(OperationKind.ACTIVITY, projected, affectsFlags = true) { identifyOnLane(distinctId, set, occurredAt, setOnce) }
     }
 
     override fun alias(alias: String) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (!isUsableIdentifier(alias)) {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
-        dispatch(OperationKind.ACTIVITY) {
+        val occurredAt = now()
+        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
             val canonicalId = persistedDistinctId()
             if (alias == canonicalId) {
                 // Aliasing an id to itself is the identify transition for that id.
-                identifyOnLane(alias, emptyMap())
+                identifyOnLane(alias, emptyMap(), occurredAt)
             } else {
-                appendMutations(listOf(RuntimeMutationChange.LinkAlias(alias, canonicalId)))
+                appendMutations(listOf(RuntimeMutationChange.LinkAlias(alias, canonicalId)), occurredAt)
             }
         }
     }
 
-    override fun reset() {
+    override fun reset() = reset(false)
+
+    override fun reset(resetDeviceId: Boolean) {
         // The owner mints the replacement anonymous id, so the facade cannot name it in advance;
         // until the reset commits, the getter reports no identity rather than the ended one.
+        val occurredAt = now()
         val projected = projectIdentity(ProjectedIdentity(null))
-        dispatch(OperationKind.RESET, projected) {
-            applyLocalChange(RuntimeLocalStateChange.ResetIdentity(now()))
-            if (identity?.optedOut == true) {
-                applyLocalChange(RuntimeLocalStateChange.SetOptedOut(false, now()))
-            }
+        dispatch(OperationKind.RESET, projected, affectsFlags = true) {
+            applyLocalChange(RuntimeLocalStateChange.ResetIdentity(occurredAt, resetDeviceId))
             cachedPersonProperties = null
             clearFlags()
             if (state is EluFacadeState.Enabled) startFlagReload()
         }
     }
 
+    override fun optOut() = synchronized(consentIntakeLock) {
+        val intent = synchronized(projectionLock) {
+            consentIntentRevision = Math.incrementExact(consentIntentRevision)
+            requestedOptOut = true
+            ConsentIntent(consentIntentRevision, optedOut = true)
+        }
+        // Withdrawal is immediate, including while open() is still running.
+        stack?.runtime?.restrictForConsent()
+        acceptNativeChange(restrictive = true)?.let { settleNativeChange(it, onLane = false) }
+        enqueueConsent(intent)
+    }
+
+    override fun optIn(captureEventName: String?, properties: Map<String, Any>?) {
+        if (captureEventName != null && !isUsableIdentifier(captureEventName)) {
+            countDrop(EluFacadeDropReason.INVALID_INPUT)
+            return
+        }
+        val eventProperties = withoutReservedKeys(properties)
+        synchronized(consentIntakeLock) {
+            val intent = synchronized(projectionLock) {
+                consentIntentRevision = Math.incrementExact(consentIntentRevision)
+                ConsentIntent(consentIntentRevision, optedOut = false, captureEventName, eventProperties)
+            }
+            enqueueConsent(intent)
+        }
+    }
+
+    /** Acceptance and enqueue stay ordered; only one latest pre-open choice is retained. */
+    private fun enqueueConsent(intent: ConsentIntent) {
+        if (stack == null) startupConsent = intent
+        dispatch(OperationKind.CONSENT, affectsFlags = true) { applyConsentOnLane(intent) }
+    }
+
+    private fun isCurrentConsent(intent: ConsentIntent): Boolean =
+        synchronized(projectionLock) { consentIntentRevision == intent.revision }
+
+    private fun applyConsentOnLane(intent: ConsentIntent) {
+        if (stack == null || appliedConsentRevision >= intent.revision || !isCurrentConsent(intent)) return
+        try {
+            // Every explicit choice, including a repeated value, settles the consent-only
+            // record and closes the old coverage interval through the original owner.
+            when (val result = requireStack().owner.applyConsent(RuntimeLocalStateChange.SetOptedOut(intent.optedOut, now())).await()) {
+                is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
+                is RuntimeAppendResult.Rejected -> countDrop(EluFacadeDropReason.STORAGE)
+            }
+        } catch (error: Throwable) {
+            synchronized(projectionLock) { requestedOptOut = true }
+            requireStack().runtime.restrictForConsent()
+            throw error
+        }
+        if (identity?.optedOut != intent.optedOut) return
+        appliedConsentRevision = intent.revision
+        if (intent.optedOut) {
+            renewAuthority()
+            clearFlags()
+            return
+        }
+        synchronized(consentIntakeLock) {
+            synchronized(projectionLock) {
+                if (consentIntentRevision == intent.revision) {
+                    requestedOptOut = false
+                    stack?.runtime?.restoreConsent()
+                }
+            }
+        }
+        renewAuthority()
+        // This is one normal capture attempt, never a delayed-until-config opt-in event.
+        if (isCurrentConsent(intent) && !isOptedOut() && state is EluFacadeState.Enabled && intent.eventName != null) {
+            val occurredAt = now()
+            captureThrough { attempt -> requireStack().runtime.capture(intent.eventName, intent.properties, occurredAt, attempt) }
+        }
+    }
+
+    override fun viewPrivacyChanged() {
+        acceptNativeChange(restrictive = true)?.let { settleNativeChange(it, onLane = false) }
+    }
+
+    override fun isOptedOut(): Boolean = requestedOptOut || identity?.optedOut == true
+
     override fun distinctId(): String? {
-        if (state !is EluFacadeState.Enabled) return null
+        if (isOptedOut() || state !is EluFacadeState.Enabled || !hasCurrentConfiguration()) return null
         projectedIdentity?.let { return it.distinctId }
         val current = identity ?: return null
         return current.userId ?: current.anonymousId
+    }
+
+    /** Detached original context only; every sample is rechecked on the facade and storage lanes. */
+    internal fun performanceContext(): dev.elu.analytics.internal.performance.NativePerformanceContext? = synchronized(projectionLock) {
+        if (closed || closeRequested.get() || isOptedOut() || !nativeLifecycleEligible ||
+            pendingNativeOperations != 0 || pendingFlagOperations != 0 || pendingIdentityOperations != 0 ||
+            !hasCurrentCapture()) return null
+        val policy = performanceConfiguration ?: return null
+        if (!policy.memory && !policy.longTasks) return null
+        val current = identity ?: return null
+        val session = current.session ?: return null
+        if (session.lifecycle != dev.elu.analytics.internal.core.SessionLifecycle.ACTIVE || session.backgroundedAt != null) return null
+        val now = wallClock()
+        val lastActivity = java.time.Instant.parse(session.lastActivityAt).toEpochMilli()
+        val started = java.time.Instant.parse(session.startedAt).toEpochMilli()
+        if (now < lastActivity || now - lastActivity >= session.timeoutSeconds * 1_000L ||
+            now < started || now - started >= session.maximumDurationSeconds * 1_000L) return null
+        val source = if (configurationGate == null) configDocument ?: return null
+            else appliedConfiguration?.takeIf { it.isCurrent() }?.token ?: return null
+        dev.elu.analytics.internal.performance.NativePerformanceContext(source, current.revision, current.contextRevision,
+            session.id, flagIntentRevision, nativeIntentEpoch, policy)
+    }
+
+    internal fun capturePerformance(original: dev.elu.analytics.internal.performance.NativePerformanceContext, properties: Map<String, Any>) {
+        val detached = properties.toMap()
+        submit {
+            if (performanceContext() != original) return@submit
+            // Do not retry an old aggregate through a new identity, session, or configuration.
+            val result = requireStack().runtime.capturePerformance(detached,
+                dev.elu.analytics.internal.runtime.RuntimeCaptureExpectation(original.identityRevision,
+                    original.contextRevision, original.sessionId) { performanceContext() == original }).await()
+            if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
+        }
+    }
+
+    /** Coverage is durable, while intent/lifecycle denial is synchronous and process-local. */
+    internal fun startupContext(): dev.elu.analytics.internal.diagnostics.NativeStartupContext? = synchronized(projectionLock) {
+        if (closed || closeRequested.get() || isOptedOut() || !nativeLifecycleEligible ||
+            pendingNativeOperations != 0 || pendingFlagOperations != 0 || pendingIdentityOperations != 0) return null
+        val current = identity ?: return null
+        val epoch = stack?.owner?.diagnosticsEpoch() ?: return null
+        if (!epoch.launchTimings || epoch.identityRevision != current.revision) return null
+        dev.elu.analytics.internal.diagnostics.NativeStartupContext(epoch, consentIntentRevision)
+    }
+
+    internal fun captureStartup(original: dev.elu.analytics.internal.diagnostics.NativeStartupContext,
+        measurement: dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement) {
+        submit {
+            if (startupContext() != original) return@submit
+            val current = performanceContext()?.takeIf { it.policy.longTasks } ?: return@submit
+            val result = requireStack().runtime.captureStartup(measurement,
+                dev.elu.analytics.internal.runtime.RuntimeCaptureExpectation(current.identityRevision,
+                    current.contextRevision, current.sessionId) {
+                    startupContext() == original && performanceContext() == current
+                }).await()
+            if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
+        }
+    }
+
+    override fun beginNetworkObservation(host: String): dev.elu.analytics.internal.network.NativeNetworkObservation? {
+        fun eligibleHost(value: String): Boolean = value != networkConfigHost && value != networkApiHost &&
+            !dev.elu.analytics.internal.network.NativeNetworkInterceptor.isOwnedSdkHost(value)
+        if (!eligibleHost(host)) return null
+        val original = synchronized(projectionLock) {
+            if (networkObservations >= 200) return null
+            val observed = networkContext() ?: return null
+            networkObservations++
+            observed
+        }
+        return dev.elu.analytics.internal.network.NativeNetworkObservation(::eligibleHost) { properties ->
+            val detached = properties.toMap()
+            submit {
+                if (networkContext() != original) return@submit
+                val expectation = dev.elu.analytics.internal.runtime.RuntimeNetworkExpectation(
+                    original.identityRevision, original.contextRevision, original.sessionId, original.sessionStartedAt,
+                ) { networkContext() == original }
+                val result = requireStack().runtime.captureNetwork(detached, expectation).await()
+                if (result is RuntimeCaptureResult.Accepted) syncIdentity(result.snapshot.state.identity)
+            }
+        }
+    }
+
+    private fun networkContext(): dev.elu.analytics.internal.network.NativeNetworkContext? = synchronized(projectionLock) {
+        if (closed || closeRequested.get() || isOptedOut() || !nativeLifecycleEligible ||
+            pendingNativeOperations != 0 || pendingFlagOperations != 0 || pendingIdentityOperations != 0 ||
+            !hasCurrentCapture()) return null
+        val current = identity ?: return null
+        val session = current.session
+        if (session != null) {
+            if (session.lifecycle != dev.elu.analytics.internal.core.SessionLifecycle.ACTIVE || session.backgroundedAt != null) return null
+            val now = wallClock()
+            val lastActivity = java.time.Instant.parse(session.lastActivityAt).toEpochMilli()
+            val started = java.time.Instant.parse(session.startedAt).toEpochMilli()
+            if (now < lastActivity || now - lastActivity >= session.timeoutSeconds * 1_000L ||
+                now < started || now - started >= session.maximumDurationSeconds * 1_000L) return null
+        }
+        val source = if (configurationGate == null) configDocument ?: return null
+            else appliedConfiguration?.takeIf { it.isCurrent() }?.token ?: return null
+        dev.elu.analytics.internal.network.NativeNetworkContext(source, current.revision, current.contextRevision,
+            session?.id, session?.startedAt, flagIntentRevision, consentIntentRevision, nativeIntentEpoch)
     }
 
     // ---- properties ----------------------------------------------------------
@@ -335,8 +807,22 @@ internal class StandaloneFacade(
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
-        dispatch(OperationKind.ACTIVITY) {
-            applyLocalChange(RuntimeLocalStateChange.RegisterSuperProperties(superProperties, now()))
+        val occurredAt = now()
+        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
+            applyLocalChange(RuntimeLocalStateChange.RegisterSuperProperties(superProperties, occurredAt))
+        }
+    }
+
+    override fun registerOnce(properties: Map<String, Any>, defaultValue: Any?) {
+        val selected = withoutReservedKeys(properties)
+        if (selected.isEmpty()) return
+        if (selected.keys.any { it.isEmpty() }) {
+            countDrop(EluFacadeDropReason.INVALID_INPUT)
+            return
+        }
+        val occurredAt = now()
+        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
+            applyLocalChange(RuntimeLocalStateChange.RegisterSuperPropertiesOnce(selected, defaultValue, occurredAt))
         }
     }
 
@@ -346,17 +832,26 @@ internal class StandaloneFacade(
             return
         }
         if (isReservedPropertyKey(key)) return
-        dispatch(OperationKind.ACTIVITY) {
+        val occurredAt = now()
+        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
             // Unregistering an absent key would still advance the context revision.
             if (identity?.superProperties?.containsKey(key) != true) return@dispatch
-            applyLocalChange(RuntimeLocalStateChange.UnregisterSuperProperties(listOf(key), now()))
+            applyLocalChange(RuntimeLocalStateChange.UnregisterSuperProperties(listOf(key), occurredAt))
         }
     }
 
-    override fun setPersonProperties(properties: Map<String, Any>) {
-        if (properties.isEmpty()) return
+    override fun setPersonProperties(properties: Map<String, Any>) = setPersonProperties(properties, emptyMap())
+
+    override fun setPersonProperties(properties: Map<String, Any>, propertiesOnce: Map<String, Any>) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
+        if (properties.isEmpty() && propertiesOnce.isEmpty()) return
         val set = properties.toMap()
-        dispatch(OperationKind.ACTIVITY) { appendPersonProperties(set, reloadFlags = true) }
+        val setOnce = propertiesOnce.toMap()
+        val occurredAt = now()
+        dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
+            if (hasCurrentCapture()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt, setOnce = setOnce)
+            else applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(set, occurredAt, setOnce), filterMutation = true)
+        }
     }
 
     override fun group(
@@ -369,7 +864,12 @@ internal class StandaloneFacade(
             return
         }
         val groupProperties = properties?.toMap()
-        dispatch(OperationKind.ACTIVITY) {
+        val occurredAt = now()
+        dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
+            if (!hasCurrentCapture()) {
+                applyFlagContext(RuntimeLocalStateChange.SetFlagGroup(type, key, groupProperties, occurredAt), filterMutation = true)
+                return@dispatch
+            }
             val changes = mutableListOf<RuntimeMutationChange>()
             if (identity?.groups?.get(type) != key) {
                 changes += RuntimeMutationChange.AssociateGroup(type, key)
@@ -387,8 +887,21 @@ internal class StandaloneFacade(
             if (changes.isEmpty()) return@dispatch
             // The group mutation also enters the flag evaluation context, so the reload below
             // evaluates against the group the caller just described.
-            appendMutations(changes)
+            appendMutations(changes, occurredAt)
             startFlagReload()
+        }
+    }
+
+    override fun getGroups(): Map<String, String> {
+        if (isOptedOut() || projectedIdentity != null || pendingFlagOperations != 0 || (!hasCurrentCapture() && !hasCurrentFlags())) return emptyMap()
+        return java.util.Collections.unmodifiableMap(LinkedHashMap(identity?.groups.orEmpty()))
+    }
+
+    override fun resetGroups() {
+        val occurredAt = now()
+        dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
+            val change = RuntimeLocalStateChange.ResetGroups(occurredAt)
+            if (hasCurrentCapture()) applyLocalChange(change) else applyFlagContext(change)
         }
     }
 
@@ -396,39 +909,100 @@ internal class StandaloneFacade(
 
     override fun getFeatureFlag(key: String): Any? = readFlag(key, expose = true)?.value
 
+    override fun getFeatureFlag(key: String, options: EluFeatureFlagOptions): Any? =
+        readFlag(key, expose = options.sendEvent, fresh = options.fresh)?.value
+
+    override fun getFeatureFlagResult(key: String): EluFeatureFlagResult? = readFlag(key, expose = true)?.let {
+        EluFeatureFlagResult(key, isTruthyVariant(it.value), it.value as? String, it.payload)
+    }
+
+    override fun getFeatureFlagResult(key: String, options: EluFeatureFlagOptions): EluFeatureFlagResult? =
+        readFlag(key, expose = options.sendEvent, fresh = options.fresh)?.let {
+            EluFeatureFlagResult(key, isTruthyVariant(it.value), it.value as? String, it.payload)
+        }
+
     override fun getFeatureFlagPayload(key: String): Any? = readFlag(key, expose = false)?.payload
 
     override fun isFeatureEnabled(key: String): Boolean = isTruthyVariant(readFlag(key, expose = true)?.value)
 
+    override fun isFeatureEnabled(key: String, options: EluFeatureFlagOptions, defaultValue: Boolean?): Boolean? =
+        readFlag(key, expose = options.sendEvent, fresh = options.fresh)?.let { isTruthyVariant(it.value) } ?: defaultValue
+
+    override fun getFeatureFlagSnapshot(): EluFeatureFlagSnapshot? = currentFlagPublication()?.snapshot
+
+    override fun subscribeToFeatureFlags(listener: EluFeatureFlagSnapshot.Listener): EluFeatureFlagSubscription {
+        val cancellation = FeatureFlagCancellation()
+        val registration = FlagListener(listener, cancellation)
+        val weakOwner = java.lang.ref.WeakReference(this)
+        val token = EluFeatureFlagSubscription(cancellation) {
+            weakOwner.get()?.let { owner -> owner.submit { owner.snapshotListeners.remove(registration) } }
+        }
+        if (!submit {
+                if (!closed && !closeRequested.get() && cancellation.admit()) {
+                    snapshotListeners += registration
+                    currentFlagPublication()?.let { deliverSnapshot(registration, it) }
+                }
+            }) cancellation.cancel()
+        return token
+    }
+
     override fun reloadFeatureFlags(completion: (() -> Unit)?) {
-        // A reload is a command, not a state change: it is never replayed from the hold buffer.
+        // A completion belongs to this accepted command, including a deferred physical reload.
+        val completionRequest = synchronized(projectionLock) {
+            completion?.let { ReloadCompletion(it, null, identityIntentRevision, consentIntentRevision, configDocument, flagConfiguration) }
+        }
         submit {
-            if (state !is EluFacadeState.Enabled) {
+            if (!hasCurrentFlags()) {
                 countDrop(currentDropReason())
                 return@submit
             }
-            completion?.let { reloadCompletions += it }
+            // Prior identity commands have now settled on this same lane. Bind their actual
+            // result here; a later caller identity intent cannot adopt this earlier completion.
+            synchronized(projectionLock) {
+                completionRequest?.takeIf(::reloadCompletionIntentIsCurrent)?.let { request ->
+                    reloadCompletions += ReloadCompletion(request.callback, identity, request.identityIntent,
+                        request.consentRevision, request.configurationBody, request.source)
+                }
+            }
+            synchronized(projectionLock) {
+                if (pendingFlagOperations != 0) pendingFlagReloadRequested = true
+            }
             startFlagReload()
-            // Without a flag client there is nothing to load, so the completion runs now.
-            if (flagReloadGeneration == null) finishFlagReload()
+            // Pending context work is not a finished reload. Its last original intent starts it.
+            if (stack?.flags == null && pendingFlagOperations == 0) finishFlagReload()
         }
     }
 
     override fun onFeatureFlagsLoaded(callback: () -> Unit) {
         submit {
+            if (closed || closeRequested.get()) return@submit
             listeners += callback
-            // Add-and-fire on one lane: a listener either made this load's snapshot or missed it
-            // and replays once. Later loads legitimately re-fire every listener in order.
-            if (state is EluFacadeState.Enabled && flagsLoaded) deliver(callback)
+            currentFlagPublication()?.let { deliverFlagCallback(callback, it) }
         }
     }
 
     override fun setPersonPropertiesForFlags(properties: Map<String, Any>) {
         if (properties.isEmpty()) return
         val set = properties.toMap()
-        dispatch(OperationKind.ACTIVITY) {
-            applyLocalChange(RuntimeLocalStateChange.SetFlagPersonProperties(set, now()))
+        val occurredAt = now()
+        dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
+            applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(set, occurredAt))
             startFlagReload()
+        }
+    }
+
+    override fun resetPersonPropertiesForFlags() {
+        val occurredAt = now()
+        dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
+            applyFlagContext(RuntimeLocalStateChange.ResetFlagPersonProperties(occurredAt))
+        }
+    }
+
+    override fun resetGroupPropertiesForFlags(type: String?) {
+        if (type != null && !isUsableIdentifier(type)) { countDrop(EluFacadeDropReason.INVALID_INPUT); return }
+        val occurredAt = now()
+        dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
+            applyFlagContext(RuntimeLocalStateChange.ResetFlagGroupProperties(type, occurredAt))
         }
     }
 
@@ -441,8 +1015,9 @@ internal class StandaloneFacade(
             return
         }
         val set = properties.toMap()
-        dispatch(OperationKind.ACTIVITY) {
-            applyLocalChange(RuntimeLocalStateChange.SetFlagGroupProperties(type, set, now()))
+        val occurredAt = now()
+        dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
+            applyFlagContext(RuntimeLocalStateChange.SetFlagGroupProperties(type, set, occurredAt))
             startFlagReload()
         }
     }
@@ -451,7 +1026,7 @@ internal class StandaloneFacade(
 
     override fun flush() {
         submit {
-            if (state !is EluFacadeState.Enabled) {
+            if (isOptedOut() || state !is EluFacadeState.Enabled) {
                 countDrop(currentDropReason())
                 return@submit
             }
@@ -464,30 +1039,106 @@ internal class StandaloneFacade(
 
     private enum class OperationKind {
         ACTIVITY,
+        CONSENT,
         RESET,
+        FLAG_CONTEXT,
+        PERSON_GROUP_CONTEXT,
     }
 
     private class Operation(
         val kind: OperationKind,
         val projected: Boolean,
+        val flagIntent: Boolean,
+        val nativeChange: NativeChange?,
+        val nativeEpoch: Any,
         val onDropped: (() -> Unit)?,
         val run: () -> Unit,
-    )
+    ) { val settled = java.util.concurrent.atomic.AtomicBoolean(false) }
+
+    private class NativeChange(val epoch: Any) { val settled = java.util.concurrent.atomic.AtomicBoolean(false) }
+
+    private fun hasContextMutation(properties: Map<String, Any?>): Boolean =
+        properties.containsKey("\$set") || properties.containsKey("\$set_once")
+
+    private fun acceptNativeChange(restrictive: Boolean, lifecycleEligible: Boolean? = null): NativeChange? {
+        val token = synchronized(projectionLock) {
+            if (closeRequested.get() || closed) return null
+            if (lifecycleEligible != null) {
+                if (nativeLifecycleEligible == lifecycleEligible) return null
+                nativeLifecycleEligible = lifecycleEligible
+            }
+            if (restrictive) nativeIntentEpoch = Any()
+            pendingNativeOperations += 1
+            NativeChange(nativeIntentEpoch)
+        }
+        stack?.runtime?.withdrawNativeReplay(restrictive)
+        return token
+    }
+
+    private fun nativeEpochIsCurrent(epoch: Any): Boolean = synchronized(projectionLock) {
+        !closeRequested.get() && !closed && nativeIntentEpoch === epoch
+    }
+
+    private fun requestNativeEvaluation(epoch: Any, force: Boolean) {
+        if (nativeEpochIsCurrent(epoch).also { nativeStartTrace.mark(NativeStartPhase.FACADE_EPOCH, it) } &&
+            nativeReplayIntakeAllowed().also { nativeStartTrace.mark(NativeStartPhase.FACADE_INTAKE, it) } &&
+            (state !is EluFacadeState.Pending).also { nativeStartTrace.mark(NativeStartPhase.FACADE_NOT_PENDING, it) } &&
+            (state !is EluFacadeState.Closed).also { nativeStartTrace.mark(NativeStartPhase.FACADE_NOT_CLOSED, it) })
+            stack?.runtime.also { nativeStartTrace.mark(NativeStartPhase.RUNTIME_PRESENT, it != null) }?.reevaluateNativeReplay(force) {
+            nativeEpochIsCurrent(epoch) && nativeReplayIntakeAllowed()
+        }
+    }
+
+    private fun settleNativeChange(token: NativeChange?, onLane: Boolean) {
+        if (token == null || !token.settled.compareAndSet(false, true)) return
+        val last = synchronized(projectionLock) { pendingNativeOperations -= 1; pendingNativeOperations == 0 }
+        if (!last) return
+        val action: () -> Unit = {
+            requestNativeEvaluation(token.epoch, force = true)
+            stack?.runtime?.requestAutomaticExceptions()
+        }
+        if (onLane) action() else submit(action)
+    }
+
+    private fun settleOperation(operation: Operation, onLane: Boolean) {
+        if (!operation.settled.compareAndSet(false, true)) return
+        if (operation.projected) settleProjection()
+        if (operation.flagIntent) settleFlagIntent(onLane)
+        settleNativeChange(operation.nativeChange, onLane)
+    }
 
     private fun dispatch(
         kind: OperationKind,
         projected: Boolean = false,
+        affectsFlags: Boolean = false,
+        reloadFlagsAfter: Boolean = true,
+        restrictsEventFilter: Boolean = affectsFlags,
         onDropped: (() -> Unit)? = null,
         run: () -> Unit,
     ) {
-        val operation = Operation(kind, projected, onDropped, run)
+        // A later opt-in must never backfill activity submitted during a denial.
+        val deniedAtCall = kind == OperationKind.ACTIVITY && isOptedOut()
+        if (affectsFlags) stack?.runtime?.withdrawAutomaticExceptions(retire = true)
+        if (affectsFlags) synchronized(projectionLock) {
+            pendingFlagOperations += 1
+            pendingFlagReloadRequested = pendingFlagReloadRequested || reloadFlagsAfter
+            flagIntentRevision = Math.incrementExact(flagIntentRevision)
+            if (restrictsEventFilter) eventFilterIntentRevision = Math.incrementExact(eventFilterIntentRevision)
+        }
+        val nativeChange = if (affectsFlags) acceptNativeChange(restrictive = false) else null
+        val nativeEpoch = synchronized(projectionLock) { nativeIntentEpoch }
+        val operation = Operation(kind, projected, affectsFlags, nativeChange, nativeChange?.epoch ?: nativeEpoch, onDropped, run)
         val accepted =
             submit {
                 if (closed) {
                     discard(operation, EluFacadeDropReason.CLOSED)
                     return@submit
                 }
-                if (state is EluFacadeState.Pending) {
+                if (deniedAtCall) {
+                    discard(operation, EluFacadeDropReason.OPTED_OUT)
+                    return@submit
+                }
+                if (state is EluFacadeState.Pending && kind != OperationKind.CONSENT) {
                     if (buffer.size >= bufferLimit) {
                         // Drop the newest, never the oldest: the held calls are an ordered identity
                         // history, and a coherent prefix is worth more than a recent fragment.
@@ -495,20 +1146,33 @@ internal class StandaloneFacade(
                         return@submit
                     }
                     buffer.addLast(operation)
+                    observeLane(RuntimeStartupPhase.BUFFERED)
                     return@submit
                 }
                 execute(operation)
             }
-        if (!accepted) discard(operation, EluFacadeDropReason.CLOSED)
+        if (!accepted) discard(operation, EluFacadeDropReason.CLOSED, onLane = false)
     }
 
     private fun execute(operation: Operation) {
+        observeLane(RuntimeStartupPhase.DISPATCHED)
         val current = state
+        val previousNativeEpoch = executingNativeEpoch
+        executingNativeEpoch = operation.nativeEpoch
         try {
             when {
-                current is EluFacadeState.Closed -> discard(operation, EluFacadeDropReason.CLOSED, settle = false)
-                current is EluFacadeState.Pending ->
+                closeRequested.get() -> discard(operation, EluFacadeDropReason.CLOSED, settle = false)
+                configurationGate != null && !hasCurrentConfiguration() && operation.kind == OperationKind.ACTIVITY ->
                     discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
+                operation.kind == OperationKind.FLAG_CONTEXT && !hasCurrentFlags() ->
+                    discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
+                operation.kind == OperationKind.PERSON_GROUP_CONTEXT && !hasCurrentCapture() && !hasCurrentFlags() ->
+                    discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
+                current is EluFacadeState.Closed -> discard(operation, EluFacadeDropReason.CLOSED, settle = false)
+                current is EluFacadeState.Pending && operation.kind != OperationKind.CONSENT ->
+                    discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
+                isOptedOut() && operation.kind == OperationKind.ACTIVITY ->
+                    discard(operation, EluFacadeDropReason.OPTED_OUT, settle = false)
                 current is EluFacadeState.Disabled && operation.kind == OperationKind.ACTIVITY ->
                     discard(operation, current.reason.drop, settle = false)
                 else ->
@@ -520,7 +1184,14 @@ internal class StandaloneFacade(
                     }
             }
         } finally {
-            if (operation.projected) settleProjection()
+            try {
+                if (nativeSessionRefreshNeeded && !closeRequested.get()) renewAuthority(operation.nativeEpoch)
+            } finally {
+                settleOperation(operation, onLane = true)
+                requestNativeEvaluation(operation.nativeEpoch, force = false)
+                stack?.runtime?.requestAutomaticExceptions()
+                executingNativeEpoch = previousNativeEpoch
+            }
         }
     }
 
@@ -528,11 +1199,47 @@ internal class StandaloneFacade(
         operation: Operation,
         reason: EluFacadeDropReason,
         settle: Boolean = true,
+        onLane: Boolean = true,
     ) {
         countDrop(reason)
-        operation.onDropped?.invoke()
-        if (settle && operation.projected) settleProjection()
+        try { operation.onDropped?.invoke() }
+        finally { if (settle) settleOperation(operation, onLane) }
     }
+
+    private fun settleFlagIntent(onLane: Boolean) {
+        val reload = synchronized(projectionLock) {
+            pendingFlagOperations -= 1
+            if (pendingFlagOperations != 0) return
+            pendingFlagReloadRequested.also { pendingFlagReloadRequested = false }
+        }
+        val apply = {
+            // Quiet work withdraws getters immediately, but is not a new load outcome.
+            // Restore metadata only after rereading the same original cache lease. Keep an
+            // existing retry's original timer/attempt; a due timer waits for this quiet batch.
+            val retained = flagPublication
+            if (reload) {
+                invalidateFlagProjection()
+                // A new quiet intent can arrive after the last old intent settled. Transfer the
+                // requested reload to that batch, or submit it now without awaiting its result.
+                synchronized(projectionLock) {
+                    if (pendingFlagOperations != 0) pendingFlagReloadRequested = true else startFlagReload()
+                }
+            } else {
+                // The pending intent already withheld old getters. Quiet work must not abandon
+                // the original physical request or replace its eventual load metadata with CACHE.
+                if (flagReloadOutcome != null) drainFlagReloadOutcome()
+                else if (flagReloadGeneration == null) publishFlagRead(null, null, restoring = retained)
+                drainCompletedFlagReloads()
+                runDueFlagRetry()
+            }
+        }
+        // Successful/discarded lane work must settle before the next reload command. Only a
+        // rejected external submission needs to queue cleanup; it may not touch lane-owned maps.
+        if (onLane) apply() else submit(apply)
+    }
+
+    private fun flagIntentIsCurrent(revision: Long): Boolean =
+        pendingFlagOperations == 0 && revision == flagIntentRevision && projectedIdentity == null
 
     private fun submit(block: () -> Unit): Boolean =
         try {
@@ -541,6 +1248,7 @@ internal class StandaloneFacade(
                     block()
                 } catch (error: Throwable) {
                     countDrop(classify(error))
+                    observeLane(RuntimeStartupPhase.LANE_FAILED)
                 }
             }
             true
@@ -551,6 +1259,7 @@ internal class StandaloneFacade(
     private fun transition(next: EluFacadeState) {
         val previous = state
         state = next
+        observeLane(RuntimeStartupPhase.TRANSITION)
         if (previous !is EluFacadeState.Pending) return
         if (next is EluFacadeState.Pending || next is EluFacadeState.Closed) return
         val released = buffer.toList()
@@ -568,21 +1277,59 @@ internal class StandaloneFacade(
      * super-property, group and flag-context change advances the context revision the authority is
      * bound to, so each of them renews before the next capture can proceed.
      */
-    private fun renewAuthority() {
+    private fun renewAuthority(nativeEpoch: Any? = executingNativeEpoch ?: synchronized(projectionLock) { nativeIntentEpoch }) {
         val open = stack ?: return
-        val document = configDocument ?: return
+        if (!hasConfigDecision && (configurationGate == null || configurationGate.snapshot() == null)) return
+        val witness = configurationGate?.snapshot()
+        if (witness?.isApplicationSuspended == true) {
+            // Gate withdrawal already makes every retained source witness unusable. Retire
+            // scheduling and projections without feeding a nonexistent document to the permanent
+            // invalid-config barrier. A new source token must pass full validation to resume.
+            open.runtime.configurationChanged()
+            appliedConfiguration = null
+            appliedFlagConfigBody = null
+            flagConfiguration = null
+            flagsAuthorized = false
+            invalidateFlagProjection()
+            nativeSessionRefreshNeeded = false
+            transition(EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED))
+            return
+        }
+        val document = if (configurationGate == null) configDocument else witness?.body
+        observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.AUTHORITY_BEGIN, configPresent = document != null) }
         val result = open.runtime.applyConfiguration(document).await()
-        open.flags?.let { client -> runCatching { client.applyConfiguration(document).await() } }
+        val allowed = result is RuntimeCaptureAuthorityUpdateResult.Activated &&
+            (configurationGate == null || witness?.isCurrent() == true)
+        performanceConfiguration = if (allowed && document != null)
+            runCatching { dev.elu.analytics.internal.config.V1ConfigJson.parseConfig(document).capturePerformance }.getOrNull() else null
+        appliedConfiguration = if (allowed) witness else null
+        if (appliedFlagConfigBody != document ||
+            (configurationGate != null && flagConfiguration?.token !== witness?.token)) invalidateFlagProjection()
+        appliedFlagConfigBody = document
+        val flagResult = open.flags?.let { client -> runCatching { client.applyConfiguration(document).await() }.getOrNull() }
+        flagsAuthorized = flagResult is V1FlagAuthorizationResolution.Allowed &&
+            (configurationGate == null || witness?.isCurrent() == true)
+        observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.FLAGS_RESULT, flagsAllowed = flagsAuthorized) }
+        flagConfiguration = if (flagsAuthorized) witness else null
+        if (!flagsAuthorized) invalidateFlagProjection()
         syncIdentity(open.owner.snapshot().await().state.identity)
+        observeLane(RuntimeStartupPhase.IDENTITY_READY)
         val wasEnabled = state is EluFacadeState.Enabled
         val next =
             when (result) {
-                is RuntimeCaptureAuthorityUpdateResult.Activated -> EluFacadeState.Enabled
+                is RuntimeCaptureAuthorityUpdateResult.Activated -> if (allowed) EluFacadeState.Enabled
+                    else EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED)
                 is RuntimeCaptureAuthorityUpdateResult.Terminated ->
                     EluFacadeState.Disabled(disabledReasonFor(result.authority.reason))
             }
+        nativeSessionRefreshNeeded = false
         transition(next)
-        if (next is EluFacadeState.Enabled && !wasEnabled) startFlagReload()
+        if (flagsAuthorized && !flagsLoaded && pendingFlagOperations == 0) {
+            publishFlagRead(null, null)?.let(::fireFlagListeners)
+        }
+        if (flagsAuthorized && (!wasEnabled || !flagsLoaded)) startFlagReload()
+        nativeEpoch?.let { requestNativeEvaluation(it, force = true) }
+        open.runtime.requestAutomaticExceptions()
     }
 
     private fun disabledReasonFor(reason: RuntimeCaptureAuthorityTerminalReason): EluFacadeDisabledReason =
@@ -592,38 +1339,86 @@ internal class StandaloneFacade(
             else -> EluFacadeDisabledReason.UNAUTHORIZED
         }
 
-    private fun captureThrough(send: () -> Future<RuntimeCaptureResult>) {
-        when (val first = send().await()) {
-            is RuntimeCaptureResult.Accepted -> syncIdentity(first.snapshot.state.identity)
+    private fun captureThrough(send: (RuntimeCaptureRateAttempt) -> Future<RuntimeCaptureResult>): RuntimeCaptureResult.Accepted? {
+        val attempt = RuntimeCaptureRateAttempt()
+        return captureThrough(attempt, send)
+    }
+
+    private fun captureThrough(attempt: RuntimeCaptureRateAttempt,
+        send: (RuntimeCaptureRateAttempt) -> Future<RuntimeCaptureResult>): RuntimeCaptureResult.Accepted? {
+        val first = send(attempt).await()
+        observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_FIRST,
+            captureAccepted = first is RuntimeCaptureResult.Accepted, captureRejection = (first as? RuntimeCaptureResult.Rejected)?.reason) }
+        return when (first) {
+            is RuntimeCaptureResult.Accepted -> first.also { syncIdentity(it.snapshot.state.identity) }
             is RuntimeCaptureResult.Rejected -> {
+                if (first.reason == RuntimeCaptureRejection.EXPOSURE_ALREADY_REPORTED) return null
                 if (!isAuthorityRejection(first.reason)) {
                     countDrop(dropReasonFor(first.reason))
-                    return
+                    return null
                 }
                 // Authority was withdrawn under this facade (expiry, or a context change from a
                 // concurrent owner); one renewal decides whether the call proceeds or is dropped.
                 renewAuthority()
                 if (state !is EluFacadeState.Enabled) {
                     countDrop(currentDropReason())
-                    return
+                    return null
                 }
-                when (val second = send().await()) {
-                    is RuntimeCaptureResult.Accepted -> syncIdentity(second.snapshot.state.identity)
-                    is RuntimeCaptureResult.Rejected -> countDrop(dropReasonFor(second.reason))
+                val second = send(attempt).await()
+                observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_SECOND,
+                    captureAccepted = second is RuntimeCaptureResult.Accepted, captureRejection = (second as? RuntimeCaptureResult.Rejected)?.reason) }
+                when (second) {
+                    is RuntimeCaptureResult.Accepted -> second.also { syncIdentity(it.snapshot.state.identity) }
+                    is RuntimeCaptureResult.Rejected -> { countDrop(dropReasonFor(second.reason)); null }
                 }
             }
         }
     }
 
-    private fun appendMutations(changes: List<RuntimeMutationChange>) {
-        val open = stack ?: return
-        val occurredAt = now()
+    // Identity/context chronology belongs to the accepted API call, just like capture timestamps.
+    // Sampling it after a held lane resumes would make the immediately following event look stale.
+    private fun appendMutations(
+        changes: List<RuntimeMutationChange>,
+        occurredAt: String,
+        captureAdmission: (() -> Boolean)? = null,
+    ): Boolean {
+        val open = stack ?: return false
         val drafts = changes.map { change -> RuntimeRecordDraft.Mutation(occurredAt, change, versions) }
-        when (val result = open.owner.appendMutations(drafts).await()) {
-            is RuntimeAppendResult.Accepted ->
-                syncIdentity(result.snapshot.state.identity)
+        val selectedAdmission = captureAdmission ?: if (eventFilter.enabled) eventFilterAdmission(allowPendingIdentity = true) else null
+        val originalAdmission = selectedAdmission?.let { check -> { synchronized(projectionLock) { check() } } }
+        val pending = if (originalAdmission == null) open.owner.appendMutations(drafts) else synchronized(projectionLock) {
+            // Only submission holds the projection lock. Never wait for the queue worker here.
+            if (originalAdmission()) open.owner.appendMutations(drafts, originalAdmission,
+                filterMutation = captureAdmission == null && eventFilter.enabled) else null
+        }
+        if (pending == null) { countDrop(EluFacadeDropReason.UNAUTHORIZED); return false }
+        val result = pending.await()
+        when (result) {
+            is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
             is RuntimeAppendResult.Rejected ->
-                countDrop(EluFacadeDropReason.STORAGE)
+                countDrop(mutationDropReason(result.reason))
+        }
+        renewAuthority()
+        return result is RuntimeAppendResult.Accepted
+    }
+
+    private fun hasCurrentCapture(): Boolean = state is EluFacadeState.Enabled && hasCurrentConfiguration()
+
+    private fun mutationDropReason(reason: RuntimeAppendRejection): EluFacadeDropReason = when (reason) {
+        RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE -> EluFacadeDropReason.UNAUTHORIZED
+        RuntimeAppendRejection.FILTER_DROPPED -> EluFacadeDropReason.INVALID_INPUT
+        RuntimeAppendRejection.FILTER_INVALID -> EluFacadeDropReason.INVALID_INPUT
+        else -> EluFacadeDropReason.STORAGE
+    }
+
+    private fun applyFlagContext(change: RuntimeLocalStateChange, filterMutation: Boolean = false) {
+        // The unbound injected facade remains a local test/compatibility seam. Production always
+        // uses the source-bound owner operation and its durable flag authority transaction.
+        if (configurationGate == null && !(filterMutation && eventFilter.enabled)) { applyLocalChange(change); return }
+        val restriction = if (filterMutation && eventFilter.enabled) eventFilterAdmission(allowPendingIdentity = true) else null
+        when (val result = requireStack().owner.applyFlagContext(change, filterMutation, restriction).await()) {
+            is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
+            is RuntimeAppendResult.Rejected -> countDrop(mutationDropReason(result.reason))
         }
         renewAuthority()
     }
@@ -642,33 +1437,42 @@ internal class StandaloneFacade(
     private fun identifyOnLane(
         userId: String,
         set: Map<String, Any?>,
+        occurredAt: String,
+        setOnce: Map<String, Any?> = emptyMap(),
     ) {
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (userId != persistedDistinctId()) {
-            appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, emptyMap())))
-            cachedPersonProperties = personPropertiesKey(userId, set)
+            val accepted = appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, setOnce)), occurredAt)
+            if (accepted && !eventFilter.enabled) cachedPersonProperties = personPropertiesKey(userId, set, setOnce)
             startFlagReload()
             return
         }
-        if (set.isNotEmpty()) appendPersonProperties(set, reloadFlags = true)
+        if (set.isNotEmpty() || setOnce.isNotEmpty()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt, setOnce = setOnce)
     }
 
     private fun appendPersonProperties(
         set: Map<String, Any?>,
         reloadFlags: Boolean,
+        occurredAt: String,
+        setOnce: Map<String, Any?> = emptyMap(),
+        captureAdmission: (() -> Boolean)? = null,
     ) {
-        val key = personPropertiesKey(persistedDistinctId(), set)
+        if (personProfiles == EluPersonProfilesMode.NEVER) return
+        val key = personPropertiesKey(persistedDistinctId(), set, setOnce)
         // Repeating exactly the previous person-property call for the same identity changes nothing.
-        if (cachedPersonProperties == key) return
-        appendMutations(
+        if (!eventFilter.enabled && cachedPersonProperties == key) return
+        val accepted = appendMutations(
             listOf(
                 RuntimeMutationChange.SetPersonProperties(
                     set = set,
-                    setOnce = emptyMap(),
+                    setOnce = setOnce,
                     unset = emptyList(),
                 ),
             ),
+            occurredAt,
+            captureAdmission,
         )
-        cachedPersonProperties = key
+        if (accepted) cachedPersonProperties = key
         if (reloadFlags) startFlagReload()
     }
 
@@ -680,15 +1484,20 @@ internal class StandaloneFacade(
     private fun personPropertiesKey(
         distinctId: String,
         set: Map<String, Any?>,
-    ): String = "$distinctId $set"
+        setOnce: Map<String, Any?> = emptyMap(),
+    ): String = "$distinctId\u0000$set\u0000$setOnce"
 
     private fun syncIdentity(next: IdentityState) {
+        val previous = identity
         identity = next
-        if (exposureIdentityRevision != next.revision) {
-            // Exposure is reported once per key and value for one identity; a new identity starts
-            // a new ledger.
-            exposures.clear()
-            exposureIdentityRevision = next.revision
+        val priorSession = previous?.session
+        val currentSession = next.session
+        if (priorSession?.id != currentSession?.id || priorSession?.startedAt != currentSession?.startedAt ||
+            priorSession?.lifecycle != currentSession?.lifecycle || priorSession?.backgroundedAt != currentSession?.backgroundedAt) {
+            nativeSessionRefreshNeeded = true
+        }
+        if (previous != null && (previous.revision != next.revision || previous.contextRevision != next.contextRevision)) {
+            invalidateFlagProjection()
         }
     }
 
@@ -696,64 +1505,120 @@ internal class StandaloneFacade(
 
     // ---- flag snapshot, listeners and exposure -------------------------------
 
-    private class FlagEntry(
-        val present: Boolean,
-        val value: Any?,
-        val payload: Any?,
-    )
+    private class FlagListener(val callback: EluFeatureFlagSnapshot.Listener, val cancellation: FeatureFlagCancellation)
+    private class ReloadCompletion(val callback: () -> Unit, val identity: IdentityState?, val identityIntent: Long,
+        val consentRevision: Long, val configurationBody: String?, val source: V2ConfigAuthorityWitness?)
+    private class CompletedFlagReload(val request: ReloadCompletion, val publication: FlagPublication) {
+        @Volatile var deferredIntent: Long = publication.intent
+    }
+    private class FlagPublication(val snapshot: EluFeatureFlagSnapshot, val read: FlagSnapshotReadResult.Found?,
+        val generation: Long, val intent: Long, val source: V2ConfigAuthorityWitness?)
+    private class FlagReloadOutcome(val generation: Long, val restriction: Long,
+        val source: V2ConfigAuthorityWitness?, val result: FlagReloadResult?, val error: Throwable?)
+    private class FlagEntry(val present: Boolean, val value: Any?, val payload: Any?, val read: FlagReadResult)
 
-    private fun readFlag(
-        key: String,
-        expose: Boolean,
-    ): FlagEntry? {
-        if (key.isEmpty()) return null
-        if (state !is EluFacadeState.Enabled || !flagsLoaded) return null
-        val entry = flagProjection[key]
-        submit {
-            // The owned client resolves one key at a time, so a key is read once here and then
-            // refreshed on every later load.
-            if (observedFlagKeys.add(key)) resolveFlag(key)
-            if (expose) reportExposure(key, entry)
-        }
-        return entry?.takeIf { it.present }
+    private fun reloadCompletionIntentIsCurrent(request: ReloadCompletion): Boolean = synchronized(projectionLock) {
+        !closed && !closeRequested.get() && !isOptedOut() && request.identityIntent == identityIntentRevision &&
+            request.consentRevision == consentIntentRevision && request.configurationBody == configDocument &&
+            (configurationGate == null || request.source?.isCurrent() == true)
     }
 
-    /** Reports `$feature_flag_called` once per flag key and reported value for one identity. */
-    private fun reportExposure(
-        key: String,
-        entry: FlagEntry?,
-    ) {
-        if (entry == null) return
-        val ledgerKey = "$key ${entry.value}"
-        if (!exposures.add(ledgerKey)) return
-        val identityRevision = exposureIdentityRevision
-        val properties = LinkedHashMap<String, Any?>()
-        properties["\$feature_flag"] = key
-        if (entry.present) properties["\$feature_flag_response"] = entry.value
-        properties["\$feature_flag_payload"] = entry.payload
-        if (!entry.present) properties["\$feature_flag_error"] = "flag_missing"
+    private fun reloadCompletionIsCurrent(request: ReloadCompletion): Boolean = synchronized(projectionLock) {
+        val original = request.identity
+        val current = identity
+        reloadCompletionIntentIsCurrent(request) &&
+            original?.anonymousId == current?.anonymousId && original?.userId == current?.userId &&
+            original?.revision == current?.revision
+    }
+
+    private fun publicationIsCurrent(publication: FlagPublication): Boolean =
+        flagPublication === publication && !closed && flagsLoaded &&
+            publication.generation == flagGeneration && flagIntentIsCurrent(publication.intent) &&
+            hasCurrentFlags() && (configurationGate == null || publication.source?.isCurrent() == true) &&
+            (publication.read?.cacheLeaseToken?.let { stack?.flags?.isCacheLeaseCurrent(it) } != false)
+
+    private fun currentFlagPublication(): FlagPublication? = flagPublication?.takeIf(::publicationIsCurrent)
+
+    private fun readFlag(key: String, expose: Boolean, fresh: Boolean = false): FlagEntry? {
+        if (!validFlagKey(key)) return null
+        val publication = currentFlagPublication() ?: return null
+        if (fresh && publication.snapshot.source != EluFeatureFlagSnapshot.Source.REMOTE) return null
+        val read = publication.read?.forKey(key) ?: return null
+        val entry = when (read) {
+            is FlagReadResult.Found -> FlagEntry(true, publicFlagValue(platformValue(read.value)),
+                read.payload?.let(::platformValue), read)
+            is FlagReadResult.CacheMiss -> FlagEntry(false, null, null, read)
+            else -> return null
+        }
+        if (expose) submit { reportExposure(key, entry, publication) }
+        return entry.takeIf { it.present && publicationIsCurrent(publication) }
+    }
+
+    /** The original queue transaction owns anonymous-visitor dedupe, never this projection. */
+    private fun reportExposure(key: String, entry: FlagEntry, publication: FlagPublication) {
+        if (!publicationIsCurrent(publication)) return
+        val exposure = dev.elu.analytics.internal.runtime.RuntimeFlagExposureCapture.from(key, entry.read,
+            publication.snapshot.source == EluFeatureFlagSnapshot.Source.CACHE) {
+            publicationIsCurrent(publication)
+        } ?: return
         val occurredAt = now()
-        dispatch(
-            kind = OperationKind.ACTIVITY,
-            onDropped = {
-                // A discarded exposure was never reported, so the next read of that value reports
-                // it again as long as the identity that recorded it still stands.
-                if (exposureIdentityRevision == identityRevision) exposures.remove(ledgerKey)
-            },
-        ) {
-            val runtime = requireStack().runtime
-            captureThrough { runtime.capture(FEATURE_FLAG_CALLED_EVENT, properties, occurredAt) }
+        dispatch(kind = OperationKind.ACTIVITY) {
+            if (exposure.isCurrent()) captureThrough { attempt -> requireStack().runtime.captureFlagExposure(exposure, occurredAt, attempt) }
         }
     }
+
+    /** One original client read, not a collection of public keyed reads or exposures. */
+    private fun publishFlagRead(remoteToken: FlagCacheLeaseToken?, error: EluFeatureFlagSnapshot.LoadError?,
+        publishUnavailable: Boolean = false, restoring: FlagPublication? = null,
+        preserveLoadError: Boolean = true): FlagPublication? {
+        val generation = flagGeneration
+        val intent = flagIntentRevision
+        val source = flagConfiguration
+        if (!flagIntentIsCurrent(intent) || !hasCurrentFlags()) return null
+        val read = try { stack?.flags?.readSnapshot()?.await() ?: return null }
+            catch (failure: Throwable) { countDrop(classify(failure)); return null }
+        if (read is FlagSnapshotReadResult.Restricted || read == FlagSnapshotReadResult.Terminal) return null
+        val found = read as? FlagSnapshotReadResult.Found
+        if (generation != flagGeneration || !flagIntentIsCurrent(intent) || !hasCurrentFlags() ||
+            (configurationGate != null && source?.isCurrent() != true)) return null
+        if (remoteToken != null && found?.cacheLeaseToken != remoteToken) return null
+        if (found != null && stack?.flags?.isCacheLeaseCurrent(found.cacheLeaseToken) != true) return null
+        val restored = restoring?.takeIf {
+            it.generation == generation && sameFlagSource(it.source, source) &&
+                if (found == null) it.read == null && it.snapshot.source == EluFeatureFlagSnapshot.Source.UNAVAILABLE
+                else it.read?.cacheLeaseToken == found.cacheLeaseToken
+        }
+        if (found == null && !publishUnavailable && restored == null) return null
+        val previous = restored ?: currentFlagPublication()
+        val remote = found != null && (remoteToken == found.cacheLeaseToken ||
+            previous?.snapshot?.source == EluFeatureFlagSnapshot.Source.REMOTE &&
+                previous.read?.cacheLeaseToken == found.cacheLeaseToken)
+        val origin = if (found == null) EluFeatureFlagSnapshot.Source.UNAVAILABLE
+            else if (remote) EluFeatureFlagSnapshot.Source.REMOTE else EluFeatureFlagSnapshot.Source.CACHE
+        val snapshot = EluFeatureFlagSnapshot(found?.response, origin,
+            if (preserveLoadError && restored != null) restored.snapshot.error else error)
+        val publication = FlagPublication(snapshot, found, generation, intent, source)
+        flagPublication = publication
+        flagsLoaded = true
+        return publication.takeIf(::publicationIsCurrent)
+    }
+
+    private fun sameFlagSource(original: V2ConfigAuthorityWitness?, current: V2ConfigAuthorityWitness?): Boolean =
+        if (configurationGate == null) original == null && current == null else
+            original != null && current != null && original.token === current.token &&
+                original.body == current.body && original.receiptBody == current.receiptBody &&
+                original.nativeV3 === current.nativeV3 && original.isCurrent() && current.isCurrent()
 
     /**
      * Starts one reload. Concurrent requests join the reload already running, and the lane never
      * waits for it: the request leaves the client on its own lane and the outcome comes back as
      * another lane task, so captures behind it are not held for a network round trip.
      */
-    private fun startFlagReload() {
-        if (state !is EluFacadeState.Enabled || closed) return
+    private fun startFlagReload(resetRetry: Boolean = true) {
+        if (closed || pendingFlagOperations != 0 || !hasCurrentFlags()) return
         if (stack?.flags == null || flagReloadGeneration != null) return
+        cancelFlagRetry()
+        if (resetRetry) flagRetryAttempt = 0
         flagReloadGeneration = flagGeneration
         flagReloadAttempts = 0
         beginFlagReloadAttempt()
@@ -764,103 +1629,187 @@ internal class StandaloneFacade(
         val generation = flagReloadGeneration
         if (client == null || generation == null) return
         flagReloadAttempts += 1
+        val restriction = synchronized(projectionLock) { eventFilterIntentRevision }
+        val source = flagConfiguration
         val pending =
             try {
                 client.reload()
             } catch (error: Throwable) {
-                countDrop(classify(error))
-                finishFlagReload()
+                retainFlagReloadOutcome(FlagReloadOutcome(generation, restriction, source, null, error))
                 return
             }
         pending.whenComplete { result, error ->
-            submit { settleFlagReload(generation, result, error) }
+            submit { retainFlagReloadOutcome(FlagReloadOutcome(generation, restriction, source, result, error)) }
         }
     }
 
-    private fun settleFlagReload(
-        generation: Long,
-        result: FlagReloadResult?,
-        error: Throwable?,
-    ) {
-        // A reload the identity outlived is discarded: its flags belong to the identity that ended.
-        if (generation != flagReloadGeneration) return
-        if (error != null) {
-            countDrop(classify(error))
-            finishFlagReload()
+    private fun flagReloadScopeIsCurrent(outcome: FlagReloadOutcome): Boolean = synchronized(projectionLock) {
+        !closed && !closeRequested.get() && outcome.generation == flagReloadGeneration &&
+            outcome.generation == flagGeneration && outcome.restriction == eventFilterIntentRevision &&
+            hasCurrentFlags() && sameFlagSource(outcome.source, flagConfiguration)
+    }
+
+    private fun retainFlagReloadOutcome(outcome: FlagReloadOutcome) {
+        if (!flagReloadScopeIsCurrent(outcome)) return
+        flagReloadOutcome = outcome
+        drainFlagReloadOutcome()
+    }
+
+    private fun drainFlagReloadOutcome() {
+        val outcome = flagReloadOutcome ?: return
+        if (!flagReloadScopeIsCurrent(outcome)) { finishFlagReload(); return }
+        val intent = flagIntentRevision
+        if (!flagIntentIsCurrent(intent)) return // The last original quiet operation drains it.
+        val result = outcome.result
+        if (result == FlagReloadResult.Stale && outcome.error == null) {
+            flagReloadOutcome = null
+            if (flagReloadAttempts < MAX_FLAG_RELOAD_ATTEMPTS) beginFlagReloadAttempt()
+            else finishFlagReload()
             return
         }
-        if (state !is EluFacadeState.Enabled || closed) {
-            finishFlagReload()
-            return
-        }
-        when (result) {
-            is FlagReloadResult.Updated -> {
-                observedFlagKeys.forEach { key -> resolveFlag(key) }
-                flagsLoaded = true
-                // Listeners see the new snapshot before the reload's own completion runs.
-                fireFlagListeners()
-                finishFlagReload()
+        val retry = outcome.error != null || result is FlagReloadResult.Failed
+        val loadError = if (outcome.error != null) EluFeatureFlagSnapshot.LoadError.TRANSPORT else
+            when ((result as? FlagReloadResult.Failed)?.reason) {
+                "transport-failure" -> EluFeatureFlagSnapshot.LoadError.TRANSPORT
+                "protocol-failure" -> EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE
+                else -> null
             }
-            // The reload was superseded by a context or configuration change; the next attempt
-            // evaluates the current witness.
-            FlagReloadResult.Stale ->
-                if (flagReloadAttempts < MAX_FLAG_RELOAD_ATTEMPTS) {
-                    beginFlagReloadAttempt()
-                } else {
-                    finishFlagReload()
+        val token = (result as? FlagReloadResult.Updated)?.cacheLeaseToken
+        val publication = if (retry || token != null) publishFlagRead(token, loadError, publishUnavailable = retry,
+            restoring = flagPublication, preserveLoadError = false) else null
+        // A new quiet call may have arrived during the original client read. Keep the actual
+        // outcome for its last settlement; never consume a completion or error as a cache reread.
+        if (flagReloadScopeIsCurrent(outcome) && !flagIntentIsCurrent(intent)) return
+        if (!flagReloadScopeIsCurrent(outcome)) { finishFlagReload(); return }
+        outcome.error?.let { countDrop(classify(it)) }
+        // Preserve listener-before-completion order. A listener's quiet capture may withdraw
+        // this publication, but cannot erase a completion bound to the same original cache.
+        publication?.let(::fireFlagListeners)
+        finishFlagReload(publication)
+        if (retry) scheduleFlagRetry()
+    }
+
+    private fun cancelFlagRetry() {
+        flagRetryGeneration = Math.incrementExact(flagRetryGeneration)
+        flagRetryTask?.cancel()
+        flagRetryTask = null
+        flagRetryRestriction = null
+        flagRetryDue = false
+    }
+
+    private fun flagRetryScopeIsCurrent(): Boolean = synchronized(projectionLock) {
+        !closed && hasCurrentFlags() && flagRetryRestriction != null &&
+            flagRetryRestriction == eventFilterIntentRevision
+    }
+
+    private fun runDueFlagRetry() = synchronized(projectionLock) {
+        if (flagRetryDue && pendingFlagOperations == 0 && flagRetryScopeIsCurrent()) {
+            flagRetryDue = false
+            startFlagReload(resetRetry = false)
+        }
+    }
+
+    private fun scheduleFlagRetry() {
+        if (closed || !hasCurrentFlags() || flagRetryAttempt >= 6) return
+        cancelFlagRetry()
+        val generation = flagRetryGeneration
+        flagRetryRestriction = synchronized(projectionLock) { eventFilterIntentRevision }
+        val floorMillis = 5_000L * (1L shl flagRetryAttempt++)
+        val jitter = runCatching { flagRetryJitter() }.getOrDefault(0.0).takeIf { it.isFinite() && it in 0.0..1.0 } ?: 0.0
+        val delayMillis = minOf(300_000L, floorMillis + (floorMillis * .2 * jitter).toLong())
+        try {
+            flagRetryTask = flagRetryScheduler.schedule(delayMillis * 1_000_000L) {
+                submit {
+                    if (generation == flagRetryGeneration) {
+                        if (!flagRetryScopeIsCurrent()) cancelFlagRetry()
+                        else {
+                            flagRetryTask = null
+                            flagRetryDue = true
+                            runDueFlagRetry()
+                        }
+                    }
                 }
-            else -> {
-                // A load that failed still ends the "flags have not loaded" phase, so getters
-                // report their documented defaults instead of waiting for a retry.
-                flagsLoaded = true
-                fireFlagListeners()
-                finishFlagReload()
             }
-        }
+        } catch (_: Exception) { cancelFlagRetry() }
     }
 
-    private fun finishFlagReload() {
+    private fun finishFlagReload(publication: FlagPublication? = currentFlagPublication()) {
         flagReloadGeneration = null
+        flagReloadOutcome = null
         val completions = reloadCompletions.toList()
         reloadCompletions.clear()
-        completions.forEach { completion -> deliver(completion) }
+        if (publication != null) completions.filter(::reloadCompletionIsCurrent).forEach { request ->
+            deliverCompletedFlagReload(CompletedFlagReload(request, publication))
+        }
     }
 
-    private fun resolveFlag(key: String) {
-        val client = stack?.flags ?: return
-        val read =
-            try {
-                client.read(key).await()
-            } catch (error: Throwable) {
-                countDrop(classify(error))
-                return
+    private fun completedFlagReloadIsCurrent(completed: CompletedFlagReload): Boolean =
+        reloadCompletionIsCurrent(completed.request) && completed.publication.generation == flagGeneration &&
+            sameFlagSource(completed.publication.source, flagConfiguration)
+
+    private fun deliverCompletedFlagReload(completed: CompletedFlagReload) {
+        deliver {
+            if (!completedFlagReloadIsCurrent(completed)) return@deliver
+            val current = currentFlagPublication()
+            val original = completed.publication
+            val admitted = current != null && current.read?.cacheLeaseToken == original.read?.cacheLeaseToken &&
+                current.snapshot.source == original.snapshot.source && current.snapshot.error == original.snapshot.error &&
+                publicationIsCurrent(current) && completedFlagReloadIsCurrent(completed)
+            if (admitted) completed.request.callback()
+            else if (flagIntentRevision != completed.deferredIntent) {
+                // Transfer this same callback back to the original lane. The last quiet
+                // settlement drains it once, including a full reread after the counter reached
+                // zero. At most one transfer per accepted intent; an unavailable read never spins.
+                val intent = flagIntentRevision
+                submit {
+                    if (completedFlagReloadIsCurrent(completed)) {
+                        completed.deferredIntent = intent
+                        completedFlagReloads += completed
+                        drainCompletedFlagReloads()
+                    }
+                }
             }
-        val entry =
-            when (read) {
-                is FlagReadResult.Found ->
-                    FlagEntry(
-                        present = true,
-                        value = publicFlagValue(platformValue(read.value)),
-                        payload = read.payload?.let(::platformValue),
-                    )
-                // Every other outcome is "no value for this key from a usable cache".
-                else -> FlagEntry(present = false, value = null, payload = null)
-            }
-        flagProjection = LinkedHashMap(flagProjection).apply { put(key, entry) }
+        }
     }
 
-    private fun clearFlags() {
-        flagProjection = emptyMap()
+    private fun drainCompletedFlagReloads() {
+        if (pendingFlagOperations != 0) return
+        val completed = completedFlagReloads.toList()
+        completedFlagReloads.clear()
+        completed.forEach(::deliverCompletedFlagReload)
+    }
+
+    private fun clearFlags() = invalidateFlagProjection()
+
+    private fun invalidateFlagProjection() {
+        cancelFlagRetry()
+        flagRetryAttempt = 0
+        flagPublication = null
         flagsLoaded = false
-        observedFlagKeys.clear()
-        exposures.clear()
-        flagGeneration += 1
+        flagGeneration = Math.incrementExact(flagGeneration)
         flagReloadGeneration = null
+        flagReloadOutcome = null
+        completedFlagReloads.clear()
         flagReloadAttempts = 0
+        // A same-identity command deferred by a context intent still owns its completion.
+        reloadCompletions.removeAll { !reloadCompletionIsCurrent(it) }
     }
 
-    private fun fireFlagListeners() {
-        listeners.toList().forEach { listener -> deliver(listener) }
+    private fun fireFlagListeners(publication: FlagPublication) {
+        listeners.toList().forEach { deliverFlagCallback(it, publication) }
+        snapshotListeners.toList().forEach { deliverSnapshot(it, publication) }
+    }
+
+    private fun deliverSnapshot(listener: FlagListener, publication: FlagPublication) {
+        deliver {
+            if (publicationIsCurrent(publication) && listener.cancellation.admit()) {
+                listener.callback.onFlags(publication.snapshot)
+            }
+        }
+    }
+
+    private fun deliverFlagCallback(callback: () -> Unit, publication: FlagPublication) {
+        deliver { if (publicationIsCurrent(publication)) callback() }
     }
 
     private fun deliver(callback: () -> Unit) {
@@ -881,7 +1830,9 @@ internal class StandaloneFacade(
     private class ProjectedIdentity(val distinctId: String?)
 
     private fun projectIdentity(projection: ProjectedIdentity): Boolean {
+        synchronized(projectionLock) { identityIntentRevision = Math.incrementExact(identityIntentRevision) }
         if (state !is EluFacadeState.Enabled) return false
+        stack?.runtime?.withdrawAutomaticExceptions(retire = true)
         synchronized(projectionLock) {
             pendingIdentityOperations += 1
             projectedIdentity = projection
@@ -906,6 +1857,8 @@ internal class StandaloneFacade(
     ) {
         if (count <= 0) return
         synchronized(dropCounts) { dropCounts[reason] = (dropCounts[reason] ?: 0) + count }
+        observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.DROP,
+            drop = RuntimeStartupDrop.valueOf(reason.name), dropCount = synchronized(dropCounts) { dropCounts[reason] }) }
     }
 
     private fun currentDropReason(): EluFacadeDropReason =
@@ -960,7 +1913,7 @@ internal class StandaloneFacade(
                 "\$session_id",
                 "\$window_id",
                 "\$groups",
-                "\$is_identified",
+                "\$is_identified", "\$process_person_profile", "\$epp",
             )
 
         /** Prefix of the version properties the runtime stamps on every record. */
@@ -981,8 +1934,10 @@ internal class StandaloneFacade(
         fun dropReasonFor(reason: RuntimeCaptureRejection): EluFacadeDropReason =
             when (reason) {
                 RuntimeCaptureRejection.OPTED_OUT -> EluFacadeDropReason.OPTED_OUT
-                RuntimeCaptureRejection.EVENT_INVALID -> EluFacadeDropReason.INVALID_INPUT
+                RuntimeCaptureRejection.EVENT_INVALID, RuntimeCaptureRejection.FILTER_DROPPED,
+                RuntimeCaptureRejection.FILTER_INVALID, RuntimeCaptureRejection.FILTER_PERSON_UNSUPPORTED -> EluFacadeDropReason.INVALID_INPUT
                 RuntimeCaptureRejection.QUEUE_LIMIT -> EluFacadeDropReason.STORAGE
+                RuntimeCaptureRejection.RATE_LIMITED -> EluFacadeDropReason.RATE_LIMITED
                 else -> EluFacadeDropReason.UNAUTHORIZED
             }
 

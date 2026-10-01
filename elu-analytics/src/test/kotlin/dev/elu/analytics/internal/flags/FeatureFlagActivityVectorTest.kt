@@ -24,7 +24,8 @@ import java.math.BigDecimal
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.Base64
-import java.util.concurrent.CompletableFuture
+import dev.elu.analytics.internal.concurrent.SdkFuture
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
@@ -57,6 +58,74 @@ class FeatureFlagActivityVectorTest {
     fun tearDown() {
         owners.asReversed().forEach { owner -> runCatching { owner.closeAsync().await() } }
         RuntimeQueueOwner.clearOwnershipForTesting()
+    }
+
+    @Test fun `cloud and distinct selfhost stores isolate actual flag cache identity and queued mutations`() {
+        val key = "elu_pk_test_flags"
+        val a = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://a.example.com")
+        val b = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://b.example.com")
+        val cloud = dev.elu.analytics.internal.config.LocalEndpointPolicy.CLOUD
+        val stores = mutableMapOf<String, FakeRuntimeQueueBacking>()
+        fun scoped(policy: dev.elu.analytics.internal.config.LocalEndpointPolicy): RuntimeQueueOwner {
+            val path = dev.elu.analytics.internal.runtime.RuntimeSiteNamespace.directory(key, policy)
+            val owner = open(stores.getOrPut(path) { FakeRuntimeQueueBacking() }, key, policy)
+            owner.ensureFeatureFlagRuntime().await()
+            val body = policy.apiOrigin?.let { configAllowed().replace("https://ingest.elu.dev", it).replace("https://assets.elu.dev", it) } ?: configAllowed()
+            assertTrue(owner.applyFeatureFlagConfiguration(body, millis("2026-08-04T00:01:00.000Z")).await() is V1FlagAuthorizationResolution.Allowed)
+            return owner
+        }
+        val first = scoped(a)
+        val begun = first.begin("flags_request_1", "store_epoch_1", "2026-08-04T00:01:01.000Z")
+        assertTrue(complete(first, begun, responseMixed(), "2026-08-04T00:01:02.000Z") is FlagReloadResult.Updated)
+        assertFalse(first.readFlag("variant").isMissing())
+        val others = listOf(scoped(cloud), scoped(b))
+        assertTrue(others.all { it.readFlag("variant").isMissing() })
+        assertTrue(first.appendMutations(listOf(RuntimeRecordDraft.Mutation("2026-08-04T00:01:04.000Z",
+            RuntimeMutationChange.Identify("selfhost-only-user", emptyMap(), emptyMap()), browserVersions()))).await() is RuntimeAppendResult.Accepted)
+        assertEquals("selfhost-only-user", first.snapshot().await().state.identity.userId)
+        assertEquals(1, first.snapshot().await().queuedCount)
+        others.forEach { assertEquals("user_123", it.snapshot().await().state.identity.userId); assertEquals(0, it.snapshot().await().queuedCount) }
+        first.closeAsync().await()
+        val normalized = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost(" HTTPS://A.EXAMPLE.COM/ ")
+        val sameStore = stores.getValue(dev.elu.analytics.internal.runtime.RuntimeSiteNamespace.directory(key, normalized))
+        val reopened = open(sameStore, key, normalized)
+        assertEquals("selfhost-only-user", reopened.snapshot().await().state.identity.userId)
+        assertEquals(1, reopened.snapshot().await().queuedCount)
+        assertEquals(3, stores.size)
+    }
+
+    @Test fun `cloud root and distinct prefixed stores isolate actual flag cache identity and queued mutations`() {
+        val key = "elu_pk_test_flags"
+        val a = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com/a")
+        val b = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com/b")
+        val cloud = dev.elu.analytics.internal.config.LocalEndpointPolicy.CLOUD
+        val stores = mutableMapOf<String, FakeRuntimeQueueBacking>()
+        fun scoped(policy: dev.elu.analytics.internal.config.LocalEndpointPolicy): RuntimeQueueOwner {
+            val path = dev.elu.analytics.internal.runtime.RuntimeSiteNamespace.directory(key, policy)
+            val owner = open(stores.getOrPut(path) { FakeRuntimeQueueBacking() }, key, policy)
+            owner.ensureFeatureFlagRuntime().await()
+            val body = policy.apiOrigin?.let { configAllowed().replace("https://ingest.elu.dev", it).replace("https://assets.elu.dev", it) } ?: configAllowed()
+            assertTrue(owner.applyFeatureFlagConfiguration(body, millis("2026-08-04T00:01:00.000Z")).await() is V1FlagAuthorizationResolution.Allowed)
+            return owner
+        }
+        val first = scoped(a)
+        val begun = first.begin("flags_request_1", "store_epoch_1", "2026-08-04T00:01:01.000Z")
+        assertTrue(complete(first, begun, responseMixed(), "2026-08-04T00:01:02.000Z") is FlagReloadResult.Updated)
+        assertFalse(first.readFlag("variant").isMissing())
+        val others = listOf(scoped(cloud), scoped(b), scoped(dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost("https://same.example.com")))
+        assertTrue(others.all { it.readFlag("variant").isMissing() })
+        assertTrue(first.appendMutations(listOf(RuntimeRecordDraft.Mutation("2026-08-04T00:01:04.000Z",
+            RuntimeMutationChange.Identify("selfhost-only-user", emptyMap(), emptyMap()), browserVersions()))).await() is RuntimeAppendResult.Accepted)
+        assertEquals("selfhost-only-user", first.snapshot().await().state.identity.userId)
+        assertEquals(1, first.snapshot().await().queuedCount)
+        others.forEach { assertEquals("user_123", it.snapshot().await().state.identity.userId); assertEquals(0, it.snapshot().await().queuedCount) }
+        first.closeAsync().await()
+        val normalized = dev.elu.analytics.internal.config.LocalEndpointPolicy.fromApiHost(" HTTPS://SAME.EXAMPLE.COM/a/ ")
+        val sameStore = stores.getValue(dev.elu.analytics.internal.runtime.RuntimeSiteNamespace.directory(key, normalized))
+        val reopened = open(sameStore, key, normalized)
+        assertEquals("selfhost-only-user", reopened.snapshot().await().state.identity.userId)
+        assertEquals(1, reopened.snapshot().await().queuedCount)
+        assertEquals(4, stores.size)
     }
 
     @Test
@@ -178,7 +247,7 @@ class FeatureFlagActivityVectorTest {
         val sent = AtomicInteger()
         val request = AtomicReference<FlagTransportRequest>()
         val entered = CountDownLatch(1)
-        val response = CompletableFuture<ByteArray>()
+        val response = SdkFuture<ByteArray>()
         val client =
             AndroidFeatureFlagClient(
                 owner,
@@ -221,7 +290,7 @@ class FeatureFlagActivityVectorTest {
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
-                FlagTransport { CompletableFuture() },
+                FlagTransport { SdkFuture() },
                 clock,
                 FlagOpaqueIdSource { "unused_closed_request" },
                 FlagOpaqueIdSource { "unused_closed_epoch" },
@@ -278,7 +347,7 @@ class FeatureFlagActivityVectorTest {
         val owner = open(backing)
         val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val transportEntered = CountDownLatch(1)
-        val transportResponse = CompletableFuture<ByteArray>()
+        val transportResponse = SdkFuture<ByteArray>()
         val client =
             AndroidFeatureFlagClient(
                 owner,
@@ -327,7 +396,7 @@ class FeatureFlagActivityVectorTest {
         val owner = open(backing)
         val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val entered = CountDownLatch(1)
-        val transportResponse = CompletableFuture<ByteArray>()
+        val transportResponse = SdkFuture<ByteArray>()
         val client =
             AndroidFeatureFlagClient(
                 owner,
@@ -676,45 +745,47 @@ class FeatureFlagActivityVectorTest {
     fun `pre-send authorization observes a core mutation and suppresses transport`() {
         val owner = open(FakeRuntimeQueueBacking())
         val sent = AtomicInteger()
-        val calls = AtomicInteger()
-        val clock =
-            object : FlagClock {
-                override fun wallNowEpochMillis(): Long {
-                    if (calls.incrementAndGet() == 4) {
-                        owner.appendMutations(
-                            listOf(
-                                RuntimeRecordDraft.Mutation(
-                                    "2026-08-04T00:01:01.000Z",
-                                    RuntimeMutationChange.SetPersonProperties(
-                                        mapOf("plan" to "enterprise"),
-                                        emptyMap(),
-                                        emptyList(),
-                                    ),
-                                    browserVersions(),
-                                ),
-                            ),
-                        ).await()
-                    }
-                    return millis("2026-08-04T00:01:00.000Z")
-                }
-
-                override fun monotonicNowNanos(): Long = calls.get().toLong() * 1_000_000_000L
-            }
+        val mutations = AtomicInteger()
+        // Completion can wake await() before the RELOAD_RESULT diagnostic is appended.
+        val phases = CopyOnWriteArrayList<FlagDiagnosticRecord>()
+        val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val client =
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
                 FlagTransport {
                     sent.incrementAndGet()
-                    CompletableFuture.completedFuture(responseMixed())
+                    SdkFuture.completedFuture(responseMixed())
                 },
                 clock,
                 FlagOpaqueIdSource { "pre_send_request" },
                 FlagOpaqueIdSource { "pre_send_epoch" },
+                diagnostic = FlagDiagnosticObserver { record ->
+                    phases.add(record)
+                    if (record.phase == FlagDiagnosticPhase.BEGIN_RESULT && record.result == FlagDiagnosticResult.BEGUN) {
+                        // Begin's durable request witness exists; the client's pre-send check has not run.
+                        owner.appendMutations(
+                            listOf(
+                                RuntimeRecordDraft.Mutation(
+                                    "2026-08-04T00:01:01.000Z",
+                                    RuntimeMutationChange.SetPersonProperties(
+                                        mapOf("plan" to "enterprise"), emptyMap(), emptyList(),
+                                    ),
+                                    browserVersions(),
+                                ),
+                            ),
+                        ).await()
+                        mutations.incrementAndGet()
+                    }
+                },
             )
         try {
             assertTrue(client.applyConfiguration(configAllowed()).await() is V1FlagAuthorizationResolution.Allowed)
             assertTrue(client.reload().await() is FlagReloadResult.Stale)
+            assertEquals(1, mutations.get())
+            val begin = phases.indexOfFirst { it.phase == FlagDiagnosticPhase.BEGIN_RESULT && it.result == FlagDiagnosticResult.BEGUN }
+            val preSend = phases.indexOfFirst { it.phase == FlagDiagnosticPhase.PRE_SEND_RESULT && it.result == FlagDiagnosticResult.STALE }
+            assertTrue(begin >= 0 && preSend > begin)
             assertEquals(0, sent.get())
         } finally {
             client.close()
@@ -726,7 +797,7 @@ class FeatureFlagActivityVectorTest {
         val owner = open(FakeRuntimeQueueBacking())
         val entered = CountDownLatch(1)
         val sent = AtomicInteger()
-        val never = CompletableFuture<ByteArray>()
+        val never = SdkFuture<ByteArray>()
         val clock = MutableFlagClock(millis("2026-08-04T00:01:00.000Z"), 1_000_000_000L)
         val client =
             AndroidFeatureFlagClient(
@@ -773,7 +844,7 @@ class FeatureFlagActivityVectorTest {
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
-                FlagTransport { CompletableFuture() },
+                FlagTransport { SdkFuture() },
                 clock,
                 FlagOpaqueIdSource { "unused_request" },
                 FlagOpaqueIdSource { "unused_epoch" },
@@ -800,16 +871,17 @@ class FeatureFlagActivityVectorTest {
             AndroidFeatureFlagClient(
                 owner,
                 browserVersions(),
-                FlagTransport { CompletableFuture() },
+                FlagTransport { SdkFuture() },
                 clock,
                 FlagOpaqueIdSource { "unused_request" },
                 FlagOpaqueIdSource { "unused_epoch" },
             )
         try {
             assertTrue(client.applyConfiguration(configAllowed()).await() is V1FlagAuthorizationResolution.Allowed)
-            assertTrue(client.read("missing").await() is FlagReadResult.Missing)
+            val missing = client.read("missing").await() as FlagReadResult.CacheMiss
+            assertEquals("flags_request_1", missing.metadata!!.requestId)
             clock.set(millis("2026-08-04T00:01:30.000Z"), 100_000_000_000L)
-            assertTrue(client.read("missing").await() is FlagReadResult.Missing)
+            assertEquals(missing, client.read("missing").await())
             clock.set(millis("2026-08-04T00:01:31.000Z"), 178_000_000_000L)
             assertTrue(client.read("missing").await() is FlagReadResult.Missing)
             val metadata = metadataJson(backing)
@@ -819,6 +891,52 @@ class FeatureFlagActivityVectorTest {
         } finally {
             client.close()
         }
+    }
+
+    @Test fun `complete cache and keyed projection share original token and immutable full response`() {
+        val backing = FakeRuntimeQueueBacking()
+        val owner = seededOwner(backing)
+        val full = owner.readFeatureFlagSnapshot(browserVersions(), { millis("2026-08-04T00:01:03.000Z") }).await()
+            as FlagSnapshotReadResult.Found
+        assertEquals(FlagCodec.decodeResponse(responseMixed()), full.response)
+        assertEquals(owner.readFlag("variant"), full.forKey("variant"))
+        assertEquals(owner.readFlag("absent"), full.forKey("absent"))
+        assertTrue(full.response.payloads.contains("orphan"))
+        org.junit.Assert.assertThrows(UnsupportedOperationException::class.java) {
+            (full.response.flags.members as MutableList<*>).clear()
+        }
+        val nested = full.response.payloads.member("variant") as FlagJsonValue.ObjectValue
+        org.junit.Assert.assertThrows(UnsupportedOperationException::class.java) { (nested.members as MutableList<*>).clear() }
+        assertEquals(full, owner.readFeatureFlagSnapshot(browserVersions(), { millis("2026-08-04T00:01:03.000Z") }).await())
+        assertEquals(0, owner.snapshot().await().queuedCount)
+        assertTrue(owner.readFeatureFlagSnapshot(browserVersions(), { millis("2026-08-04T00:04:00.000Z") }).await() is FlagSnapshotReadResult.Missing)
+        assertTrue(owner.readFlag("variant", "2026-08-04T00:04:00.000Z").isMissing())
+    }
+
+    @Test fun `complete client read cannot renew lifetime consumed by its original storage hop`() {
+        val owner = seededOwner()
+        val nanos = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)
+        val readWalls = AtomicInteger()
+        var armed = false
+        val clock = object : FlagClock {
+            override fun wallNowEpochMillis(): Long {
+                // Pre-hop sample is first, original owner transaction's wall read is second.
+                if (armed && readWalls.incrementAndGet() == 2) nanos.set(178_000_000_000L)
+                return millis("2026-08-04T00:01:03.000Z")
+            }
+            override fun monotonicNowNanos() = nanos.get()
+        }
+        val sent = AtomicInteger()
+        val client = AndroidFeatureFlagClient(owner, browserVersions(), FlagTransport {
+            sent.incrementAndGet(); SdkFuture()
+        }, clock, FlagOpaqueIdSource { "unused" }, FlagOpaqueIdSource { "unused_epoch" })
+        try {
+            assertTrue(client.applyConfiguration(configAllowed()).await() is V1FlagAuthorizationResolution.Allowed)
+            armed = true
+            assertTrue(client.readSnapshot().await() is FlagSnapshotReadResult.Missing)
+            assertTrue(readWalls.get() >= 2); assertEquals(0, sent.get())
+            assertTrue(client.read("variant").await() is FlagReadResult.Missing)
+        } finally { client.close() }
     }
 
     @Test
@@ -1369,6 +1487,7 @@ class FeatureFlagActivityVectorTest {
     private fun open(
         backing: FakeRuntimeQueueBacking,
         trustedSiteKey: String = "elu_pk_test_flags",
+        endpointPolicy: dev.elu.analytics.internal.config.LocalEndpointPolicy = dev.elu.analytics.internal.config.LocalEndpointPolicy.CLOUD,
     ): RuntimeQueueOwner {
         val owner =
             RuntimeQueueOwner.open(
@@ -1377,6 +1496,7 @@ class FeatureFlagActivityVectorTest {
                 databaseFactory = backing::connection,
                 legacyStateLoader = ::initialState,
                 trustedSiteKey = trustedSiteKey,
+                endpointPolicy = endpointPolicy,
             ).await()
         owners += owner
         return owner

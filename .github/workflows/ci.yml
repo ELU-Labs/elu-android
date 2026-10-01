@@ -20,22 +20,40 @@ jobs:
         run: >-
           ./gradlew
           :elu-analytics:testDebugUnitTest
+          :elu-analytics:lintRelease
           :elu-analytics:assembleRelease
+          :elu-analytics-compose:assembleRelease
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication
           :elu-analytics:generateMetadataFileForMavenPublication
-          :elu-analytics:releaseSourcesJar
+          :elu-analytics:sourceReleaseJar
           :elu-analytics:javaDocReleaseJar
           :elu-analytics:cyclonedxDirectBom
+          :elu-analytics-compose:generatePomFileForMavenPublication
+          :elu-analytics-compose:generateMetadataFileForMavenPublication
+          :elu-analytics-compose:sourceReleaseJar
+          :elu-analytics-compose:javaDocReleaseJar
+          :elu-analytics-compose:cyclonedxDirectBom
           :sample:assembleDebug
           checkConformanceFixtures
           checkFeatureFlagBoundary
           checkZeroBrandScanner
           checkZeroBrandRatchet
           --stacktrace
+      - name: Validate local distributions and compile Maven-only Compose consumers
+        run: |
+          python3 scripts/validate-compose-distribution.py
+          ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=module -Pandroid.useAndroidX=true --stacktrace
+          ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=pom -Pandroid.useAndroidX=true --stacktrace
+          python3 scripts/validate-compose-distribution.py --verify-staged
       - name: Verify public API and ABI snapshot
-        run: python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
-      - name: Reproduce published 0.1.0 consumer
+        run: >-
+          python3 scripts/check-api-snapshot.py
+          elu-analytics/build/outputs/aar/elu-analytics-release.aar
+          --compose-aar elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar
+      - name: Verify closed paired publication task graph without execution
+        run: bash scripts/check-publication-graph.sh
+      - name: Compile immutable historical 0.1.0 consumer (no state-import claim)
         run: >-
           ./gradlew
           :sample:assembleDebug
@@ -47,13 +65,21 @@ jobs:
         run: |
           mkdir -p build/reports
           ./gradlew :elu-analytics:dependencies --configuration releaseRuntimeClasspath > build/reports/release-runtime-classpath.txt
+          ./gradlew :elu-analytics-compose:dependencies --configuration releaseRuntimeClasspath > build/reports/compose-release-runtime-classpath.txt
           python3 scripts/validate-network-parser-smoke.py scanner/fixtures/network-parser-smoke.json
           python3 scripts/zero-brand-gate.py --mode report --skip-tree \
             --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar \
             --input publication=elu-analytics/build/publications/maven \
-            --input archives=elu-analytics/build/libs \
+            --input sources=elu-analytics/build/intermediates/source_jar/release/release-sources.jar \
+            --input javadoc=elu-analytics/build/intermediates/java_doc_jar/release/release-javadoc.jar \
             --input dependencies=build/reports/release-runtime-classpath.txt \
             --input sbom=elu-analytics/build/reports/sbom/elu-analytics-release-sbom.json \
+            --input compose-aar=elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar \
+            --input compose-publication=elu-analytics-compose/build/publications/maven \
+            --input compose-sources=elu-analytics-compose/build/intermediates/source_jar/release/release-sources.jar \
+            --input compose-javadoc=elu-analytics-compose/build/intermediates/java_doc_jar/release/release-javadoc.jar \
+            --input compose-dependencies=build/reports/compose-release-runtime-classpath.txt \
+            --input compose-sbom=elu-analytics-compose/build/reports/sbom/elu-analytics-compose-release-sbom.json \
             | tee build/reports/zero-brand-artifacts.txt
           python3 scripts/zero-brand-gate.py --mode strict --skip-tree \
             --network parser-smoke=scanner/fixtures/network-parser-smoke.json
@@ -63,14 +89,25 @@ jobs:
           name: android-sdk-reports
           path: |
             elu-analytics/build/reports/tests/
+            elu-analytics/build/outputs/aar/elu-analytics-release.aar
+            elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar
             elu-analytics/build/publications/maven/
             elu-analytics/build/reports/sbom/
+            elu-analytics-compose/build/publications/maven/
+            elu-analytics-compose/build/reports/sbom/
+            build/compose-distribution/
+            fixtures/compose-consumer/build/module/reports/
+            fixtures/compose-consumer/build/pom/reports/
             build/reports/
 
-  upgrade-evidence:
-    name: Android 0.1.0 replacement continuity
+  owned-runtime:
+    name: Android owned runtime instrumentation (API ${{ matrix.api-level }})
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [29, 35]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -84,21 +121,31 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Execute published-to-candidate replacement assertions
+      - name: Verify clean setup, owned SQLite continuity, refusal and privacy
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: ${{ matrix.api-level }}
           arch: x86_64
           disable-animations: true
           script: |
+            adb shell getprop ro.build.fingerprint
+            adb shell getprop ro.build.version.sdk
+            adb shell getprop ro.product.cpu.abi
+            test "$(adb shell getprop ro.build.version.sdk | tr -d '\r')" = "${{ matrix.api-level }}"
+            test "$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" = "x86_64"
+            mkdir -p elu-analytics/build/reports
+            adb shell 'for key in ro.build.version.sdk ro.product.cpu.abi dalvik.vm.heapgrowthlimit dalvik.vm.heapsize dalvik.vm.heapstartsize ro.config.low_ram ro.sf.lcd_density; do printf "%s=" "$key"; getprop "$key"; done' | tee elu-analytics/build/reports/device-memory.txt
+            adb shell wm size | tee -a elu-analytics/build/reports/device-memory.txt
+            adb shell wm density | tee -a elu-analytics/build/reports/device-memory.txt
+            if [ -r "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" ]; then awk -F '[[:space:]]*=[[:space:]]*' '$1 ~ /^(hw\.ramSize|vm\.heapSize|hw\.lcd\.width|hw\.lcd\.height|hw\.lcd\.density|hw\.cpu\.ncore)$/ { print }' "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" | tee -a elu-analytics/build/reports/device-memory.txt; else echo 'avd_config_available=0' | tee -a elu-analytics/build/reports/device-memory.txt; fi
             ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
-            bash scripts/run-android-upgrade-evidence.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-upgrade-evidence-0.1.0
+          name: android-owned-runtime-instrumentation-api-${{ matrix.api-level }}
           retention-days: 14
           if-no-files-found: warn
           path: |
-            build/reports/upgrade-evidence/0.1.0/manifest.json
-            build/reports/upgrade-evidence/0.1.0/manifest.sha256
+            elu-analytics/build/reports/androidTests/
+            elu-analytics/build/outputs/androidTest-results/
+            elu-analytics/build/reports/device-memory.txt

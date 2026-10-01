@@ -2,6 +2,7 @@ import org.cyclonedx.gradle.CyclonedxDirectTask
 import org.cyclonedx.model.Component
 import org.gradle.api.file.RegularFile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 val sdkVersion =
     Regex("const val NAME: String = \"([^\"]+)\"")
@@ -13,20 +14,30 @@ val sdkVersion =
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
     id("com.vanniktech.maven.publish")
     id("org.cyclonedx.bom")
 }
 
+// Also bind project-dependency/SBOM identity to the publication version.
+group = "dev.elu"
+version = sdkVersion
+
 android {
     namespace = "dev.elu.analytics"
     compileSdk = 36
+    // Compiler support for the original-host Compose androidTest fixture only.
+    buildFeatures { compose = true }
 
     defaultConfig {
-        // The resolved analytics runtime requires minSdk 23.
+        // Keep the public minimum Android version unchanged.
         minSdk = 23
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+
+    // Library instrumentation host only; avoids obsolete-target OS dialogs.
+    testOptions { targetSdk = 36 }
 
     buildTypes {
         release {
@@ -35,6 +46,7 @@ android {
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -49,10 +61,25 @@ kotlin {
     }
 }
 
+// The plugin is needed by the original-host androidTest sources only. Pinned 2.1.20
+// explicitly supports skipping IR transformation when no Compose runtime is present.
+// Keep AndroidTest strict and core production/runtime dependencies Compose-free.
+tasks.withType<KotlinCompile>().configureEach {
+    if (name in setOf("compileDebugKotlin", "compileReleaseKotlin", "compileDebugUnitTestKotlin", "compileReleaseUnitTestKotlin")) {
+        compilerOptions.freeCompilerArgs.addAll(
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:skipIrLoweringIfRuntimeNotFound=true",
+        )
+    }
+}
+
 dependencies {
-    // Exact pin: update only with an API/behavior compatibility review.
-    implementation("com.posthog:posthog-android") {
-        version { strictly("3.58.0") }
+    // Backport the Java time and arithmetic APIs used by the runtime on API 23.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
+    // Owned replay networking needs per-client cookie/authentication isolation.
+    implementation("com.squareup.okhttp3:okhttp") {
+        version { strictly("4.12.0") }
     }
 
     testImplementation("junit:junit:4.13.2")
@@ -60,6 +87,14 @@ dependencies {
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    // Compatibility fixture only. The published SDK has no AppCompat dependency.
+    androidTestImplementation("androidx.appcompat:appcompat:1.8.0")
+    // Test-only reverse edge: core main -> optional main -> core androidTest. No runtime dependency.
+    androidTestImplementation(project(":elu-analytics-compose"))
+    androidTestImplementation("androidx.activity:activity:1.8.0")
+    androidTestImplementation("androidx.compose.foundation:foundation:1.7.8")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.7.8")
+    androidTestImplementation("androidx.compose.ui:ui-test-manifest:1.7.8")
 }
 
 mavenPublishing {

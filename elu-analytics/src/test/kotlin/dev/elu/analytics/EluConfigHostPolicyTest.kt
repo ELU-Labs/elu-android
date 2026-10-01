@@ -1,5 +1,7 @@
 package dev.elu.analytics
 
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -71,6 +73,34 @@ class EluConfigHostPolicyTest {
     private val cell = "https://analytics.example.com"
 
     @Test
+    fun `declared regular prefix is canonical and cannot widen cloud or loopback config rules`() {
+        val base = "$cell/team-a/elu_v2~beta"
+        assertEquals(base, EluConfigHostPolicy.resolve(" HTTPS://Analytics.Example.com/team-a/elu_v2~beta/ ", false, base))
+        assertEquals(base, EluConfigHostPolicy.selfHostedOrigin("$base/"))
+        assertEquals("$cell/%CE%B1", EluConfigHostPolicy.selfHostedOrigin("$cell/%CE%B1/"))
+        assertNull(EluConfigHostPolicy.resolve(base, false))
+        assertNull(EluConfigHostPolicy.resolve("$cell/team-b/elu_v2~beta", false, base))
+        assertNull(EluConfigHostPolicy.resolve(cell, false, base))
+        assertNull(EluConfigHostPolicy.resolve("https://elu.dev/team-a", false, base))
+        assertNull(EluConfigHostPolicy.resolve("http://localhost:8787/team-a", true, base))
+        assertEquals("https://elu.dev", EluConfigHostPolicy.resolve("https://elu.dev", false, base))
+        assertEquals("https://elu.dev/team-a", EluConfigHostPolicy.resolve("https://elu.dev/team-a/", false, "https://elu.dev/team-a"))
+        assertNull(EluConfigHostPolicy.selfHostedOrigin("https://analytics.example.com:/team-a"))
+    }
+
+    @Test
+    fun `irregular or rewritten prefix never creates local authority even with approved config host`() {
+        for (suffix in listOf("//", "/a//b", "/a//", "/./a", "/a/../b", "/a/.", "/a/..", "/%2e/a", "/a/.%2E/b",
+            "/%2E%2e/b", "/a%2fb", "/a%5Cb", "/a%252fb", "/a%00b", "/a%1fb", "/a%20b", "/a%7Fb", "/a\\b", "/a b",
+            "/a\tb", "/a\nb", "/ümlaut", "/a@b", "/a?x=1", "/a#fragment")) {
+            val base = cell + suffix
+            assertNull(base, EluConfigHostPolicy.selfHostedOrigin(base))
+            assertNull(base, EluConfigHostPolicy.resolve("https://elu.dev", false, base))
+            assertNull(base, EluConfigHostPolicy.resolve("http://localhost:8787", true, base))
+        }
+    }
+
+    @Test
     fun `a self-hosted config host is approved when it is exactly the declared api host`() {
         for (debuggable in listOf(false, true)) {
             assertEquals(cell, EluConfigHostPolicy.resolve(cell, debuggable, apiHost = cell))
@@ -135,4 +165,22 @@ class EluConfigHostPolicyTest {
         assertNull(EluConfigHostPolicy.resolve("http://localhost:8080", false, apiHost = "http://localhost:8080"))
         assertEquals("http://localhost:8080", EluConfigHostPolicy.resolve("http://localhost:8080", true, apiHost = cell))
     }
+    @Test
+    fun `diagnostics compose with declared origins without changing existing option defaults`() {
+        val diagnostics = EluDiagnosticsOptions(enabled = true, launchTimings = true)
+        val performance = EluPerformanceOptions(enabled = true)
+        val combined = EluOptions(diagnostics, performance, cell, cell)
+        assertTrue(combined.diagnostics === diagnostics)
+        assertTrue(combined.performance === performance)
+        assertEquals(cell, combined.configHost)
+        assertEquals(cell, combined.apiHost)
+        assertEquals(cell, EluConfigHostPolicy.resolve(combined.configHost, false, combined.apiHost))
+        val concise = EluOptions(diagnostics = diagnostics, configHost = cell, apiHost = cell)
+        assertFalse(concise.performance.enabled)
+        assertTrue(concise.diagnostics === diagnostics)
+        assertNull(EluOptions(diagnostics).apiHost)
+        assertFalse(EluOptions(cell, cell).diagnostics.enabled)
+        assertTrue(EluOptions(performance, cell, cell).performance === performance)
+    }
+
 }

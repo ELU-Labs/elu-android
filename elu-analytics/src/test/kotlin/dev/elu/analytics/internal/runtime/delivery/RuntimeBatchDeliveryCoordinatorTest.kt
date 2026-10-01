@@ -182,6 +182,27 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     @Test
+    fun `acknowledgement integers reject fractions and overflow before narrowing`() {
+        val request = V1BatchRequestCodec.encodeExact(listOf(event(0, START)), instant(START))
+        val valid = acknowledgement(request, 1).decodeToString()
+        for (invalid in listOf("-1", "0.5", "9223372036854775808", "18446744073709551616", "1e100")) {
+            val body = valid.replace("\"sequence\":0", "\"sequence\":$invalid").encodeToByteArray()
+            assertThrows(BatchProtocolException::class.java) {
+                V1BatchResponseCodec.parseAcknowledgement(body, request)
+            }
+        }
+        val integralDecimal = valid.replace("\"sequence\":0", "\"sequence\":0.0").encodeToByteArray()
+        assertEquals(request.references, V1BatchResponseCodec.parseAcknowledgement(integralDecimal, request).acknowledgement.references)
+    }
+
+    @Test
+    fun `acknowledgement integer accepts exact long maximum without double rounding`() {
+        val request = V1BatchRequestCodec.encodeExact(listOf(event(Long.MAX_VALUE, START)), instant(START))
+        val parsed = V1BatchResponseCodec.parseAcknowledgement(acknowledgement(request, 1), request)
+        assertEquals(Long.MAX_VALUE, parsed.acknowledgement.references.single().sequence)
+    }
+
+    @Test
     fun `transport error parser accepts 64 KiB exactly and rejects one byte over`() {
         val requestId = "request_test"
         val base = transportError(503, requestId)

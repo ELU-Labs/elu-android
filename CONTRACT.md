@@ -1,175 +1,731 @@
-# ELU Mobile SDK — behavioral contract
+# ELU Android owned runtime contract
 
-The ELU mobile SDKs (iOS and Android) are driven entirely by ELU remote
-configuration. The design rules:
+This describes the current ELU-owned source candidate. It does not describe
+the unused published 0.1.0 preview, and is not evidence of package publication
+or production qualification. See [README.md](./README.md) for installation and
+public Kotlin APIs, and [development status](./docs/sdk-development-status.md)
+for outstanding release gates.
 
-1. The SDK is initialized with ONLY a site key — `Elu.setup` is the mobile
-   analog of ELU's one-line web script tag.
-2. It fetches per-site-key remote config from
-   `GET https://elu.dev/v1/<siteKey>/config` and caches it on disk.
-3. It ships **fail-closed compiled defaults** (EU-block ON, masking ON,
-   replay off-until-config) until the first usable config arrives. That
-   initial config may loosen the defaults. Once the runtime is running, fresh
-   config tightens immediately while loosening waits for the next launch;
-   captured frames cannot be retroactively re-masked.
-4. Customer code only ever touches the `Elu.*` facade — never the underlying
-   provider SDK.
+The installed native replay implementation supports two closed protocols. Native-v2
+has value/encoding/buffering, current-window observation and exact-tuple durable
+admission paths. It uses the exact `elu-native-wireframe-v2` Meta
+discriminator, primary-pointer start/end and coordinate-free root cancellation,
+and coalesced movement with at most ten samples per second. Samples must join
+live lawful encoded leaf IDs and their positive clips; masked/input/placeholder
+or layout-only targets are refused. Changed existing geometry uses FullSnapshot;
+removal or masking of an active target requires an earlier real cancellation.
+Movement chunks include the earliest logical sample in their time span and charge
+each position once. Every geometry event retains the decoder's 200 ms wire-clock
+spacing, independently of the monotonic capture clock. Existing frame, node, byte and minimum-duration limits remain;
+capacity requests an early seal only after the original initial prefix was known
+committed. The pure commit seam is descriptive and does not prove durability.
+The original internal authority and queue recognize only `elu-native-wireframe-v1` / gzip /
+`protocol-generation-v1` and `elu-native-wireframe-v2` / gzip /
+`protocol-generation-v2`. Those definitions also restrict current config and sealed
+delivery negotiation: mixed advertisements cannot pair a codec with the other
+generation, and the restrictive map does not add local readback evidence. The
+sealer retains one matching encoder, independent chunk domain and original privacy,
+identity and version wrapper; a failed envelope does not advance its encoder.
+Both codecs refuse generic append and require the original current physical use,
+capture admission, source and durable accounting transaction. An ambiguous append
+retains the same prepared bytes through reconciliation; unknown outcomes quarantine
+the original owner. The public runtime supplies one immutable installed V1/V2
+selection to both its queue and composition on every open, including reopen.
+The original configuration generation selects the matching codec; a v1 grant
+remains v1 even when v2 is advertised first. Crossed, unknown and uncompressed
+tuples do not authorize collection. Installed support grants no remote permission
+and does not change the engine's disabled-by-default production release registry.
 
-## 1. Config endpoint
+On API 29+, an authorized v2 capture installs the original Window.Callback observer
+and arms only after its exact initial geometry prefix is known durably committed.
+Current hierarchy privacy, the serialized positive clip, source/session/budget and
+physical ownership remain checked. Original application dispatch is forwarded once;
+callback displacement withdraws collection. Single-finger pointer observations do
+not claim which child handled or clicked the event. Existing v1 encoder/buffer bytes
+and its chunk domain remain unchanged. The installed selection's new facade tests
+remain uncompiled/unrun, and fresh exact-AAR canonical readback, customer-player
+interaction/scroll rendering and resource qualification remain release gates.
 
-`GET /v1/<siteKey>/config` — unauthenticated, CDN-cached (~5-minute
-propagation). Always HTTP 200 with JSON.
+## Configuration and collection authority
 
-Disabled (unknown / revoked / paused keys — not distinguished):
+`Elu.setup(applicationContext, siteKey)` starts the owned runtime. Configuration
+comes from ELU's site-key config endpoint. The owned transport uses the current
+v2 configuration authority: capture, flags, replay and delivery require their
+corresponding current authorization. A successful HTTP response by itself does
+not authorize collection. Unsupported, malformed, expired, revoked or mismatched
+configuration cannot open a capture or delivery path.
 
-```json
-{ "v": 1, "enabled": false }
-```
+The public `apiHost` declaration permits an exactly matching self-hosted config
+base: HTTPS with an optional regular path prefix, no explicit port, credentials,
+query, fragment or trailing-dot hostname. Empty/dot path segments, backslashes,
+raw non-ASCII characters, encoded separators/spaces/controls and double escapes are
+refused. Prior outer-whitespace/host-case normalization and one trailing-slash
+removal are retained; accepted path bytes remain exact. Undeclared bases are
+refused before runtime setup. This declaration does not itself authorize ingestion;
+the owned runtime's endpoint and configuration authority checks still apply.
+The immutable local declaration reaches config validation, queue authorization
+and the physical event, flag and replay transports. Every role retains its exact
+contract path appended to the declared prefix; remote documents cannot widen the
+host or prefix. Config fetching binds
+the exact original site-key URI, and all transports refuse redirects. Local
+customer HTTP telemetry excludes both selected SDK configuration and API hosts,
+including requests outside the declared API prefix.
 
-Enabled:
+Cloud keeps the previous site-key storage namespace. Custom API bases use a
+domain-separated hash of their canonical host plus prefix and exact site-key hash.
+Existing prefixless namespaces are unchanged. Identity, consent, event/replay
+queues and flag cache never migrate between bases. Opening an equivalent
+normalized base reuses its original store. The protocol's
+site-key hash is unchanged; no remote credential or history identity is invented.
 
-```json
-{
-  "v": 1,
-  "enabled": true,
-  "publicToken": "example-token",
-  "host": "<analytics-host-from-elu-config>",
-  "privacy": {
-    "blockEu": true,
-    "maskTextInputs": true,
-    "maskAllText": false,
-    "maskImages": false,
-    "replayNewUsersOnly": false,
-    "replayMaxMinutes": 0
-  }
-}
-```
+Configuration can independently restrict features, endpoints, privacy, session
+limits and replay formats. Refresh, foreground/background transitions and
+configuration withdrawal are checked again at capture and delivery boundaries.
+Config requests can continue while collection is disabled so authorization can
+recover. There is no customer override that bypasses remote privacy policy.
 
-The host is supplied by ELU remote configuration; this example does not
-prescribe a production hostname.
+Before the initial configuration decision, state-changing facade operations
+have a bounded in-memory FIFO of 100 entries; overflow drops the newest entry
+to preserve the already accepted identity history.
+This pre-initialization buffer is not a durable offline queue. Feature-flag
+reload commands are not replayed from that buffer. Invalid or unavailable
+operations return safe facade defaults.
 
-A self-hosted ELU instance serves the same endpoint with the same contract.
-An app using one declares the instance as its API host and sets the config
-host to the same origin. The SDK accepts a config host outside `elu.dev` only
-when it is exactly that declared API host: HTTPS on both, the same host, the
-default port, and no credentials, path, query, fragment or trailing-dot host.
-Without a declared API host, only `elu.dev` origins (and loopback origins in
-debug builds) are accepted.
+## Identity, properties and consent
 
-Defaults when a privacy field is missing or unparseable: `blockEu` and
-`maskTextInputs` true, everything else off, `replayMaxMinutes` 0 = unlimited
-(valid range 1–60; out-of-range means unlimited). Unknown fields are ignored.
-A malformed response body is a FETCH FAILURE (keep cached config / stay
-pending) — never `enabled:false`.
+The SDK creates an installation-specific anonymous identity. Customer code
+calls `identify` when the user is known and `reset` on logout. Group associations,
+super properties and flag-evaluation context belong to that identity context;
+reset clears customer identity, groups, super properties and flag context.
+The independent device ID is initially the owned anonymous ID. `reset()` preserves
+it; `reset(true)` rotates it with the new anonymous ID in the same transaction.
+Both preserve consent and capture-session audience history.
+Captured records retain their original identity and session through offline
+storage and retries. New account/context changes cannot expose a prior
+account's cached flag result.
 
-Fetch policy: on every `setup()` (cold start), re-fetch on app-foreground if
-the last success is older than 15 minutes, 10s timeout, in-process backoff,
-cached config valid indefinitely.
+`EluOptions.personProfiles` defaults to `IDENTIFIED_ONLY`; `ALWAYS` and `NEVER`
+are explicit local alternatives. Accepted identify/alias/person-property mutations
+persist the processing marker. Any accepted processing-enabled event also persists
+it, so group → event → resetGroups remains enabled, while group → resetGroups
+without an accepted event does not. Always-mode events retain this decision on a
+later identified-only reopen. Never-mode refuses person mutations before facade
+projection and again at durable owner admission; flag-only context is separate.
+All event categories receive the final authoritative `$device_id`, `$is_identified`
+and `$process_person_profile` properties; `$epp` is removed. Numeric telemetry
+input whitelists are unchanged. OS observations retain their historical interval
+semantics, omit customer groups/super properties, and use receipt identity stamps.
+Quota refusal, rollback and uncommitted writes cannot advance the marker or device.
+Reset clears the marker; consent, ACK, flags, replay and restart preserve it.
 
-## 2. Lifecycle state machine
+Production openers explicitly select a mode and validate a stream-bound singleton
+metadata row. The raw internal frozen-protocol conformance seam cannot reopen a
+store containing this metadata. Owned families 1–6, 7–12, 25–30 and 31–36 upgrade to 37–42,
+preserving core and queued bytes, audience, flags, replay and diagnostics. Device
+identity begins from the current anonymous ID on upgrade; prior person mutations
+cannot be inferred from flag context. Existing user/group state can enable the
+next accepted event. Missing, malformed, foreign-stream or extended metadata is
+refused. Versions 13–24 and 43+ remain refused; older binaries refuse 37–42.
+Downgrading the owned store is unsupported.
 
-States: `idle` → `pending` (setup called, no usable config yet) → `running`
-(runtime initialized) / `disabled` (config said `enabled:false`, or
-EU-blocked).
+Exposure reports use a separate closed stream/anonymous-visitor singleton. Its
+sorted set retains at most 4,096 digests of flag key plus the typed Boolean,
+string or missing result. Identify, consent, configuration changes, ACK and
+restart retain reports; reset clears them with the anonymous identity. Each new
+digest commits atomically with its accepted `$feature_flag_called` event. Quota,
+withdrawal or rolled-back writes consume no report. Ambiguous completion must
+reconcile the exact event and metadata together. Saturation suppresses new
+exposure events without evicting old reports, blocking getters or ordinary events.
+The raw frozen-protocol seam cannot produce this production exposure metadata.
 
-- `setup(siteKey)` is idempotent (second call warns and no-ops). It records
-  the first-launch marker (the `replayNewUsersOnly` probe), runs the EU
-  guard, then: cached-enabled config → initialize immediately; cached
-  disabled → `disabled` (keeps fetching so re-activation recovers); no cache
-  (first launch ever) → `pending`, facade calls buffer in memory (FIFO,
-  cap 100, drop-oldest, never persisted, never sent).
-- Device-in-EU AND `blockEu` (from cached config, or the compiled default
-  TRUE when no config exists yet) ⇒ blocked. Buffered ops held while the
-  decision is pending flush if the fetched config says `blockEu:false` and
-  are dropped if it says `blockEu:true`. Until the decision is made, the
-  analytics runtime stays uninitialized and emits no events or replay; the
-  ELU config request itself still occurs.
-- Facade methods are safe in EVERY state: `pending` buffers event-class
-  calls (getters return defaults), `disabled` no-ops, `running` delegates.
-  Never throws, never blocks the caller.
+Additive public `EluFeatureFlagOptions(sendEvent = true, fresh = false)` overloads
+preserve the original getter descriptors. Quiet reads never reserve or consume
+an exposure digest. Fresh reads require the exact current cache lease and logical
+evaluation that an accepted response installed during the original facade's
+lifetime, joined to its current generation and identity/context intent. Restored
+cache alone is not fresh. Both the returned projection and any later exposure
+transaction recheck that origin and the existing authority/cache deadlines.
+Identity, context, consent and close fences still apply. No read option initiates
+a network request, extends expiry, changes storage, or grants authority. The
+complete cache read validates the original source, transaction, witness, hash,
+clock and expiry once; keyed reads project that same admitted publication. The optional Boolean
+getter distinguishes unavailable from evaluated false and applies its fallback
+only to unavailable values; the original Boolean getter remains false on
+unavailability. Payload reads remain quiet.
 
-Mid-session rules for a FRESH config while `running` — tightening applies
-immediately, loosening waits for the next launch:
+`getFeatureFlagSnapshot` exposes only the current complete publication without a
+fetch or exposure. Exact typed entries and canonical flags/payload bytes preserve
+false, null, number and payload-only keys; returned dates/bytes are detached.
+`subscribeToFeatureFlags` returns an explicit `Closeable` cancellation token and
+uses the original main callback dispatcher. Each queued delivery retains one
+publication and rechecks its original generation, identity/context intent,
+source and cache lease immediately before admission. A later publication cannot
+supply values or errors to an older notification. Cancellation prevents later
+admission and never holds an SDK lock while running customer code.
 
-| Change | Action now |
-|---|---|
-| `enabled` true→false | opt out + stop replay; state → `disabled` |
-| `enabled` false→true (runtime never initialized) | initialize now |
-| `blockEu` false→true and device is EU | opt out + stop replay; `disabled` |
-| any masking tightened | stop replay for the rest of the run |
-| `replayNewUsersOnly` turned on, device is returning | stop replay |
-| `replayMaxMinutes` reduced | recompute budget; stop replay if exceeded |
-| anything loosened | applies at next launch |
+Remote origin requires the exact cache token from an accepted reload in this
+facade. Reopened cache remains cache even when its bytes match an earlier remote
+response. Transport/invalid-response errors are attached to that load's still
+current values, or an explicit unavailable publication; a valid empty evaluation
+is not unavailable. Retained snapshots convey no continuing authority. Original
+reload completions remain bound to the requesting identity/consent/source while
+coalescing and pending same-identity context work defer the actual reload. No new
+storage schema, network request, worker or exposure ledger is introduced.
 
-## 3. Privacy semantics
+Exposure properties retain the validated evaluation request ID and evaluation
+time, including a missing key in an otherwise valid evaluation. No usable cache
+means no exposure report. The remote/cache bit compares flags revision, flags
+and payloads, excluding request/expiry clocks; bootstrap response/payload fields
+are null because no customer bootstrap input is supported. The original client
+lease and exact current cache read are checked again inside the event transaction.
+Foreground config refresh is capped at 300 seconds (or the earlier lease-derived
+renewal); a successful unchanged response reloads flags without publishing new
+configuration authority or extending its original expiry. Failed flag evaluations
+receive at most six owner-lifetime scheduled retries per reload cycle, with 5, 10,
+20, 40, 80 and 160 second bases plus at most 20% jitter. Identity, consent, source
+withdrawal and close fence late retries; an explicit reload starts a new cycle.
 
-All capture controls act CLIENT-SIDE — masked or blocked analytics content
-never leaves the device. ELU config requests still occur while capture is
-blocked so a re-enabled site can recover.
+`optOut` immediately fences new collection and delivery work, then persists the
+choice asynchronously. It purges pending replay. Previously queued events stay
+paused until explicit `optIn`; already transmitted requests cannot be recalled.
+`reset`, restart and a newly enabled server configuration never silently clear
+user opt-out. `optIn` resumes only when current server policy also permits it,
+and attempts `$opt_in` under current configuration unless its event name is null.
+There is no separate delayed-until-config opt-in event queue.
 
-- **`blockEu`** (compiled default ON, fail-closed): IANA-timezone heuristic —
-  blocked when the zone is empty/unreadable, starts with `Europe/`, or is one
-  of: `Asia/Nicosia, Asia/Famagusta, Atlantic/Canary, Atlantic/Madeira,
-  Atlantic/Azores, Atlantic/Reykjavik, Atlantic/Faroe, Africa/Ceuta,
-  America/Cayenne, America/Guadeloupe, America/Martinique, Indian/Reunion,
-  Indian/Mayotte`. Blocked = the analytics runtime never initializes: no
-  runtime identity storage, analytics events, or replay. ELU config fetches
-  continue so re-activation can recover.
-- **`maskTextInputs`** (default ON): mask typed input in replay. Platform
-  note: the underlying mobile SDKs have a single text-masking knob that
-  masks ALL rendered text (labels included), not just inputs — tighter than
-  the web posture, accepted as the fail-closed direction.
-- **`maskAllText`** (opt-in): strongest text masking the platform offers;
-  also disables log capture into replay where the platform supports it
-  (log lines routinely echo the same user text).
-- **`maskImages`** (opt-in): mask all images in replay.
-- **`replayNewUsersOnly`** (opt-in): replay only for devices whose
-  first-launch marker was created by this install's first `setup()` call.
-  Returning device ⇒ replay disabled at init; events unaffected.
-- **`replayMaxMinutes`** (opt-in, 1–60, 0 = unlimited): per-session
-  visual-replay budget, resumed across relaunches within the same session,
-  enforced by a short poll (±5s granularity). Events keep flowing.
-- Passwords are always masked by the underlying SDK regardless of settings.
+Before setup, the latest valid consent choice is held in memory and reported
+by `isOptedOut`. Setup persists that choice before lifecycle collection begins;
+call `optOut` before `setup` when consent is initially denied. The pre-setup
+choice cannot survive process death before durable storage has been opened.
 
-## 4. Compiled defaults
+`registerOnce` fills missing values or values equal to its selected default
+(`"None"` by default). Identify and person-property calls accept independent
+set-once values. Flag result getters return null when no currently valid result
+exists; a result contains its key, enabled state, variant and payload.
 
-The SDK owns its runtime configuration: token + host come from ELU config
-only; screen tracking and application
-lifecycle events ON; session replay ON in screenshot mode; element-
-interaction autocapture, surveys, and optional extras OFF.
-Replay on/off, sampling, and minimum duration remain governed server-side by
-the ELU-managed project. The SDK never calls opt-in/opt-out except on
-the ELU kill-switch path (and clears a persisted opt-out at init so a
-re-enabled workspace recovers).
+## Event property filtering
 
-## 5. Super properties
+`EluOptions.propertyDenylist` and `beforeSend` are copied at setup. Exact top-level
+UTF-16 property names are removed from the merged super/event map before the
+callback; nested values and person maps are separate. The callback can deliberately
+reintroduce an ordinary denied field. Protected identity/session/profile fields,
+`$elu_*` and `$epp` are removed and owned metadata is rederived afterward.
 
-Registered at init AND re-registered after every `reset()` (the underlying
-`reset()` clears super properties along with identity):
+The original capture worker reads a bounded input under its existing storage owner,
+then invokes the callback outside the database transaction and SDK locks. Input and
+output JSON are detached, with depth 16, 1,024 members per container, 4,096 nodes and
+a conservative 10 MiB text budget. Invalid Unicode, cycles, non-JSON values, callback
+errors and null output refuse capture. Original native fixed-name/provenance checks
+remain enforced. Authority, identity, source and caller-intent currentness are
+checked again before and after writes. Known rollback and authority renewal reuse
+the original detached filter result; no callback runs inside transaction retry.
 
-```
-elu_sdk: "ios" | "android"
-elu_sdk_version: "<sdk semver>"
-elu_facade_version: 1
-```
+Manual capture continues transformed person maps on its original facade operation;
+automatic captures continue on the same original queue worker, including the fixed
+background handoff and an accepted rate-limit warning. Only confirmed event acceptance
+can start the separate person append. The callback is not invoked again for those
+maps. Known follow-on refusal preserves the accepted event; unknown commit retains
+the original reconciliation/quarantine behavior. The mutation uses actual wall time,
+never a backdated event time, and preserves profile, source and intent restrictions.
 
-## 6. Facade surface
+Standalone changed identify uses `$identify` with person maps; same-identity identify
+and person properties use `$set`/`$set_once`; alias uses `$create_alias`; group uses
+`$groupidentify`/`$group_set`. Targets and mutation chronology remain the original typed
+operation even if the callback edits metadata. Removed person maps are a no-op; a
+changed group retains its association when its property map is removed. Public
+person/group updates in flags-only mode retain the original durable flag authority;
+explicit `ForFlags` and typed unset/set-once-only operations without these projections
+remain unchanged. All filtered mutation writes recheck original admission before
+and after writes and on retry. Replay is unaffected; default setup has no filter.
 
-`setup`, `capture`, `identify`, `reset`, `alias`, `distinctId`, `screen`,
-`captureException`, `register`, `unregister`, `group`,
-`setPersonProperties`, `setPersonPropertiesForFlags`,
-`setGroupPropertiesForFlags`, `getFeatureFlag`, `getFeatureFlagPayload`,
-`isFeatureEnabled`, `reloadFeatureFlags`, `onFeatureFlagsLoaded`, `flush`.
+## Explicit capture time and associated person properties
 
-Identity is customer-supplied ONLY (`identify` from your auth flow, `reset`
-on logout) — the SDK never auto-identifies. The facade deliberately omits
-runtime configuration access, session-recording start/stop, surveys, and
-opt-in/out: exposing those would couple the public ELU API to implementation
-details.
+The existing capture overloads are unchanged. `capture(event, properties,
+EluCaptureOptions)` adds an optional `Date`, `set` and `setOnce`. Omitted time uses
+call time. Timestamp and JSON inputs are detached before buffering. The event
+keeps its explicit time; the person mutation keeps call time, with the original
+runtime timestamp validation and monotonic record ordering. A future event or
+clock rollback can reject the subsequent person mutation; the SDK does not
+backdate or rewrite either timestamp to force acceptance.
 
-Buffered-op ordering: the pre-config buffer replays strictly FIFO once
-running — including `reset`, so a pre-config logout delivers pre-reset
-events under the pre-reset identity. `capture` events buffered on Android
-carry their call-time timestamps; other buffered ops (and all buffered iOS
-ops) are stamped at drain time, up to ~10s late on the first-ever launch
-only.
+Person fields are separate from event properties. Only an accepted event can
+proceed to the original person mutation, on the same facade operation. Invalid,
+denied, rate-limited or queue-rejected events do not apply associated fields.
+Reset/identify intent, consent changes, closure and source authority remain
+fences. Pending flag-context intent spans both writes. Associated updates
+invalidate old flag values without automatically requesting another reload;
+overlapping explicit identity/context operations keep their existing reload
+behavior. `NEVER` profile mode suppresses the person update. Absent fields mean
+no person intent; explicitly empty fields retain a person intent.
+
+The event and person mutation are ordered, not atomic. A failure or process death
+between durable writes can retain an event-only prefix; reopen does not fabricate
+its missing mutation. Retrying the capture is a new event. Existing person-update
+deduplication applies only after a successful associated mutation. Android has no
+customer capture-hook API in this slice.
+
+## Durable delivery and restarts
+
+With default `EluPersistenceMode.PERSISTENT`, admitted analytics and mutation records use an app-private, bounded
+SQLite queue scoped to the exact site key. Identity changes and their queued
+records commit together. Delivery uses stable stream/sequence-derived record
+identities, bounded batches and retries. A validated acknowledgement must match
+the submitted stream and records before local retirement. Lost acknowledgements
+can cause retransmission of the same identities; HTTP 200 alone is not enough
+to delete queued records.
+
+Process restart reopens the existing owned queue and current schema upgrades
+preserve it. `flush` schedules work; it cannot guarantee network completion
+before Android stops the process. Queue and age limits can prevent admission
+or retire expired records; the SDK does not promise unlimited offline retention.
+
+Existing-store preflight runs under the original process/file ownership lease.
+Before SQLite opens the original, the SDK streams its database and any WAL or
+rollback journal into a private per-store snapshot. Original SHM is never read by
+SQLite during preflight: even a read-only SQLite connection can change WAL read
+marks. Recovery and strict integrity/schema/identity checks run on the copy;
+refusal preserves every original family member. Successful admission then opens
+and revalidates the original normally. Scratch recovery removes only the exact
+known regular files in that store's reserved directory; unknown entries or links
+refuse startup.
+
+This adds linear read/write I/O and temporary storage equal to the existing
+physical database plus copied WAL/journal, with additional SQLite scratch sidecars.
+There is no new fixed store-size ceiling. Admission checks that the copy's exact
+minimum space is available, but later exhaustion still fails closed and cleans up;
+it cannot guarantee space against concurrent app writes. Logical queue quotas do
+not bound previously allocated SQLite pages or this temporary footprint. A process
+interrupted during preflight leaves at most that one reserved snapshot; the next
+original lease reclaims it before another copy. Fresh stores need no snapshot.
+
+The unused 0.1.0 preview and unpublished aggregate-file builds have no supported
+persisted-data import. Clean setup starts a fresh owned installation without
+opening or deleting their old data. Retired import checkpoints are refused,
+not rewritten as fresh state. This differs from the iOS owned-file recovery
+path; Android supports current owned SQLite reopen and schema upgrades.
+
+## Memory storage and explicit consent
+
+`EluOptions.persistence` defaults to `PERSISTENT`. `MEMORY` selects a real
+`:memory:` SQLite connection with memory journal and temp storage, using the same
+closed schemas, admission rules and logical quotas. No analytics database,
+WAL/journal/SHM, preflight copy or analytics temporary file is created in this mode.
+Every identity/session/device field, queue, flag cache/exposure ledger, replay
+state and diagnostics epoch disappears when the original connection closes.
+Restart therefore cannot deliver its prior offline data or historical diagnostics.
+These logical quotas do not establish a process RSS ceiling.
+
+The same canonical site/API namespace and process/file lease govern both modes.
+A separate, at-most-128-byte `explicit-consent-v1.json` contains only version 1,
+`optedOut`, `settled` and `persistentReconciled`. A private pending replacement is
+also at most 128 bytes. Either an unsettled record or an interrupted replacement
+denies collection. Unknown versions, malformed bytes, links, nonprivate files or
+foreign ownership refuse startup. Writes retain an existing pending inode through
+truncation, sync it and its parent, then atomically rename and verify the result;
+there is no unlink-before-replacement grant window.
+
+Memory entry never opens old analytics for consent. No record plus any current
+database family, abandoned owned preflight or retired owned aggregate-file presence
+becomes pending denial; a genuinely fresh namespace retains its initial default.
+An existing explicit record is marked not reconciled with persistent analytics.
+On persistent return, the original queue commits a real opt-out privacy barrier
+before restoring a settled explicit grant, even if its final bit equals the old
+database bit. Only after that commit is persistent reconciliation recorded. The
+barrier retires prior session/replay/diagnostic coverage, preserving event records
+with their original identities. Ordinary reset cannot change consent.
+
+Each explicit choice first writes pending consent, then commits through the owned
+queue, then marks the choice settled. A pending-write error cannot prevent a
+changed durable opt-out, but no grant proceeds after that error. Any unsettled
+storage outcome denies the owner and retains its original namespace lease. A
+memory commit reported ambiguous is read back only on that same original, fully
+settled connection; exact existing state/record comparisons still apply. Failure
+never substitutes a new memory database. Consent is asynchronous after setup;
+process death before its writes run, or complete rejection of all filesystem
+writes to the separate consent store, cannot be represented as a durable
+acknowledged choice. Persistent reopen treats any supposedly reconciled record/DB
+disagreement as denial. Memory mode cannot inspect a newer old-DB denial after
+complete sidecar-write rejection; it retains only the last successfully recorded
+explicit choice. Applications requiring a newly denied choice on every launch
+must supply `optOut` before setup as well.
+
+## Replay audience
+
+The optional top-level configuration-v2 `replayAudience` accepts only `"new-devices"`
+on an enabled document. Its absence leaves all-device eligibility unchanged;
+explicit null or other values are rejected. This restriction affects replay only.
+
+Fresh installations remember the first accepted session-bearing event in the same
+SQLite transaction as that event and its session. Manual captures, screens,
+exceptions and authorized automatic events count; setup, mutations and rejected
+captures do not. Failed or rolled-back transactions cannot consume eligibility.
+The first session identifier and start time remain installation-scoped across
+identity changes, reset, consent transitions and process restart. Replay never
+claims a session before analytics commits it, and cannot promote a later session.
+
+Existing owned databases without audience history upgrade with an unknown-history
+marker, which denies only new-device replay. Queued analytics and identity remain
+intact. The new additive database versions are rejected by older owned binaries;
+a store downgrade is unsupported. No preview/aggregate import is introduced.
+
+## Native replay privacy
+
+Replay is an authorized native Views wireframe stream, not screenshots or
+browser DOM capture. The blanket profile masks ordinary text. The sensitive
+profile can retain plain, fully visible text from supported framework Views and
+the closed exact AppCompat text classes listed in README. AppCompat is optional
+and adds no published runtime dependency. Capture reads the existing layout and
+does not resolve pending text futures; changed layouts invalidate that frame.
+Inputs stay masked in both profiles; images, WebViews and unsupported content
+are hidden. Text longer than 4096 UTF-8 bytes is not truncated into a partial
+capture. Unsupported rules fail closed through stronger masking or denial.
+
+`maskView(view)` strengthens masking for that view and descendants.
+`blockView(view)` excludes their content and descendants while retaining a
+placeholder. Both apply for the view's lifetime and invalidate work in progress.
+They cannot weaken the server policy. Previously transmitted frames cannot be
+recalled. Applications should mark private display labels before showing them;
+ordinary labels may contain personal information even when they are not inputs.
+These replay restrictions do not sanitize customer-supplied event properties,
+identity values, or exception messages.
+
+Events, identity and feature flags require Android 6+ (API 23+) with app-level
+core-library desugaring. First-release Views replay requires Android 10+ (API 29+)
+because older versions lack public transition-alpha and animation-matrix
+observations. Replay on API 23–28, Compose semantics replay and readable
+custom-subclass text are not supported. Exact
+AppCompat support still requires current artifact/emulator and R8 qualification.
+Compose applications
+can use the analytics APIs and explicit screen events. These differences remain
+explicit release-scope decisions, not silently completed parity claims.
+
+## Exceptions and native performance
+
+Customer-installed `EluOkHttpInterceptor` observes that client's requests only.
+General capture authority, consent and original identity/session/configuration
+must remain current through durable enqueue; replay network-detail permission
+does not authorize or disable these independent analytics events. The native
+`$network_request` uses the shared method/status/response-time/initiator/failure
+fields but omits URL/path, headers, bodies and exception messages. Response-time
+ends at headers, with original response/failure and body ownership preserved.
+The shared bound is 200 admitted observations per SDK process lifetime, never
+renewed by identity/reset/consent changes; a process restart resets the bound.
+ELU-owned/configuration hosts are excluded. Pending configuration, background
+transitions and stale contexts drop observations; no later user inherits them.
+
+Request telemetry preserves an existing session's last activity and cannot
+extend its idle timeout. An originally sessionless request may create the first
+actual capture session; a later session or expired original session rejects it.
+
+`captureException` is explicit reporting. Its messages, stacks and customer
+properties can contain sensitive data; callers control what they send. The separate
+automatic JVM option below never invokes those Throwable detail getters.
+
+Native performance sampling is disabled by default and needs both local opt-in
+and current remote authorization. While a valid foreground session exists, it
+can sample process proportional set size (PSS) and main-looper probe delays.
+Unknown memory measurements are omitted. There is at most one outstanding
+main-thread probe. Identity, consent, configuration and lifecycle changes clear
+old aggregates; samples do not prolong the session idle timer.
+
+`EluFrameMetricsOptions` separately enables public Window frame timing on API 26+
+under the same remote `capturePerformance.long_tasks` permission. The original
+sole resumed Activity, Window, registration timestamp and authorized session
+remain bound through aggregate emission. Frame reports predating registration,
+unavailable/impossible timings and withdrawn contexts are discarded. There is
+one listener, no per-frame worker queue, and at most 1,000,000 accepted reports
+per sample interval; each retained duration is capped at 60 seconds. Listener
+removal and performance-worker settlement join SDK close completion; an
+unproven cleanup fails that completion rather than claiming disposal.
+
+Count and total/maximum duration include first-draw frames; slow-frame and
+deadline-miss counts exclude them. The slow threshold is fixed at 16.666667 ms,
+not display-specific jank. API 31+ exposes actual frame deadlines; earlier
+versions omit that metric. API 24–25 lacks the needed original frame timestamp,
+so this SDK does not collect frames below API 26. Software-rendered Windows,
+separate SurfaceView buffers, multiple resumed Activities and other processes
+are not covered. These scalar metrics do not enable Compose replay.
+
+Optional process age at the first eligible observed frame is one attempt per
+monitor/process lifetime and can be discarded on withdrawal. It is not an app
+startup/TTID metric; the separate observed OS launch option is described below.
+Both frame timing and this additional process-age field default off.
+
+`$performance_sample` is an analytics event linked to the current anonymous or
+identified user and session, with the normal applicable event context. The
+monitor adds process-memory, sampled delay and optional frame metrics, not UI
+text or stack traces. These are native diagnostics, not Web Vitals, complete frame/jank
+measurement, or an ANR/crash detector. Applications must account for linked
+performance diagnostics and readable replay text in their privacy disclosures.
+Resource overhead and exact distribution behavior require the final Lab gate.
+
+## Observed startup continuity
+
+`EluDiagnosticsOptions(enabled = true, launchTimings = true)` enables a bounded
+API 35+ public history observation. It never installs or replaces an app
+completion listener. A unique exact current PID/UID/process/launch record must
+first be observed incomplete, then acquire its first-frame timestamp while the
+original foreground, consent and identity interval remains current. Already
+completed, ambiguous, unavailable or invalid records are omitted. The local
+query limits are 16 records, 101 polls and a 10-second budget checked after each
+settled query (not a hard OS-call deadline); accepted launches are at
+most 30 seconds. This is partial observed startup coverage, not app-wide TTID.
+
+The default-off interval is persisted with stream, identity revision, boot and
+monotonic/wall-clock floors. Explicit consent (including same-choice calls),
+identity/reset, local option changes, terminal authority withdrawal and explicit
+close end coverage. Routine config expiry and background do not retrospectively
+invalidate a prior interval. Whole-interval ownership is required; enabling the
+option after launch cannot import an earlier launch. Unknown history fails closed.
+
+Current general capture and `capturePerformance.long_tasks` authorization plus a
+live foreground receipt session are mandatory again inside the event transaction.
+`$native_launch` carries numeric OS monotonic start/first-frame timestamps, duration,
+reason/type, and fixed Android/source labels. Event time/session describe receipt,
+not historical ownership by that session. Groups and super properties are omitted.
+The dedupe watermark commits with the event; rollback and ambiguous completion
+reconcile against exact durable state. Metadata-only interval changes do not
+change identity/context/session or create capture-session audience history.
+
+The raw pre-profile runtime lazily upgrades diagnostics to families 25–30 after
+full validation. Production profile/exposure families 31–42 include the diagnostics table
+in a closed state; creating the table does not enable diagnostics. Existing queued
+data and diagnostics intervals are preserved by the profile migration, then the
+normal current-option/continuity checks apply. Downgrade is unsupported.
+A failed interval closure suppresses observation and cannot release the original
+store lease as a successful shutdown. It retries once only after proven rollback;
+unresolved failure retains process-local resource ownership. No durable guarantee
+is possible if all storage writes fail and the process then dies. Automatic
+launch timing does not authorize automatic JVM reports; native-crash/ANR collection
+remains unimplemented and manual exceptions are separate.
+
+## Local capture budget
+
+`EluOptions.rateLimiting` defaults to 10 events/second and a 100-event burst.
+`EluRateLimitingOptions` accepts positive finite fractional values, normalizes invalid
+values to defaults, and clamps burst to at least rate. Default burst multiplication
+overflow clamps to the greatest finite native Double. The selected bucket is a
+strict stream-bound `capture_rate_limit` singleton, with canonical numeric payload
+at most 256 bytes. Schema 43–48 adds this table to each six-way owned combination;
+all supported 1–12 and 25–42 families upgrade without changing queued bytes or core
+generation. Versions 13–24 remain refused. Existing-file snapshot preflight validates
+its exact shape, canonical payload and stream before the live writable connection.
+Old binaries cannot reopen these newer stores.
+
+The owner rereads durable tokens/last-wall-time, otherwise uses held state, otherwise
+starts full. Signed wall delta refills before the burst clamp; backwards time incurs
+debt. Constructor check-only refill remembers the limited state, so reopening an
+empty bucket does not issue a fresh warning. Reset, identity, group and consent
+mutations do not reset the bucket. Memory uses the same table on its original
+`:memory:` connection; it neither reads nor changes a dormant persistent bucket.
+
+Original source/consent/current authority and duplicate/stale flag-exposure checks
+precede the debit. Canonical validation, event enrichment, ledger capacity and queue
+quota follow it. The debit is an independent transaction: later event rejection or
+rollback never refunds it and cannot alter core generation. Only classified read I/O
+or known no-BEGIN/proved-rollback optional metadata failure may use held arithmetic;
+structural mismatch and ambiguous COMMIT stop the original owner. A subsequent
+readable durable bucket supersedes held state, even after an earlier optional write
+failed, matching released browser behavior. No fresh memory database is substituted.
+
+One internally retained call attempt binds the exact command and owner across the
+facade's authority renewal. Event-transaction retry remains below the debit. One
+private recursion tries `$$client_ingestion_warning` on the transition to limiting,
+with `$$client_ingestion_warning_message` and the fixed numeric settings text. That
+warning uses normal event authority, final identity stamps and quota. Failed warning
+admission is not retried during consecutive limiting. Its passive source context
+cannot create/advance session activity or mark an unaccepted exposure/startup as
+reported. A customer using the same event name receives no bypass. Rejected calls
+remain rejected even if their warning is enqueued; delivery scheduling includes that
+ordinary queue record. Native drops use `RATE_LIMITED`.
+
+All public capture/screen/manual-exception, lifecycle, exposure, HTTP/performance and
+startup event paths share this budget. Identity/local mutations and replay chunks are
+exempt. Native bounded caller-value detachment happens before the serialized owner;
+the event filter runs after the debit and before the event transaction. Android
+does not install browser console logging. Additional
+metadata I/O and current JVM/SQLite/artifact/device performance remain validation
+requirements; authored tests are not execution evidence.
+
+## Local replay controls
+
+`startSessionRecording()`, `stopSessionRecording()` and
+`sessionRecordingStarted()` are additive no-argument APIs. The default instance
+latch is enabled; only explicit local start reverses local stop. The latch is
+separate from consent/source/identity epochs and is not persisted. Pre-setup calls
+are no-op/false; a stop on the published pending facade survives stack opening.
+There are no browser trigger overrides or new wire/schema permissions.
+
+Local stop immediately fences fresh reads, accepted frames and status, then joins
+the original capture on the existing worker. A validated idle tail uses the same
+sealer, immutable timestamps/ordinals, permit, physical use, source/identity/session,
+selection and local privacy-revision checks at seal and durable admission. It never
+raises elapsed duration to meet the initial minimum. A main callback interrupted
+before exact View/privacy postvalidation contributes no frame and discards the
+unsealed tail. No stop-time View read is used to establish permission. Restrictive
+withdrawal continues to discard unsealed work and revoke delivery when required;
+an uncertain append retains its original physical accounting/quarantine.
+
+Status samples the actual original installed collector and current guards; an
+ACTIVE scheduling result alone is insufficient. No synchronous View dispatch,
+SQLite request or network operation occurs in the getter. Stop/start generations
+cannot adopt an old callback or begin replacement before original cleanup settles.
+These source contracts require actual compiled API, emulator and exact-artifact
+qualification; source controls alone do not establish those results.
+
+## Native root and viewport continuity
+
+A closed root/viewport boundary may request recovery only after original physical
+collection and durable accounting settle. Composition then joins the original
+watcher disposal before any new selection. Unknown cleanup quarantines the owner.
+Each replacement uses a new replay ID and sequence zero through existing queue
+authority, retaining session/sample/first-start/remaining-budget state. Changed
+viewport frames and unsealed boundary tails are never appended or used to satisfy
+initial minimum duration. The v1 fixed-viewport contract is unchanged.
+
+Only closed unsupported-geometry failures may retry the original collector after
+full selection and authority postvalidation. No failed frame, ordinal or projection
+is accepted. Existing bounded retry ticks check original consent/source/session,
+local privacy and recording intent; deadlines and budgets are never extended.
+
+After a settled root loss, at most one observer holds one canonical preparation
+and local privacy witness. Its main-thread ticks inspect only the sole resumed
+Activity's root/window facts. They do not select, watch, read content, poll SQLite
+or renew configuration. A ready observation grants nothing: ordinary selection
+and authority run again. Close/local/restrictive withdrawal invalidates admission
+synchronously, and the serial worker joins any already-submitted main observation
+before replacement or close completes. JVM controls are authored but unrun;
+actual Android/window behavior and exact-artifact player transitions remain gates.
+
+
+## Automatic JVM exception intake
+
+`diagnostics.enabled && diagnostics.crashReports` is an independent default-false
+API 23+ opt-in. Persistent storage, an original current enabled v2 configuration,
+canonical general capture permission and `captureExceptions: {suppressionRules: []}`
+are all required. Missing/false denies; known nonempty browser rules are parsed with
+closed bounded shapes but deny native automatic reporting rather than being ignored.
+Malformed/unknown rules fail configuration validation, including the flag boundary.
+There is no details option which does nothing, no implicit API 35 dependency and no
+claim of message/stack/native-crash/ANR or handled-error parity.
+
+The original queue commits one identity/namespace/policy reservation before handler
+installation. Its prestarted writer uses one atomic slot. The callback freezes an
+original arm before bounded type inspection and rechecks that arm's source token,
+local intent, wall expiry and monotonic budget before publication. Same-body source
+replacement cannot renew an old observation. Publication observation waits at most
+100 ms on only that arm's completion; timeout/interruption means unconfirmed and
+never releases the original writer, file or queue lease. No SQL, queue task, main
+thread or network completion is awaited by the callback. General latency/deadlock
+claims do not extend to arbitrary host handlers, injected code or scheduler stalls.
+
+Remote withdrawal, local background/identity/consent intent and close synchronously
+disarm. Current foreground permission can rearm the same settled writer under a new
+committed reservation; it cannot adopt unfinished old work. Restrictive policy/identity
+retirement waits for that work, clears the physical slot durably, then retires SQL.
+A valid retained report needs a current original source and an actual current session
+at import; no session is created by import, and its activity clock is not extended.
+The event and consumed digest commit atomically. Known rollback retries the same
+candidate; unknown COMMIT retains the existing storage quarantine. Only then are the
+file and reservation retired in that order, so acknowledged bytes cannot duplicate.
+Memory-only mode creates neither this durable schema nor a spool/handler.
+
+Close retains the original registration handle, denies observation first and attempts
+restoration only while still current. Restoration failure is reported; an inert
+retained wrapper still delegates exact original arguments and does not itself require
+storage quarantine. The original queue close worker physically joins its writer even
+if a synchronous completion listener is still running, then applies existing storage
+closure/quarantine rules. Host default-handler registrations must be setup-serialized:
+public Java get/set offers no compare-and-set protection against foreign races.
+
+Activation's facade/source/queue/writer JVM tests are authored but uncompiled/unrun
+in this source packet. Earlier one-slot durability tests and hosted suites are separate
+evidence; real exact-artifact process-death/restart and canonical delivery remain gates.
+
+
+### Native raster durability
+
+The optional declared-region collector can now be admitted through the original native authority,
+physical enrollment and queue worker. This path is a separate internal capability, disabled by default;
+it does not change the automatic Views privacy witness. The explicit setup option below selects the
+original raster capture and delivery branch together. Only a one-shot
+collector frame sealed under the original source identity and copied local intent revision may append.
+Changing that intent after encoding withdraws fresh append without retaining the closed candidate or
+its pixel allocation. The original request bytes, identity, start receipt, clocks and shared session
+budget survive retries; no restored row creates a producer permit.
+
+The existing segmented replay table has a closed raster header/body variant. Ordinals, queue limits,
+opt-out purge and original COMMIT reconciliation are shared with legacy replay. Default delivery skips
+raster rows; the explicit internal delivery branch below handles their separate scope. A missing raster branch or plain-v2 source retains sealed
+raster bytes; explicit incompatible privacy, consent or replay disable and lawful TTL still remove them.
+The old 42 supported database versions retain their meaning. Only native families 5,6,11,12,29,30,35,36,
+41,42,47,48,53,54 may lazily add128, atomically with the raster state discriminator. Other markers and
+missing/mismatched singleton state fail closed. Existing upgrades preserve the outer marker.
+
+The singleton also retains full-wrapper issuance/hash/conflict independently of embedded-v2 policy.
+An original source-detected conflict carries a bounded immutable denial through its lifecycle and gate;
+null/background/close cannot acknowledge it. The queue commits the restriction before acknowledging
+that exact original receipt. Even before recording was prepared, a denial alone may initialize the
+existing replay/native/raster singleton metadata; it cannot sample, start or authorize capture. The
+gate retains that original restriction channel independently of executable tokens. Gate/queue close
+fences original source validation before draining the final receipt. Failed durable restriction keeps
+the original database/file occupancy quarantined and fails close. An older restriction cannot replace
+a newer durable base or wrapper boundary.
+Equal/older plain-v2 sources cannot bypass committed poison after restart; a newer plain-v2 base may
+resume its existing channels but cannot clear the raster witness or grant raster capture. Capture,
+ordinary delivery, flags and sealed legacy replay all honor that ordering. A process death before the
+SQL restriction commits remains an unavoidable unpersisted observation gap. Unknown COMMIT retains
+original resources/denial until exact reopened state establishes the outcome; timeouts grant nothing.
+
+New Kotlin and instrumentation cases for this checkpoint are authored but have not been compiled or
+executed locally. Source-boundary controls are not device or end-to-end qualification.
+
+
+### Internal raster delivery checkpoint (default off)
+
+The existing delivery owner has an explicit `INCLUDING_RASTER` mode; the installed composition still
+uses `WIREFRAME_ONLY`. It introduces no recorder, worker, public bitmap/request API, or production
+capability advertisement. One original physical transport slot, installation lease and SQLite worker
+serve both formats. A claim retains its exact original config-source witness, identity/context, closed
+policy hash/revision and `/v3/replay` endpoint scope. Replacement source tokens can authorize only a
+new claim, never adopt enrolled IO. Reset/logout, opt-out, expiry and source loss deny old IO/ACKs.
+Sealed delivery does not sample again or fabricate a session/recording budget.
+
+Strict raster delivery metadata uses schema2 on the existing marked raster table; legacy schema1
+canonical bytes remain unchanged. The lowest unresolved sequence is retried with its original body,
+request ID and digest. Lost ACK/process restart applies the existing unknown-attempt delay. Exact
+schema3 ACK deletes only its original row, subject to current original authority. Ambiguous COMMIT
+uses original full-state reconciliation; divergent state quarantines the owner rather than guessing.
+429 cooldown is keyed to its format/endpoint scope, and cannot stall the other format's endpoint.
+
+Validated original409 request/chunk/sequence conflicts and413 permanently block the entire raster
+epoch, including later appends and suffixes after restart.401/403 and protocol-invalid replies retain
+the refused epoch and latch its source issuance; a genuinely newer lawful issuance may deliver only
+a new epoch. Fully validated physical409/413 and observed401/403 survive subsequent cancellation,
+but partial/mismatched response bodies do not manufacture an exact conflict. Original transport
+cleanup and durable refusal settlement precede physical-slot release. Failed settlement retains the
+original lease and close barrier; elapsed time does not authorize release.
+
+TTL retires the whole raster epoch rather than only an expired head. Privacy/opt-out purge follows
+the same ordering: withdraw matching intake, cancel matching transport, and retain rows/refusal
+metadata until original capture accounting and physical IO settle. Deferred removal first commits an exact schema2 BLOCKED/RASTER_RETIRE restriction on the original
+rows. Only that closed variant allows attempts=0 and empty owner/nonce/credential/scope; it cannot
+become CLAIMED/RETRY or a schema1 record. Existing source time is retained when already claimed;
+otherwise the original durable wrapper boundary is restriction provenance, not a reconstructed first
+capture grant. This survives opt-in/loosening/restart. Deferred removal uses only the existing owner
+and is conservative when an enrolled capture remains. No separate tombstone store is added. Unavailable child/support retains bytes without granting permission; explicit incompatible
+base privacy still purges. New delivery tests are authored, not compiled or executed by this source
+checkpoint. Hosted and actual local device/engine/player qualification remain separate requirements.
+
+
+## Explicit declared-region replay setup
+
+`EluOptions(declaredRegionReplayEnabled = true)` opts the original SDK stack into the native-v3 configuration format and declared-region raster implementation together. The default remains false. There is one source, queue, capture owner and delivery coordinator; an unavailable native-v3 response never starts a fallback configuration fetch. An exact server declared-regions child, current consent/identity and replay budget are still required.
+
+On API29+, retain each private-region identity independently of its conditional UI and pass the complete required set to `EluAnnotatedReplayRoot`. Wrap every input, private region and unsupported paint in the corresponding `EluReplayMask` or `EluReplayBlock` clipping wrapper. Missing, stale, duplicate or ambiguous bindings refuse capture. Removing declarations from the same selected root never downgrades it to ordinary Views replay. This integration captures original mounted state at no more than one frame per second; it adds no raster pointer stream and does not automatically discover all Compose inputs or classify unknown drawing.
+
+Only validated redacted output is encoded or retained. A main-thread post-check that rejects a drawn candidate clears and closes that candidate. Root viewport/rebinding changes retire the original source; restoring an earlier size cannot revive it. The first retained prefix requires actual lawful samples spanning the configured minimum duration. Stopping or advancing time without a second sample does not establish that duration. Existing wireframe behavior, original physical cleanup, immutable request retries and durable refusal semantics remain in force.
+
+Capture preserves the original inward integer display viewport (each edge at most 16,384 pixels). It draws the original host directly into an initialized bitmap of at most 2,048 pixels per edge and 1,048,576 pixels total. A larger lawful viewport is downsampled without allocating a full-size intermediate bitmap. Its original dimensions remain in the frame and epoch; encoded image dimensions are separate. Private rectangles are mapped outward into output pixels, with an additional one-pixel margin when downsampling, and excluded in device coordinates before the Canvas transform. Final redaction and original geometry/currentness checks still gate all retained output. This bounds the SDK's output bitmap, not temporary allocations inside Android's renderer; unsupported paint still requires the declared clipping wrappers or capture refusal. Source, privacy and viewport changes remain epoch boundaries even when rounded output sizes coincide. Full-HD usefulness, renderer behavior and the existing capture deadline require actual large-window device qualification.
+
+Core analytics (events, identity and feature flags) and annotation registration support Android 6+ (API23+). Both Views replay and annotated capture require Android 10+ (API29+); replay is unavailable on API23–28 in the first release. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. The optional module's remote publication and exact two-artifact release qualification remain separate; this source change does not announce an available package version or completed device/engine/player validation.

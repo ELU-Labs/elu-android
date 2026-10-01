@@ -1,7 +1,12 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.replay.NativeReplayAccounting
+import dev.elu.analytics.internal.replay.ReplayStoredState
+import dev.elu.analytics.internal.core.CoreStateCodec
+
 import android.content.ContentValues
 import android.database.Cursor
+import android.database.DatabaseErrorHandler
 import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import java.io.File
@@ -9,6 +14,9 @@ import java.io.IOException
 
 internal interface AndroidRuntimeDatabaseFaults {
     fun connectionConfigured(settings: AndroidRuntimeConnectionSettings) = Unit
+
+    fun beforeCaptureRateRead() = Unit
+    fun beforeCaptureRateWrite() = Unit
 
     fun beforeCommit() = Unit
 
@@ -28,60 +36,325 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     private val sqlite: SQLiteDatabase,
     private val ownerThread: Thread,
     private val faults: AndroidRuntimeDatabaseFaults,
+    private val memoryOnly: Boolean = false,
 ) : RuntimeQueueDatabase {
-    override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) {
+    override fun ensureExceptionSchema() {
         assertOwnerThread()
-        require(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY) { "Initial flag authority row has the wrong key" }
-        require(initialAuthority.storageSchemaVersion == 1L) { "Initial flag authority schema must be v1" }
-        require(initialAuthority.payload.isNotEmpty()) { "Initial flag authority payload must not be empty" }
-        require(initialAuthority.payload.size <= MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES) {
-            "Initial flag authority payload exceeds the SQLite row limit"
-        }
+        ensureReplayAudienceSchema()
+        ensurePersonSchema()
+        ensureExposureSchema()
+        ensureCaptureRateSchema()
         val version = pragmaLong(sqlite, "PRAGMA user_version")
-        if (version == RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
-            validateSchemaObjects(sqlite, flagsPresent = true)
-            return
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXCEPTION_SCHEMA_OFFSET) return
+        check(runtimeNormalizedDatabaseVersion(version) > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) { "Exception requires owned exposure schema" }
+        sqlite.beginTransaction()
+        var successful = false
+        try {
+            val core = SQLiteTransaction(sqlite, faults).readCore() ?: error("Exception requires owned core")
+            sqlite.execSQL(CREATE_EXCEPTIONS)
+            writeExceptions(sqlite, RuntimeExceptionState(CoreStateCodec.decode(core.stateJson).stream.streamId), true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_EXCEPTION_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version)}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); successful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                throw AmbiguousRuntimeCommitException("Uncertain exception schema transaction", error)
+            }
         }
-        if (version != RUNTIME_STORAGE_SCHEMA_VERSION.toLong()) {
-            throw UnsupportedRuntimeStorageSchemaException(version)
+        check(successful)
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain exception schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_EXCEPTION_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version))
+    }
+
+    override fun ensureCaptureRateSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) return
+        check(runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXPOSURE_SCHEMA_OFFSET) { "Capture limiter requires owned exposure schema" }
+        sqlite.beginTransaction()
+        var successful = false
+        try {
+            val core = SQLiteTransaction(sqlite, faults).readCore() ?: error("Capture limiter requires owned core")
+            sqlite.execSQL(CREATE_CAPTURE_RATE)
+            writeCaptureRate(sqlite, RuntimeCaptureRateState(CoreStateCodec.decode(core.stateJson).stream.streamId, null), true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version)}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); successful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                throw AmbiguousRuntimeCommitException("Uncertain capture limiter schema transaction", error)
+            }
         }
+        check(successful)
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain capture limiter schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version))
+    }
+
+    override fun <T> captureRateTransaction(block: (RuntimeQueueTransaction) -> T): T = try {
+        transaction(block)
+    } catch (error: Throwable) {
+        // Only known optional I/O/no-BEGIN/proved rollback qualifies. Corruption, unknown COMMIT,
+        // schema/stream failures and arbitrary programming errors never become held fallback.
+        val cause = if (error is ProvenNotCommittedRuntimeTransactionException) error.cause else error
+        if (cause is IOException || cause is android.database.sqlite.SQLiteDiskIOException ||
+            cause is android.database.sqlite.SQLiteFullException || cause is android.database.sqlite.SQLiteDatabaseLockedException ||
+            cause is android.database.sqlite.SQLiteCantOpenDatabaseException) throw RuntimeCaptureRateStorageUnavailable(error)
+        throw error
+    }
+
+    override fun ensureExposureSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXPOSURE_SCHEMA_OFFSET) return
+        check(runtimeNormalizedDatabaseVersion(version) > RUNTIME_PERSON_SCHEMA_OFFSET) { "Exposure metadata requires owned person schema" }
         sqlite.beginTransaction()
         var markedSuccessful = false
         try {
-            sqlite.execSQL(CREATE_FLAG_CACHE)
-            val values =
-                ContentValues().apply {
-                    put("record_key", initialAuthority.key)
-                    put("storage_schema_version", initialAuthority.storageSchemaVersion)
-                    put("payload", initialAuthority.payload)
-                }
-            sqlite.insertOrThrow(FLAG_CACHE_TABLE, null, values)
-            executePragma(sqlite, "PRAGMA user_version = $RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS")
-            if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
-                corrupt("Runtime database could not persist its additive flag schema version")
-            }
-            sqlite.setTransactionSuccessful()
-            markedSuccessful = true
+            val core = SQLiteTransaction(sqlite).readCore() ?: error("Exposure metadata requires an owned core")
+            check(core.exposures == null)
+            sqlite.execSQL(CREATE_EXPOSURES)
+            writeExposures(sqlite, RuntimeFlagExposureState.initial(CoreStateCodec.decode(core.stateJson)), insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_EXPOSURE_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version)}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
         } finally {
-            try {
-                sqlite.endTransaction()
-            } catch (error: Throwable) {
-                if (markedSuccessful) {
-                    throw AmbiguousRuntimeCommitException(
-                        "SQLite could not report a definitive flag-schema transaction outcome",
-                        error,
-                    )
-                }
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain exposure schema transaction", error)
                 throw error
             }
         }
-        validateSchemaObjects(sqlite, flagsPresent = true)
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain exposure schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_EXPOSURE_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version))
+    }
+
+    override fun ensurePersonSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_PERSON_SCHEMA_OFFSET) return
+        check(runtimeNormalizedDatabaseVersion(version) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) { "Person metadata requires validated audience schema" }
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            val core = SQLiteTransaction(sqlite).readCore() ?: error("Person metadata requires an owned core")
+            check(core.person == null)
+            if (runtimeNormalizedDatabaseVersion(version) <= RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) {
+                sqlite.execSQL(CREATE_DIAGNOSTICS)
+                writeDiagnostics(sqlite, RuntimeDiagnosticsState(), insert = true)
+            }
+            sqlite.execSQL(CREATE_PERSON)
+            writePerson(sqlite, RuntimePersonState.initial(CoreStateCodec.decode(core.stateJson)), insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_PERSON_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version)}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain person schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain person schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_PERSON_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version))
+    }
+
+    override fun initialReplayAudienceState(): RuntimeReplayAudienceState {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        runtimeBaseDatabaseVersion(version)
+        return if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) RuntimeReplayAudienceState.Unseen else RuntimeReplayAudienceState.Unknown
+    }
+
+    override fun ensureReplayAudienceSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) return
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            // The owner has already validated every existing core/queue/replay payload.
+            check(SQLiteTransaction(sqlite).readCore() != null) { "Audience upgrade requires an owned core" }
+            sqlite.execSQL(CREATE_AUDIENCE)
+            writeAudience(sqlite, RuntimeReplayAudienceState.Unknown, insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${version + RUNTIME_AUDIENCE_SCHEMA_OFFSET}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain audience schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain audience schema durability", error) }
+        validateSchemaObjects(sqlite, version + RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+    }
+
+    override fun ensureDiagnosticsSchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val base = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) return
+        check(runtimeNormalizedDatabaseVersion(version) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) { "Diagnostics require validated audience schema" }
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            check(SQLiteTransaction(sqlite).readCore() != null) { "Diagnostics require owned core" }
+            sqlite.execSQL(CREATE_DIAGNOSTICS)
+            writeDiagnostics(sqlite, RuntimeDiagnosticsState(), insert = true)
+            executePragma(sqlite, "PRAGMA user_version = ${base + RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version)}")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain diagnostics schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain diagnostics schema durability", error) }
+        validateSchemaObjects(sqlite, base + RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET + runtimeDatabaseRasterOffset(version))
+    }
+
+    override fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow) {
+        require(initialAuthority.key == RUNTIME_FLAG_AUTHORITY_KEY)
+        ensureAdditiveSchema(false, initialAuthority.key, initialAuthority.storageSchemaVersion, initialAuthority.payload)
+    }
+
+    override fun ensureReplaySchema(initialState: RuntimeReplayStoredRow) {
+        require(initialState.key == "state")
+        ensureAdditiveSchema(true, initialState.key, initialState.storageSchemaVersion, initialState.payload)
+    }
+
+    override fun ensureNativeReplaySchema(initialAuthority: RuntimeReplayStoredRow) {
+        assertOwnerThread()
+        val initial = NativeReplayAccounting.read(initialAuthority)
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val baseVersion = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        check(baseVersion in 3L..6L) { "Native accounting requires explicit replay storage" }
+        if (baseVersion == 5L || baseVersion == 6L) {
+            transaction { tx ->
+                val current = NativeReplayAccounting.read(tx.readReplayRow(NativeReplayAccounting.KEY)
+                    ?: corrupt("Missing native replay accounting"))
+                if (current.namespaceHash != initial.namespaceHash || current.streamId != initial.streamId) {
+                    corrupt("Native accounting installation mismatch")
+                }
+            }
+            return
+        }
+        val target = (if (baseVersion == 3L) 5 else 6) + runtimeDatabaseFeatureOffset(version) + runtimeDatabaseRasterOffset(version)
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            val tx = SQLiteTransaction(sqlite)
+            val core = tx.readCore() ?: corrupt("Native accounting without runtime core")
+            if (CoreStateCodec.decode(core.stateJson).stream.streamId != initial.streamId) corrupt("Native accounting stream mismatch")
+            if (tx.readReplayRow(NativeReplayAccounting.KEY) != null) corrupt("Native metadata precedes its schema")
+            val values = ContentValues().apply {
+                put("record_key", NativeReplayAccounting.KEY)
+                put("storage_schema_version", 1L)
+                put("payload", initial.encoded())
+            }
+            sqlite.insertOrThrow(REPLAY_TABLE, null, values)
+            executePragma(sqlite, "PRAGMA user_version = $target")
+            if (pragmaLong(sqlite, "PRAGMA user_version") != target.toLong()) corrupt("Native schema version was not persisted")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful(); markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain native schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain native schema durability", error) }
+        validateSchemaObjects(sqlite, target.toLong())
+    }
+
+    override fun ensureNativeRasterReplaySchema() {
+        assertOwnerThread()
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        validateSchemaObjects(sqlite, version)
+        check(runtimeBaseDatabaseVersion(version) in setOf(5L, 6L))
+        if (runtimeDatabaseRasterOffset(version) != 0) {
+            val state = transaction { ReplayStoredState.decode(checkNotNull(it.readReplayRow("state"))) }
+            check(state.rasterStorage)
+            return
+        }
+        val target = version + RUNTIME_RASTER_SCHEMA_OFFSET
+        runtimeNormalizedDatabaseVersion(target) // Reject every unlisted transition before mutation.
+        transaction { tx ->
+            val state = ReplayStoredState.decode(checkNotNull(tx.readReplayRow("state")))
+            check(!state.rasterStorage && state.rasterSource == null)
+            tx.putReplayRow(state.copy(rasterStorage = true).row())
+            executePragma(sqlite, "PRAGMA user_version = $target")
+        }
+        validateSchemaObjects(sqlite, target)
+    }
+
+    private fun ensureAdditiveSchema(replay: Boolean, key: String, rowVersion: Long, payload: ByteArray) {
+        assertOwnerThread()
+        require(rowVersion == 1L && payload.isNotEmpty())
+        require(payload.size <= if (replay) REPLAY_ROW_BYTES else MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES)
+        val version = pragmaLong(sqlite, "PRAGMA user_version")
+        val baseVersion = runtimeBaseDatabaseVersion(version)
+        validateSchemaObjects(sqlite, version)
+        val alreadyPresent = if (replay) baseVersion in setOf(3L, 4L, 5L, 6L) else baseVersion in setOf(2L, 4L, 6L)
+        if (alreadyPresent) return
+        val target = (if (replay) { if (baseVersion == 1L) 3 else 4 } else { when (baseVersion) { 1L -> 2; 5L -> 6; else -> 4 } }) +
+            runtimeDatabaseFeatureOffset(version) + runtimeDatabaseRasterOffset(version)
+        sqlite.beginTransaction()
+        var markedSuccessful = false
+        try {
+            sqlite.execSQL(if (replay) CREATE_REPLAY else CREATE_FLAG_CACHE)
+            val values = ContentValues().apply {
+                put("record_key", key)
+                put("storage_schema_version", rowVersion)
+                put("payload", payload)
+            }
+            sqlite.insertOrThrow(if (replay) REPLAY_TABLE else FLAG_CACHE_TABLE, null, values)
+            executePragma(sqlite, "PRAGMA user_version = $target")
+            if (pragmaLong(sqlite, "PRAGMA user_version") != target.toLong()) corrupt("Additive schema version was not persisted")
+            faults.beforeCommit()
+            sqlite.setTransactionSuccessful()
+            markedSuccessful = true
+        } finally {
+            try { sqlite.endTransaction() }
+            catch (error: Throwable) {
+                if (markedSuccessful) throw AmbiguousRuntimeCommitException("Uncertain additive schema transaction", error)
+                throw error
+            }
+        }
+        try { faults.afterCommit() }
+        catch (error: Throwable) { throw AmbiguousRuntimeCommitException("Uncertain additive schema durability", error) }
+        validateSchemaObjects(sqlite, target.toLong())
     }
 
     override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T {
         assertOwnerThread()
         sqlite.beginTransaction()
-        val transaction = SQLiteTransaction(sqlite)
+        val transaction = SQLiteTransaction(sqlite, faults)
         var markedSuccessful = false
         try {
             val result = block(transaction)
@@ -137,6 +410,13 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         }
     }
 
+    override fun validateMemoryReconciliation() {
+        assertOwnerThread()
+        check(memoryOnly && sqlite.isOpen && !sqlite.inTransaction()) { "Original memory transaction has not settled" }
+        validateIntegrity(sqlite)
+        validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
+    }
+
     override fun close() {
         assertOwnerThread()
         sqlite.close()
@@ -148,9 +428,25 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         }
     }
 
-    private class SQLiteTransaction(private val sqlite: SQLiteDatabase) : RuntimeQueueTransaction {
+    private class SQLiteTransaction(private val sqlite: SQLiteDatabase, private val faults: AndroidRuntimeDatabaseFaults = AndroidRuntimeDatabaseFaults.None) : RuntimeQueueTransaction {
         var mutated: Boolean = false
             private set
+
+        override fun readCaptureRateState(): RuntimeCaptureRateState? {
+            requireTransaction()
+            if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) <= RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) return null
+            faults.beforeCaptureRateRead()
+            return readCaptureRate(sqlite)
+        }
+
+        override fun writeCaptureRateState(state: RuntimeCaptureRateState) {
+            requireTransaction()
+            val previous = readCaptureRate(sqlite)
+            if (previous.streamId != state.streamId) corrupt("Capture limiter stream changed")
+            faults.beforeCaptureRateWrite()
+            writeCaptureRate(sqlite, state, false)
+            mutated = true
+        }
 
         override fun readCore(): RuntimeStoredCore? {
             requireTransaction()
@@ -164,12 +460,35 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                 null,
                 "2",
             ).use { cursor ->
-                if (!cursor.moveToFirst()) return null
+                if (!cursor.moveToFirst()) {
+                    if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_AUDIENCE_SCHEMA_OFFSET && readAudience(sqlite) != null)
+                        corrupt("Audience history exists without an owned core")
+                    if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET && readDiagnostics(sqlite) != null)
+                        corrupt("Diagnostics history exists without an owned core")
+                    if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_PERSON_SCHEMA_OFFSET && readPerson(sqlite) != null)
+                        corrupt("Person state exists without an owned core")
+                    if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_EXPOSURE_SCHEMA_OFFSET && readExposures(sqlite) != null)
+                        corrupt("Exposure state exists without an owned core")
+                    if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_EXCEPTION_SCHEMA_OFFSET && readExceptions(sqlite) != null)
+                        corrupt("Exception state exists without an owned core")
+                    return null
+                }
                 val core =
                     RuntimeStoredCore(
                         stateJson = cursor.requiredBlob(0, "core_state.state_json"),
                         queueCount = cursor.getLong(1),
                         queueBytes = cursor.getLong(2),
+                        replayAudience = if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_AUDIENCE_SCHEMA_OFFSET)
+                            readAudience(sqlite) ?: corrupt("Missing installation audience history")
+                            else RuntimeReplayAudienceState.Unknown,
+                        diagnostics = if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET)
+                            readDiagnostics(sqlite) ?: corrupt("Missing diagnostics state") else RuntimeDiagnosticsState(),
+                        person = if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_PERSON_SCHEMA_OFFSET)
+                            readPerson(sqlite) ?: corrupt("Missing person state") else null,
+                        exposures = if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_EXPOSURE_SCHEMA_OFFSET)
+                            readExposures(sqlite) ?: corrupt("Missing exposure state") else null,
+                        exceptions = if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_EXCEPTION_SCHEMA_OFFSET)
+                            readExceptions(sqlite) ?: corrupt("Missing exception state") else null,
                     )
                 if (cursor.moveToNext()) corrupt("Runtime database contains duplicate core rows")
                 return core
@@ -178,6 +497,12 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
 
         override fun insertCore(core: RuntimeStoredCore) {
             requireTransaction()
+            val version = pragmaLong(sqlite, "PRAGMA user_version")
+            if (runtimeNormalizedDatabaseVersion(version) <= RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+                check(core.replayAudience === RuntimeReplayAudienceState.Unknown)
+                sqlite.execSQL(CREATE_AUDIENCE)
+                executePragma(sqlite, "PRAGMA user_version = ${version + RUNTIME_AUDIENCE_SCHEMA_OFFSET}")
+            }
             val values =
                 ContentValues().apply {
                     put("singleton_id", SINGLETON_ID)
@@ -186,6 +511,16 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     put("queue_bytes", core.queueBytes)
                 }
             sqlite.insertOrThrow(CORE_TABLE, null, values)
+            writeAudience(sqlite, core.replayAudience, insert = true)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) writeDiagnostics(sqlite, core.diagnostics, insert = true)
+            else check(core.diagnostics == RuntimeDiagnosticsState())
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_PERSON_SCHEMA_OFFSET) writePerson(sqlite, checkNotNull(core.person), insert = true)
+            else check(core.person == null)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXPOSURE_SCHEMA_OFFSET) writeExposures(sqlite, checkNotNull(core.exposures), insert = true)
+            else check(core.exposures == null)
+            if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_EXCEPTION_SCHEMA_OFFSET)
+                writeExceptions(sqlite, checkNotNull(core.exceptions), insert = true)
+            else check(core.exceptions == null)
             mutated = true
         }
 
@@ -205,6 +540,27 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     arrayOf(SINGLETON_ID.toString()),
                 )
             if (changed != 1) corrupt("Runtime core update did not affect exactly one row")
+            if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) {
+                val previous = readAudience(sqlite) ?: corrupt("Missing installation audience history")
+                if (previous != core.replayAudience) {
+                    check(previous === RuntimeReplayAudienceState.Unseen && core.replayAudience is RuntimeReplayAudienceState.FirstSession) {
+                        "Installation audience history cannot be reset or replaced"
+                    }
+                    writeAudience(sqlite, core.replayAudience, insert = false)
+                }
+            } else check(core.replayAudience === RuntimeReplayAudienceState.Unknown)
+            if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET)
+                writeDiagnostics(sqlite, core.diagnostics, insert = false)
+            else check(core.diagnostics == RuntimeDiagnosticsState())
+            if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_PERSON_SCHEMA_OFFSET)
+                writePerson(sqlite, checkNotNull(core.person), insert = false)
+            else check(core.person == null)
+            if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_EXPOSURE_SCHEMA_OFFSET)
+                writeExposures(sqlite, checkNotNull(core.exposures), insert = false)
+            else check(core.exposures == null)
+            if (runtimeNormalizedDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) > RUNTIME_EXCEPTION_SCHEMA_OFFSET)
+                writeExceptions(sqlite, checkNotNull(core.exceptions), insert = false)
+            else check(core.exceptions == null)
             mutated = true
         }
 
@@ -272,6 +628,88 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             requireTransaction()
             val changed = sqlite.delete(QUEUE_TABLE, "sequence = ?", arrayOf(sequence.toString()))
             if (changed > 1) corrupt("Queue deletion affected more than one primary-key row")
+            if (changed == 1) mutated = true
+            return changed == 1
+        }
+
+        override fun replaySchemaPresent(): Boolean {
+            requireTransaction()
+            return runtimeBaseDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) in setOf(3L, 4L, 5L, 6L)
+        }
+
+        override fun nativeRasterReplaySchemaPresent(): Boolean {
+            requireTransaction()
+            return runtimeDatabaseRasterOffset(pragmaLong(sqlite, "PRAGMA user_version")) != 0
+        }
+
+        override fun nativeReplaySchemaPresent(): Boolean {
+            requireTransaction()
+            return runtimeBaseDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) in setOf(5L, 6L)
+        }
+
+        override fun readReplayRow(key: String): RuntimeReplayStoredRow? {
+            requireTransaction()
+            requireReplayTable()
+            require(key.isNotEmpty()) { "Replay row key must not be empty" }
+            sqlite.query(
+                REPLAY_TABLE,
+                REPLAY_ROW_COLUMNS,
+                "record_key = ?",
+                arrayOf(key),
+                null,
+                null,
+                null,
+                "2",
+            ).use { cursor ->
+                if (!cursor.moveToFirst()) return null
+                val row = cursor.replayRow()
+                if (cursor.moveToNext()) corrupt("Runtime database contains duplicate replay row keys")
+                return row
+            }
+        }
+
+        override fun scanReplayRows(prefix: String, visitor: (RuntimeReplayStoredRow) -> Unit) {
+            requireTransaction()
+            requireReplayTable()
+            sqlite.query(
+                REPLAY_TABLE,
+                REPLAY_ROW_COLUMNS,
+                "substr(record_key, 1, ?) = ?",
+                arrayOf(prefix.length.toString(), prefix),
+                null,
+                null,
+                "record_key ASC",
+                null,
+            ).use { cursor -> while (cursor.moveToNext()) visitor(cursor.replayRow()) }
+        }
+
+        override fun putReplayRow(row: RuntimeReplayStoredRow) {
+            requireTransaction()
+            requireReplayTable()
+            require(row.key.isNotEmpty() && row.key.length <= MAX_REPLAY_ROW_KEY_CHARS) {
+                "Replay row key is outside its bounds"
+            }
+            require(row.storageSchemaVersion >= 1L) { "Replay row schema version must be positive" }
+            require(row.payload.isNotEmpty() && row.payload.size <= REPLAY_ROW_BYTES) {
+                "Replay row payload is outside the Android SQLite row limit"
+            }
+            val values =
+                ContentValues().apply {
+                    put("record_key", row.key)
+                    put("storage_schema_version", row.storageSchemaVersion)
+                    put("payload", row.payload)
+                }
+            sqlite.insertWithOnConflict(REPLAY_TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE).also { inserted ->
+                if (inserted == -1L) corrupt("Replay row upsert failed")
+            }
+            mutated = true
+        }
+
+        override fun deleteReplayRow(key: String): Boolean {
+            requireTransaction()
+            requireReplayTable()
+            val changed = sqlite.delete(REPLAY_TABLE, "record_key = ?", arrayOf(key))
+            if (changed > 1) corrupt("Replay row deletion affected more than one key")
             if (changed == 1) mutated = true
             return changed == 1
         }
@@ -355,10 +793,17 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
         }
 
         private fun requireFlagTable() {
-            if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong()) {
+            if (runtimeBaseDatabaseVersion(pragmaLong(sqlite, "PRAGMA user_version")) !in setOf(2L, 4L, 6L)) {
                 throw IllegalStateException("Flag storage schema has not been initialized")
             }
         }
+
+        private fun requireReplayTable() {
+            check(replaySchemaPresent()) { "Replay storage schema has not been initialized" }
+        }
+
+        private fun Cursor.replayRow(): RuntimeReplayStoredRow = RuntimeReplayStoredRow(
+            requiredString(0, "replay_queue.record_key"), getLong(1), requiredBlob(2, "replay_queue.payload"))
 
         private fun Cursor.storedRecord(): RuntimeStoredRecord =
             RuntimeStoredRecord(
@@ -379,8 +824,187 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
     }
 
     internal companion object {
+        private const val CAPTURE_RATE_TABLE = "capture_rate_limit"
+        private val CREATE_CAPTURE_RATE = """
+            CREATE TABLE capture_rate_limit (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                stream_id TEXT NOT NULL,
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND $MAX_RUNTIME_CAPTURE_RATE_BYTES)
+            )
+        """.trimIndent()
+
+        private fun readCaptureRate(sqlite: SQLiteDatabase): RuntimeCaptureRateState =
+            sqlite.query(CAPTURE_RATE_TABLE, arrayOf("stream_id", "payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) corrupt("Missing capture limiter state")
+                val result = RuntimeCaptureRateState.decode(cursor.requiredString(0, "capture_rate_limit.stream_id"),
+                    cursor.requiredBlob(1, "capture_rate_limit.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate capture limiter state")
+                result
+            }
+
+        private fun writeCaptureRate(sqlite: SQLiteDatabase, state: RuntimeCaptureRateState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("stream_id", state.streamId); put("payload", state.encodeBucket()) }
+            if (insert) sqlite.insertOrThrow(CAPTURE_RATE_TABLE, null, values)
+            else if (sqlite.update(CAPTURE_RATE_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Capture limiter update did not affect exactly one row")
+        }
+
+        private const val EXCEPTIONS_TABLE = "exception_state"
+        private val CREATE_EXCEPTIONS = """
+            CREATE TABLE exception_state (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND $MAX_RUNTIME_EXCEPTION_BYTES)
+            )
+        """.trimIndent()
+
+        private fun readExceptions(sqlite: SQLiteDatabase): RuntimeExceptionState? =
+            sqlite.query(EXCEPTIONS_TABLE, arrayOf("payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val result = RuntimeExceptionState.decode(cursor.requiredBlob(0, "exception_state.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate exception state")
+                result
+            }
+
+        private fun writeExceptions(sqlite: SQLiteDatabase, state: RuntimeExceptionState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("payload", state.encode()) }
+            if (insert) sqlite.insertOrThrow(EXCEPTIONS_TABLE, null, values)
+            else if (sqlite.update(EXCEPTIONS_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Exception update did not affect exactly one row")
+        }
+
+        private const val EXPOSURES_TABLE = "flag_exposure_state"
+        private val CREATE_EXPOSURES = """
+            CREATE TABLE flag_exposure_state (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND $MAX_RUNTIME_EXPOSURE_STATE_BYTES)
+            )
+        """.trimIndent()
+
+        private fun readExposures(sqlite: SQLiteDatabase): RuntimeFlagExposureState? =
+            sqlite.query(EXPOSURES_TABLE, arrayOf("payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val result = RuntimeFlagExposureState.decode(cursor.requiredBlob(0, "flag_exposure_state.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate exposure state")
+                result
+            }
+
+        private fun writeExposures(sqlite: SQLiteDatabase, state: RuntimeFlagExposureState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("payload", state.encode()) }
+            if (insert) sqlite.insertOrThrow(EXPOSURES_TABLE, null, values)
+            else if (sqlite.update(EXPOSURES_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Exposure update did not affect exactly one row")
+        }
+
+        private const val PERSON_TABLE = "person_state"
+        private val CREATE_PERSON = """
+            CREATE TABLE person_state (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 4096)
+            )
+        """.trimIndent()
+
+        private fun readPerson(sqlite: SQLiteDatabase): RuntimePersonState? =
+            sqlite.query(PERSON_TABLE, arrayOf("payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val result = RuntimePersonState.decode(cursor.requiredBlob(0, "person_state.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate person state")
+                result
+            }
+
+        private fun writePerson(sqlite: SQLiteDatabase, state: RuntimePersonState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("payload", state.encode()) }
+            if (insert) sqlite.insertOrThrow(PERSON_TABLE, null, values)
+            else if (sqlite.update(PERSON_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Person update did not affect exactly one row")
+        }
+
+        private const val DIAGNOSTICS_TABLE = "native_diagnostics"
+        private val CREATE_DIAGNOSTICS = """
+            CREATE TABLE native_diagnostics (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 2048)
+            )
+        """.trimIndent()
+
+        private fun readDiagnostics(sqlite: SQLiteDatabase): RuntimeDiagnosticsState? =
+            sqlite.query(DIAGNOSTICS_TABLE, arrayOf("payload"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val result = RuntimeDiagnosticsState.decode(cursor.requiredBlob(0, "native_diagnostics.payload"))
+                if (cursor.moveToNext()) corrupt("Duplicate diagnostics state")
+                result
+            }
+
+        private fun writeDiagnostics(sqlite: SQLiteDatabase, state: RuntimeDiagnosticsState, insert: Boolean) {
+            val values = ContentValues().apply { put("singleton_id", SINGLETON_ID); put("payload", state.encode()) }
+            if (insert) sqlite.insertOrThrow(DIAGNOSTICS_TABLE, null, values)
+            else if (sqlite.update(DIAGNOSTICS_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Diagnostics update did not affect exactly one row")
+        }
+
+        private const val AUDIENCE_TABLE = "replay_audience"
+        private val CREATE_AUDIENCE = """
+            CREATE TABLE replay_audience (
+                singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+                status TEXT NOT NULL CHECK (status IN ('unknown', 'unseen', 'first-session')),
+                session_id TEXT,
+                session_started_at TEXT,
+                CHECK ((status = 'first-session' AND session_id IS NOT NULL AND session_started_at IS NOT NULL AND length(session_id) BETWEEN 1 AND 256 AND length(session_started_at) BETWEEN 1 AND 128)
+                    OR (status IN ('unknown', 'unseen') AND session_id IS NULL AND session_started_at IS NULL))
+            )
+        """.trimIndent()
+
+        private fun readAudience(sqlite: SQLiteDatabase): RuntimeReplayAudienceState? =
+            sqlite.query(AUDIENCE_TABLE, arrayOf("status", "session_id", "session_started_at"), null, null, null, null, null, "2").use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val status = cursor.getString(0)
+                val id = if (cursor.isNull(1)) null else cursor.getString(1)
+                val start = if (cursor.isNull(2)) null else cursor.getString(2)
+                val result = when (status) {
+                    "unknown", "unseen" -> {
+                        if (id != null || start != null) corrupt("Non-session audience contains a session")
+                        if (status == "unknown") RuntimeReplayAudienceState.Unknown else RuntimeReplayAudienceState.Unseen
+                    }
+                    "first-session" -> {
+                        if (id == null || start == null || start.length > 128) corrupt("Incomplete audience session")
+                        try { RuntimeReplayAudienceState.FirstSession(id, start) }
+                        catch (error: IllegalArgumentException) { throw RuntimeQueueCorruptionException("Invalid audience session", error) }
+                    }
+                    else -> corrupt("Unsupported audience status")
+                }
+                if (cursor.moveToNext()) corrupt("Duplicate audience history")
+                result
+            }
+
+        private fun writeAudience(sqlite: SQLiteDatabase, state: RuntimeReplayAudienceState, insert: Boolean) {
+            val values = ContentValues().apply {
+                put("singleton_id", SINGLETON_ID)
+                put("status", when (state) {
+                    RuntimeReplayAudienceState.Unknown -> "unknown"
+                    RuntimeReplayAudienceState.Unseen -> "unseen"
+                    is RuntimeReplayAudienceState.FirstSession -> "first-session"
+                })
+                put("session_id", (state as? RuntimeReplayAudienceState.FirstSession)?.sessionId)
+                put("session_started_at", (state as? RuntimeReplayAudienceState.FirstSession)?.startedAt)
+            }
+            if (insert) sqlite.insertOrThrow(AUDIENCE_TABLE, null, values)
+            else if (sqlite.update(AUDIENCE_TABLE, values, "singleton_id = ?", arrayOf(SINGLETON_ID.toString())) != 1)
+                corrupt("Audience update did not affect exactly one row")
+        }
+
         private const val CORE_TABLE = "core_state"
         private const val QUEUE_TABLE = "queue_records"
+        private const val REPLAY_TABLE = "replay_queue"
+        private const val MAX_REPLAY_ROW_KEY_CHARS = 128
+        // Conservative segment policy, not a universal device CursorWindow capacity assertion.
+        private const val REPLAY_ROW_BYTES = 262_144
+        private val REPLAY_ROW_COLUMNS = arrayOf("record_key", "storage_schema_version", "payload")
+        private val CREATE_REPLAY = """
+            CREATE TABLE replay_queue (
+                record_key TEXT NOT NULL PRIMARY KEY CHECK (length(record_key) BETWEEN 1 AND $MAX_REPLAY_ROW_KEY_CHARS),
+                storage_schema_version INTEGER NOT NULL CHECK (storage_schema_version >= 1),
+                payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND $REPLAY_ROW_BYTES)
+            )
+        """.trimIndent()
         private const val FLAG_CACHE_TABLE = "flag_cache"
         private const val SINGLETON_ID = 1
         private const val MAX_FLAG_ROW_KEY_CHARS = 512
@@ -434,6 +1058,9 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory) {
                 throw IOException("Could not create runtime database directory")
             }
+            // The original owner already holds the process/file lease. Even SQLite READONLY
+            // can rewrite original SHM; validate a private DB/WAL/journal copy first.
+            if (file.exists()) AndroidRuntimeDatabasePreflight.withSnapshot(file) { validateExistingSnapshot(it) }
             val sqlite =
                 SQLiteDatabase.openDatabase(
                     file.absolutePath,
@@ -441,7 +1068,8 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     SQLiteDatabase.OPEN_READWRITE or
                         SQLiteDatabase.CREATE_IF_NECESSARY or
                         SQLiteDatabase.NO_LOCALIZED_COLLATORS,
-            )
+                    REFUSE_CORRUPTION_RECOVERY,
+                )
             try {
                 // Android 15 can safely execute row-returning PRAGMAs on every pooled connection.
                 // Older releases stay single-connection so these durability settings cannot
@@ -459,6 +1087,77 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
             } catch (error: Throwable) {
                 sqlite.close()
                 throw error
+            }
+        }
+
+        /** Public SQLite open API recognizes :memory: on every supported Android version. */
+        internal fun openMemory(faults: AndroidRuntimeDatabaseFaults = AndroidRuntimeDatabaseFaults.None): AndroidSQLiteRuntimeDatabase {
+            val sqlite = SQLiteDatabase.openDatabase(":memory:", null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.CREATE_IF_NECESSARY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+                REFUSE_CORRUPTION_RECOVERY)
+            try {
+                sqlite.disableWriteAheadLogging()
+                executePragma(sqlite, "PRAGMA temp_store = MEMORY")
+                executePragma(sqlite, "PRAGMA journal_mode = MEMORY")
+                executePragma(sqlite, "PRAGMA synchronous = FULL")
+                executePragma(sqlite, "PRAGMA busy_timeout = $SQLITE_BUSY_TIMEOUT_MILLIS")
+                val settings = AndroidRuntimeConnectionSettings(pragmaString(sqlite, "PRAGMA journal_mode").lowercase(),
+                    pragmaLong(sqlite, "PRAGMA synchronous"), pragmaLong(sqlite, "PRAGMA busy_timeout"))
+                check(sqlite.path == ":memory:" && settings.journalMode == "memory" &&
+                    pragmaLong(sqlite, "PRAGMA temp_store") == 2L && settings.synchronous == SQLITE_SYNCHRONOUS_FULL &&
+                    settings.busyTimeoutMillis == SQLITE_BUSY_TIMEOUT_MILLIS) { "SQLite memory-only settings were not applied" }
+                faults.connectionConfigured(settings)
+                validateIntegrity(sqlite)
+                initializeOrValidateSchema(sqlite)
+                return AndroidSQLiteRuntimeDatabase(sqlite, Thread.currentThread(), faults, memoryOnly = true)
+            } catch (error: Throwable) {
+                try { sqlite.close() } catch (closeFailure: Throwable) { error.addSuppressed(closeFailure) }
+                throw error
+            }
+        }
+
+        private val REFUSE_CORRUPTION_RECOVERY = DatabaseErrorHandler {
+            throw RuntimeQueueCorruptionException("Runtime SQLite corruption refused without recovery")
+        }
+
+        private fun validateExistingSnapshot(file: File) {
+            // Writable recovery is confined to the disposable copy so a valid interrupted
+            // rollback-journal transaction can be recovered before its strict metadata checks.
+            SQLiteDatabase.openDatabase(file.absolutePath, null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+                REFUSE_CORRUPTION_RECOVERY).use { readOnly ->
+                validateIntegrity(readOnly)
+                val version = pragmaLong(readOnly, "PRAGMA user_version")
+                if (version == 0L) {
+                    if (applicationSchemaObjects(readOnly).isNotEmpty())
+                        corrupt("Unversioned runtime database contains unexpected schema objects")
+                    return
+                }
+                validateSchemaObjects(readOnly, version)
+                if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_PERSON_SCHEMA_OFFSET) {
+                    val person = readPerson(readOnly) ?: corrupt("Missing person state")
+                    val state = readOnly.rawQuery("SELECT state_json FROM core_state WHERE singleton_id = 1 LIMIT 2", null).use { cursor ->
+                        if (!cursor.moveToFirst()) corrupt("Person state exists without an owned core")
+                        val parsed = try { CoreStateCodec.decode(cursor.requiredBlob(0, "core_state.state_json")) }
+                        catch (error: Exception) { throw RuntimeQueueCorruptionException("Invalid person core binding", error) }
+                        if (cursor.moveToNext()) corrupt("Runtime database contains duplicate core rows")
+                        parsed
+                    }
+                    if (person.streamId != state.stream.streamId) corrupt("Person state stream binding differs")
+                    if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXCEPTION_SCHEMA_OFFSET) {
+                        val exceptions = readExceptions(readOnly) ?: corrupt("Missing exception state")
+                        if (exceptions.streamId != state.stream.streamId ||
+                            (exceptions.reservation != null && !exceptions.reservation.matches(state)))
+                            corrupt("Exception metadata does not match owned identity")
+                    }
+                    if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET && readCaptureRate(readOnly).streamId != state.stream.streamId)
+                        corrupt("Capture limiter metadata does not match owned stream")
+                    if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXPOSURE_SCHEMA_OFFSET) {
+                        val exposures = readExposures(readOnly) ?: corrupt("Missing exposure state")
+                        if (exposures.streamId != state.stream.streamId || exposures.anonymousId != state.identity.anonymousId)
+                            corrupt("Exposure metadata does not match owned visitor")
+                    }
+                }
             }
         }
 
@@ -527,11 +1226,12 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                     try {
                         sqlite.execSQL(CREATE_CORE)
                         sqlite.execSQL(CREATE_QUEUE)
+                        sqlite.execSQL(CREATE_AUDIENCE)
                         executePragma(
                             sqlite,
-                            "PRAGMA user_version = $RUNTIME_STORAGE_SCHEMA_VERSION",
+                            "PRAGMA user_version = $RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE",
                         )
-                        if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_STORAGE_SCHEMA_VERSION.toLong()) {
+                        if (pragmaLong(sqlite, "PRAGMA user_version") != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_AUDIENCE.toLong()) {
                             corrupt("Runtime database could not persist its schema version")
                         }
                         sqlite.setTransactionSuccessful()
@@ -550,30 +1250,36 @@ internal class AndroidSQLiteRuntimeDatabase private constructor(
                         }
                     }
                 }
-                version != RUNTIME_STORAGE_SCHEMA_VERSION.toLong() &&
-                    version != RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong() ->
-                    throw UnsupportedRuntimeStorageSchemaException(version)
+                else -> runtimeNormalizedDatabaseVersion(version)
             }
-            validateSchemaObjects(
-                sqlite,
-                flagsPresent = pragmaLong(sqlite, "PRAGMA user_version") == RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS.toLong(),
-            )
+            validateSchemaObjects(sqlite, pragmaLong(sqlite, "PRAGMA user_version"))
         }
 
-        private fun validateSchemaObjects(sqlite: SQLiteDatabase, flagsPresent: Boolean) {
-            val expected =
-                if (flagsPresent) {
-                    setOf("table:$CORE_TABLE", "table:$QUEUE_TABLE", "table:$FLAG_CACHE_TABLE")
-                } else {
-                    setOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
-                }
+        private fun validateSchemaObjects(sqlite: SQLiteDatabase, version: Long) {
+            val baseVersion = runtimeBaseDatabaseVersion(version)
+            val flagsPresent = baseVersion in setOf(2L, 4L, 6L)
+            val replayPresent = baseVersion in setOf(3L, 4L, 5L, 6L)
+            val expected = mutableSetOf("table:$CORE_TABLE", "table:$QUEUE_TABLE")
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) expected += "table:$AUDIENCE_TABLE"
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) expected += "table:$DIAGNOSTICS_TABLE"
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_PERSON_SCHEMA_OFFSET) expected += "table:$PERSON_TABLE"
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXPOSURE_SCHEMA_OFFSET) expected += "table:$EXPOSURES_TABLE"
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) expected += "table:$CAPTURE_RATE_TABLE"
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXCEPTION_SCHEMA_OFFSET) expected += "table:$EXCEPTIONS_TABLE"
+            if (flagsPresent) expected += "table:$FLAG_CACHE_TABLE"
+            if (replayPresent) expected += "table:$REPLAY_TABLE"
             val objects = applicationSchemaObjects(sqlite)
-            if (objects != expected) {
-                corrupt("Runtime database schema object set is unsupported: ${objects.joinToString()}")
-            }
+            if (objects != expected) corrupt("Runtime database schema object set is unsupported: ${objects.joinToString()}")
             validateTableSql(sqlite, CORE_TABLE, CREATE_CORE)
             validateTableSql(sqlite, QUEUE_TABLE, CREATE_QUEUE)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_AUDIENCE_SCHEMA_OFFSET) validateTableSql(sqlite, AUDIENCE_TABLE, CREATE_AUDIENCE)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_DIAGNOSTICS_SCHEMA_OFFSET) validateTableSql(sqlite, DIAGNOSTICS_TABLE, CREATE_DIAGNOSTICS)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_PERSON_SCHEMA_OFFSET) validateTableSql(sqlite, PERSON_TABLE, CREATE_PERSON)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXPOSURE_SCHEMA_OFFSET) validateTableSql(sqlite, EXPOSURES_TABLE, CREATE_EXPOSURES)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_CAPTURE_RATE_SCHEMA_OFFSET) validateTableSql(sqlite, CAPTURE_RATE_TABLE, CREATE_CAPTURE_RATE)
+            if (runtimeNormalizedDatabaseVersion(version) > RUNTIME_EXCEPTION_SCHEMA_OFFSET) validateTableSql(sqlite, EXCEPTIONS_TABLE, CREATE_EXCEPTIONS)
             if (flagsPresent) validateTableSql(sqlite, FLAG_CACHE_TABLE, CREATE_FLAG_CACHE)
+            if (replayPresent) validateTableSql(sqlite, REPLAY_TABLE, CREATE_REPLAY)
         }
 
         private const val SQLITE_SYNCHRONOUS_FULL = 2L

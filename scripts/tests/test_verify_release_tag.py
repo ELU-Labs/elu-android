@@ -29,6 +29,8 @@ class VerifyReleaseTagTest(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.email", "test@elu.dev")
         self.git("config", "user.name", "ELU Test")
+        # Fixture keys are OpenPGP regardless of the developer's global signing format.
+        self.git("config", "gpg.format", "openpgp")
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
 
@@ -96,33 +98,97 @@ class VerifyReleaseTagTest(unittest.TestCase):
 
     def test_accepts_matching_reviewed_tag_signed_by_trusted_key(self) -> None:
         fingerprint = self.create_signing_key()
-        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>")
+        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         result = self.verify("1.2.3", trusted=fingerprint)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_rejects_ref_whose_authenticated_tag_name_differs(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-s", "other-name", "-m", "Release\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: " + "a" * 64)
+        self.git("update-ref", "refs/tags/1.2.3", "refs/tags/other-name")
+        self.git("verify-tag", "refs/tags/1.2.3")
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("signed name does not match", result.stdout + result.stderr)
+
+    def test_rejects_signed_tag_of_tag_even_when_it_peels_to_head(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-a", "inner", "-m", "Inner fixture")
+        self.git("tag", "-s", "1.2.3", "inner", "-m", "Release\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: " + "a" * 64)
+        self.git("verify-tag", "refs/tags/1.2.3")
+        self.assertEqual(self.git("rev-parse", "1.2.3^{commit}"), self.git("rev-parse", "HEAD"))
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("directly reference the checked-out commit", result.stdout + result.stderr)
+
+    def test_rejects_trusted_signed_tag_without_evidence_digest(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>")
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("exactly one Android-Lab-Evidence-SHA256", result.stdout + result.stderr)
+
+    def test_rejects_trusted_signed_tag_with_ambiguous_evidence_digest(self) -> None:
+        fingerprint = self.create_signing_key()
+        trailer = "Android-Lab-Evidence-SHA256: " + "a" * 64
+        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>\n" + trailer + "\n" + trailer)
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("exactly one Android-Lab-Evidence-SHA256", result.stdout + result.stderr)
+
+    def replace_tag_object(self, mutate) -> None:
+        original = self.git("cat-file", "tag", "refs/tags/1.2.3")
+        result = subprocess.run(["git", "hash-object", "-t", "tag", "-w", "--stdin"],
+            input=mutate(original), cwd=self.root, env=self.environment, check=True, capture_output=True, text=True)
+        self.git("update-ref", "refs/tags/1.2.3", result.stdout.strip())
+
+    def test_rejects_unsigned_evidence_trailer_after_valid_signature(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-s", "1.2.3", "-m", "Release\n\nReviewed-by: SDK Owner <owner@elu.dev>")
+        self.replace_tag_object(lambda raw: raw + "\n\nAndroid-Lab-Evidence-SHA256: " + "a" * 64 + "\n")
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unsigned text after", result.stdout + result.stderr)
+
+    def test_rejects_unsigned_review_trailer_after_valid_signature(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-s", "1.2.3", "-m", "Release\n\nAndroid-Lab-Evidence-SHA256: " + "a" * 64)
+        self.replace_tag_object(lambda raw: raw + "\n\nReviewed-by: SDK Owner <owner@elu.dev>\n")
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unsigned text after", result.stdout + result.stderr)
+
+    def test_rejects_digest_mutated_inside_authenticated_payload(self) -> None:
+        fingerprint = self.create_signing_key()
+        self.git("tag", "-s", "1.2.3", "-m", "Release\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: " + "a" * 64)
+        self.replace_tag_object(lambda raw: raw.replace("a" * 64, "b" * 64))
+        result = self.verify("1.2.3", trusted=fingerprint)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("valid cryptographic signature", result.stdout + result.stderr)
+
     def test_rejects_unsigned_annotated_tag(self) -> None:
-        self.git("tag", "-a", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>")
+        self.git("tag", "-a", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         result = self.verify("1.2.3", trusted="0" * 40)
         self.assertNotEqual(0, result.returncode)
         self.assertIn("valid cryptographic signature", result.stdout + result.stderr)
 
     def test_rejects_valid_signature_from_untrusted_key(self) -> None:
         self.create_signing_key()
-        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>")
+        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         result = self.verify("1.2.3", trusted="0" * 40)
         self.assertNotEqual(0, result.returncode)
         self.assertIn("not in the trusted set", result.stdout + result.stderr)
 
     def test_rejects_missing_trusted_fingerprint_configuration(self) -> None:
         self.create_signing_key()
-        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>")
+        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         result = self.verify("1.2.3")
         self.assertNotEqual(0, result.returncode)
         self.assertIn("fails closed", result.stdout + result.stderr)
 
     def test_rejects_untracked_worktree_content(self) -> None:
         fingerprint = self.create_signing_key()
-        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>")
+        self.git("tag", "-s", "1.2.3", "-m", "Release 1.2.3\n\nReviewed-by: SDK Owner <owner@elu.dev>\nAndroid-Lab-Evidence-SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         (self.root / "untracked.txt").write_text("not reviewed", encoding="utf-8")
         result = self.verify("1.2.3", trusted=fingerprint)
         self.assertNotEqual(0, result.returncode)

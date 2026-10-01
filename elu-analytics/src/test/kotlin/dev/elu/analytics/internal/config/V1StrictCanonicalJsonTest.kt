@@ -11,6 +11,44 @@ import org.junit.Test
 
 class V1StrictCanonicalJsonTest {
     @Test
+    fun `retained root member uses decoded name and exact original value span`() {
+        val original = "{ \"nested\":{\"configV2\":false}, \"word\":\"brace } and \\\"\", \"n\":2.50e-1 }"
+        val source = " {\"before\":[],\"config\\u00562\": $original ,\"after\":true} \n"
+        val retained = V1StrictCanonicalJson.parseRetainingRootProperty(source, "configV2")
+        assertEquals(original, retained.propertySource)
+        assertEquals(V1StrictCanonicalJson.parse(source), retained.value)
+        assertEquals(null, V1StrictCanonicalJson.parseRetainingRootProperty("{\"nested\":{\"configV2\":1}}", "configV2").propertySource)
+        assertEquals(null, V1StrictCanonicalJson.parseRetainingRootProperty("[{\"configV2\":1}]", "configV2").propertySource)
+    }
+
+    @Test
+    fun `retained property never escapes incomplete duplicate or invalid suffix validation`() {
+        for (source in listOf(
+            "{\"configV2\":{},\"config\\u00562\":{}}",
+            "{\"configV2\":{},\"later\":1e100000000}",
+            "{\"configV2\":{},\"later\":\"\\ud800\"}",
+            "{\"configV2\":{},}",
+            "{\"configV2\":{}}false",
+            "{\"configV2\":{}",
+        )) {
+            assertThrows(V1MalformedConfigException::class.java) {
+                V1StrictCanonicalJson.parseRetainingRootProperty(source, "configV2")
+            }
+        }
+    }
+
+    @Test
+    fun `retained root member preserves scalar null and nonascii spellings`() {
+        for (value in listOf("null", "false", "2.50e-1", "[\"é\",\"\\uD83D\\uDE00\"]", "\"\\u0061\"")) {
+            val source = "{\"configV2\":$value}"
+            val retained = V1StrictCanonicalJson.parseRetainingRootProperty(source, "configV2")
+            assertEquals(value, retained.propertySource)
+            assertEquals(V1StrictCanonicalJson.canonicalize(V1StrictCanonicalJson.parse(source)),
+                V1StrictCanonicalJson.canonicalize(retained.value))
+        }
+    }
+
+    @Test
     fun `shared behavior vector uses logical fixtures and canonical cases execute byte exactly`() {
         val vector = JSONObject(resourceText("contracts/v1/test-vectors/capture-admission-activity.json"))
         assertEquals(1, vector.getInt("schemaVersion"))

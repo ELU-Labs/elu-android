@@ -25,7 +25,7 @@ internal object V1ConfigJson {
 
     private val configRequired = setOf("schemaVersion", "revision", "issuedAt", "expiresAt", "status")
     private val configOptional =
-        setOf("site", "endpoints", "privacy", "features", "capabilities", "session", "limits", "reason")
+        setOf("site", "endpoints", "privacy", "features", "capabilities", "session", "limits", "reason", "capturePerformance", "replayAudience", "captureExceptions")
     private val siteRequired = setOf("id")
     private val endpointsRequired = setOf("events", "flags")
     private val endpointsOptional = setOf("replay", "assets")
@@ -126,6 +126,9 @@ internal object V1ConfigJson {
 
         return V1ParsedConfig(
             schemaVersion = boundary.schemaVersion,
+            capturePerformance = optionalObject(root, "capturePerformance")?.let(::parseCapturePerformance),
+            captureExceptions = parseCaptureExceptions(root, boundary.schemaVersion),
+            replayAudience = if (root.has("replayAudience")) V1ReplayAudience.NEW_DEVICES else null,
             revision = revision,
             issuedAt = issuedAt,
             issuedAtInstant = issuedAtInstant,
@@ -203,6 +206,13 @@ internal object V1ConfigJson {
     ): V1ParsedConfigBoundary {
         expectFields(root, configRequired, configOptional, "config")
         val schemaVersion = readConfigSchemaVersion(root)
+        if (root.has("replayAudience") &&
+            (schemaVersion != V2_CONFIG_SCHEMA_VERSION || root.opt("status") != "enabled" ||
+                root.opt("replayAudience") != "new-devices")) {
+            malformed("config.replayAudience requires enabled configuration v2 and new-devices")
+        }
+        optionalObject(root, "capturePerformance")?.let(::parseCapturePerformance)
+        parseCaptureExceptions(root, schemaVersion)
         val revision = requiredString(root, "revision", 1, 128, "config")
         val issuedAt = requiredString(root, "issuedAt", 1, Int.MAX_VALUE, "config")
         val issuedAtInstant = parseRfc3339(issuedAt, "config.issuedAt")
@@ -378,6 +388,50 @@ internal object V1ConfigJson {
             idleTimeoutSeconds = requiredInt(json, "idleTimeoutSeconds", 60, 36_000, "config.session"),
             maximumDurationSeconds = requiredInt(json, "maximumDurationSeconds", 86_400, 86_400, "config.session"),
         )
+    }
+
+    private fun parseCapturePerformance(json: JSONObject): V1CapturePerformance {
+        val path = "config.capturePerformance"
+        expectFields(json, setOf("memory", "long_tasks", "sample_interval_ms"), emptySet(), path)
+        return V1CapturePerformance(requiredBoolean(json, "memory", path),
+            requiredBoolean(json, "long_tasks", path), requiredInt(json, "sample_interval_ms", 5_000, Int.MAX_VALUE, path))
+    }
+
+    private fun parseCaptureExceptions(root: JSONObject, schema: Int): V1CaptureExceptions? {
+        if (!root.has("captureExceptions")) return null
+        val path = "config.captureExceptions"
+        if (schema != V2_CONFIG_SCHEMA_VERSION || root.opt("status") != "enabled")
+            malformed("$path requires enabled configuration v2")
+        val raw = root.opt("captureExceptions")
+        if (raw == false) return V1CaptureExceptions(false)
+        val policy = raw as? JSONObject ?: malformed("$path must be false or a closed policy")
+        expectFields(policy, setOf("suppressionRules"), emptySet(), path)
+        val rules = policy.opt("suppressionRules") as? JSONArray ?: malformed("$path.suppressionRules must be an array")
+        if (rules.length() > 100) malformed("$path has too many rules")
+        val operators = setOf("exact", "is_not", "icontains", "not_icontains", "regex", "not_regex", "gt", "lt")
+        fun bounded(value: Any?) {
+            val text = value as? String ?: malformed("$path rule value must be a string")
+            requireString(text, 0, 1_000, path)
+        }
+        for (index in 0 until rules.length()) {
+            val rule = rules.opt(index) as? JSONObject ?: malformed("$path rule must be an object")
+            expectFields(rule, setOf("type", "values"), emptySet(), path)
+            if (rule.opt("type") !in setOf("AND", "OR")) malformed("$path rule type is unsupported")
+            val values = rule.opt("values") as? JSONArray ?: malformed("$path values must be an array")
+            if (values.length() > 50) malformed("$path has too many values")
+            for (part in 0 until values.length()) {
+                val value = values.opt(part) as? JSONObject ?: malformed("$path value must be an object")
+                expectFields(value, setOf("key", "value", "operator"), emptySet(), path)
+                if (value.opt("key") !in setOf("\$exception_types", "\$exception_values") || value.opt("operator") !in operators)
+                    malformed("$path rule is unsupported")
+                val match = value.opt("value")
+                if (match is JSONArray) {
+                    if (match.length() > 100) malformed("$path has too many matches")
+                    for (item in 0 until match.length()) bounded(match.opt(item))
+                } else bounded(match)
+            }
+        }
+        return V1CaptureExceptions(rules.length() == 0)
     }
 
     private fun parseLimits(json: JSONObject): V1ConfigLimits {

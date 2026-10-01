@@ -1,7 +1,20 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.replay.NativeReplayComposition
+import dev.elu.analytics.internal.replay.awaitExact
+
 import dev.elu.analytics.EluEuGuard
 import dev.elu.analytics.EluVersion
+import dev.elu.analytics.EluDiagnosticsOptions
+import dev.elu.analytics.internal.diagnostics.AndroidUncaughtExceptionOwner
+import dev.elu.analytics.internal.diagnostics.AndroidUncaughtExceptionRegistry
+import dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionRegistry
+import dev.elu.analytics.internal.diagnostics.NativeUncaughtExceptionAdmission
+import dev.elu.analytics.internal.diagnostics.NativeExceptionObservation
+import dev.elu.analytics.internal.diagnostics.NativeExceptionIntake
+import java.util.concurrent.atomic.AtomicReference
+import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
+import dev.elu.analytics.internal.config.V2ConfigAuthorityWitness
 import dev.elu.analytics.internal.config.V1ConfigJson
 import dev.elu.analytics.internal.config.V1ConfigStatus
 import dev.elu.analytics.internal.config.V1MalformedConfigException
@@ -28,7 +41,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.Callable
-import java.util.concurrent.CompletableFuture
+import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -37,6 +50,65 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicBoolean
+
+/** Private diagnostic candidate only. Closed fields cannot carry customer or config payloads. */
+internal enum class RuntimeStartupPhase {
+    OPEN_BEGIN, OPEN_READY, OPEN_FAILED, CAPTURE_CALL, BUFFERED, DISPATCHED, DROP,
+    LANE_FAILED, AUTHORITY_BEGIN, AUTHORITY_RESULT, FLAGS_RESULT, IDENTITY_READY,
+    TRANSITION, CAPTURE_FIRST, CAPTURE_SECOND, PRIVACY_CONSUMED,
+}
+
+internal enum class RuntimeStartupLane { PENDING, ENABLED, BLOCKED, OPTED_OUT, UNAUTHORIZED, CLOSED }
+internal enum class RuntimeStartupDrop { BLOCKED, OPTED_OUT, UNAUTHORIZED, BUFFER_FULL, CLOSED, INVALID_INPUT, RESERVED_PROPERTY, STORAGE }
+
+internal data class RuntimeStartupObservation(
+    val phase: RuntimeStartupPhase,
+    val lane: RuntimeStartupLane? = null,
+    val buffered: Int? = null,
+    val drop: RuntimeStartupDrop? = null,
+    val dropCount: Int? = null,
+    val configPresent: Boolean? = null,
+    val authorityActivated: Boolean? = null,
+    val authorityReason: RuntimeCaptureAuthorityTerminalReason? = null,
+    val flagsAllowed: Boolean? = null,
+    val captureAccepted: Boolean? = null,
+    val captureRejection: RuntimeCaptureRejection? = null,
+    val deviceInEuTimezone: Boolean? = null,
+    val optedOut: Boolean? = null,
+    val captureAllowed: Boolean? = null,
+)
+
+internal fun interface RuntimeStartupObserver {
+    fun observe(observation: RuntimeStartupObservation)
+    companion object { val NONE = RuntimeStartupObserver { } }
+}
+
+/** Even observation construction failures cannot replace an original SDK result or exception. */
+internal fun observeStartup(observer: RuntimeStartupObserver, observation: () -> RuntimeStartupObservation) {
+    if (observer === RuntimeStartupObserver.NONE) return
+    try { observer.observe(observation()) } catch (_: Throwable) { }
+}
+
+/** A fresh per-stack sink, with no worker, clock, callback, or SDK entry point. */
+internal class BoundedRuntimeStartupObserver(private val write: (String) -> Unit) : RuntimeStartupObserver {
+    private val emitted = java.util.concurrent.atomic.AtomicInteger()
+    override fun observe(observation: RuntimeStartupObservation) {
+        try {
+            // Saturating admission: even a failed write consumes its one diagnostic slot.
+            while (true) {
+                val count = emitted.get()
+                if (count >= 128) return
+                if (emitted.compareAndSet(count, count + 1)) break
+            }
+            with(observation) {
+                write("startup-observation-v1 phase=$phase lane=$lane buffered=$buffered drop=$drop dropCount=$dropCount" +
+                    " configPresent=$configPresent authorityActivated=$authorityActivated authorityReason=$authorityReason" +
+                    " flagsAllowed=$flagsAllowed captureAccepted=$captureAccepted captureRejection=$captureRejection" +
+                    " deviceInEuTimezone=$deviceInEuTimezone optedOut=$optedOut captureAllowed=$captureAllowed")
+            }
+        } catch (_: Throwable) { }
+    }
+}
 
 /** Millisecond RFC 3339 wall-clock instants in the exact form the queue owner validates. */
 internal object RuntimeWallTimestamps {
@@ -88,6 +160,13 @@ internal class StandaloneRuntime(
     transportFactory: () -> BatchHTTPTransport = { HttpURLConnectionBatchTransport() },
     private val deviceInEuTimezone: () -> Boolean = EluEuGuard::isEuTimezone,
     private val flushDelayMillis: Long = DEFAULT_FLUSH_DELAY_MILLIS,
+    private val configurationGate: V2ConfigAuthorityGate? = null,
+    private val nativeReplay: NativeReplayComposition? = null,
+    private val startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
+    private val nativeStartTrace: NativeStartTrace = NativeStartTrace.NONE,
+    diagnosticsOptions: EluDiagnosticsOptions = EluDiagnosticsOptions(),
+    private val exceptionRegistry: NativeUncaughtExceptionRegistry = AndroidUncaughtExceptionRegistry,
+    private val automaticExceptionAllowed: () -> Boolean = { true },
 ) : AutoCloseable {
     private val transport: BatchHTTPTransport = transportFactory()
     private val deliveryQueue = RuntimeQueueOwnerDeliveryQueue(owner)
@@ -97,8 +176,106 @@ internal class StandaloneRuntime(
     private val deliveryLock = Any()
     private var coordinator: RuntimeBatchDeliveryCoordinator? = null
     private var closed = false
+    private val consentRestricted = AtomicBoolean(false)
+    private val closeResult = object : SdkFuture<Unit>() {
+        override fun cancel(mayInterruptIfRunning: Boolean) = false
+    }
     private val flushTimerArmed = AtomicBoolean(false)
     private var flushTimer: BatchScheduledTask? = null
+
+    private val exceptionsEnabled = diagnosticsOptions.enabled && diagnosticsOptions.crashReports
+    private val exceptionEpoch = AtomicReference(Any())
+    private val exceptionAdmission = AtomicReference<NativeExceptionIntake?>()
+    private val exceptionRetirement = AtomicReference<Any?>()
+    private val exceptionUpdateRequested = AtomicBoolean(false)
+    private val exceptionUpdateScheduled = AtomicBoolean(false)
+    private val exceptionSuspended = AtomicBoolean(false)
+    private val exceptionStopped = AtomicBoolean(false)
+    private var exceptionHandler: AndroidUncaughtExceptionOwner? = null // control lane; retained before install
+    private var exceptionWaiting: SdkFuture<Unit>? = null // at most one original unfinished report
+    private var exceptionFailure: Throwable? = null // control lane; no retry after unknown failure
+
+    /** Restriction only. Never waits for storage or refreshes an original source lease. */
+    internal fun withdrawAutomaticExceptions(retire: Boolean = false) {
+        if (!exceptionsEnabled) return
+        exceptionEpoch.set(Any())
+        exceptionAdmission.getAndSet(null)?.invalidate()
+        if (retire) {
+            exceptionRetirement.set(Any())
+            requestAutomaticExceptions()
+        }
+    }
+
+    /** Coalesced on the existing runtime control lane, with no periodic queue/schema polling. */
+    internal fun requestAutomaticExceptions() {
+        if (!exceptionsEnabled || exceptionStopped.get()) return
+        exceptionUpdateRequested.set(true)
+        if (!exceptionUpdateScheduled.compareAndSet(false, true)) return
+        try { controlExecutor.execute {
+            exceptionUpdateRequested.set(false)
+            try { updateAutomaticExceptionsOnControl() }
+            catch (error: Throwable) {
+                exceptionFailure = error
+                exceptionStopped.set(true)
+                withdrawAutomaticExceptions()
+            } finally {
+                exceptionUpdateScheduled.set(false)
+                if (exceptionUpdateRequested.get() && !exceptionStopped.get()) requestAutomaticExceptions()
+            }
+        } } catch (_: RejectedExecutionException) { exceptionUpdateScheduled.set(false) }
+    }
+
+    private fun updateAutomaticExceptionsOnControl() {
+        if (exceptionStopped.get()) return
+        val epoch = exceptionEpoch.get()
+        fun current() = !exceptionStopped.get() && !exceptionSuspended.get() && !consentRestricted.get() &&
+            exceptionEpoch.get() === epoch && automaticExceptionAllowed() && exceptionEpoch.get() === epoch
+        val retirement = exceptionRetirement.get()
+        if (retirement == null && !current()) return
+        val update = owner.updateAutomaticExceptionIntake(versions, ::current, retire = retirement != null).await()
+        if (update.imported) armFlushTimer()
+        val pending = update.pending
+        if (pending != null) {
+            if (exceptionWaiting !== pending) {
+                exceptionWaiting = pending
+                pending.whenComplete { _, _ -> requestAutomaticExceptions() }
+            }
+            return
+        }
+        if (retirement != null) {
+            exceptionRetirement.compareAndSet(retirement, null)
+            if (current()) requestAutomaticExceptions()
+            return
+        }
+        val intake = update.intake ?: return
+        if (!current() || !intake.allowsObservation()) { intake.invalidate(); return }
+        exceptionAdmission.set(intake)
+        if (!current()) { exceptionAdmission.compareAndSet(intake, null); intake.invalidate(); return }
+        if (exceptionHandler == null) {
+            val handler = AndroidUncaughtExceptionOwner(exceptionRegistry, object : NativeUncaughtExceptionAdmission {
+                override fun allowsObservation(): Boolean = !exceptionStopped.get() &&
+                    exceptionAdmission.get()?.allowsObservation() == true
+                override fun snapshot(): NativeUncaughtExceptionAdmission? =
+                    if (exceptionStopped.get()) null else exceptionAdmission.get()?.snapshotForPublication()
+                override fun offer(observation: NativeExceptionObservation) {
+                    // Owner must use its exact original snapshot, never adopt a newer arm.
+                    error("An original exception admission snapshot is required")
+                }
+            })
+            exceptionHandler = handler
+            if (!handler.install()) {
+                exceptionStopped.set(true); withdrawAutomaticExceptions()
+                check(handler.close()) { "Original exception handler restoration is unresolved" }
+            }
+        }
+        // Returning custom handlers may leave the process alive. Import/rearm only after the
+        // exact original arm settles; the callback merely schedules this existing worker.
+        val completion = intake.reportSettlement
+        if (exceptionWaiting !== completion) {
+            exceptionWaiting = completion
+            completion.whenComplete { _, _ -> requestAutomaticExceptions() }
+        }
+    }
 
     init {
         require(
@@ -116,12 +293,18 @@ internal class StandaloneRuntime(
      * activated authority also installs a delivery coordinator bound to that config's endpoint,
      * expiry, and batch limits; anything else retires delivery.
      */
-    fun applyConfiguration(configBody: String?): Future<RuntimeCaptureAuthorityUpdateResult> =
-        submitControl {
+    fun applyConfiguration(configBody: String?): Future<RuntimeCaptureAuthorityUpdateResult> {
+        withdrawAutomaticExceptions()
+        nativeReplay?.withdrawAll()
+        return submitControl {
+            val configurationWitness = configurationGate?.snapshotFor(configBody)
             val parsed = parseConfig(configBody)
+            if (exceptionsEnabled && (parsed?.captureExceptions?.allowsUncaughtReports != true ||
+                    configurationWitness?.isCurrent() != true)) exceptionRetirement.set(Any())
             val privacyBody =
                 parsed?.takeIf { config -> config.status == V1ConfigStatus.ENABLED }?.let { config ->
                     val identity = owner.snapshot().await().state.identity
+                    var observedEuTimezone: Boolean? = null
                     val state =
                         PrivacyStateProjector.project(
                             PrivacyProjectionInput(
@@ -129,13 +312,18 @@ internal class StandaloneRuntime(
                                 features = checkNotNull(config.features),
                                 replayCapabilities = checkNotNull(config.replayCapabilities),
                                 identity = identity,
-                                deviceInEuTimezone = deviceInEuTimezone(),
+                                deviceInEuTimezone = deviceInEuTimezone().also { observedEuTimezone = it },
                                 evaluatedAt = RuntimeWallTimestamps.rfc3339(wallClock()),
                             ),
                         )
+                    observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.PRIVACY_CONSUMED,
+                        deviceInEuTimezone = observedEuTimezone, optedOut = identity.optedOut, captureAllowed = state.captureAllowed) }
                     PrivacyStateProjector.encode(state)
                 }
             val result = owner.submitCaptureAuthority(configBody, privacyBody).await()
+            observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.AUTHORITY_RESULT,
+                authorityActivated = result is RuntimeCaptureAuthorityUpdateResult.Activated,
+                authorityReason = (result as? RuntimeCaptureAuthorityUpdateResult.Terminated)?.authority?.reason) }
             when (result) {
                 is RuntimeCaptureAuthorityUpdateResult.Activated -> {
                     val config = checkNotNull(parsed)
@@ -147,18 +335,26 @@ internal class StandaloneRuntime(
                             expiresAt = config.expiresAt,
                             eventBatchCount = limits.eventBatchCount,
                             eventBatchBytes = limits.eventBatchBytes,
+                            endpointPolicy = owner.endpointPolicy,
                         ),
+                        configurationWitness,
                     )
                 }
-                is RuntimeCaptureAuthorityUpdateResult.Terminated -> retireDelivery()
+                is RuntimeCaptureAuthorityUpdateResult.Terminated -> {
+                    retireDelivery()
+                    if (exceptionsEnabled) exceptionRetirement.set(Any())
+                }
             }
+            requestAutomaticExceptions()
             result
         }
+    }
 
     fun capture(
         name: String,
         properties: Map<String, Any?> = emptyMap(),
         occurredAt: String = now(),
+        rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
     ): Future<RuntimeCaptureResult> =
         submitCapture(
             RuntimeCaptureCommand(
@@ -167,13 +363,18 @@ internal class StandaloneRuntime(
                 occurredAt = occurredAt,
                 properties = properties,
                 versions = versions,
-            ),
+            ), rateAttempt,
         )
+
+    internal fun captureFlagExposure(exposure: RuntimeFlagExposureCapture, occurredAt: String, rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt()): Future<RuntimeCaptureResult> =
+        submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$feature_flag_called", occurredAt,
+            exposure.properties(), versions, flagExposure = exposure), rateAttempt)
 
     fun screen(
         name: String,
         properties: Map<String, Any?> = emptyMap(),
         occurredAt: String = now(),
+        rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
     ): Future<RuntimeCaptureResult> {
         val merged = LinkedHashMap<String, Any?>(properties)
         merged[SCREEN_NAME_PROPERTY] = name
@@ -184,58 +385,120 @@ internal class StandaloneRuntime(
                 occurredAt = occurredAt,
                 properties = Collections.unmodifiableMap(merged),
                 versions = versions,
-            ),
+            ), rateAttempt,
         )
     }
+
+    internal fun capturePerformance(properties: Map<String, Any>, expectation: RuntimeCaptureExpectation): Future<RuntimeCaptureResult> =
+        submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$performance_sample", now(), properties, versions, expectation))
+
+    internal fun captureNetwork(properties: Map<String, Any>, expectation: RuntimeNetworkExpectation): Future<RuntimeCaptureResult> =
+        submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$network_request", now(), properties, versions,
+            networkExpectation = expectation))
+
+    internal fun captureStartup(measurement: dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement,
+        expectation: RuntimeCaptureExpectation): Future<RuntimeCaptureResult> =
+        submitCapture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "\$native_launch", now(),
+            measurement.properties(), versions, expectation, startupMeasurement = measurement))
 
     fun captureException(
         throwable: Throwable,
         properties: Map<String, Any?> = emptyMap(),
         occurredAt: String = now(),
+        rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
     ): Future<RuntimeCaptureResult> =
-        submitCapture(ExceptionSerializer.command(throwable, occurredAt, versions, properties))
+        submitCapture(ExceptionSerializer.command(throwable, occurredAt, versions, properties), rateAttempt)
+
+    /** Withdraw and queue the fixed boundary in owner-before-driver order; never wait here. */
+    internal fun applicationBackgrounded(
+        driver: dev.elu.analytics.internal.config.V2ConfigLifecycleDriver,
+        occurredAt: String,
+    ): Future<RuntimeAppendResult>? {
+        exceptionSuspended.set(true); withdrawAutomaticExceptions()
+        nativeReplay?.withdrawFresh()
+        val result = owner.applicationBackgrounded(driver, occurredAt, versions)
+        if (result != null) lifecycleAdapter.onBackgrounded()
+        return result
+    }
 
     /** Persists the background transition first, then schedules one bounded delivery pass. */
     fun markBackgrounded(occurredAt: String = now()): Future<RuntimeAppendResult> {
+        exceptionSuspended.set(true); withdrawAutomaticExceptions()
+        nativeReplay?.withdrawFresh()
         val result = owner.markBackgrounded(occurredAt)
         lifecycleAdapter.onBackgrounded()
         return result
     }
 
-    fun markForegrounded(): Boolean = lifecycleAdapter.onForegrounded()
+    fun markForegrounded(): Boolean {
+        exceptionSuspended.set(false)
+        requestAutomaticExceptions()
+        return lifecycleAdapter.onForegrounded()
+    }
 
     /** Triggers delivery immediately; without an activated authority nothing is sent. */
-    fun flush(): CompletableFuture<BatchDeliveryPassResult> {
+    fun flush(): SdkFuture<BatchDeliveryPassResult> {
+        nativeReplay?.flushSealed()
         val active = synchronized(deliveryLock) { coordinator }
-        return active?.trigger()
-            ?: CompletableFuture.completedFuture(BatchDeliveryPassResult(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE))
+        return (active?.trigger()
+            ?: SdkFuture.completedFuture(BatchDeliveryPassResult(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE))).also {
+                it.whenComplete { _, error -> if (error == null) requestAutomaticExceptions() }
+            }
     }
 
     fun lifecycleSink(): RuntimeLifecycleSink = LifecycleSink()
 
     fun hasDeliveryAuthorization(): Boolean = synchronized(deliveryLock) { coordinator != null }
 
-    override fun close() {
-        synchronized(deliveryLock) {
-            if (closed) return
-            closed = true
-            coordinator?.close()
-            coordinator = null
-            flushTimer?.cancel()
-            flushTimer = null
-        }
-        controlExecutor.shutdown()
-        deliveryExecutor.shutdown()
-        scheduler.shutdownNow()
-        try {
-            owner.closeAsync()
-        } catch (_: IllegalStateException) {
-            // The owner was already closing; nothing else to release.
-        }
+    /** Local fences never supply recording permission; the native owner rechecks actual authority. */
+    internal fun withdrawNativeReplay(restrictive: Boolean) {
+        if (restrictive) nativeReplay?.withdrawAll() else nativeReplay?.withdrawFresh()
     }
 
-    private fun submitCapture(command: RuntimeCaptureCommand): Future<RuntimeCaptureResult> {
-        val result = owner.capture(command)
+    internal fun startNativeRecording() { nativeReplay?.startRecording() }
+
+    internal fun stopNativeRecording() { nativeReplay?.stopRecording() }
+
+    internal fun nativeRecordingStarted(): Boolean = nativeReplay?.recordingStarted() == true
+
+    internal fun reevaluateNativeReplay(force: Boolean = false, originalAcceptance: () -> Boolean) {
+        nativeReplay.also { nativeStartTrace.mark(NativeStartPhase.NATIVE_PRESENT, it != null) }?.reevaluate(force, originalAcceptance)
+    }
+
+    override fun close() { closeAndWait() }
+
+    /** Retains exact native completion before queue close; no facade/main thread waits here. */
+    internal fun closeAndWait(): SdkFuture<Unit> {
+        exceptionStopped.set(true); withdrawAutomaticExceptions()
+        synchronized(deliveryLock) {
+            if (closed) return closeResult
+            closed = true
+            coordinator?.close(); coordinator = null
+            flushTimer?.cancel(); flushTimer = null
+        }
+        nativeReplay?.withdrawAll()
+        val originalNativeClose = nativeReplay?.closeAndWait()
+        deliveryExecutor.shutdown(); scheduler.shutdownNow()
+        try {
+            controlExecutor.execute {
+                var failure: Throwable? = exceptionFailure
+                fun attempt(action: () -> Unit) { try { action() } catch (error: Throwable) {
+                    if (failure == null) failure = error else if (failure !== error) failure!!.addSuppressed(error)
+                } }
+                attempt { check(exceptionHandler?.close() != false) { "Original exception handler restoration is unresolved" } }
+                attempt { originalNativeClose?.awaitExact() }
+                // Attempt close even after a settled native quarantine: queue retains resources,
+                // reports uncertainty and terminates its worker without releasing the lease.
+                attempt { owner.closeAsync().awaitExact() }
+                controlExecutor.shutdown()
+                if (failure == null) closeResult.complete(Unit) else closeResult.completeExceptionally(checkNotNull(failure))
+            }
+        } catch (error: Throwable) { closeResult.completeExceptionally(error) }
+        return closeResult
+    }
+
+    private fun submitCapture(command: RuntimeCaptureCommand, rateAttempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt()): Future<RuntimeCaptureResult> {
+        val result = owner.capture(command, rateAttempt)
         armFlushTimer()
         return result
     }
@@ -265,12 +528,34 @@ internal class StandaloneRuntime(
         }
     }
 
-    private fun installDelivery(authorization: V1BatchAuthorizationSnapshot) {
+    /** Stop scheduling promptly; every composed send also checks its original source witness. */
+    internal fun configurationChanged() { withdrawAutomaticExceptions(); nativeReplay?.withdrawAll(); retireDelivery() }
+
+    internal fun restrictForConsent() {
+        withdrawAutomaticExceptions(retire = true)
+        consentRestricted.set(true)
+        nativeReplay?.withdrawAll()
+        retireDelivery()
+    }
+
+    /** Only the facade calls this after its durable opt-in and latest intent still agree. */
+    internal fun restoreConsent() { consentRestricted.set(false) }
+
+    private fun installDelivery(
+        authorization: V1BatchAuthorizationSnapshot,
+        witness: V2ConfigAuthorityWitness?,
+    ) {
         val replacement =
             RuntimeBatchDeliveryCoordinator(
                 authorization = authorization,
                 queue = deliveryQueue,
-                transport = transport,
+                transport = BatchHTTPTransport { request ->
+                    if (consentRestricted.get()) throw java.io.IOException("Collection consent withdrawn")
+                    if (configurationGate != null && (witness?.isCurrent() != true || !owner.authorizeCurrentDelivery(witness.body, deviceInEuTimezone).await() || !witness.isCurrent())) {
+                        throw java.io.IOException("Event configuration or privacy changed before dispatch")
+                    }
+                    transport.execute(request)
+                },
                 clock = deliveryClock,
                 scheduler = retryScheduler,
                 jitter = jitter,
@@ -278,13 +563,23 @@ internal class StandaloneRuntime(
             )
         val previous =
             synchronized(deliveryLock) {
-                if (closed) {
+                if (closed || consentRestricted.get()) {
                     replacement.close()
                     return
                 }
                 coordinator.also { coordinator = replacement }
             }
         previous?.close()
+        // A foreground flush may have completed while its asynchronous config refresh was
+        // unavailable. Wake the retained queue after installation, without requiring a new capture.
+        // Each send still rechecks the original source witness, current privacy and expiry.
+        if (configurationGate == null || witness?.isCurrent() == true) {
+            synchronized(deliveryLock) {
+                if (!closed && coordinator === replacement) replacement.trigger().whenComplete { _, error ->
+                    if (error == null) requestAutomaticExceptions()
+                }
+            }
+        }
     }
 
     private fun retireDelivery() {
@@ -367,5 +662,153 @@ internal class StandaloneRuntime(
             Executors.newSingleThreadExecutor { runnable ->
                 Thread(runnable, name).apply { isDaemon = true }
             }
+    }
+}
+
+/** Private diagnostic candidate. These records contain no SDK identity or customer values. */
+internal enum class NativeStartPhase {
+    SINK_READY, LIMIT_REACHED, FACADE_LIFECYCLE, FACADE_EPOCH, FACADE_INTAKE,
+    FACADE_NOT_PENDING, FACADE_NOT_CLOSED, RUNTIME_PRESENT, NATIVE_PRESENT,
+    COMPOSITION_CREATED, LIFECYCLE_CHANGED, REEVALUATE_REQUEST, ORIGINAL_ACCEPTANCE,
+    COMPOSITION_AVAILABLE, EVALUATION_COALESCED, EVALUATION_BEGIN, READY_RETURNED,
+    EVALUATION_QUARANTINED, ACCEPTANCE_REFUSED, LOCAL_CURRENT_REFUSED, IDENTITY_RETURNED,
+    ACTIVE_REUSED, ATTEMPT_ELIGIBLE, IDENTITY_ELIGIBLE, ROOT_SELECTION_BEGIN, ROOT_SELECTION_RESULT,
+    PREPARE_BEGIN, PREPARE_OPEN, PREPARE_INITIAL_GUARD, PREPARE_SELECTION_CURRENT,
+    PROJECTION_INPUT_RESULT, PROJECTION_INPUT_CURRENT, PRIVACY_PROJECTION_RESULT,
+    PRIVACY_PROJECTION_CURRENT, PREPARATION_RESULT, PREPARATION_VALIDATED,
+    PREPARATION_CURRENT, PREPARE_RESULT, PREPARE_POSTCHECK, CAPTURE_OWNER_RESULT,
+    CAPTURE_OWNER_ELIGIBLE, CAPTURE_THREAD_ENTERED, ENROLL_BEGIN, ENROLL_RESULT,
+    PHYSICAL_USE_RESULT, START_BEGIN, START_RESULT, ADMISSION_BEGIN, ADMISSION_RESULT,
+    CAPTURE_LOOP_READY, CAPTURE_FAILED, CAPTURE_PROFILE, EVALUATION_ACTIVE, EVALUATION_FAILED,
+}
+
+/** Closed failure-only observations; none of these values carries capture authority. */
+internal enum class NativeCaptureStage {
+    BEFORE_LOOP, LOOP_CURRENT, ROOT_COLLECT, COLLECTOR, FRAME_APPEND,
+    SEAL_PREFIX, SEAL_REQUEST, DURABLE_APPEND, COMMIT_FRAME, WAIT_NEXT,
+}
+internal enum class NativeCaptureFailureKind {
+    NOT_MAIN_THREAD, REENTRANT, WITHDRAWN, INVALID_ROOT, UNSUPPORTED_GEOMETRY,
+    UNRESOLVED_BLOCK_RULE, TREE_CHANGED, NODE_LIMIT, DEPTH_LIMIT, PROJECTION_LIMIT, OTHER,
+    GEOMETRY_ACTION_BAR_ANCESTOR, GEOMETRY_UNKNOWN_ANCESTOR,
+    PASS_CLOCK_REVERSED, PASS_DEADLINE,
+}
+internal data class NativeCaptureFailureRecord(
+    val stage: NativeCaptureStage,
+    val frames: Int,
+    val failure: NativeCaptureFailureKind,
+    val profile: List<Int>? = null,
+)
+
+/** The callback is diagnostic only. Even a throwing sink cannot escape a call site. */
+internal class NativeStartTrace private constructor(
+    private val record: (NativeStartPhase, Boolean?, NativeCaptureFailureRecord?) -> Unit,
+) {
+    fun mark(phase: NativeStartPhase, result: Boolean? = null) {
+        try { record(phase, result, null) } catch (_: Throwable) { }
+    }
+    fun captureFailed(stage: NativeCaptureStage, frames: Int, failure: NativeCaptureFailureKind) {
+        try {
+            check(frames >= 0)
+            record(NativeStartPhase.CAPTURE_FAILED, null, NativeCaptureFailureRecord(stage, frames, failure))
+        } catch (_: Throwable) { }
+    }
+    fun captureProfile(profile: dev.elu.analytics.internal.replay.NativeCapturePassProfile) {
+        try {
+            val values = profile.values()
+            val maxima = listOf(13, 3, 65535, 65535, 9999, 64, 9999, 999999, 999999, 999999, 16383, 3)
+            check(values.size == maxima.size && values.indices.all { values[it] in 0..maxima[it] })
+            record(NativeStartPhase.CAPTURE_PROFILE, null, NativeCaptureFailureRecord(
+                NativeCaptureStage.COLLECTOR, 0, NativeCaptureFailureKind.OTHER, values.toList()))
+        } catch (_: Throwable) { }
+    }
+    companion object {
+        val NONE = NativeStartTrace { _, _, _ -> }
+        internal fun create(record: (NativeStartPhase, Boolean?) -> Unit) =
+            NativeStartTrace { phase, result, _ -> record(phase, result) }
+        internal fun captureAware(record: (NativeStartPhase, Boolean?, NativeCaptureFailureRecord?) -> Unit) =
+            NativeStartTrace(record)
+    }
+}
+
+/** One bounded private stream per stack. No timer, worker, clock, SDK call or flush. */
+internal class BoundedNativeStartObserver private constructor(private val append: (ByteArray) -> Unit) {
+    private var sequence = 0
+    private var evaluation = 0
+    private var bytes = 0
+    private var disabled = false
+    private var writing = false
+    val global = NativeStartTrace.captureAware { phase, result, failure -> emit(0, phase, result, failure) }
+
+    @Synchronized fun begin(): NativeStartTrace {
+        if (disabled) return NativeStartTrace.NONE
+        if (writing) { disabled = true; return NativeStartTrace.NONE }
+        return try {
+            val original = ++evaluation // Never an SDK/session/owner identity.
+            val trace = NativeStartTrace.captureAware { phase, result, failure -> emit(original, phase, result, failure) }
+            trace.mark(NativeStartPhase.EVALUATION_BEGIN)
+            if (disabled) NativeStartTrace.NONE else trace
+        } catch (_: Throwable) { disabled = true; NativeStartTrace.NONE }
+    }
+
+    @Synchronized private fun emit(original: Int, phase: NativeStartPhase, result: Boolean?, failure: NativeCaptureFailureRecord?) {
+        if (disabled) return
+        if (writing) { disabled = true; return }
+        try {
+            // Reserve the final record for an explicit bound marker. Failed/partial writes
+            // consume admission and permanently disable this stream; they are never retried.
+            val terminal = sequence == MAXIMUM_RECORDS - 1
+            val selected = if (terminal) NativeStartPhase.LIMIT_REACHED else phase
+            val selectedEvaluation = if (terminal) 0 else original
+            val selectedResult = if (terminal) null else result
+            val detail = if (terminal || failure == null) "" else if (failure.profile != null) {
+                check(selected == NativeStartPhase.CAPTURE_PROFILE && selectedResult == null && original > 0)
+                ",\"p\":[${failure.profile.joinToString(",")}]"
+            } else {
+                check(selected == NativeStartPhase.CAPTURE_FAILED && selectedResult == null && original > 0 && failure.frames >= 0)
+                ",\"stage\":\"${failure.stage}\",\"frames\":${failure.frames},\"failure\":\"${failure.failure}\""
+            }
+            val raw = ("{\"schemaVersion\":1,\"sequence\":${sequence + 1},\"evaluation\":$selectedEvaluation," +
+                "\"phase\":\"$selected\",\"result\":$selectedResult$detail}\n").toByteArray(Charsets.US_ASCII)
+            check(raw.size <= MAXIMUM_RECORD_BYTES && bytes <= MAXIMUM_BYTES - raw.size)
+            sequence += 1; bytes += raw.size; writing = true
+            try { append(raw) } finally { writing = false }
+            if (terminal) disabled = true
+        } catch (_: Throwable) { writing = false; disabled = true }
+    }
+
+    companion object {
+        const val MAXIMUM_RECORDS = 1024
+        const val MAXIMUM_RECORD_BYTES = 192
+        const val MAXIMUM_BYTES = 262144
+        val NONE = BoundedNativeStartObserver { }.also { it.disabled = true }
+        fun create(append: (ByteArray) -> Unit): BoundedNativeStartObserver = try {
+            BoundedNativeStartObserver(append).also { it.global.mark(NativeStartPhase.SINK_READY) }
+        } catch (_: Throwable) { NONE }
+    }
+}
+
+/** Process-lifetime ownership of the one private diagnostic path's uncertain close. */
+internal class NativeStartDescriptorOwner {
+    // Never probed, replaced, retried or cleared. Original process teardown owns final release.
+    private var uncertain: java.io.FileDescriptor? = null
+
+    @Synchronized fun <T> use(
+        open: () -> java.io.FileDescriptor,
+        body: (java.io.FileDescriptor) -> T,
+        close: (java.io.FileDescriptor) -> Unit,
+    ): T {
+        check(uncertain == null) { "Diagnostic descriptor is unresolved" }
+        val original = open()
+        var primary: Throwable? = null
+        try { return body(original) }
+        catch (error: Throwable) { primary = error; throw error }
+        finally {
+            try { close(original) }
+            catch (error: Throwable) {
+                uncertain = original
+                if (primary == null) throw error
+            }
+        }
     }
 }

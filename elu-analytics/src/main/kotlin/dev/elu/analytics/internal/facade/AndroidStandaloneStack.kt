@@ -1,54 +1,228 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import android.app.Application
+import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Handler
 import android.os.Looper
-import android.content.Context
-import dev.elu.analytics.internal.runtime.ActivityLifecycleEmitter
-import dev.elu.analytics.internal.runtime.ActivityLifecycleTracker
+import dev.elu.analytics.internal.config.AndroidV2ConfigClock
+import dev.elu.analytics.internal.config.V2ConfigAuthorityGate
+import dev.elu.analytics.internal.config.V2ConfigLifecycleDriver
+import dev.elu.analytics.internal.config.V2ConfigSource
+import dev.elu.analytics.internal.flags.AndroidFeatureFlagClient
+import dev.elu.analytics.internal.flags.FlagClock
+import dev.elu.analytics.internal.flags.FlagOpaqueIdSource
+import dev.elu.analytics.internal.flags.V2ConfigBoundFlagTransport
+import dev.elu.analytics.EluEuGuard
+import dev.elu.analytics.internal.replay.NativeReplayCapabilities
+import dev.elu.analytics.internal.replay.NativeReplayComposition
+import dev.elu.analytics.internal.replay.NativeReplayProtocol
+import dev.elu.analytics.internal.core.SystemCoreEpochClock
+import dev.elu.analytics.internal.runtime.AndroidProcessLifecycle
+import dev.elu.analytics.internal.runtime.StandaloneLifecycleBinding
 import dev.elu.analytics.internal.runtime.AndroidRuntimeQueue
+import dev.elu.analytics.internal.runtime.RuntimeLifecycleSink
 import dev.elu.analytics.internal.runtime.RuntimeQueueLimits
 import dev.elu.analytics.internal.runtime.StandaloneRuntime
+import java.util.Date
+import java.util.Collections
+import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
-/**
- * Assembles the owned runtime for one site key: the durable queue owner, the standalone event
- * runtime over it, and the activity lifecycle emitter that turns foreground, background and screen
- * transitions into events.
- *
- * Two pieces are deliberately absent. The feature-flag client is not constructed, because it takes
- * a transport this package does not ship; flag reads report their documented defaults until it is.
- * And nothing here fetches a configuration document — it reaches the facade through
- * [StandaloneFacade.applyConfiguration], so until a source supplies one the facade holds calls and
- * captures nothing.
- *
- * The runtime keeps its own identity storage and never reads the embedded runtime's: with it
- * selected, a device starts a fresh ELU identity.
- */
+/** Owns the runtime and resources behind the public Elu facade. */
 internal object AndroidStandaloneStack {
-    /** Matches the queue ceilings the runtime is exercised against on device. */
     private val LIMITS = RuntimeQueueLimits(maximumCount = 10_000, maximumBytes = 16_777_216)
+    // Installed implementation only: every capture still requires the exact current remote tuple.
+    // Explicit membership prevents a future enum case from silently enabling another protocol.
+    internal val installedNativeReplayProtocols: Set<NativeReplayProtocol> =
+        Collections.unmodifiableSet(setOf(NativeReplayProtocol.V1, NativeReplayProtocol.V2))
 
-    fun facade(
-        appContext: Context,
-        siteKey: String,
-    ): StandaloneFacade {
+    fun facade(appContext: Context, siteKey: String, configHost: String = "https://elu.dev",
+        performanceOptions: dev.elu.analytics.EluPerformanceOptions = dev.elu.analytics.EluPerformanceOptions(),
+        diagnosticsOptions: dev.elu.analytics.EluDiagnosticsOptions = dev.elu.analytics.EluDiagnosticsOptions(),
+        apiHost: String? = null,
+        personProfiles: dev.elu.analytics.EluPersonProfilesMode = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+        persistence: dev.elu.analytics.EluPersistenceMode = dev.elu.analytics.EluPersistenceMode.PERSISTENT,
+        rateLimiting: dev.elu.analytics.EluRateLimitingOptions = dev.elu.analytics.EluRateLimitingOptions(),
+        declaredRegionReplayEnabled: Boolean = false,
+        // Original factory test seam: raw transport only, never a parsed grant or replacement source.
+        configurationTransport: dev.elu.analytics.internal.config.V2ConfigTransport? = null,
+        eventFilter: dev.elu.analytics.internal.runtime.RuntimeEventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter()): StandaloneFacade {
+        val endpointPolicy = LocalEndpointPolicy.fromApiHost(apiHost)
+        // Capture fresh identity chronology before Elu.setup can publish this facade.
+        val freshIdentityStartedAt = SystemCoreEpochClock.nowEpochMillis()
         val mainThread = Handler(Looper.getMainLooper())
-        return StandaloneFacade(
-            open = { open(appContext, siteKey) },
-            deliverCallback = { callback -> mainThread.post(callback) },
-        )
-    }
-
-    /** Runs on the facade lane: opening the queue is blocking storage work. */
-    private fun open(
-        appContext: Context,
-        siteKey: String,
-    ): StandaloneStack {
-        val owner = AndroidRuntimeQueue.open(appContext, siteKey, LIMITS).get()
-        val runtime = StandaloneRuntime(owner = owner, siteKey = siteKey)
-        (appContext as? Application)?.let { application ->
-            ActivityLifecycleEmitter(ActivityLifecycleTracker(runtime.lifecycleSink())).attach(application)
+        val application = appContext as? Application
+        val gate = V2ConfigAuthorityGate()
+        val flagTransport = V2ConfigBoundFlagTransport(siteKey, gate, endpointPolicy)
+        val debuggable = (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        val source = V2ConfigSource(configHost, siteKey, transport = configurationTransport,
+            debuggable = debuggable, endpointPolicy = endpointPolicy,
+            format = if (declaredRegionReplayEnabled) dev.elu.analytics.internal.config.V2ConfigFormat.NATIVE_V3
+                else dev.elu.analytics.internal.config.V2ConfigFormat.V2)
+        val runtimeRef = AtomicReference<StandaloneRuntime?>()
+        val performanceRef = AtomicReference<dev.elu.analytics.internal.performance.AndroidPerformanceMonitor?>()
+        val performanceClose = AtomicReference(dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(Unit))
+        val startupAccess = if (diagnosticsOptions.enabled && android.os.Build.VERSION.SDK_INT >= 35)
+            dev.elu.analytics.internal.diagnostics.AndroidStartupAccess(appContext) else null
+        val startupRef = AtomicReference<dev.elu.analytics.internal.diagnostics.NativeStartupMonitor?>()
+        val startupClose = AtomicReference(dev.elu.analytics.internal.concurrent.SdkFuture.completedFuture(Unit))
+        fun closePerformance() {
+            performanceRef.getAndSet(null)?.let { performanceClose.set(it.closeAndWait()) }
         }
-        return StandaloneStack(runtime = runtime, owner = owner, flags = null)
+        val closing = AtomicBoolean(false)
+        val notifications = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "elu-config-application").apply { isDaemon = true }
+        }
+        lateinit var facade: StandaloneFacade
+        lateinit var lifecycle: StandaloneLifecycleBinding
+        val driver = V2ConfigLifecycleDriver(source, listener = { token ->
+            // Only the source token is published under the lifecycle lock. Storage, cancellation
+            // and facade work run afterward; every consumer checks the token again at use.
+            gate.update(token)
+            runtimeRef.get()?.withdrawAutomaticExceptions()
+            try {
+                notifications.execute {
+                    flagTransport.retireSuperseded()
+                    runtimeRef.get()?.configurationChanged()
+                    facade.configurationChanged()
+                }
+            } catch (_: java.util.concurrent.RejectedExecutionException) { gate.close() }
+        }, onRetainedRefresh = { token ->
+            // No gate publication or lease renewal. Recheck the same original token on the facade lane.
+            try { notifications.execute { facade.configurationRefreshed(token) } }
+            catch (_: java.util.concurrent.RejectedExecutionException) { gate.close() }
+        })
+        facade = StandaloneFacade(
+            open = {
+                check(!closing.get()) { "Standalone stack is closed" }
+                // One explicit private component capability selection reaches both original owners.
+                val nativeReplayTransports = installedNativeReplayProtocols.map { it.transport }.toSet()
+                val nativeReplayGenerations = installedNativeReplayProtocols.map { it.generation }.toSet()
+                val owner = AndroidRuntimeQueue.open(appContext, siteKey, LIMITS, freshIdentityStartedAt,
+                    readbackProvenReplayTransports = nativeReplayTransports,
+                    supportedReplayProtocolGenerations = nativeReplayGenerations,
+                    endpointPolicy = endpointPolicy,
+                    personProfiles = personProfiles,
+                    persistence = persistence,
+                    rateLimiting = rateLimiting,
+                    eventFilter = eventFilter.boundTo { facade.eventFilterAdmission() },
+                    assertStartupCurrent = { check(!closing.get()) { "Standalone stack is closed" } }).get()
+                var native: NativeReplayComposition? = null
+                try {
+                    owner.configureDiagnostics(dev.elu.analytics.internal.runtime.RuntimeDiagnosticsConfiguration(
+                        enabled = diagnosticsOptions.enabled && startupAccess != null,
+                        launchTimings = diagnosticsOptions.launchTimings), startupAccess ?:
+                        dev.elu.analytics.internal.runtime.RuntimeDiagnosticsClock { null }).get()
+                    owner.bindConfigurationGate(gate).get()
+                    native = NativeReplayComposition(owner, AndroidProcessLifecycle.nativeObserved,
+                        NativeReplayCapabilities(
+                            transports = nativeReplayTransports,
+                            generations = nativeReplayGenerations,
+                            rasterSupported = declaredRegionReplayEnabled,
+                        ), StandaloneRuntime.defaultVersions(), EluEuGuard::isEuTimezone,
+                        facade::nativeReplayIntakeAllowed, recordingAllowed = facade::nativeReplayRecordingAllowed)
+                    // Preparation concerns storage only and must finish before runtime publication.
+                    // Private component capability; current source, privacy, session and physical guards still apply.
+                    native.ready().get()
+                    val runtime = StandaloneRuntime(owner = owner, siteKey = siteKey, configurationGate = gate, nativeReplay = native,
+                        diagnosticsOptions = diagnosticsOptions, automaticExceptionAllowed = facade::automaticExceptionIntakeAllowed)
+                    runtimeRef.set(runtime)
+                    val flags = AndroidFeatureFlagClient(
+                        owner, StandaloneRuntime.defaultVersions(), flagTransport,
+                        object : FlagClock {
+                            override fun wallNowEpochMillis() = AndroidV2ConfigClock.wallNowEpochMillis()
+                            override fun monotonicNowNanos() = AndroidV2ConfigClock.monotonicNowNanos()
+                        },
+                        FlagOpaqueIdSource { UUID.randomUUID().toString() },
+                        FlagOpaqueIdSource { UUID.randomUUID().toString() },
+                        configurationGate = gate,
+                        collectionAllowed = { !facade.isOptedOut() },
+                    )
+                    if (closing.get()) { flags.close(); runtime.close(); error("Standalone stack is closed") }
+                    StandaloneStack(runtime, owner, flags)
+                } catch (error: Throwable) {
+                    closing.set(true)
+                    lifecycle.close()
+                    driver.close()
+                    gate.close()
+                    flagTransport.close()
+                    notifications.shutdownNow()
+                    val runtime = runtimeRef.getAndSet(null)
+                    if (runtime != null) runtime.closeAndWait()
+                    else {
+                        val originalNative = native
+                        if (originalNative != null) originalNative.closeAndWait().whenComplete { _, _ -> runCatching { owner.closeAsync() } }
+                        else runCatching { owner.closeAsync() }
+                    }
+                    throw error
+                }
+            },
+            deliverCallback = { callback -> mainThread.post(callback) },
+            configurationGate = gate,
+            networkConfigHost = java.net.URI(configHost).host,
+            networkApiHost = endpointPolicy.apiHost,
+            personProfiles = personProfiles,
+            eventFilter = eventFilter,
+            onOpened = {
+                if (performanceOptions.enabled && !closing.get()) {
+                    val monitor = dev.elu.analytics.internal.performance.AndroidPerformanceMonitor(
+                        performanceOptions, mainThread, facade::performanceContext, facade::capturePerformance,
+                        AndroidProcessLifecycle.performanceObserved)
+                    performanceRef.set(monitor)
+                    if (closing.get()) closePerformance()
+                }
+                if (startupAccess != null && diagnosticsOptions.launchTimings && !closing.get()) {
+                    val monitor = dev.elu.analytics.internal.diagnostics.NativeStartupMonitor(startupAccess.process,
+                        startupAccess, startupAccess::records, facade::startupContext, facade::captureStartup,
+                        deliveryReady = { facade.performanceContext()?.policy?.longTasks == true })
+                    startupRef.set(monitor)
+                    if (closing.get()) startupRef.getAndSet(null)?.let { startupClose.set(it.closeAndWait()) }
+                }
+                lifecycle.ready()
+            },
+            onCloseRequested = {
+                closing.set(true)
+                closePerformance()
+                startupRef.getAndSet(null)?.let { startupClose.set(it.closeAndWait()) }
+                runtimeRef.get()?.withdrawAutomaticExceptions()
+                runtimeRef.get()?.withdrawNativeReplay(restrictive = true)
+                driver.close()
+                gate.close()
+                lifecycle.close()
+                flagTransport.close()
+                notifications.shutdownNow()
+            },
+            onCloseSettled = { dev.elu.analytics.internal.concurrent.SdkFuture.allOf(performanceClose.get(), startupClose.get()) },
+        )
+        // The manifest initializer normally installs before the first Activity. If customers
+        // remove it, installing here can observe future starts/resumes but cannot invent past ones.
+        application?.let(AndroidProcessLifecycle::install)
+        lifecycle = StandaloneLifecycleBinding(AndroidProcessLifecycle.observed, object : RuntimeLifecycleSink {
+            override fun applicationForegrounded(occurredAt: String, fromBackground: Boolean) {
+                facade.nativeReplayLifecycleChanged(true)
+                performanceRef.get()?.foreground(true)
+                startupRef.get()?.foreground(true)
+                driver.onForeground()
+                runtimeRef.get()?.markForegrounded()
+                facade.capture(StandaloneRuntime.APPLICATION_OPENED_EVENT,
+                    mapOf(StandaloneRuntime.FROM_BACKGROUND_PROPERTY to fromBackground),
+                    Date(java.time.Instant.parse(occurredAt).toEpochMilli()))
+            }
+            override fun applicationBackgrounded(occurredAt: String) {
+                // Revoke synchronously before any queued storage or customer callback can run.
+                facade.nativeReplayLifecycleChanged(false)
+                performanceRef.get()?.foreground(false)
+                startupRef.get()?.foreground(false)
+                val runtime = runtimeRef.get()
+                if (runtime == null) driver.onBackground()
+                else runtime.applicationBackgrounded(driver, occurredAt)
+            }
+            override fun screenViewed(name: String, occurredAt: String) { facade.screen(name, null) }
+        })
+        return facade
     }
 }

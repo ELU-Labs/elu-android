@@ -13,13 +13,6 @@ on:
         description: Exact trusted signed semantic-version tag to publish
         required: true
         type: string
-      replayNetworkEvidence:
-        description: >-
-          Also require a replay upload request in the runtime-network evidence;
-          leave off until the SDK ships a replay transport
-        required: false
-        type: boolean
-        default: false
       dryRun:
         description: Run every release gate but skip the Maven Central publish step
         required: false
@@ -58,28 +51,52 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
         run: python3 scripts/verify-release-tag.py "$RELEASE_TAG"
+      - name: Acquire reviewed draft Lab evidence
+        timeout-minutes: 3
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
+        run: >-
+          python3 scripts/acquire-runtime-network-evidence.py "$RELEASE_TAG"
+          --output build/reports/android-runtime-network-evidence.json
       - name: Run release gates
         run: >-
           ./gradlew
           :elu-analytics:testDebugUnitTest
+          :elu-analytics:lintRelease
           :elu-analytics:assembleRelease
+          :elu-analytics-compose:assembleRelease
           :elu-analytics:assembleDebugAndroidTest
           :elu-analytics:generatePomFileForMavenPublication
           :elu-analytics:generateMetadataFileForMavenPublication
-          :elu-analytics:releaseSourcesJar
+          :elu-analytics:sourceReleaseJar
           :elu-analytics:javaDocReleaseJar
           :elu-analytics:cyclonedxDirectBom
+          :elu-analytics-compose:generatePomFileForMavenPublication
+          :elu-analytics-compose:generateMetadataFileForMavenPublication
+          :elu-analytics-compose:sourceReleaseJar
+          :elu-analytics-compose:javaDocReleaseJar
+          :elu-analytics-compose:cyclonedxDirectBom
           :sample:assembleDebug
           checkConformanceFixtures
           checkFeatureFlagBoundary
           checkZeroBrandScanner
           checkZeroBrandRatchet
           --stacktrace
+      - name: Validate paired distributions and clean coordinate consumers
+        run: |
+          python3 scripts/validate-compose-distribution.py
+          ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=module -Pandroid.useAndroidX=true --stacktrace
+          ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=pom -Pandroid.useAndroidX=true --stacktrace
+          python3 scripts/validate-compose-distribution.py --verify-staged
       - name: Generate resolved release dependency evidence
         run: |
           mkdir -p build/reports
           ./gradlew :elu-analytics:dependencies --configuration releaseRuntimeClasspath \
             > build/reports/release-runtime-classpath.txt
+          ./gradlew :elu-analytics-compose:dependencies --configuration releaseRuntimeClasspath \
+            > build/reports/compose-release-runtime-classpath.txt
       - name: Validate static network-parser smoke
         run: |
           python3 scripts/validate-network-parser-smoke.py scanner/fixtures/network-parser-smoke.json
@@ -87,39 +104,49 @@ jobs:
             --network parser-smoke=scanner/fixtures/network-parser-smoke.json
       - name: Require generated Android runtime-network evidence
         env:
-          REPLAY_EVIDENCE: ${{ inputs.replayNetworkEvidence }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
         run: |
-          expectations=(--expect config=1 --expect capture=1 --expect flags=1)
-          if [[ "$REPLAY_EVIDENCE" == "true" ]]; then
-            expectations+=(--expect replay=1)
-          fi
           python3 scripts/validate-runtime-network-evidence.py \
             build/reports/android-runtime-network-evidence.json \
-            "${expectations[@]}"
+            --tag "$RELEASE_TAG" \
+            --distribution build/compose-distribution
+          python3 scripts/verify-paired-publication.py --tag "$RELEASE_TAG"
       - name: Verify public API and legal-only artifact gate
         run: |
-          python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar
+          python3 scripts/check-api-snapshot.py elu-analytics/build/outputs/aar/elu-analytics-release.aar \
+            --compose-aar elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar
           scanner_inputs=(
             --input aar=elu-analytics/build/outputs/aar/elu-analytics-release.aar
             --input publication=elu-analytics/build/publications/maven
-            --input archives=elu-analytics/build/libs
+            --input sources=elu-analytics/build/intermediates/source_jar/release/release-sources.jar
+            --input javadoc=elu-analytics/build/intermediates/java_doc_jar/release/release-javadoc.jar
             --input dependencies=build/reports/release-runtime-classpath.txt
+            --input compose-aar=elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar
+            --input compose-publication=elu-analytics-compose/build/publications/maven
+            --input compose-sources=elu-analytics-compose/build/intermediates/source_jar/release/release-sources.jar
+            --input compose-javadoc=elu-analytics-compose/build/intermediates/java_doc_jar/release/release-javadoc.jar
+            --input compose-dependencies=build/reports/compose-release-runtime-classpath.txt
           )
           sbom_index=0
           while IFS= read -r -d '' sbom; do
             scanner_inputs+=(--input "sbom-${sbom_index}=${sbom}")
             ((sbom_index += 1))
           done < <(
-            find build elu-analytics/build -type f \
+            find build elu-analytics/build elu-analytics-compose/build -type f \
               \( -iname '*sbom*' -o -iname 'bom.json' -o -iname 'bom.xml' \) \
               -print0
           )
           scanner_inputs+=(--network runtime=build/reports/android-runtime-network-evidence.json)
           python3 scripts/zero-brand-gate.py --mode strict "${scanner_inputs[@]}"
+      - name: Verify closed paired publication task graph without execution
+        run: bash scripts/check-publication-graph.sh
       - name: Publish and release
         if: ${{ !inputs.dryRun }}
-        run: ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache --stacktrace
+        run: ./gradlew publishPairedRelease --no-configuration-cache --no-parallel --stacktrace
         env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}

@@ -306,6 +306,42 @@ class V1ConfigManagerTest {
     }
 
     @Test
+    fun `native generation restrictions preserve lawful mixed advertisements and refuse crossed sealed delivery`() {
+        val bindings = dev.elu.analytics.internal.replay.NativeReplayProtocol.generationBindings()
+        val transports = bindings.keys
+        for ((pair, expectedGeneration) in bindings) {
+            for (generation in bindings.values + "unrecognized-native-generation") {
+                val body = v2EnabledConfig().apply {
+                    getJSONObject("capabilities").getJSONObject("replay")
+                        .put("transports", JSONArray(transports.map { JSONObject().put("codec", it.codec).put("compression", "gzip") }))
+                        .put("replayProtocolGeneration", generation)
+                }.toString()
+                val privacy = v2AllowedPrivacy().apply {
+                    getJSONObject("replayTransport").put("codec", pair.codec)
+                    rehash(this)
+                }.toString()
+                val mutableBindings = bindings.toMutableMap()
+                val manager = V1ConfigManager(transports, replayTransportGenerations = mutableBindings)
+                mutableBindings.clear() // Input mutation must not remove the original restrictions.
+                val config = authorized(body, privacy, identity(5), V2_NOW_MS, manager)
+                assertEquals(V1ChannelAuthorizationStatus.AUTHORIZED, config.captureAuthorization.status)
+                if (generation == expectedGeneration) {
+                    assertEquals(pair, config.negotiatedReplayTransport)
+                    assertEquals(pair, checkNotNull(manager.authorizeSealedReplayDelivery(privacy, identity(5), V2_NOW_MS)).transport)
+                } else {
+                    assertEquals(V1ChannelAuthorizationReason.LOCAL_TRANSPORT_UNPROVEN, config.replayAuthorization.reason)
+                    assertNull(config.negotiatedReplayTransport)
+                    assertNull(manager.authorizeSealedReplayDelivery(privacy, identity(5), V2_NOW_MS))
+                }
+                val unproven = V1ConfigManager(replayTransportGenerations = bindings)
+                val restricted = authorized(body, privacy, identity(5), V2_NOW_MS, unproven)
+                assertNull(restricted.negotiatedReplayTransport) // Restrictions cannot manufacture local proof.
+                assertNull(unproven.authorizeSealedReplayDelivery(privacy, identity(5), V2_NOW_MS))
+            }
+        }
+    }
+
+    @Test
     fun `v2 disabled fixture stays inactive and majors order by issuedAt like any revision`() {
         assertRejected(v2DisabledConfig(), null, identity(), V1ConfigRejection.INACTIVE, V2_NOW_MS)
 

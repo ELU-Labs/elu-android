@@ -63,11 +63,23 @@ def verified_signature_fingerprints(ref: str) -> set[str]:
     return fingerprints
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("tag")
-    args = parser.parse_args()
-    tag = args.tag
+def signed_message(raw_tag: str) -> str:
+    # Git/GPG can authenticate the prefix while ignoring text after ASCII armor.
+    # Only the message BEFORE one final signature can supply release trailers.
+    headers, separator, body = raw_tag.partition("\n\n")
+    begin = "-----BEGIN PGP SIGNATURE-----"
+    end = "-----END PGP SIGNATURE-----"
+    lines = body.splitlines(keepends=True)
+    starts = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == begin]
+    ends = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == end]
+    if not separator or not headers or len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise SystemExit("release tag requires exactly one final OpenPGP signature")
+    if "".join(lines[ends[0] + 1:]).strip():
+        raise SystemExit("unsigned text after the release signature is not permitted")
+    return "".join(lines[:starts[0]])
+
+
+def verify_release(tag: str) -> dict[str, str]:
     if not TAG_PATTERN.fullmatch(tag):
         raise SystemExit(f"release tag is not a supported semantic version: {tag}")
 
@@ -79,23 +91,55 @@ def main() -> None:
         raise SystemExit(f"tag {tag} does not match EluVersion.NAME {version}")
 
     ref = f"refs/tags/{tag}"
-    if git("cat-file", "-t", ref) != "tag":
+    # Resolve once, then read and verify the same immutable tag object throughout.
+    tag_object = git("rev-parse", "--verify", ref)
+    if re.fullmatch(r"[a-f0-9]{40}(?:[a-f0-9]{24})?", tag_object) is None:
+        raise SystemExit("invalid release tag object identity")
+    if git("cat-file", "-t", tag_object) != "tag":
         raise SystemExit("release tag must be a signed tag object; lightweight tags cannot publish")
-    if git("rev-parse", f"{ref}^{{commit}}") != git("rev-parse", "HEAD"):
+    source_commit = git("rev-parse", f"{tag_object}^{{commit}}")
+    if source_commit != git("rev-parse", "HEAD"):
         raise SystemExit("release tag does not point at the checked-out commit")
-    message = git("for-each-ref", ref, "--format=%(contents)")
-    if REVIEW_PATTERN.search(message) is None:
-        raise SystemExit("signed release tag must contain a Reviewed-by: trailer")
+    raw_tag = git("cat-file", "tag", tag_object)
+    headers: dict[str, str] = {}
+    for line in raw_tag.partition("\n\n")[0].splitlines():
+        key, separator, value = line.partition(" ")
+        if not separator or key in headers:
+            raise SystemExit("release tag requires unambiguous signed object headers")
+        headers[key] = value
+    if headers.get("tag") != tag:
+        raise SystemExit("release tag object's signed name does not match the requested tag")
+    if headers.get("type") != "commit" or headers.get("object") != source_commit:
+        raise SystemExit("release tag must directly reference the checked-out commit")
     trusted = trusted_fingerprints()
-    observed = verified_signature_fingerprints(ref)
+    observed = verified_signature_fingerprints(tag_object)
     if trusted.isdisjoint(observed):
         raise SystemExit(
             "release tag signature is valid but its signer fingerprint is not in the trusted set"
         )
+    message = signed_message(raw_tag)
+    if REVIEW_PATTERN.search(message) is None:
+        raise SystemExit("signed release tag must contain a Reviewed-by: trailer")
     if git("status", "--porcelain"):
         raise SystemExit("worktree changes, including untracked files, are not publishable")
-    signer = sorted(trusted.intersection(observed))[0]
-    print(f"reviewed signed release tag verified: {tag} ({signer})")
+    # Parse the signed message, never an unsigned workflow input or release body.
+    trailers = [line for line in message.splitlines()
+                if line.lower().startswith("android-lab-evidence-sha256:")]
+    if len(trailers) != 1 or re.fullmatch(
+        r"Android-Lab-Evidence-SHA256: [a-f0-9]{64}", trailers[0]
+    ) is None:
+        raise SystemExit("signed tag requires exactly one Android-Lab-Evidence-SHA256 trailer")
+    return {"tag": tag, "sourceCommit": source_commit,
+            "evidenceSha256": trailers[0].split(": ", 1)[1],
+            "signer": sorted(trusted.intersection(observed))[0]}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("tag")
+    args = parser.parse_args()
+    binding = verify_release(args.tag)
+    print(f"reviewed signed release tag verified: {binding['tag']} ({binding['signer']})")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,397 @@
+Compiled from "Elu.kt"
+public final class dev.elu.analytics.Elu {
+  public static final dev.elu.analytics.Elu INSTANCE;
+  public static final void setup(android.content.Context, java.lang.String, dev.elu.analytics.EluOptions);
+  public static void setup$default(android.content.Context, java.lang.String, dev.elu.analytics.EluOptions, int, java.lang.Object);
+  public static final void capture(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void capture$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final void capture(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>, dev.elu.analytics.EluCaptureOptions);
+  public final dev.elu.analytics.internal.network.NativeNetworkObservation beginNetworkObservation$elu_analytics_release(java.lang.String);
+  public static final void identify(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void identify$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final void identify(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void screen(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void screen$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final void alias(java.lang.String);
+  public static final void reset();
+  public static final void reset(boolean);
+  public static final void captureException(java.lang.Throwable, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void captureException$default(java.lang.Throwable, java.util.Map, int, java.lang.Object);
+  public static final void optOut();
+  public static final void optIn(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void optIn$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final boolean isOptedOut();
+  public static final void register(java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void registerOnce(java.util.Map<java.lang.String, ? extends java.lang.Object>, java.lang.Object);
+  public static void registerOnce$default(java.util.Map, java.lang.Object, int, java.lang.Object);
+  public static final void unregister(java.lang.String);
+  public static final void setPersonProperties(java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void setPersonProperties(java.util.Map<java.lang.String, ? extends java.lang.Object>, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final java.util.Map<java.lang.String, java.lang.String> getGroups();
+  public static final void resetGroups();
+  public static final void group(java.lang.String, java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static void group$default(java.lang.String, java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final java.lang.String distinctId();
+  public static final java.lang.Object getFeatureFlag(java.lang.String);
+  public static final java.lang.Object getFeatureFlag(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions);
+  public static final dev.elu.analytics.EluFeatureFlagResult getFeatureFlagResult(java.lang.String);
+  public static final dev.elu.analytics.EluFeatureFlagResult getFeatureFlagResult(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions);
+  public static final java.lang.Object getFeatureFlagPayload(java.lang.String);
+  public static final boolean isFeatureEnabled(java.lang.String);
+  public static final java.lang.Boolean isFeatureEnabled(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions, java.lang.Boolean);
+  public static java.lang.Boolean isFeatureEnabled$default(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions, java.lang.Boolean, int, java.lang.Object);
+  public static final dev.elu.analytics.EluFeatureFlagSnapshot getFeatureFlagSnapshot();
+  public static final dev.elu.analytics.EluFeatureFlagSubscription subscribeToFeatureFlags(dev.elu.analytics.EluFeatureFlagSnapshot$Listener);
+  public static final void reloadFeatureFlags(kotlin.jvm.functions.Function0<kotlin.Unit>);
+  public static void reloadFeatureFlags$default(kotlin.jvm.functions.Function0, int, java.lang.Object);
+  public static final void onFeatureFlagsLoaded(kotlin.jvm.functions.Function0<kotlin.Unit>);
+  public static final void setPersonPropertiesForFlags(java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void resetPersonPropertiesForFlags();
+  public static final void resetGroupPropertiesForFlags(java.lang.String);
+  public static void resetGroupPropertiesForFlags$default(java.lang.String, int, java.lang.Object);
+  public static final void setGroupPropertiesForFlags(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void startSessionRecording();
+  public static final void stopSessionRecording();
+  public static final boolean sessionRecordingStarted();
+  public static final void maskView(android.view.View);
+  public static final void blockView(android.view.View);
+  public static final void flush();
+  public static final void setup(android.content.Context, java.lang.String);
+  public static final void capture(java.lang.String);
+  public static final void identify(java.lang.String);
+  public static final void screen(java.lang.String);
+  public static final void captureException(java.lang.Throwable);
+  public static final void optIn(java.lang.String);
+  public static final void optIn();
+  public static final void registerOnce(java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void group(java.lang.String, java.lang.String);
+  public static final java.lang.Boolean isFeatureEnabled(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions);
+  public static final void reloadFeatureFlags();
+  public static final void resetGroupPropertiesForFlags();
+}
+Compiled from "EluOptions.kt"
+public final class dev.elu.analytics.EluOptions {
+  public dev.elu.analytics.EluOptions(java.lang.String);
+  public dev.elu.analytics.EluOptions(java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final java.lang.String getConfigHost();
+  public final boolean getDeclaredRegionReplayEnabled();
+  public final dev.elu.analytics.EluRateLimitingOptions getRateLimiting();
+  public final dev.elu.analytics.EluPersistenceMode getPersistence();
+  public final dev.elu.analytics.EluPerformanceOptions getPerformance();
+  public final dev.elu.analytics.EluDiagnosticsOptions getDiagnostics();
+  public final java.lang.String getApiHost();
+  public final dev.elu.analytics.EluPersonProfilesMode getPersonProfiles();
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String, java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluOptions();
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions);
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode);
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode);
+  public dev.elu.analytics.EluOptions(boolean, dev.elu.analytics.EluRateLimitingOptions);
+  public dev.elu.analytics.EluOptions(boolean);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions, dev.elu.analytics.EluPersistenceMode);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluRateLimitingOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode, dev.elu.analytics.EluPersonProfilesMode);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersistenceMode);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions, java.lang.String);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode, dev.elu.analytics.EluDiagnosticsOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPersonProfilesMode);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
+  public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions);
+}
+Compiled from "EluFeatureFlagOptions.kt"
+public final class dev.elu.analytics.EluFeatureFlagOptions {
+  public dev.elu.analytics.EluFeatureFlagOptions(boolean, boolean);
+  public dev.elu.analytics.EluFeatureFlagOptions(boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final boolean getSendEvent();
+  public final boolean getFresh();
+  public final boolean component1();
+  public final boolean component2();
+  public final dev.elu.analytics.EluFeatureFlagOptions copy(boolean, boolean);
+  public static dev.elu.analytics.EluFeatureFlagOptions copy$default(dev.elu.analytics.EluFeatureFlagOptions, boolean, boolean, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+  public dev.elu.analytics.EluFeatureFlagOptions(boolean);
+  public dev.elu.analytics.EluFeatureFlagOptions();
+}
+Compiled from "EluCaptureOptions.kt"
+public final class dev.elu.analytics.EluCaptureOptions {
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date, java.util.Map<java.lang.String, ? extends java.lang.Object>, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date, java.util.Map, java.util.Map, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final java.util.Date getTimestamp();
+  public final java.util.Map<java.lang.String, java.lang.Object> getSet();
+  public final java.util.Map<java.lang.String, java.lang.Object> getSetOnce();
+  public final java.util.Date component1();
+  public final java.util.Map<java.lang.String, java.lang.Object> component2();
+  public final java.util.Map<java.lang.String, java.lang.Object> component3();
+  public final dev.elu.analytics.EluCaptureOptions copy(java.util.Date, java.util.Map<java.lang.String, ? extends java.lang.Object>, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static dev.elu.analytics.EluCaptureOptions copy$default(dev.elu.analytics.EluCaptureOptions, java.util.Date, java.util.Map, java.util.Map, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date);
+  public dev.elu.analytics.EluCaptureOptions();
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot {
+  public dev.elu.analytics.EluFeatureFlagSnapshot(dev.elu.analytics.internal.flags.FlagResponse, dev.elu.analytics.EluFeatureFlagSnapshot$Source, dev.elu.analytics.EluFeatureFlagSnapshot$LoadError);
+  public final dev.elu.analytics.EluFeatureFlagSnapshot$Source getSource();
+  public final dev.elu.analytics.EluFeatureFlagSnapshot$LoadError getError();
+  public final java.util.List<dev.elu.analytics.EluFeatureFlagSnapshot$Entry> getEntries();
+  public final byte[] getFlagsJSON();
+  public final byte[] getPayloadsJSON();
+  public final java.lang.String getRequestId();
+  public final java.lang.String getFlagsRevision();
+  public final java.util.Date getEvaluatedAt();
+  public final java.util.Date getExpiresAt();
+  public final boolean isAvailable();
+  public final dev.elu.analytics.EluFeatureFlagSnapshot$Entry getEntry(java.lang.String);
+}
+Compiled from "EluFeatureFlagSubscription.kt"
+public final class dev.elu.analytics.EluFeatureFlagSubscription implements java.io.Closeable {
+  public static final dev.elu.analytics.EluFeatureFlagSubscription$Companion Companion;
+  public dev.elu.analytics.EluFeatureFlagSubscription(dev.elu.analytics.FeatureFlagCancellation, kotlin.jvm.functions.Function0<kotlin.Unit>);
+  public final void cancel();
+  public void close();
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot$Source extends java.lang.Enum<dev.elu.analytics.EluFeatureFlagSnapshot$Source> {
+  public static final dev.elu.analytics.EluFeatureFlagSnapshot$Source REMOTE;
+  public static final dev.elu.analytics.EluFeatureFlagSnapshot$Source CACHE;
+  public static final dev.elu.analytics.EluFeatureFlagSnapshot$Source UNAVAILABLE;
+  public static dev.elu.analytics.EluFeatureFlagSnapshot$Source[] values();
+  public static dev.elu.analytics.EluFeatureFlagSnapshot$Source valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<dev.elu.analytics.EluFeatureFlagSnapshot$Source> getEntries();
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot$LoadError extends java.lang.Enum<dev.elu.analytics.EluFeatureFlagSnapshot$LoadError> {
+  public static final dev.elu.analytics.EluFeatureFlagSnapshot$LoadError TRANSPORT;
+  public static final dev.elu.analytics.EluFeatureFlagSnapshot$LoadError INVALID_RESPONSE;
+  public static dev.elu.analytics.EluFeatureFlagSnapshot$LoadError[] values();
+  public static dev.elu.analytics.EluFeatureFlagSnapshot$LoadError valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<dev.elu.analytics.EluFeatureFlagSnapshot$LoadError> getEntries();
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public interface dev.elu.analytics.EluFeatureFlagSnapshot$Listener {
+  public abstract void onFlags(dev.elu.analytics.EluFeatureFlagSnapshot);
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot$Entry {
+  public dev.elu.analytics.EluFeatureFlagSnapshot$Entry(java.lang.String, dev.elu.analytics.EluFeatureFlagSnapshot$Value, byte[]);
+  public final java.lang.String getKey();
+  public final dev.elu.analytics.EluFeatureFlagSnapshot$Value getValue();
+  public final byte[] getPayloadJSON();
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public abstract class dev.elu.analytics.EluFeatureFlagSnapshot$Value {
+  public dev.elu.analytics.EluFeatureFlagSnapshot$Value(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot$Value$BooleanValue extends dev.elu.analytics.EluFeatureFlagSnapshot$Value {
+  public dev.elu.analytics.EluFeatureFlagSnapshot$Value$BooleanValue(boolean);
+  public final boolean getValue();
+  public final boolean component1();
+  public final dev.elu.analytics.EluFeatureFlagSnapshot$Value$BooleanValue copy(boolean);
+  public static dev.elu.analytics.EluFeatureFlagSnapshot$Value$BooleanValue copy$default(dev.elu.analytics.EluFeatureFlagSnapshot$Value$BooleanValue, boolean, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot$Value$StringValue extends dev.elu.analytics.EluFeatureFlagSnapshot$Value {
+  public dev.elu.analytics.EluFeatureFlagSnapshot$Value$StringValue(java.lang.String);
+  public final java.lang.String getValue();
+  public final java.lang.String component1();
+  public final dev.elu.analytics.EluFeatureFlagSnapshot$Value$StringValue copy(java.lang.String);
+  public static dev.elu.analytics.EluFeatureFlagSnapshot$Value$StringValue copy$default(dev.elu.analytics.EluFeatureFlagSnapshot$Value$StringValue, java.lang.String, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot$Value$NumberValue extends dev.elu.analytics.EluFeatureFlagSnapshot$Value {
+  public dev.elu.analytics.EluFeatureFlagSnapshot$Value$NumberValue(double);
+  public final double getValue();
+  public final double component1();
+  public final dev.elu.analytics.EluFeatureFlagSnapshot$Value$NumberValue copy(double);
+  public static dev.elu.analytics.EluFeatureFlagSnapshot$Value$NumberValue copy$default(dev.elu.analytics.EluFeatureFlagSnapshot$Value$NumberValue, double, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+}
+Compiled from "EluFeatureFlagSnapshot.kt"
+public final class dev.elu.analytics.EluFeatureFlagSnapshot$Value$NullValue extends dev.elu.analytics.EluFeatureFlagSnapshot$Value {
+  public static final dev.elu.analytics.EluFeatureFlagSnapshot$Value$NullValue INSTANCE;
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+}
+Compiled from "EluFeatureFlagResult.kt"
+public final class dev.elu.analytics.EluFeatureFlagResult {
+  public dev.elu.analytics.EluFeatureFlagResult(java.lang.String, boolean, java.lang.String, java.lang.Object);
+  public final java.lang.String getKey();
+  public final boolean getEnabled();
+  public final java.lang.String getVariant();
+  public final java.lang.Object getPayload();
+  public final java.lang.String component1();
+  public final boolean component2();
+  public final java.lang.String component3();
+  public final java.lang.Object component4();
+  public final dev.elu.analytics.EluFeatureFlagResult copy(java.lang.String, boolean, java.lang.String, java.lang.Object);
+  public static dev.elu.analytics.EluFeatureFlagResult copy$default(dev.elu.analytics.EluFeatureFlagResult, java.lang.String, boolean, java.lang.String, java.lang.Object, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+}
+Compiled from "EluPerformanceOptions.kt"
+public final class dev.elu.analytics.EluPerformanceOptions {
+  public dev.elu.analytics.EluPerformanceOptions(boolean, boolean, boolean, long, long);
+  public dev.elu.analytics.EluPerformanceOptions(boolean, boolean, boolean, long, long, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final boolean getEnabled();
+  public final boolean getMemory();
+  public final boolean getMainThreadStalls();
+  public final long getSampleIntervalMillis();
+  public final long getMainThreadStallThresholdMillis();
+  public final boolean getFrameMetrics();
+  public final boolean getProcessAgeAtFirstObservedFrame();
+  public dev.elu.analytics.EluPerformanceOptions(dev.elu.analytics.EluFrameMetricsOptions, boolean, boolean, boolean, long, long);
+  public dev.elu.analytics.EluPerformanceOptions(dev.elu.analytics.EluFrameMetricsOptions, boolean, boolean, boolean, long, long, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluPerformanceOptions(boolean, boolean, boolean, long);
+  public dev.elu.analytics.EluPerformanceOptions(boolean, boolean, boolean);
+  public dev.elu.analytics.EluPerformanceOptions(boolean, boolean);
+  public dev.elu.analytics.EluPerformanceOptions(boolean);
+  public dev.elu.analytics.EluPerformanceOptions();
+}
+Compiled from "EluOkHttpInterceptor.kt"
+public final class dev.elu.analytics.EluOkHttpInterceptor implements okhttp3.Interceptor {
+  public dev.elu.analytics.EluOkHttpInterceptor();
+  public okhttp3.Response intercept(okhttp3.Interceptor$Chain);
+}
+Compiled from "EluFrameMetricsOptions.kt"
+public final class dev.elu.analytics.EluFrameMetricsOptions {
+  public dev.elu.analytics.EluFrameMetricsOptions(boolean, boolean);
+  public dev.elu.analytics.EluFrameMetricsOptions(boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final boolean getEnabled();
+  public final boolean getProcessAgeAtFirstObservedFrame();
+  public dev.elu.analytics.EluFrameMetricsOptions(boolean);
+  public dev.elu.analytics.EluFrameMetricsOptions();
+}
+Compiled from "EluDiagnosticsOptions.kt"
+public final class dev.elu.analytics.EluDiagnosticsOptions {
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean);
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final boolean getEnabled();
+  public final boolean getLaunchTimings();
+  public final boolean getCrashReports();
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean, boolean);
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean, boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public dev.elu.analytics.EluDiagnosticsOptions(boolean);
+  public dev.elu.analytics.EluDiagnosticsOptions();
+}
+Compiled from "EluPersonProfilesMode.kt"
+public final class dev.elu.analytics.EluPersonProfilesMode extends java.lang.Enum<dev.elu.analytics.EluPersonProfilesMode> {
+  public static final dev.elu.analytics.EluPersonProfilesMode IDENTIFIED_ONLY;
+  public static final dev.elu.analytics.EluPersonProfilesMode ALWAYS;
+  public static final dev.elu.analytics.EluPersonProfilesMode NEVER;
+  public static dev.elu.analytics.EluPersonProfilesMode[] values();
+  public static dev.elu.analytics.EluPersonProfilesMode valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<dev.elu.analytics.EluPersonProfilesMode> getEntries();
+}
+Compiled from "EluPersistenceMode.kt"
+public final class dev.elu.analytics.EluPersistenceMode extends java.lang.Enum<dev.elu.analytics.EluPersistenceMode> {
+  public static final dev.elu.analytics.EluPersistenceMode PERSISTENT;
+  public static final dev.elu.analytics.EluPersistenceMode MEMORY;
+  public static dev.elu.analytics.EluPersistenceMode[] values();
+  public static dev.elu.analytics.EluPersistenceMode valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<dev.elu.analytics.EluPersistenceMode> getEntries();
+}
+Compiled from "EluRateLimitingOptions.kt"
+public final class dev.elu.analytics.EluRateLimitingOptions {
+  public dev.elu.analytics.EluRateLimitingOptions(double, java.lang.Double);
+  public dev.elu.analytics.EluRateLimitingOptions(double, java.lang.Double, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final double getEventsPerSecond();
+  public final double getEventsBurstLimit();
+  public dev.elu.analytics.EluRateLimitingOptions(double);
+  public dev.elu.analytics.EluRateLimitingOptions();
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluReplayPrivateRegion {
+  public static final dev.elu.analytics.EluReplayPrivateRegion$Companion Companion;
+  public static final dev.elu.analytics.EluReplayPrivateRegion create();
+  public dev.elu.analytics.EluReplayPrivateRegion(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluReplayPrivateRegion$Companion {
+  public final dev.elu.analytics.EluReplayPrivateRegion create();
+  public dev.elu.analytics.EluReplayPrivateRegion$Companion(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluAnnotatedReplayBinding implements java.lang.AutoCloseable {
+  public dev.elu.analytics.EluAnnotatedReplayBinding(dev.elu.analytics.internal.replay.AnnotatedGeometryBinding);
+  public final dev.elu.analytics.internal.replay.AnnotatedGeometryBinding getEntry$elu_analytics_release();
+  public final void invalidate();
+  public void close();
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluAnnotatedReplayRootScope implements java.lang.AutoCloseable {
+  public static final dev.elu.analytics.EluAnnotatedReplayRootScope$Companion Companion;
+  public final dev.elu.analytics.internal.replay.AnnotatedRootRegistry getRegistry$elu_analytics_release();
+  public final boolean attach();
+  public final void declareRequired(java.util.List<dev.elu.analytics.EluReplayPrivateRegion>);
+  public final dev.elu.analytics.EluAnnotatedReplayBinding bindRoot(dev.elu.analytics.EluReplayGeometryReader);
+  public final dev.elu.analytics.EluAnnotatedReplayBinding bindPrivate(dev.elu.analytics.EluReplayPrivateRegion, dev.elu.analytics.EluReplayGeometryReader);
+  public void close();
+  public static final dev.elu.analytics.EluAnnotatedReplayRootScope prepare(android.view.View);
+  public dev.elu.analytics.EluAnnotatedReplayRootScope(dev.elu.analytics.internal.replay.AnnotatedRootRegistry, kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluAnnotatedReplayRootScope.kt"
+public final class dev.elu.analytics.EluAnnotatedReplayRootScope$Companion {
+  public final dev.elu.analytics.EluAnnotatedReplayRootScope prepare(android.view.View);
+  public dev.elu.analytics.EluAnnotatedReplayRootScope$Companion(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+Compiled from "EluReplayRegionGeometry.kt"
+public final class dev.elu.analytics.EluReplayRegionGeometry {
+  public dev.elu.analytics.EluReplayRegionGeometry(java.lang.Object, java.lang.Object, long, float, float, float, float, float, float, float, float);
+  public final java.lang.Object getCoordinateIdentity();
+  public final java.lang.Object getParentIdentity();
+  public final long getGeneration();
+  public final float getTopLeftX();
+  public final float getTopLeftY();
+  public final float getTopRightX();
+  public final float getTopRightY();
+  public final float getBottomLeftX();
+  public final float getBottomLeftY();
+  public final float getBottomRightX();
+  public final float getBottomRightY();
+}
+Compiled from "EluReplayRegionGeometry.kt"
+public interface dev.elu.analytics.EluReplayGeometryReader {
+  public abstract dev.elu.analytics.EluReplayRegionGeometry read();
+}

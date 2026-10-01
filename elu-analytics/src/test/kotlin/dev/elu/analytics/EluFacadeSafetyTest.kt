@@ -4,6 +4,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -13,8 +14,10 @@ class EluFacadeSafetyTest {
     @Test
     fun `every facade call is safe before setup`() {
         Elu.capture("event", mapOf("value" to 1))
+        Elu.capture("event", null, EluCaptureOptions(java.util.Date(1), mapOf("tier" to "paid")))
         Elu.identify("user", mapOf("plan" to "test"))
         Elu.reset()
+        Elu.reset(true)
         Elu.alias("alias")
         Elu.screen("Home", mapOf("source" to "test"))
         Elu.captureException(IllegalStateException("test"), mapOf("handled" to true))
@@ -26,12 +29,91 @@ class EluFacadeSafetyTest {
         Elu.setGroupPropertiesForFlags("organization", mapOf("tier" to "test"))
         Elu.reloadFeatureFlags()
         Elu.onFeatureFlagsLoaded { error("must not fire before setup") }
+        assertNull(Elu.getFeatureFlagSnapshot())
+        Elu.subscribeToFeatureFlags { error("must not fire before setup") }.use { it.cancel(); it.cancel() }
         Elu.flush()
+        Elu.stopSessionRecording()
+        Elu.startSessionRecording()
+        assertFalse(Elu.sessionRecordingStarted())
 
         assertNull(Elu.distinctId())
         assertNull(Elu.getFeatureFlag("flag"))
         assertNull(Elu.getFeatureFlagPayload("flag"))
         assertFalse(Elu.isFeatureEnabled("flag"))
+        val options = EluFeatureFlagOptions(sendEvent = false, fresh = true)
+        assertNull(Elu.getFeatureFlag("flag", options))
+        assertNull(Elu.getFeatureFlagResult("flag", options))
+        assertNull(Elu.isFeatureEnabled("flag", options))
+        assertEquals(true, Elu.isFeatureEnabled("flag", options, true))
+        assertEquals(false, Elu.isFeatureEnabled("flag", options, false))
+    }
+
+    @Test
+    fun `Java overloads retain the original primitive signature and additive nullable reads`() {
+        val facade = Elu::class.java
+        val key = String::class.java
+        val options = EluFeatureFlagOptions::class.java
+        assertEquals(java.lang.Boolean.TYPE, facade.getMethod("isFeatureEnabled", key).returnType)
+        assertEquals(java.lang.Boolean::class.java, facade.getMethod("isFeatureEnabled", key, options).returnType)
+        assertEquals(java.lang.Boolean::class.java,
+            facade.getMethod("isFeatureEnabled", key, options, java.lang.Boolean::class.java).returnType)
+        assertEquals(Any::class.java, facade.getMethod("getFeatureFlag", key, options).returnType)
+        assertEquals(EluFeatureFlagResult::class.java, facade.getMethod("getFeatureFlagResult", key, options).returnType)
+        assertEquals(EluFeatureFlagOptions(), options.getConstructor().newInstance())
+        assertEquals(EluFeatureFlagOptions(false), options.getConstructor(java.lang.Boolean.TYPE).newInstance(false))
+        assertEquals(EluFeatureFlagOptions(false, true),
+            options.getConstructor(java.lang.Boolean.TYPE, java.lang.Boolean.TYPE).newInstance(false, true))
+    }
+
+    @Test
+    fun `capture options are additive and retain original Java capture descriptors`() {
+        val facade = Elu::class.java
+        assertEquals(java.lang.Void.TYPE, facade.getMethod("capture", String::class.java).returnType)
+        assertEquals(java.lang.Void.TYPE, facade.getMethod("capture", String::class.java, Map::class.java).returnType)
+        assertEquals(java.lang.Void.TYPE, facade.getMethod("capture", String::class.java,
+            Map::class.java, EluCaptureOptions::class.java).returnType)
+        assertEquals(EluCaptureOptions(), EluCaptureOptions::class.java.getConstructor().newInstance())
+        val date = java.util.Date(42)
+        assertEquals(EluCaptureOptions(date), EluCaptureOptions::class.java.getConstructor(java.util.Date::class.java).newInstance(date))
+    }
+
+    @Test fun `snapshot callback is a Java SAM and cancellation is Closeable`() {
+        assertEquals(EluFeatureFlagSnapshot::class.java, Elu::class.java.getMethod("getFeatureFlagSnapshot").returnType)
+        assertEquals(EluFeatureFlagSubscription::class.java,
+            Elu::class.java.getMethod("subscribeToFeatureFlags", EluFeatureFlagSnapshot.Listener::class.java).returnType)
+        val callbacks = EluFeatureFlagSnapshot.Listener::class.java.declaredMethods
+        assertEquals(1, callbacks.size)
+        assertEquals(java.lang.Void.TYPE, callbacks.single().returnType)
+        assertEquals(listOf(EluFeatureFlagSnapshot::class.java), callbacks.single().parameterTypes.toList())
+        assertTrue(java.io.Closeable::class.java.isAssignableFrom(EluFeatureFlagSubscription::class.java))
+        assertEquals(java.lang.Void.TYPE, EluFeatureFlagSubscription::class.java.getMethod("cancel").returnType)
+        assertEquals(java.lang.Void.TYPE, EluFeatureFlagSubscription::class.java.getMethod("close").returnType)
+        assertEquals(ByteArray::class.java, EluFeatureFlagSnapshot::class.java.getMethod("getFlagsJSON").returnType)
+        assertEquals(java.util.Date::class.java, EluFeatureFlagSnapshot::class.java.getMethod("getEvaluatedAt").returnType)
+    }
+
+    @Test fun `event filter preserves old setup constructor and exposes a Java SAM`() {
+        val options = EluOptions::class.java.getConstructor().newInstance()
+        assertTrue(options.propertyDenylist.isEmpty()); assertNull(options.beforeSend)
+        val callback = EluEvent.Filter::class.java.declaredMethods.single()
+        assertEquals(EluEvent::class.java, callback.returnType)
+        assertEquals(listOf(EluEvent::class.java), callback.parameterTypes.toList())
+        assertEquals(java.lang.Void.TYPE, EluOptions::class.java.getMethod("setBeforeSend", EluEvent.Filter::class.java).returnType)
+        assertEquals(java.lang.Void.TYPE, EluOptions::class.java.getMethod("setPropertyDenylist", List::class.java).returnType)
+        assertEquals(java.util.Date::class.java, EluEvent::class.java.getMethod("getTimestamp").returnType)
+    }
+
+    @Test
+    fun `public consent survives pre-setup calls and reset`() {
+        try {
+            Elu.optOut()
+            assertTrue(Elu.isOptedOut())
+            Elu.reset()
+            Elu.optIn(captureEventName = "")
+            assertTrue(Elu.isOptedOut())
+            Elu.optIn(captureEventName = null)
+            assertFalse(Elu.isOptedOut())
+        } finally { Elu.optIn(captureEventName = null) }
     }
 
     @Test
@@ -51,6 +133,9 @@ class EluFacadeSafetyTest {
                         Elu.group("worker", worker.toString())
                         Elu.reset()
                         Elu.flush()
+                        Elu.stopSessionRecording()
+                        Elu.startSessionRecording()
+                        assertFalse(Elu.sessionRecordingStarted())
                     } catch (failure: Throwable) {
                         failures += failure
                     }
