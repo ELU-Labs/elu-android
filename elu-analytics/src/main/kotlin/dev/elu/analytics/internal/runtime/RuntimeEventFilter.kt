@@ -2,6 +2,7 @@ package dev.elu.analytics.internal.runtime
 
 import dev.elu.analytics.EluEvent
 import dev.elu.analytics.internal.core.JsonValues
+import dev.elu.analytics.internal.core.IdentityState
 import java.time.Instant
 import java.util.Date
 import java.util.IdentityHashMap
@@ -52,6 +53,77 @@ internal class RuntimeEventFilter(
         if (error is VirtualMachineError || error is ThreadDeath || error is LinkageError) throw error
         RuntimeEventFilterResult.Refused(RuntimeCaptureRejection.FILTER_INVALID)
     }
+
+    /** Released mutation projections expose mutable properties, never mutable identity targets.
+     * Called once on the original queue worker, outside SQLite and its retry loop. */
+    fun applyMutations(drafts: List<RuntimeRecordDraft.Mutation>, identity: IdentityState): RuntimeMutationFilterResult = try {
+        require(drafts.isNotEmpty())
+        val first = drafts.first()
+        fun project(name: String, properties: Map<String, Any?>,
+            person: RuntimeEventPerson = RuntimeEventPerson()): RuntimeEventFilterResult.Prepared {
+            val merged = LinkedHashMap(identity.superProperties).apply { putAll(properties) }
+            return when (val result = apply(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, name,
+                first.occurredAt, properties, first.versions), merged, person, true)) {
+                is RuntimeEventFilterResult.Prepared -> result
+                is RuntimeEventFilterResult.Refused -> throw MutationFilterRefusal(result.reason)
+            }
+        }
+        fun objectValue(value: Any?): Map<String, Any?>? {
+            if (value == null) return null
+            require(value is Map<*, *> && value.keys.all { it is String })
+            @Suppress("UNCHECKED_CAST")
+            return JsonValues.objectValue(value as Map<String, Any?>, "filter.mutation")
+        }
+        fun row(change: RuntimeMutationChange) = first.copy(change = change)
+        val group = drafts.last().change
+        val changes: List<RuntimeRecordDraft.Mutation> = if (group is RuntimeMutationChange.AssociateGroup || group is RuntimeMutationChange.SetGroupProperties) {
+            val type = when (group) { is RuntimeMutationChange.AssociateGroup -> group.groupType; else -> (group as RuntimeMutationChange.SetGroupProperties).groupType }
+            val key = when (group) { is RuntimeMutationChange.AssociateGroup -> group.groupKey; else -> (group as RuntimeMutationChange.SetGroupProperties).groupKey }
+            require(drafts.size == 1 || (drafts.size == 2 && drafts.first().change == RuntimeMutationChange.AssociateGroup(type, key)))
+            require(drafts.all { it.occurredAt == first.occurredAt && it.versions == first.versions })
+            if (group is RuntimeMutationChange.SetGroupProperties && (group.setOnce.isNotEmpty() || group.unset.isNotEmpty())) drafts
+            else {
+                val changed = identity.groups[type] != key
+                if (!changed && group is RuntimeMutationChange.AssociateGroup) emptyList()
+                else {
+                    val properties = linkedMapOf<String, Any?>("\$group_type" to type, "\$group_key" to key)
+                    if (group is RuntimeMutationChange.SetGroupProperties) properties["\$group_set"] = group.set
+                    val projected = project("\$groupidentify", properties)
+                    val set = objectValue(projected.properties["\$group_set"])
+                    buildList {
+                        if (changed) add(row(RuntimeMutationChange.AssociateGroup(type, key)))
+                        if (set != null) add(row(RuntimeMutationChange.SetGroupProperties(type, key, set, emptyMap(), emptyList())))
+                    }
+                }
+            }
+        } else {
+            require(drafts.size == 1)
+            when (val change = first.change) {
+                is RuntimeMutationChange.Identify -> {
+                    val projected = project("\$identify", mapOf("distinct_id" to change.userId,
+                        "\$anon_distinct_id" to (identity.userId ?: identity.anonymousId)), RuntimeEventPerson(change.set, change.setOnce))
+                    listOf(row(change.copy(set = projected.person.set.orEmpty(), setOnce = projected.person.setOnce.orEmpty())))
+                }
+                is RuntimeMutationChange.LinkAlias -> {
+                    project("\$create_alias", mapOf("alias" to change.aliasId, "distinct_id" to change.canonicalId))
+                    drafts // The callback cannot redirect either original identity.
+                }
+                is RuntimeMutationChange.SetPersonProperties -> if (change.unset.isNotEmpty()) drafts else {
+                    val projected = project("\$set", mapOf("\$set" to change.set, "\$set_once" to change.setOnce))
+                    val set = objectValue(projected.properties["\$set"]).orEmpty()
+                    val once = objectValue(projected.properties["\$set_once"]).orEmpty()
+                    if (set.isEmpty() && once.isEmpty()) emptyList() else listOf(row(change.copy(set = set, setOnce = once)))
+                }
+                else -> error("Unsupported mutation projection")
+            }
+        }
+        RuntimeMutationFilterResult.Prepared(changes)
+    } catch (error: Throwable) {
+        if (error is VirtualMachineError || error is ThreadDeath || error is LinkageError) throw error
+        RuntimeMutationFilterResult.Refused((error as? MutationFilterRefusal)?.reason ?: RuntimeCaptureRejection.FILTER_INVALID)
+    }
+
+    private class MutationFilterRefusal(val reason: RuntimeCaptureRejection) : IllegalArgumentException()
 
     private class Copier {
         private var nodes = 0
@@ -104,6 +176,10 @@ internal class RuntimeEventFilter(
 }
 
 internal data class RuntimeEventPerson(val set: Map<String, Any?>? = null, val setOnce: Map<String, Any?>? = null)
+internal sealed interface RuntimeMutationFilterResult {
+    data class Prepared(val drafts: List<RuntimeRecordDraft.Mutation>) : RuntimeMutationFilterResult
+    data class Refused(val reason: RuntimeCaptureRejection) : RuntimeMutationFilterResult
+}
 internal sealed interface RuntimeEventFilterResult {
     data class Prepared(val name: String, val occurredAt: String, val properties: Map<String, Any?>,
         val person: RuntimeEventPerson) : RuntimeEventFilterResult
@@ -112,7 +188,8 @@ internal sealed interface RuntimeEventFilterResult {
 
 /** Queue-worker confined, and attached to the original attempt across authority/SQL retries. */
 internal class RuntimeEventFilterAttempt(
-    val person: RuntimeEventPerson = RuntimeEventPerson(), val allowsPersonChanges: Boolean = false,
+    val person: RuntimeEventPerson = RuntimeEventPerson(), val allowsPersonChanges: Boolean = true,
+    val deferPersonContinuation: Boolean = false,
 ) {
     private var owner: Any? = null
     private var command: RuntimeCaptureCommand? = null

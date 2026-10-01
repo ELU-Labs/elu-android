@@ -95,6 +95,30 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             finally: path.write_text(original)
         self.assertEqual("", errors())
 
+    def test_event_mutation_continuation_retains_accepted_event_original_targets_and_postwrite_restrictions(self) -> None:
+        def errors():
+            found = []; BOUNDARY.verify_event_filter_boundary(self.root, found); return "\n".join(found)
+        self.assertEqual("", errors())
+        base = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics"
+        for relative, token in (
+            ("internal/runtime/RuntimeQueueOwner.kt", "result !is RuntimeCaptureResult.Accepted || attempt.filter.deferPersonContinuation || !eventFilter.enabled"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "before.state.identity == accepted.identity && before.state.stream == accepted.stream"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "if (backgroundBoundary == null) source?.isCurrent() == true else backgroundBoundary.authorizes(source)"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "personMutationRejected = followOn !is RuntimeAppendResult.Accepted"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "if (localAdmission != null && !localAdmission(transaction, before)) throw FlagContextWithdrawn()"),
+            ("internal/runtime/RuntimeQueueOwner.kt", "if (localAdmission != null && !localAdmission(transaction, current)) throw FlagContextWithdrawn()"),
+            ("internal/runtime/RuntimeEventFilter.kt", "first.copy(change = change)"),
+            ("internal/runtime/RuntimeEventFilter.kt", "if (changed) add(row(RuntimeMutationChange.AssociateGroup(type, key)))"),
+            ("internal/facade/StandaloneFacade.kt", "allowsPersonChanges = true, deferPersonContinuation = true"),
+            ("internal/facade/StandaloneFacade.kt", "affectsFlags = hasContextMutation(screenProperties) || eventFilter.hasCallback"),
+            ("internal/facade/StandaloneFacade.kt", "affectsFlags = hasContextMutation(exceptionProperties) || eventFilter.hasCallback"),
+            ("internal/facade/StandaloneFacade.kt", "open.owner.appendMutations(drafts, originalAdmission,")):
+            path = base / relative; original = path.read_text(); self.assertIn(token, original)
+            try:
+                path.write_text(original.replace(token, "removedOriginalBoundary")); self.assertTrue(errors())
+            finally: path.write_text(original)
+        self.assertEqual("", errors())
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="elu-flag-boundary-")
         self.root = pathlib.Path(self.temporary.name)

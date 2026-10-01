@@ -94,4 +94,67 @@ class RuntimeEventFilterTest {
         assertThrows(IllegalStateException::class.java) { prepare("one", Any()) }
         assertEquals(1, calls)
     }
+
+    private fun identity() = dev.elu.analytics.internal.core.IdentityState(revision = 2, contextRevision = 5,
+        anonymousId = "anon", userId = "original-user", groups = mapOf("company" to "old"),
+        superProperties = mapOf("super" to "original"), session = null, optedOut = false, updatedAt = "2026-08-04T00:00:00.000Z")
+    private fun mutation(change: RuntimeMutationChange) = RuntimeRecordDraft.Mutation(command().occurredAt, change, command().versions)
+
+    @Test fun `typed mutation projections filter maps but cannot redirect original identity group or timestamp`() {
+        val names = mutableListOf<String>()
+        val policy = RuntimeEventFilter(callback = EluEvent.Filter {
+            names += it.event; assertEquals("original", it.properties["super"])
+            it.event = "forged"; it.timestamp = Date(0)
+            it.properties["distinct_id"] = "forged-user"; it.properties["alias"] = "forged-alias"
+            it.properties["\$group_type"] = "forged-type"; it.properties["\$group_key"] = "forged-key"
+            when (names.last()) {
+                "\$identify" -> { it.set = mutableMapOf("changed" to true); it.setOnce = null }
+                "\$set" -> { it.properties.remove("\$set"); it.properties["\$set_once"] = mutableMapOf("once" to true) }
+                "\$groupidentify" -> it.properties["\$group_set"] = mutableMapOf("safe" to true)
+            }
+            it
+        })
+        val original = identity()
+        fun project(vararg changes: RuntimeMutationChange) = (policy.applyMutations(changes.map(::mutation), original)
+            as RuntimeMutationFilterResult.Prepared).drafts.also { result -> result.forEach { assertEquals(command().occurredAt, it.occurredAt) } }
+        val identify = project(RuntimeMutationChange.Identify("next-user", mapOf("private" to true), mapOf("private" to true))).single().change as RuntimeMutationChange.Identify
+        assertEquals("next-user", identify.userId); assertEquals(mapOf("changed" to true), identify.set); assertTrue(identify.setOnce.isEmpty())
+        val person = project(RuntimeMutationChange.SetPersonProperties(mapOf("private" to true), emptyMap(), emptyList())).single().change as RuntimeMutationChange.SetPersonProperties
+        assertTrue(person.set.isEmpty()); assertEquals(mapOf("once" to true), person.setOnce)
+        val alias = RuntimeMutationChange.LinkAlias("next-alias", "original-user")
+        assertEquals(alias, project(alias).single().change)
+        val group = project(RuntimeMutationChange.AssociateGroup("company", "new"),
+            RuntimeMutationChange.SetGroupProperties("company", "new", mapOf("private" to true), emptyMap(), emptyList()))
+        assertEquals(RuntimeMutationChange.AssociateGroup("company", "new"), group[0].change)
+        assertEquals(RuntimeMutationChange.SetGroupProperties("company", "new", mapOf("safe" to true), emptyMap(), emptyList()), group[1].change)
+        assertEquals(listOf("\$identify", "\$set", "\$create_alias", "\$groupidentify"), names)
+    }
+
+    @Test fun `removed person maps are noop while group association survives removed group map and malformed maps refuse`() {
+        val original = identity()
+        val person = mutation(RuntimeMutationChange.SetPersonProperties(mapOf("private" to true), emptyMap(), emptyList()))
+        val removed = RuntimeEventFilter(callback = EluEvent.Filter { it.properties.clear(); it })
+        assertTrue((removed.applyMutations(listOf(person), original) as RuntimeMutationFilterResult.Prepared).drafts.isEmpty())
+        val group = mutation(RuntimeMutationChange.SetGroupProperties("company", "new", mapOf("private" to true), emptyMap(), emptyList()))
+        assertEquals(listOf(mutation(RuntimeMutationChange.AssociateGroup("company", "new"))),
+            (removed.applyMutations(listOf(group), original) as RuntimeMutationFilterResult.Prepared).drafts)
+        val same = group.copy(change = (group.change as RuntimeMutationChange.SetGroupProperties).copy(groupKey = "old"))
+        assertTrue((removed.applyMutations(listOf(same), original) as RuntimeMutationFilterResult.Prepared).drafts.isEmpty())
+        val invalid = RuntimeEventFilter(callback = EluEvent.Filter { it.properties["\$set"] = listOf("not-object"); it })
+        assertEquals(RuntimeCaptureRejection.FILTER_INVALID,
+            (invalid.applyMutations(listOf(person), original) as RuntimeMutationFilterResult.Refused).reason)
+        assertEquals(RuntimeCaptureRejection.FILTER_DROPPED,
+            (RuntimeEventFilter(callback = EluEvent.Filter { null }).applyMutations(listOf(person), original) as RuntimeMutationFilterResult.Refused).reason)
+    }
+
+    @Test fun `typed unset and group setOnce without a released projection remain unchanged`() {
+        var calls = 0
+        val policy = RuntimeEventFilter(callback = EluEvent.Filter { calls++; null })
+        listOf(RuntimeMutationChange.SetPersonProperties(emptyMap(), emptyMap(), listOf("remove")),
+            RuntimeMutationChange.SetGroupProperties("company", "old", emptyMap(), mapOf("once" to true), emptyList())).forEach {
+            val drafts = listOf(mutation(it))
+            assertEquals(drafts, (policy.applyMutations(drafts, identity()) as RuntimeMutationFilterResult.Prepared).drafts)
+        }
+        assertEquals(0, calls)
+    }
 }

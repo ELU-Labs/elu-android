@@ -448,15 +448,15 @@ internal class StandaloneFacade(
 
     /** Restriction only: later synchronous identity/consent/context intentions fence the original
      * hook call even while the facade lane is waiting for its queue result. */
-    internal fun eventFilterAdmission(): () -> Boolean = synchronized(projectionLock) {
+    internal fun eventFilterAdmission(allowPendingIdentity: Boolean = false): () -> Boolean = synchronized(projectionLock) {
         val intent = eventFilterIntentRevision
         val identityIntent = identityIntentRevision
         val consent = consentIntentRevision
         val original = identity
         val check: () -> Boolean = { synchronized(projectionLock) {
-            !closeRequested.get() && !closed && !isOptedOut() && pendingIdentityOperations == 0 &&
+            !closeRequested.get() && !closed && !isOptedOut() && (allowPendingIdentity || pendingIdentityOperations == 0) &&
                 intent == eventFilterIntentRevision && identityIntent == identityIntentRevision &&
-                consent == consentIntentRevision && identity == original && hasCurrentCapture()
+                consent == consentIntentRevision && identity == original
         } }
         check
     }
@@ -506,7 +506,7 @@ internal class StandaloneFacade(
             val consentRevision = synchronized(projectionLock) { consentIntentRevision }
             val attempt = RuntimeCaptureRateAttempt(dev.elu.analytics.internal.runtime.RuntimeEventFilterAttempt(
                 dev.elu.analytics.internal.runtime.RuntimeEventPerson(set.takeIf { options.set != null },
-                    setOnce.takeIf { options.setOnce != null }), allowsPersonChanges = true))
+                    setOnce.takeIf { options.setOnce != null }), allowsPersonChanges = true, deferPersonContinuation = true))
             val accepted = captureThrough(attempt) { originalAttempt ->
                 requireStack().runtime.capture(event, eventProperties, occurredAt, originalAttempt)
             } ?: return@dispatch
@@ -538,7 +538,8 @@ internal class StandaloneFacade(
     ) {
         val screenProperties = withoutReservedKeys(properties)
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(screenProperties)) {
+        dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(screenProperties) || eventFilter.hasCallback,
+            reloadFlagsAfter = false, restrictsEventFilter = false) {
             val runtime = requireStack().runtime
             captureThrough { attempt -> runtime.screen(name, screenProperties, occurredAt, attempt) }
         }
@@ -550,7 +551,8 @@ internal class StandaloneFacade(
     ) {
         val exceptionProperties = withoutReservedKeys(properties)
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(exceptionProperties)) {
+        dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(exceptionProperties) || eventFilter.hasCallback,
+            reloadFlagsAfter = false, restrictsEventFilter = false) {
             val runtime = requireStack().runtime
             captureThrough { attempt -> runtime.captureException(error, exceptionProperties, occurredAt, attempt) }
         }
@@ -848,7 +850,7 @@ internal class StandaloneFacade(
         val occurredAt = now()
         dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
             if (hasCurrentCapture()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt, setOnce = setOnce)
-            else applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(set, occurredAt, setOnce))
+            else applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(set, occurredAt, setOnce), filterMutation = true)
         }
     }
 
@@ -865,7 +867,7 @@ internal class StandaloneFacade(
         val occurredAt = now()
         dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
             if (!hasCurrentCapture()) {
-                applyFlagContext(RuntimeLocalStateChange.SetFlagGroup(type, key, groupProperties, occurredAt))
+                applyFlagContext(RuntimeLocalStateChange.SetFlagGroup(type, key, groupProperties, occurredAt), filterMutation = true)
                 return@dispatch
             }
             val changes = mutableListOf<RuntimeMutationChange>()
@@ -1382,16 +1384,19 @@ internal class StandaloneFacade(
     ): Boolean {
         val open = stack ?: return false
         val drafts = changes.map { change -> RuntimeRecordDraft.Mutation(occurredAt, change, versions) }
-        val pending = if (captureAdmission == null) open.owner.appendMutations(drafts) else synchronized(projectionLock) {
+        val selectedAdmission = captureAdmission ?: if (eventFilter.enabled) eventFilterAdmission(allowPendingIdentity = true) else null
+        val originalAdmission = selectedAdmission?.let { check -> { synchronized(projectionLock) { check() } } }
+        val pending = if (originalAdmission == null) open.owner.appendMutations(drafts) else synchronized(projectionLock) {
             // Only submission holds the projection lock. Never wait for the queue worker here.
-            if (captureAdmission()) open.owner.appendMutations(drafts) else null
+            if (originalAdmission()) open.owner.appendMutations(drafts, originalAdmission,
+                filterMutation = captureAdmission == null && eventFilter.enabled) else null
         }
         if (pending == null) { countDrop(EluFacadeDropReason.UNAUTHORIZED); return false }
         val result = pending.await()
         when (result) {
             is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
             is RuntimeAppendResult.Rejected ->
-                countDrop(if (result.reason == RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE) EluFacadeDropReason.UNAUTHORIZED else EluFacadeDropReason.STORAGE)
+                countDrop(mutationDropReason(result.reason))
         }
         renewAuthority()
         return result is RuntimeAppendResult.Accepted
@@ -1399,15 +1404,21 @@ internal class StandaloneFacade(
 
     private fun hasCurrentCapture(): Boolean = state is EluFacadeState.Enabled && hasCurrentConfiguration()
 
-    private fun applyFlagContext(change: RuntimeLocalStateChange) {
+    private fun mutationDropReason(reason: RuntimeAppendRejection): EluFacadeDropReason = when (reason) {
+        RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE -> EluFacadeDropReason.UNAUTHORIZED
+        RuntimeAppendRejection.FILTER_DROPPED -> EluFacadeDropReason.INVALID_INPUT
+        RuntimeAppendRejection.FILTER_INVALID -> EluFacadeDropReason.INVALID_INPUT
+        else -> EluFacadeDropReason.STORAGE
+    }
+
+    private fun applyFlagContext(change: RuntimeLocalStateChange, filterMutation: Boolean = false) {
         // The unbound injected facade remains a local test/compatibility seam. Production always
         // uses the source-bound owner operation and its durable flag authority transaction.
-        if (configurationGate == null) { applyLocalChange(change); return }
-        when (val result = requireStack().owner.applyFlagContext(change).await()) {
+        if (configurationGate == null && !(filterMutation && eventFilter.enabled)) { applyLocalChange(change); return }
+        val restriction = if (filterMutation && eventFilter.enabled) eventFilterAdmission(allowPendingIdentity = true) else null
+        when (val result = requireStack().owner.applyFlagContext(change, filterMutation, restriction).await()) {
             is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
-            is RuntimeAppendResult.Rejected -> countDrop(
-                if (result.reason == RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE) EluFacadeDropReason.UNAUTHORIZED
-                else EluFacadeDropReason.STORAGE)
+            is RuntimeAppendResult.Rejected -> countDrop(mutationDropReason(result.reason))
         }
         renewAuthority()
     }
@@ -1431,8 +1442,8 @@ internal class StandaloneFacade(
     ) {
         if (personProfiles == EluPersonProfilesMode.NEVER) return
         if (userId != persistedDistinctId()) {
-            appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, setOnce)), occurredAt)
-            cachedPersonProperties = personPropertiesKey(userId, set, setOnce)
+            val accepted = appendMutations(listOf(RuntimeMutationChange.Identify(userId, set, setOnce)), occurredAt)
+            if (accepted && !eventFilter.enabled) cachedPersonProperties = personPropertiesKey(userId, set, setOnce)
             startFlagReload()
             return
         }
@@ -1449,7 +1460,7 @@ internal class StandaloneFacade(
         if (personProfiles == EluPersonProfilesMode.NEVER) return
         val key = personPropertiesKey(persistedDistinctId(), set, setOnce)
         // Repeating exactly the previous person-property call for the same identity changes nothing.
-        if (cachedPersonProperties == key) return
+        if (!eventFilter.enabled && cachedPersonProperties == key) return
         val accepted = appendMutations(
             listOf(
                 RuntimeMutationChange.SetPersonProperties(
@@ -1461,7 +1472,7 @@ internal class StandaloneFacade(
             occurredAt,
             captureAdmission,
         )
-        if (captureAdmission == null || accepted) cachedPersonProperties = key
+        if (accepted) cachedPersonProperties = key
         if (reloadFlags) startFlagReload()
     }
 

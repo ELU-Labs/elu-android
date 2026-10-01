@@ -89,6 +89,8 @@ internal enum class RuntimeAppendRejection {
     COUNT_LIMIT,
     BYTE_LIMIT,
     RECORD_TOO_LARGE,
+    FILTER_DROPPED,
+    FILTER_INVALID,
 }
 
 internal sealed interface RuntimeAppendResult {
@@ -512,16 +514,43 @@ internal class RuntimeQueueOwner private constructor(
         return submit { appendOnWorker(AppendRequest.Events(sessionUpdate, drafts.toList())) }
     }
 
-    fun appendMutations(drafts: List<RuntimeRecordDraft.Mutation>): Future<RuntimeAppendResult> {
+    fun appendMutations(drafts: List<RuntimeRecordDraft.Mutation>): Future<RuntimeAppendResult> =
+        appendMutations(drafts, null, false)
+
+    internal fun appendMutations(drafts: List<RuntimeRecordDraft.Mutation>,
+        admission: (() -> Boolean)?, filterMutation: Boolean): Future<RuntimeAppendResult> {
         require(drafts.size in 1..MAX_RUNTIME_APPEND_RECORDS) {
             "Mutation append must contain 1..$MAX_RUNTIME_APPEND_RECORDS mutations"
         }
         return submit(revokeNative = true) {
-            appendOnWorker(AppendRequest.Mutations(drafts.toList())).also { result ->
+            assertUsable()
+            val original = requireLoaded()
+            val source = captureConfiguration
+            fun current(before: LoadedSnapshot): Boolean =
+                (admission?.invoke() != false) && before.state.identity == original.state.identity &&
+                    before.state.stream == original.state.stream &&
+                    (configurationGate == null || (captureConfiguration === source && source?.isCurrent() == true))
+            fun rejected(reason: RuntimeAppendRejection) = RuntimeAppendResult.Rejected(reason, requireLoaded().publicSnapshot)
+            if (!current(original) || (configurationGate != null && captureAuthorityRejection(original) != null))
+                return@submit rejected(RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE)
+            val selected = if (filterMutation && eventFilter.enabled) {
+                when (val filtered = eventFilter.applyMutations(drafts, original.state.identity)) {
+                    is RuntimeMutationFilterResult.Refused -> return@submit rejected(filtered.reason.appendRejection())
+                    is RuntimeMutationFilterResult.Prepared -> filtered.drafts
+                }
+            } else drafts.toList()
+            if (!current(requireLoaded())) return@submit rejected(RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE)
+            if (selected.isEmpty()) return@submit RuntimeAppendResult.Accepted(emptyList(), original.publicSnapshot)
+            val result = try { appendOnWorker(AppendRequest.Mutations(selected)) { _, before -> current(before) } }
+                catch (_: FlagContextWithdrawn) { rejected(RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE) }
+            result.also {
                 if (result is RuntimeAppendResult.Accepted) invalidateAuthorizedContext()
             }
         }
     }
+
+    private fun RuntimeCaptureRejection.appendRejection(): RuntimeAppendRejection =
+        if (this == RuntimeCaptureRejection.FILTER_DROPPED) RuntimeAppendRejection.FILTER_DROPPED else RuntimeAppendRejection.FILTER_INVALID
 
     fun applyLocal(change: RuntimeLocalStateChange): Future<RuntimeAppendResult> =
         submit(revokeNative = true) {
@@ -544,7 +573,8 @@ internal class RuntimeQueueOwner private constructor(
         }
 
     /** Local flag context only, admitted against transaction-current flag/source authority. */
-    internal fun applyFlagContext(change: RuntimeLocalStateChange): Future<RuntimeAppendResult> {
+    internal fun applyFlagContext(change: RuntimeLocalStateChange,
+        filterMutation: Boolean = false, admission: (() -> Boolean)? = null): Future<RuntimeAppendResult> {
         require(change is RuntimeLocalStateChange.SetFlagPersonProperties ||
             change is RuntimeLocalStateChange.SetFlagGroupProperties || change is RuntimeLocalStateChange.SetFlagGroup ||
             change is RuntimeLocalStateChange.ResetGroups || change is RuntimeLocalStateChange.ResetFlagPersonProperties ||
@@ -558,10 +588,42 @@ internal class RuntimeQueueOwner private constructor(
             if (configurationGate == null || witness == null || authorization == null || featureFlagClockPoisoned) {
                 return@submit rejected()
             }
+            val original = requireLoaded()
+            fun restriction(before: LoadedSnapshot): Boolean = admission?.invoke() != false &&
+                before.state.identity == original.state.identity && before.state.stream == original.state.stream &&
+                !featureFlagClockPoisoned && flagConfiguration === witness && witness.isCurrent() &&
+                currentFlagAuthorization() == authorization
+            if (!restriction(original)) return@submit rejected()
+            val selected = if (filterMutation && eventFilter.enabled) {
+                val mutation = when (change) {
+                    is RuntimeLocalStateChange.SetFlagPersonProperties -> RuntimeMutationChange.SetPersonProperties(change.properties, change.setOnce, emptyList())
+                    is RuntimeLocalStateChange.SetFlagGroup -> if (change.properties == null)
+                        RuntimeMutationChange.AssociateGroup(change.groupType, change.groupKey) else
+                        RuntimeMutationChange.SetGroupProperties(change.groupType, change.groupKey, change.properties, emptyMap(), emptyList())
+                    else -> throw IllegalArgumentException("Only public person/group context has a mutation projection")
+                }
+                when (val filtered = eventFilter.applyMutations(listOf(RuntimeRecordDraft.Mutation(change.occurredAt,
+                    mutation, StandaloneRuntime.defaultVersions())), original.state.identity)) {
+                    is RuntimeMutationFilterResult.Refused -> return@submit RuntimeAppendResult.Rejected(
+                        filtered.reason.appendRejection(), original.publicSnapshot)
+                    is RuntimeMutationFilterResult.Prepared -> {
+                        if (!restriction(requireLoaded())) return@submit rejected()
+                        if (filtered.drafts.isEmpty()) return@submit RuntimeAppendResult.Accepted(emptyList(), original.publicSnapshot)
+                        when (change) {
+                            is RuntimeLocalStateChange.SetFlagPersonProperties -> {
+                                val next = filtered.drafts.single().change as RuntimeMutationChange.SetPersonProperties
+                                change.copy(properties = next.set, setOnce = next.setOnce)
+                            }
+                            is RuntimeLocalStateChange.SetFlagGroup -> change.copy(properties = filtered.drafts
+                                .map { it.change }.filterIsInstance<RuntimeMutationChange.SetGroupProperties>().singleOrNull()?.set)
+                            else -> error("Unsupported flag mutation")
+                        }
+                    }
+                }
+            } else change
             val result = try {
-                appendOnWorker(AppendRequest.Local(change)) { transaction, before ->
-                    if (featureFlagClockPoisoned || flagConfiguration !== witness || !witness.isCurrent() ||
-                        currentFlagAuthorization() != authorization) false
+                appendOnWorker(AppendRequest.Local(selected)) { transaction, before ->
+                    if (!restriction(before)) false
                     else {
                         val restriction = FlagDurableStore.contextChangeRestriction(transaction, authorization,
                             before.state, captureClock.wallNowEpochMillis())
@@ -3102,6 +3164,37 @@ internal class RuntimeQueueOwner private constructor(
         attempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
         warningOf: RuntimeCaptureCommand? = null,
     ): RuntimeCaptureResult {
+        val result = captureEventOnWorker(command, backgroundBoundary, attempt, warningOf)
+        if (result !is RuntimeCaptureResult.Accepted || attempt.filter.deferPersonContinuation || !eventFilter.enabled)
+            return result
+        val person = attempt.filter.acceptedPerson() ?: return result
+        if (personProfiles == EluPersonProfilesMode.NEVER || (person.set.isNullOrEmpty() && person.setOnce.isNullOrEmpty())) return result
+        // The accepted event is immutable. This is a distinct ordered mutation, never a
+        // second filter invocation or a transaction that can erase the accepted event.
+        val accepted = result.snapshot.state
+        val source = captureConfiguration
+        fun current(before: LoadedSnapshot): Boolean = attempt.filter.isCurrent() &&
+            before.state.identity == accepted.identity && before.state.stream == accepted.stream &&
+            (configurationGate == null || (captureConfiguration === source &&
+                if (backgroundBoundary == null) source?.isCurrent() == true else backgroundBoundary.authorizes(source)))
+        val followOn = try {
+            val mutation = RuntimeRecordDraft.Mutation(RuntimeWallTimestamps.rfc3339(captureClock.wallNowEpochMillis()),
+                RuntimeMutationChange.SetPersonProperties(person.set.orEmpty(), person.setOnce.orEmpty(), emptyList()), command.versions)
+            appendOnWorker(AppendRequest.Mutations(listOf(mutation)), backgroundBoundary = backgroundBoundary) { _, before -> current(before) }
+        } catch (_: FlagContextWithdrawn) { null }
+          catch (_: IllegalArgumentException) { null } // Actual wall time/typed bounds may refuse; never backdate.
+          catch (_: ProvenNotCommittedRuntimeTransactionException) { null }
+        // Unknown commit/storage errors are deliberately not caught: original quarantine and
+        // retained event/spool/exposure evidence must survive that unresolved result.
+        if (followOn is RuntimeAppendResult.Accepted) invalidateAuthorizedContext()
+        return result.copy(snapshot = requireLoaded().publicSnapshot, personMutationRejected = followOn !is RuntimeAppendResult.Accepted)
+    }
+
+    private fun captureEventOnWorker(command: RuntimeCaptureCommand,
+        backgroundBoundary: dev.elu.analytics.internal.config.V2ConfigApplicationBackgrounded?,
+        attempt: RuntimeCaptureRateAttempt,
+        warningOf: RuntimeCaptureCommand?,
+    ): RuntimeCaptureResult {
         assertUsable()
         requireCaptureRuntime()
         val source = warningOf ?: command
@@ -3562,6 +3655,7 @@ internal class RuntimeQueueOwner private constructor(
 
     private fun appendOnWorker(
         request: AppendRequest,
+        backgroundBoundary: dev.elu.analytics.internal.config.V2ConfigApplicationBackgrounded? = null,
         localAdmission: ((RuntimeQueueTransaction, LoadedSnapshot) -> Boolean)? = null,
     ): RuntimeAppendResult {
         assertUsable()
@@ -3579,7 +3673,7 @@ internal class RuntimeQueueOwner private constructor(
                             val before = requireCurrent(transaction)
                             validateAppendBoundaries(transaction, before)
                             if ((localAdmission != null && !localAdmission(transaction, before)) ||
-                                (configurationGate != null && request !is AppendRequest.Local && captureAuthorityRejection(before) != null)) {
+                                (configurationGate != null && request !is AppendRequest.Local && captureAuthorityRejection(before, backgroundBoundary) != null)) {
                                 return@transaction AppendCommit(
                                     RuntimeAppendResult.Rejected(RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE, before.publicSnapshot),
                                     published = null,
@@ -3593,7 +3687,7 @@ internal class RuntimeQueueOwner private constructor(
                                 )
                             } else {
                                 if ((localAdmission != null && !localAdmission(transaction, before)) ||
-                                    (configurationGate != null && request !is AppendRequest.Local && captureAuthorityRejection(before) != null)) {
+                                    (configurationGate != null && request !is AppendRequest.Local && captureAuthorityRejection(before, backgroundBoundary) != null)) {
                                     return@transaction AppendCommit(
                                         RuntimeAppendResult.Rejected(RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE, before.publicSnapshot),
                                         published = null,
@@ -3618,7 +3712,7 @@ internal class RuntimeQueueOwner private constructor(
                     }
                     validateAppendBoundaries(transaction, current)
                     if ((localAdmission != null && !localAdmission(transaction, current)) ||
-                        (configurationGate != null && request !is AppendRequest.Local && captureAuthorityRejection(current) != null)) {
+                        (configurationGate != null && request !is AppendRequest.Local && captureAuthorityRejection(current, backgroundBoundary) != null)) {
                         return@transaction RuntimeAppendResult.Rejected(RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE, current.publicSnapshot)
                     }
                     commitPreparedAppend(transaction, candidate)

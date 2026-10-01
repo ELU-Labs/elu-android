@@ -2100,6 +2100,111 @@ class StandaloneFacadeTest {
         assertEquals("Home", wire.getJSONObject("properties").getString("\$screen_name"))
     }
 
+    @Test fun `screen and handled exception continue person output once on original ordered owner`() {
+        val seen = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                seen += it.event; it.set = mutableMapOf("last" to it.event); it.setOnce = mutableMapOf("first" to it.event); it
+            }))
+        h.facade.applyConfiguration(config()); h.settle()
+        val requests = h.flagTransport.requests.size
+        h.facade.screen("Home", null)
+        assertNull(h.facade.getFeatureFlagSnapshot())
+        h.facade.captureException(IllegalStateException("handled"), null); h.settle()
+        assertEquals(listOf("Home", "\$exception"), seen)
+        assertEquals(listOf("event:Home", "mutation:setPersonProperties", "event:\$exception", "mutation:setPersonProperties"), h.queued())
+        assertEquals(mapOf("first" to "Home", "last" to "\$exception"), h.owner.snapshot().get().state.flagContext.personProperties)
+        assertEquals(requests, h.flagTransport.requests.size)
+        assertNull(h.facade.getFeatureFlagSnapshot())
+        h.facade.reloadFeatureFlags(); h.settle()
+        assertEquals(requests + 1, h.flagTransport.requests.size)
+        assertNotNull(h.facade.getFeatureFlagSnapshot())
+    }
+
+    @Test fun `identify same identity alias and group use one filtered projection without changing targets`() {
+        val seen = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                seen += it.event
+                when (it.event) {
+                    "\$identify" -> { it.set = mutableMapOf("tier" to "filtered"); it.setOnce = null }
+                    "\$set" -> { it.properties["\$set"] = mutableMapOf("person" to "filtered"); it.properties.remove("\$set_once") }
+                    "\$groupidentify" -> it.properties.remove("\$group_set")
+                }
+                it.properties["distinct_id"] = "forged"; it.properties["alias"] = "forged"
+                it.properties["\$group_key"] = "forged"; it.timestamp = Date(0); it
+            }))
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.identify("customer", mapOf("private" to true), mapOf("private-once" to true)); h.settle()
+        h.facade.identify("customer", mapOf("private" to true)); h.settle()
+        h.facade.alias("original-alias"); h.settle()
+        h.facade.group("company", "original-group", mapOf("private" to true)); h.settle()
+        assertEquals(listOf("\$identify", "\$set", "\$create_alias", "\$groupidentify"), seen)
+        val changes = h.records().filterIsInstance<RuntimeQueuedRecord.Mutation>().map { it.envelope.mutation }
+        assertEquals("customer", (changes[0].change as RuntimeMutationChange.Identify).userId)
+        assertEquals("original-alias", (changes[2].change as RuntimeMutationChange.LinkAlias).aliasId)
+        assertEquals(RuntimeMutationChange.AssociateGroup("company", "original-group"), changes[3].change)
+        assertTrue(changes.all { it.occurredAt == NOW })
+        assertEquals(mapOf("tier" to "filtered", "person" to "filtered"), h.owner.snapshot().get().state.flagContext.personProperties)
+        assertTrue(h.owner.snapshot().get().state.flagContext.groupProperties.isEmpty())
+    }
+
+    @Test fun `capture associated mutation rechecks later original intent after its insert without losing accepted event`() {
+        for (action in listOf("reset", "optout")) {
+            lateinit var target: StandaloneFacade; var invoked = false
+            val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+                eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                    it.set = mutableMapOf("private" to true); it
+                }), databaseDecorator = { db -> object : dev.elu.analytics.internal.runtime.RuntimeQueueDatabase by db {
+                    override fun <T> transaction(block: (dev.elu.analytics.internal.runtime.RuntimeQueueTransaction) -> T): T = db.transaction { tx ->
+                        block(object : dev.elu.analytics.internal.runtime.RuntimeQueueTransaction by tx {
+                            override fun insertRecord(record: dev.elu.analytics.internal.runtime.RuntimeStoredRecord) {
+                                tx.insertRecord(record)
+                                if (record.sequence == 1L && !invoked) {
+                                    invoked = true
+                                    if (action == "reset") target.reset() else target.optOut()
+                                }
+                            }
+                        })
+                    }
+                } })
+            target = h.facade; target.applyConfiguration(config()); h.settle()
+            target.capture("accepted", null, EluCaptureOptions(set = mapOf("caller" to true))); h.settle()
+            assertTrue(action, invoked)
+            assertEquals(action, listOf("event:accepted"), h.queued())
+            assertTrue(action, h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+        }
+    }
+
+    @Test fun `public flags only context filters under original gate while explicit flags APIs remain unfiltered`() {
+        val gate = dev.elu.analytics.internal.config.V2ConfigAuthorityGate()
+        val body = JSONObject(config()).also { it.getJSONObject("features").put("capture", false) }.toString()
+        gate.update(dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate(1) { consumer -> consumer(body); true })
+        var calls = 0; var drop = false
+        val h = harness(configurationGate = gate, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(callback = dev.elu.analytics.EluEvent.Filter {
+                calls++
+                if (drop) null else {
+                    if (it.event == "\$set") it.properties["\$set"] = mutableMapOf("filtered" to true)
+                    if (it.event == "\$groupidentify") it.properties.remove("\$group_set")
+                    it
+                }
+            }))
+        h.facade.configurationChanged(); h.settle()
+        h.facade.setPersonProperties(mapOf("private" to true)); h.settle()
+        assertEquals(mapOf("filtered" to true), h.owner.snapshot().get().state.flagContext.personProperties)
+        h.facade.group("company", "retained-target", mapOf("private" to true)); h.settle()
+        assertEquals(mapOf("company" to "retained-target"), h.owner.snapshot().get().state.identity.groups)
+        assertTrue(h.owner.snapshot().get().state.flagContext.groupProperties.isEmpty())
+        val prior = h.owner.snapshot().get().state
+        drop = true; h.facade.setPersonProperties(mapOf("rejected" to true)); h.settle()
+        assertEquals(prior, h.owner.snapshot().get().state)
+        h.facade.setPersonPropertiesForFlags(mapOf("explicit" to true)); h.settle()
+        assertEquals(3, calls)
+        assertEquals(mapOf("filtered" to true, "explicit" to true), h.owner.snapshot().get().state.flagContext.personProperties)
+        assertTrue(h.records().isEmpty())
+    }
+
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,

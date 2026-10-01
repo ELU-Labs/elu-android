@@ -122,6 +122,8 @@ internal sealed interface RuntimeCaptureResult {
     data class Accepted(
         val record: RuntimeQueuedRecord.Event,
         val snapshot: RuntimeQueueSnapshot,
+        /** A confirmed event remains accepted if its separate person mutation is refused. */
+        val personMutationRejected: Boolean = false,
     ) : RuntimeCaptureResult
 
     data class Rejected(

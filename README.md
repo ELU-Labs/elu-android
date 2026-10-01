@@ -461,12 +461,17 @@ metadata is reconstructed after filtering and cannot be supplied by the callback
 Original consent and configuration checks still apply. A dropped exposure does
 not consume its durable report marker. Rate limiting occurs before filtering.
 
-For manual `capture`, accepted transformed `set`/`setOnce` values continue through
-the same ordered person update. Automatic events currently refuse callback output
-containing person fields. The denylist applies to event properties, not nested
-fields, replay pixels, person/group properties or identity mutations. Filtering of
-standalone identify/person/group operations and automatic person updates is not
-implemented in this slice.
+Accepted manual and automatic events can continue with transformed `set`/`setOnce`
+values through a separate ordered person update. The event remains accepted if
+that update is refused by consent, identity, time or queue limits; the two writes
+are not atomic. `NEVER` profile mode performs no person update.
+
+Identify, alias, person-property and group calls also pass their supported property
+projection through the callback. Identity and group targets remain fixed. Returning
+null drops that operation; removing property maps does not restore the original
+values. A group association can still change when its property map is removed.
+The denylist acts on the projection's top-level names, not nested fields or replay
+pixels. Explicit `ForFlags` setters and typed unset operations do not run this hook.
 
 Activity-based apps get `$screen` events automatically on every foreground
 Activity start. **Compose (single-Activity) apps must call `Elu.screen()`

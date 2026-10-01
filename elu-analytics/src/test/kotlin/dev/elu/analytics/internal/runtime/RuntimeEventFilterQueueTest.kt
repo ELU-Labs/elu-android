@@ -3,7 +3,7 @@ package dev.elu.analytics.internal.runtime
 import dev.elu.analytics.EluPersonProfilesMode
 import dev.elu.analytics.EluRateLimitingOptions
 import dev.elu.analytics.EluEvent
-import dev.elu.analytics.internal.config.V1StrictCanonicalJson
+import dev.elu.analytics.internal.config.*
 import dev.elu.analytics.internal.core.*
 import java.io.IOException
 import java.time.Instant
@@ -31,10 +31,12 @@ class RuntimeEventFilterQueueTest {
         stream = StreamState(streamId = "stream_capture", nextSequence = 0),
         flagContext = FlagContextState(personProperties = emptyMap(), groupProperties = emptyMap()))
     private fun open(backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(), burst: Double = 2.0,
-        count: Int = 100, filter: RuntimeEventFilter = RuntimeEventFilter(), wrap: (RuntimeQueueDatabase) -> RuntimeQueueDatabase = { it }): RuntimeQueueOwner =
+        count: Int = 100, filter: RuntimeEventFilter = RuntimeEventFilter(),
+        profiles: EluPersonProfilesMode = EluPersonProfilesMode.IDENTIFIED_ONLY,
+        wrap: (RuntimeQueueDatabase) -> RuntimeQueueDatabase = { it }): RuntimeQueueOwner =
         RuntimeQueueOwner.open("rate-${UUID.randomUUID()}", RuntimeQueueLimits(count, 1_000_000),
             { wrap(backing.connection()) }, ::fresh, trustedSiteKey = "elu_pk_test_capture", captureClock = clock,
-            personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY, rateLimiting = EluRateLimitingOptions(1.0, burst), eventFilter = filter)
+            personProfiles = profiles, rateLimiting = EluRateLimitingOptions(1.0, burst), eventFilter = filter)
             .await().also { owners += it }
     private fun command(name: String = "ordinary") = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, name, NOW,
         emptyMap(), StandaloneRuntime.defaultVersions())
@@ -136,13 +138,13 @@ class RuntimeEventFilterQueueTest {
         assertEquals(1, calls); assertEquals("one", events(owner).single().record.name)
     }
 
-    @Test fun `automatic network path is filtered but cannot rename provenance or introduce person writes`() {
+    @Test fun `automatic network path is filtered preserves provenance and continues original person output`() {
         for (mode in 0..2) {
             var calls = 0
             val owner = open(filter = RuntimeEventFilter(callback = EluEvent.Filter {
                 calls++; it.properties.remove("url")
                 if (mode == 1) it.event = "ordinary"
-                if (mode == 2) it.set = mutableMapOf("person" to "unsupported")
+                if (mode == 2) it.set = mutableMapOf("person" to "filtered")
                 it
             }))
             authorize(owner)
@@ -153,9 +155,170 @@ class RuntimeEventFilterQueueTest {
             when (mode) {
                 0 -> { assertTrue(result is RuntimeCaptureResult.Accepted); assertFalse(events(owner).single().record.properties.containsKey("url")) }
                 1 -> reject(result, RuntimeCaptureRejection.FILTER_INVALID)
-                else -> reject(result, RuntimeCaptureRejection.FILTER_PERSON_UNSUPPORTED)
+                else -> {
+                    assertTrue(result is RuntimeCaptureResult.Accepted)
+                    assertFalse((result as RuntimeCaptureResult.Accepted).personMutationRejected)
+                    val rows = owner.peek(100, Long.MAX_VALUE).await()
+                    assertEquals(2, rows.size); assertTrue(rows[0] is RuntimeQueuedRecord.Event)
+                    val mutation = (rows[1] as RuntimeQueuedRecord.Mutation).envelope.mutation
+                    assertEquals(mapOf("person" to "filtered"), (mutation.change as RuntimeMutationChange.SetPersonProperties).set)
+                    assertEquals(1L, mutation.sequence)
+                }
             }
         }
+    }
+
+    @Test fun `automatic accepted event survives refused person capacity chronology and postwrite restriction`() {
+        for (mode in 0..2) {
+            var current = true; var calls = 0
+            val owner = open(count = if (mode == 0) 1 else 100,
+                filter = RuntimeEventFilter(callback = EluEvent.Filter {
+                    calls++; it.set = mutableMapOf("tier" to "paid")
+                    if (mode == 1) it.timestamp = java.util.Date(clock.wall + 1_000)
+                    it
+                }, admission = { { current } }), wrap = { db -> object : RuntimeQueueDatabase by db {
+                    override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T = db.transaction { tx ->
+                        block(object : RuntimeQueueTransaction by tx {
+                            override fun insertRecord(record: RuntimeStoredRecord) {
+                                tx.insertRecord(record)
+                                if (mode == 2 && record.sequence == 1L) current = false
+                            }
+                        })
+                    }
+                } })
+            authorize(owner)
+            val accepted = owner.capture(command()).await() as RuntimeCaptureResult.Accepted
+            assertTrue(accepted.personMutationRejected); assertEquals(1, calls)
+            val rows = owner.peek(100, Long.MAX_VALUE).await()
+            assertEquals(listOf(accepted.record), rows)
+            assertEquals(1L, owner.snapshot().await().state.stream.nextSequence)
+            assertTrue(owner.snapshot().await().state.flagContext.personProperties.isEmpty())
+        }
+    }
+
+    @Test fun `never profile refuses person continuation without dropping the accepted event`() {
+        val owner = open(profiles = EluPersonProfilesMode.NEVER,
+            filter = RuntimeEventFilter(callback = EluEvent.Filter { it.set = mutableMapOf("person" to true); it }))
+        authorize(owner)
+        assertTrue(owner.capture(command()).await() is RuntimeCaptureResult.Accepted)
+        assertEquals(1, owner.peek(100, Long.MAX_VALUE).await().size)
+        assertTrue(owner.snapshot().await().state.flagContext.personProperties.isEmpty())
+    }
+
+    @Test fun `recursive warning owns its accepted person continuation while outer rate limited capture stays rejected`() {
+        val names = mutableListOf<String>()
+        val owner = open(burst = 1.0, filter = RuntimeEventFilter(callback = EluEvent.Filter {
+            names += it.event; if (it.event == "\$\$client_ingestion_warning") it.setOnce = mutableMapOf("warning" to true); it
+        }))
+        authorize(owner)
+        assertTrue(owner.capture(command()).await() is RuntimeCaptureResult.Accepted)
+        reject(owner.capture(command()).await(), RuntimeCaptureRejection.RATE_LIMITED)
+        assertEquals(listOf("ordinary", "\$\$client_ingestion_warning"), names)
+        val rows = owner.peek(100, Long.MAX_VALUE).await()
+        assertEquals(3, rows.size); assertTrue(rows[0] is RuntimeQueuedRecord.Event); assertTrue(rows[1] is RuntimeQueuedRecord.Event)
+        assertEquals(mapOf("warning" to true), ((rows[2] as RuntimeQueuedRecord.Mutation).envelope.mutation.change
+            as RuntimeMutationChange.SetPersonProperties).setOnce)
+    }
+
+    @Test fun `mutation callback runs once outside transaction and original postwrite admission rolls back properties`() {
+        var inside = false; var current = true; var calls = 0
+        val owner = open(filter = RuntimeEventFilter(callback = EluEvent.Filter {
+            assertFalse(inside); calls++; it.properties["\$set"] = mutableMapOf("safe" to true); it
+        }), wrap = { db -> object : RuntimeQueueDatabase by db {
+            override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T {
+                inside = true
+                try { return db.transaction { tx -> block(object : RuntimeQueueTransaction by tx {
+                    override fun insertRecord(record: RuntimeStoredRecord) { tx.insertRecord(record); current = false }
+                }) } } finally { inside = false }
+            }
+        } })
+        authorize(owner); val before = owner.snapshot().await()
+        val result = owner.appendMutations(listOf(RuntimeRecordDraft.Mutation(NOW,
+            RuntimeMutationChange.SetPersonProperties(mapOf("private" to true), emptyMap(), emptyList()),
+            StandaloneRuntime.defaultVersions())), { current }, true).await()
+        assertEquals(RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE, (result as RuntimeAppendResult.Rejected).reason)
+        assertEquals(1, calls); assertEquals(before.state, owner.snapshot().await().state)
+        assertTrue(owner.peek(100, Long.MAX_VALUE).await().isEmpty())
+    }
+
+    @Test fun `committed ambiguous person mutation preserves one original event and one transformed mutation`() {
+        val backing = FakeRuntimeQueueBacking(); var calls = 0; var armed = false
+        val owner = open(backing, filter = RuntimeEventFilter(callback = EluEvent.Filter {
+            calls++; it.set = mutableMapOf("person" to true); it
+        }), wrap = { db -> object : RuntimeQueueDatabase by db {
+            override fun <T> transaction(block: (RuntimeQueueTransaction) -> T): T = db.transaction { tx ->
+                block(object : RuntimeQueueTransaction by tx {
+                    override fun insertRecord(record: RuntimeStoredRecord) {
+                        tx.insertRecord(record)
+                        if (record.sequence == 1L && !armed) { armed = true; backing.ambiguousNextCommit = FakeAmbiguousOutcome.COMMIT }
+                    }
+                })
+            }
+        } })
+        authorize(owner)
+        val result = owner.capture(command()).await() as RuntimeCaptureResult.Accepted
+        assertFalse(result.personMutationRejected); assertEquals(1, calls)
+        assertEquals(listOf(0L, 1L), owner.peek(100, Long.MAX_VALUE).await().map { it.sequence })
+    }
+
+    @Test fun `fixed original background handoff filters and continues person output after foreground witness closes`() {
+        val key = "elu_pk_live_" + "A".repeat(26)
+        val config = checkNotNull(javaClass.classLoader?.getResource("contracts/v2/fixtures/config-enabled.json")).readText()
+        val wall = Instant.parse("2026-08-05T00:01:00Z").toEpochMilli()
+        val sourceClock = object : V2ConfigClock {
+            override fun wallNowEpochMillis() = wall
+            override fun monotonicNowNanos() = 100L
+        }
+        val gate = V2ConfigAuthorityGate()
+        val tasks = ArrayDeque<() -> Unit>()
+        val worker = object : V2ConfigLifecycleWorker {
+            override fun execute(task: () -> Unit) { tasks.add(task) }
+            override fun interruptCurrent() = Unit
+            override fun close() = Unit
+        }
+        val source = V2ConfigSource("https://elu.dev", key, V2ConfigTransport { V2ConfigHttpResponse(200, config) }, sourceClock)
+        val driver = V2ConfigLifecycleDriver(source, gate::update, sourceClock,
+            object : V2ConfigLifecycleScheduler {
+                override fun schedule(delayNanos: Long, task: () -> Unit) = V2ConfigLifecycleTask { }
+                override fun close() = Unit
+            }, worker)
+        lateinit var facade: dev.elu.analytics.internal.facade.StandaloneFacade
+        val names = mutableListOf<String>()
+        val filter = RuntimeEventFilter(callback = EluEvent.Filter {
+            names += it.event
+            if (it.event == StandaloneRuntime.APPLICATION_BACKGROUNDED_EVENT) it.set = mutableMapOf("handoff" to true)
+            it
+        })
+        val backing = FakeRuntimeQueueBacking()
+        val owner = RuntimeQueueOwner.open("filter-background-${UUID.randomUUID()}", RuntimeQueueLimits(100, 1_000_000),
+            { backing.connection() }, { fresh().let { it.copy(identity = it.identity.copy(updatedAt = "2026-08-05T00:00:00Z")) } },
+            trustedSiteKey = key, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            captureClock = object : RuntimeCaptureClock {
+                override fun wallNowEpochMillis() = wall
+                override fun elapsedRealtimeNanos() = 100L
+            }, eventFilter = filter.boundTo { facade.eventFilterAdmission() }).await()
+        owners += owner; owner.bindConfigurationGate(gate).await()
+        val runtime = StandaloneRuntime(owner, key, wallClock = { wall }, configurationGate = gate,
+            transportFactory = { dev.elu.analytics.internal.runtime.delivery.BatchHTTPTransport {
+                dev.elu.analytics.internal.runtime.delivery.BatchHTTPResponse(503, ByteArray(0))
+            } }, deviceInEuTimezone = { false })
+        facade = dev.elu.analytics.internal.facade.StandaloneFacade(
+            open = { dev.elu.analytics.internal.facade.StandaloneStack(runtime, owner, null) },
+            deliverCallback = { it.run() }, wallClock = { wall }, configurationGate = gate,
+            personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY, eventFilter = filter)
+        try {
+            facade.start(); driver.start(); tasks.removeFirst().invoke(); facade.configurationChanged(); facade.settled().await()
+            assertTrue(facade.state() is dev.elu.analytics.internal.facade.EluFacadeState.Enabled)
+            val original = checkNotNull(gate.snapshot())
+            checkNotNull(runtime.applicationBackgrounded(driver, Instant.ofEpochMilli(wall).toString())).await()
+            assertFalse(original.isCurrent())
+            val rows = owner.peek(100, Long.MAX_VALUE).await()
+            assertEquals(listOf(StandaloneRuntime.APPLICATION_BACKGROUNDED_EVENT), names)
+            assertEquals(2, rows.size)
+            assertEquals(mapOf("handoff" to true), ((rows[1] as RuntimeQueuedRecord.Mutation).envelope.mutation.change
+                as RuntimeMutationChange.SetPersonProperties).set)
+            assertEquals(SessionLifecycle.BACKGROUND, owner.snapshot().await().state.identity.session?.lifecycle)
+        } finally { facade.close(); driver.close(); gate.close() }
     }
 
     companion object {

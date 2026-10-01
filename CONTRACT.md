@@ -220,12 +220,23 @@ remain enforced. Authority, identity, source and caller-intent currentness are
 checked again before and after writes. Known rollback and authority renewal reuse
 the original detached filter result; no callback runs inside transaction retry.
 
-Only manual capture can continue with transformed person maps after event acceptance,
-on its original facade operation and with the original identity/consent fences.
-Automatic event output containing person maps is explicitly unsupported and refuses
-the event. Standalone person/identify/alias/group mutation filtering and automatic
-person continuation remain follow-on work; this is not complete browser filtering
-parity. Replay capture is unaffected. Default setup has no filter or denylist.
+Manual capture continues transformed person maps on its original facade operation;
+automatic captures continue on the same original queue worker, including the fixed
+background handoff and an accepted rate-limit warning. Only confirmed event acceptance
+can start the separate person append. The callback is not invoked again for those
+maps. Known follow-on refusal preserves the accepted event; unknown commit retains
+the original reconciliation/quarantine behavior. The mutation uses actual wall time,
+never a backdated event time, and preserves profile, source and intent restrictions.
+
+Standalone changed identify uses `$identify` with person maps; same-identity identify
+and person properties use `$set`/`$set_once`; alias uses `$create_alias`; group uses
+`$groupidentify`/`$group_set`. Targets and mutation chronology remain the original typed
+operation even if the callback edits metadata. Removed person maps are a no-op; a
+changed group retains its association when its property map is removed. Public
+person/group updates in flags-only mode retain the original durable flag authority;
+explicit `ForFlags` and typed unset/set-once-only operations without these projections
+remain unchanged. All filtered mutation writes recheck original admission before
+and after writes and on retry. Replay is unaffected; default setup has no filter.
 
 ## Explicit capture time and associated person properties
 
