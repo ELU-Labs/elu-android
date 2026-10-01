@@ -1,5 +1,3 @@
-# Every public, non-synthetic JVM class in the release classes.jar.
-# Regenerate with: python3 scripts/check-api-snapshot.py --update-classes <aar>
 dev.elu.analytics.Elu
 dev.elu.analytics.EluAnnotatedReplayBinding
 dev.elu.analytics.EluAnnotatedReplayRootScope
@@ -13,6 +11,18 @@ dev.elu.analytics.EluEuGuard
 dev.elu.analytics.EluEventBuffer
 dev.elu.analytics.EluFeatureFlagOptions
 dev.elu.analytics.EluFeatureFlagResult
+dev.elu.analytics.EluFeatureFlagSnapshot
+dev.elu.analytics.EluFeatureFlagSnapshot$Entry
+dev.elu.analytics.EluFeatureFlagSnapshot$Listener
+dev.elu.analytics.EluFeatureFlagSnapshot$LoadError
+dev.elu.analytics.EluFeatureFlagSnapshot$Source
+dev.elu.analytics.EluFeatureFlagSnapshot$Value
+dev.elu.analytics.EluFeatureFlagSnapshot$Value$BooleanValue
+dev.elu.analytics.EluFeatureFlagSnapshot$Value$NullValue
+dev.elu.analytics.EluFeatureFlagSnapshot$Value$NumberValue
+dev.elu.analytics.EluFeatureFlagSnapshot$Value$StringValue
+dev.elu.analytics.EluFeatureFlagSubscription
+dev.elu.analytics.EluFeatureFlagSubscription$Companion
 dev.elu.analytics.EluFrameMetricsOptions
 dev.elu.analytics.EluOkHttpInterceptor
 dev.elu.analytics.EluOptions
@@ -38,6 +48,7 @@ dev.elu.analytics.EluStatePolicy
 dev.elu.analytics.EluStatePolicy$Action
 dev.elu.analytics.EluStatePolicy$State
 dev.elu.analytics.EluVersion
+dev.elu.analytics.FeatureFlagCancellation
 dev.elu.analytics.internal.concurrent.SdkCompletionStage
 dev.elu.analytics.internal.concurrent.SdkFuture
 dev.elu.analytics.internal.concurrent.SdkFuture$Companion
@@ -341,6 +352,11 @@ dev.elu.analytics.internal.flags.FlagRequest
 dev.elu.analytics.internal.flags.FlagRequestToken
 dev.elu.analytics.internal.flags.FlagResponse
 dev.elu.analytics.internal.flags.FlagRestrictionReason
+dev.elu.analytics.internal.flags.FlagSnapshotReadResult
+dev.elu.analytics.internal.flags.FlagSnapshotReadResult$Found
+dev.elu.analytics.internal.flags.FlagSnapshotReadResult$Missing
+dev.elu.analytics.internal.flags.FlagSnapshotReadResult$Restricted
+dev.elu.analytics.internal.flags.FlagSnapshotReadResult$Terminal
 dev.elu.analytics.internal.flags.FlagTransport
 dev.elu.analytics.internal.flags.FlagTransportRequest
 dev.elu.analytics.internal.flags.HttpURLConnectionFlagTransport
