@@ -16,6 +16,7 @@ import dev.elu.analytics.internal.flags.FlagClock
 import dev.elu.analytics.internal.flags.FlagOpaqueIdSource
 import dev.elu.analytics.internal.flags.FlagTransport
 import dev.elu.analytics.internal.runtime.RuntimeRecordCodec
+import dev.elu.analytics.internal.runtime.RuntimeMutationChange
 import dev.elu.analytics.internal.runtime.FakeRuntimeQueueBacking
 import dev.elu.analytics.internal.runtime.RuntimeCaptureClock
 import dev.elu.analytics.internal.runtime.RuntimeEventKind
@@ -2116,7 +2117,7 @@ class StandaloneFacadeTest {
         assertEquals(mapOf("first" to "Home", "last" to "\$exception"), h.owner.snapshot().get().state.flagContext.personProperties)
         assertEquals(requests, h.flagTransport.requests.size)
         assertNull(h.facade.getFeatureFlagSnapshot())
-        h.facade.reloadFeatureFlags(); h.settle()
+        h.facade.reloadFeatureFlags(null); h.settle()
         assertEquals(requests + 1, h.flagTransport.requests.size)
         assertNotNull(h.facade.getFeatureFlagSnapshot())
     }
