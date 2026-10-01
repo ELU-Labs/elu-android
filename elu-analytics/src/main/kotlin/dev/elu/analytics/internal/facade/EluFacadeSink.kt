@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluCaptureOptions
 import dev.elu.analytics.EluFeatureFlagResult
 import dev.elu.analytics.EluFeatureFlagOptions
 import java.util.Date
@@ -18,6 +19,8 @@ internal interface EluFacadeSink {
         properties: Map<String, Any>?,
         timestamp: Date,
     )
+
+    fun capture(event: String, properties: Map<String, Any>?, options: EluCaptureOptions)
 
     fun identify(
         distinctId: String,

@@ -14,6 +14,7 @@ class EluFacadeSafetyTest {
     @Test
     fun `every facade call is safe before setup`() {
         Elu.capture("event", mapOf("value" to 1))
+        Elu.capture("event", null, EluCaptureOptions(java.util.Date(1), mapOf("tier" to "paid")))
         Elu.identify("user", mapOf("plan" to "test"))
         Elu.reset()
         Elu.reset(true)
@@ -60,6 +61,18 @@ class EluFacadeSafetyTest {
         assertEquals(EluFeatureFlagOptions(false), options.getConstructor(java.lang.Boolean.TYPE).newInstance(false))
         assertEquals(EluFeatureFlagOptions(false, true),
             options.getConstructor(java.lang.Boolean.TYPE, java.lang.Boolean.TYPE).newInstance(false, true))
+    }
+
+    @Test
+    fun `capture options are additive and retain original Java capture descriptors`() {
+        val facade = Elu::class.java
+        assertEquals(java.lang.Void.TYPE, facade.getMethod("capture", String::class.java).returnType)
+        assertEquals(java.lang.Void.TYPE, facade.getMethod("capture", String::class.java, Map::class.java).returnType)
+        assertEquals(java.lang.Void.TYPE, facade.getMethod("capture", String::class.java,
+            Map::class.java, EluCaptureOptions::class.java).returnType)
+        assertEquals(EluCaptureOptions(), EluCaptureOptions::class.java.getConstructor().newInstance())
+        val date = java.util.Date(42)
+        assertEquals(EluCaptureOptions(date), EluCaptureOptions::class.java.getConstructor(java.util.Date::class.java).newInstance(date))
     }
 
     @Test

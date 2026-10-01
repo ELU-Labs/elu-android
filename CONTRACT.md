@@ -183,6 +183,32 @@ choice cannot survive process death before durable storage has been opened.
 set-once values. Flag result getters return null when no currently valid result
 exists; a result contains its key, enabled state, variant and payload.
 
+## Explicit capture time and associated person properties
+
+The existing capture overloads are unchanged. `capture(event, properties,
+EluCaptureOptions)` adds an optional `Date`, `set` and `setOnce`. Omitted time uses
+call time. Timestamp and JSON inputs are detached before buffering. The event
+keeps its explicit time; the person mutation keeps call time, with the original
+runtime timestamp validation and monotonic record ordering. A future event or
+clock rollback can reject the subsequent person mutation; the SDK does not
+backdate or rewrite either timestamp to force acceptance.
+
+Person fields are separate from event properties. Only an accepted event can
+proceed to the original person mutation, on the same facade operation. Invalid,
+denied, rate-limited or queue-rejected events do not apply associated fields.
+Reset/identify intent, consent changes, closure and source authority remain
+fences. Pending flag-context intent spans both writes. Associated updates
+invalidate old flag values without automatically requesting another reload;
+overlapping explicit identity/context operations keep their existing reload
+behavior. `NEVER` profile mode suppresses the person update. Absent fields mean
+no person intent; explicitly empty fields retain a person intent.
+
+The event and person mutation are ordered, not atomic. A failure or process death
+between durable writes can retain an event-only prefix; reopen does not fabricate
+its missing mutation. Retrying the capture is a new event. Existing person-update
+deduplication applies only after a successful associated mutation. Android has no
+customer capture-hook API in this slice.
+
 ## Durable delivery and restarts
 
 With default `EluPersistenceMode.PERSISTENT`, admitted analytics and mutation records use an app-private, bounded

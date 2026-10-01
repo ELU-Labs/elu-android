@@ -23,7 +23,7 @@ API_DIR = ROOT / "baselines" / "standalone" / "api"
 SNAPSHOT = API_DIR / "public-api.txt"
 CLASS_INVENTORY = API_DIR / "jvm-classes.txt"
 PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions",
-                  "dev.elu.analytics.EluFeatureFlagOptions",
+                  "dev.elu.analytics.EluFeatureFlagOptions", "dev.elu.analytics.EluCaptureOptions",
                   "dev.elu.analytics.EluFeatureFlagResult", "dev.elu.analytics.EluPerformanceOptions",
                   "dev.elu.analytics.EluOkHttpInterceptor", "dev.elu.analytics.EluFrameMetricsOptions",
                   "dev.elu.analytics.EluDiagnosticsOptions", "dev.elu.analytics.EluPersonProfilesMode",

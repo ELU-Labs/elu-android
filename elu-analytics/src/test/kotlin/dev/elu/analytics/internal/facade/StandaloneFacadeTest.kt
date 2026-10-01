@@ -1,5 +1,9 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluCaptureOptions
+import dev.elu.analytics.EluPersonProfilesMode
+import dev.elu.analytics.internal.runtime.RuntimeStartupObserver
+import dev.elu.analytics.internal.runtime.RuntimeStartupPhase
 import dev.elu.analytics.EluFeatureFlagOptions
 import dev.elu.analytics.internal.core.FlagContextState
 import dev.elu.analytics.internal.core.IdentityState
@@ -1211,6 +1215,230 @@ class StandaloneFacadeTest {
         assertEquals(0.0, backing.captureRateState!!.bucket!!.tokens, 0.0)
     }
 
+    @Test fun `capture options detach nested inputs and timestamp before pending admission`() {
+        val h = harness(autoStart = false, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        val date = Date(NOW_MS - 5_000)
+        val nested = mutableListOf<Any>("original")
+        val properties = mutableMapOf<String, Any>("items" to nested)
+        val set = mutableMapOf<String, Any>("tier" to mutableMapOf("name" to "paid"))
+        val once = mutableMapOf<String, Any>("origin" to "capture")
+        h.facade.capture("checkout", properties, EluCaptureOptions(date, set, once))
+        date.time = NOW_MS + 90_000; nested[0] = "changed"; set.clear(); once.clear()
+        h.facade.start(); h.facade.applyConfiguration(config()); h.settle()
+        assertEquals(listOf("event:checkout", "mutation:setPersonProperties"), h.queued())
+        val event = (h.records()[0] as RuntimeQueuedRecord.Event).record
+        val mutation = (h.records()[1] as RuntimeQueuedRecord.Mutation).envelope.mutation
+        assertEquals("2026-08-04T00:00:55.000Z", event.occurredAt)
+        assertEquals(listOf("original"), event.properties["items"])
+        assertFalse(event.properties.containsKey("\$set"))
+        assertEquals("2026-08-04T00:01:00.000Z", mutation.occurredAt)
+        assertEquals(event.identity.anonymousId, mutation.subject.anonymousId)
+        assertEquals(event.identity.revision, mutation.subject.identityRevision)
+        assertEquals(event.sequence + 1, mutation.sequence)
+        assertEquals(mapOf("tier" to mapOf("name" to "paid"), "origin" to "capture"),
+            h.owner.snapshot().get().state.flagContext.personProperties)
+    }
+
+    @Test fun `accepted capture set and setOnce stay ordered and do not request another flag reload`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.setPersonProperties(mapOf("origin" to "existing")); h.settle()
+        val reloads = h.flagTransport.requests.size
+        val options = EluCaptureOptions(Date(NOW_MS), mapOf("tier" to "paid"),
+            mapOf("origin" to "ignored", "first" to "value"))
+        h.facade.capture("first", null, options); h.facade.capture("second", null, options); h.settle()
+        assertEquals(listOf("mutation:setPersonProperties", "event:first", "mutation:setPersonProperties", "event:second"), h.queued())
+        assertEquals(mapOf("origin" to "existing", "tier" to "paid", "first" to "value"),
+            h.owner.snapshot().get().state.flagContext.personProperties)
+        assertEquals(reloads, h.flagTransport.requests.size)
+        assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false))); h.settle()
+        assertEquals(reloads, h.flagTransport.requests.size)
+    }
+
+    @Test fun `capture person intent does not erase another pending operation reload in either order`() {
+        for (captureFirst in listOf(true, false)) {
+            val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val h = harness(facadeLane = lane, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+            h.facade.applyConfiguration(config()); h.settle()
+            assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false))); h.settle()
+            assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                val capture = { h.facade.capture("checkout", null, EluCaptureOptions(set = mapOf("tier" to "paid"))) }
+                val context = { h.facade.setPersonPropertiesForFlags(mapOf("context" to "later")) }
+                if (captureFirst) { capture(); context() } else { context(); capture() }
+                assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+            } finally { release.countDown() }
+            h.settle()
+            assertEquals(mapOf("tier" to "paid", "context" to "later"), h.owner.snapshot().get().state.flagContext.personProperties)
+            assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+            assertTrue(h.exposures().isEmpty())
+        }
+    }
+
+    @Test fun `explicit reload queued before a quiet associated capture remains requested`() {
+        val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val h = harness(facadeLane = lane, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        val reloads = h.flagTransport.requests.size
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            h.facade.reloadFeatureFlags(null)
+            h.facade.capture("quiet", null, EluCaptureOptions(set = mapOf("tier" to "paid")))
+        } finally { release.countDown() }
+        h.settle()
+        assertTrue(h.flagTransport.requests.size > reloads)
+        assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false))); h.settle()
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+        assertEquals(mapOf("tier" to "paid"), h.owner.snapshot().get().state.flagContext.personProperties)
+    }
+
+    @Test fun `rejected associated capture settles its intent and permits an explicit flag reload`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        val reloads = h.flagTransport.requests.size
+        h.facade.capture("", null, EluCaptureOptions(set = mapOf("must-not-apply" to true))); h.settle()
+        assertTrue(h.records().isEmpty())
+        assertTrue(h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+        assertEquals(reloads, h.flagTransport.requests.size)
+        var completed = false
+        h.facade.reloadFeatureFlags { completed = true }; h.settle()
+        assertTrue(completed)
+        assertTrue(h.flagTransport.requests.size > reloads)
+        assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false))); h.settle()
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+    }
+
+    @Test fun `invalid denied limited or full capture never appends accompanying person properties`() {
+        for (case in listOf("invalid", "json", "person-json", "disabled", "opted-out", "rate", "queue")) {
+            val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+                rateLimiting = if (case == "rate") dev.elu.analytics.EluRateLimitingOptions(1.0, 1.0) else null,
+                limits = if (case == "queue") RuntimeQueueLimits(10, 1) else RuntimeQueueLimits(10_000, 16_777_216))
+            h.facade.applyConfiguration(if (case == "disabled") config("config-disabled.json") else config()); h.settle()
+            if (case == "opted-out") { h.facade.optOut(); h.settle() }
+            if (case == "rate") { h.facade.capture("spend", null, Date(NOW_MS)); h.settle() }
+            val options = EluCaptureOptions(Date(NOW_MS), mapOf("tier" to if (case == "person-json") Any() else "forbidden"))
+            h.facade.capture(if (case == "invalid") "" else "denied", if (case == "json") mapOf("bad" to Any()) else null, options)
+            h.settle()
+            assertTrue(case, h.records().filterIsInstance<RuntimeQueuedRecord.Mutation>().isEmpty())
+            assertTrue(case, h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+            assertFalse(case, h.records().filterIsInstance<RuntimeQueuedRecord.Event>().any { it.record.name == "denied" })
+        }
+    }
+
+    @Test fun `capture options never mode retains the event without person mutation or option payload`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.NEVER)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.capture("anonymous", mapOf("amount" to 42), EluCaptureOptions(set = mapOf("private" to "person")))
+        h.settle()
+        val record = (h.records().single() as RuntimeQueuedRecord.Event).record
+        assertEquals(false, record.properties["\$process_person_profile"])
+        assertFalse(record.properties.containsKey("private"))
+        assertFalse(record.properties.containsKey("\$set"))
+        assertTrue(h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+    }
+
+    @Test fun `ambiguous capture rollback retries event once and appends one associated mutation`() {
+        val backing = FakeRuntimeQueueBacking()
+        val h = harness(backing = backing, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        val attempts = backing.attemptedRecordAppends.size
+        backing.ambiguousNextCommit = dev.elu.analytics.internal.runtime.FakeAmbiguousOutcome.ROLLBACK
+        h.facade.capture("retry", null, EluCaptureOptions(set = mapOf("tier" to "paid"))); h.settle()
+        assertEquals(listOf("event:retry", "mutation:setPersonProperties"), h.queued())
+        val appended = backing.attemptedRecordAppends.drop(attempts)
+        assertEquals(3, appended.size)
+        assertEquals(appended[0].single().recordId, appended[1].single().recordId)
+        assertTrue(appended[1].single().sequence < appended[2].single().sequence)
+        assertEquals(mapOf("tier" to "paid"), h.owner.snapshot().get().state.flagContext.personProperties)
+    }
+
+    @Test fun `accepted capture cannot move person fields across later synchronous identity or consent intent`() {
+        for (action in listOf("reset", "identify", "opt-out")) {
+            var onAccepted: () -> Unit = {}
+            val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+                startupObserver = RuntimeStartupObserver { observation ->
+                    if (observation.phase == RuntimeStartupPhase.CAPTURE_FIRST && observation.captureAccepted == true) onAccepted()
+                })
+            h.facade.applyConfiguration(config()); h.settle()
+            val original = h.owner.snapshot().get().state.identity
+            var observed = false
+            onAccepted = {
+                observed = true
+                when (action) {
+                    "reset" -> h.facade.reset()
+                    "identify" -> h.facade.identify("next-user", null)
+                    else -> h.facade.optOut()
+                }
+            }
+            h.facade.capture("original", null, EluCaptureOptions(set = mapOf("must-not-cross" to true)))
+            h.settle()
+            assertTrue(action, observed)
+            assertTrue(action, h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+            assertFalse(action, h.records().filterIsInstance<RuntimeQueuedRecord.Mutation>().any {
+                it.envelope.mutation.change is dev.elu.analytics.internal.runtime.RuntimeMutationChange.SetPersonProperties
+            })
+            val event = h.records().filterIsInstance<RuntimeQueuedRecord.Event>().single { it.record.name == "original" }.record
+            assertEquals(original.anonymousId, event.identity.anonymousId)
+            assertEquals(original.userId, event.identity.userId)
+        }
+    }
+
+    @Test fun `failure after durable event keeps an event-only prefix and does not consume person dedupe`() {
+        for (reopen in listOf(false, true)) {
+            val backing = FakeRuntimeQueueBacking()
+            var onAccepted: () -> Unit = {}
+            val h = harness(backing = backing, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+                startupObserver = RuntimeStartupObserver { observation ->
+                    if (observation.phase == RuntimeStartupPhase.CAPTURE_FIRST && observation.captureAccepted == true) onAccepted()
+                })
+            h.facade.applyConfiguration(config()); h.settle()
+            onAccepted = { backing.failNextKnownCommit = java.io.IOException("person write unavailable") }
+            val options = EluCaptureOptions(set = mapOf("tier" to "paid"))
+            h.facade.capture("first", null, options); h.settle()
+            assertEquals(listOf("event:first"), h.queued())
+            assertTrue(h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+            onAccepted = {}
+            val current = if (reopen) {
+                h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+                harness(backing = backing, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY).also {
+                    it.facade.applyConfiguration(config()); it.settle()
+                    assertEquals(listOf("event:first"), it.queued())
+                    assertTrue(it.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+                }
+            } else h
+            current.facade.capture("second", null, options); current.settle()
+            assertEquals(listOf("event:first", "event:second", "mutation:setPersonProperties"), current.queued())
+            assertEquals(mapOf("tier" to "paid"), current.owner.snapshot().get().state.flagContext.personProperties)
+        }
+    }
+
+    @Test fun `absent person options differ from an explicit empty person intent`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.capture("plain", null, EluCaptureOptions()); h.settle()
+        assertEquals(listOf("event:plain"), h.queued())
+        h.facade.capture("person", null, EluCaptureOptions(set = emptyMap())); h.settle()
+        assertEquals(listOf("event:plain", "event:person", "mutation:setPersonProperties"), h.queued())
+        h.facade.capture("following", null, EluCaptureOptions()); h.settle()
+        assertEquals(true, (h.records().last() as RuntimeQueuedRecord.Event).record.properties["\$process_person_profile"])
+    }
+
+    @Test fun `future event time cannot silently backdate its later person mutation`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.capture("future", null, EluCaptureOptions(Date(NOW_MS + 1_000), set = mapOf("tier" to "paid")))
+        h.settle()
+        assertEquals(listOf("event:future"), h.queued())
+        assertEquals("2026-08-04T00:01:01.000Z", (h.records().single() as RuntimeQueuedRecord.Event).record.occurredAt)
+        assertTrue(h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())
+        assertEquals(1, h.diagnostics().dropped[EluFacadeDropReason.INVALID_INPUT])
+    }
+
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
@@ -1230,6 +1458,7 @@ class StandaloneFacadeTest {
         retryScheduler: dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler = ManualFlagRetryScheduler(),
         limits: RuntimeQueueLimits = RuntimeQueueLimits(10_000, 16_777_216),
         rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
+        startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -1279,6 +1508,7 @@ class StandaloneFacadeTest {
                 networkApiHost = networkApiHost,
                 onCloseSettled = onCloseSettled,
                 personProfiles = personProfiles ?: dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY,
+                startupObserver = startupObserver,
             )
         facades += facade
         if (autoStart) facade.start()

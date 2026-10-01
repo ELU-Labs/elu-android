@@ -19,8 +19,10 @@ PINNED_FILES = {
     "elu-analytics/src/main/AndroidManifest.xml":
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
+    "elu-analytics/src/main/kotlin/dev/elu/analytics/EluCaptureOptions.kt":
+        "7e7be13379168018540470848f11be2796b80f3294bceb12b6a9cfccead37299",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "d34d64ebaae9d26cdcd5e4469743fe1d748264babfbe92359645a223fc2c42c5",
+        "3c3d8c15c33509fa2de3db81bb4a7c0afb34118c856523d2d08b5d27fea95e81",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagOptions.kt":
         "8d78e1650df46a5bacf42f2e6382000b56df8b172c84ec5a67b098b5239e0467",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":

@@ -90,6 +90,12 @@ public object Elu {
         sink?.capture(event, properties, Date())
     }
 
+    /** An accepted event is followed by its person-property mutation; the two writes are not atomic. */
+    @JvmStatic
+    public fun capture(event: String, properties: Map<String, Any>?, options: EluCaptureOptions) {
+        sink?.capture(event, properties, options)
+    }
+
     /** Original sink only; installing the customer interceptor never starts another SDK. */
     @JvmSynthetic
     internal fun beginNetworkObservation(host: String): dev.elu.analytics.internal.network.NativeNetworkObservation? =

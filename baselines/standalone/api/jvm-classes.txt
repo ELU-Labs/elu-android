@@ -4,6 +4,7 @@ dev.elu.analytics.Elu
 dev.elu.analytics.EluAnnotatedReplayBinding
 dev.elu.analytics.EluAnnotatedReplayRootScope
 dev.elu.analytics.EluAnnotatedReplayRootScope$Companion
+dev.elu.analytics.EluCaptureOptions
 dev.elu.analytics.EluConfigClient
 dev.elu.analytics.EluConfigHostPolicy
 dev.elu.analytics.EluConfigUrl

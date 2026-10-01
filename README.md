@@ -408,6 +408,30 @@ Elu.capture("checkout_started", mapOf("cart_value" to 42.5))
 Elu.screen("Checkout")
 ```
 
+For an explicit event time or associated person properties, use capture options:
+
+```kotlin
+Elu.capture(
+    "checkout_completed",
+    mapOf("amount" to 42),
+    EluCaptureOptions(
+        timestamp = java.util.Date(),
+        set = mapOf("plan" to "paid"),
+        setOnce = mapOf("first_checkout" to "mobile"),
+    ),
+)
+```
+
+The SDK copies the timestamp and JSON values when called. A rejected event does
+not apply its person properties. After an accepted event, the person update runs
+next on the same ordered operation, using current consent and identity checks;
+it does not trigger a flag reload. `NEVER` person-profile mode keeps the event
+without the associated person update. These are separate durable writes: a
+storage failure or process death between them can leave only the event. Event
+timestamps retain the existing validation and ordering rules; a future event
+time can make the following call-time person update inadmissible. Capture hooks
+are not currently available.
+
 Activity-based apps get `$screen` events automatically on every foreground
 Activity start. **Compose (single-Activity) apps must call `Elu.screen()`
 manually** — hook your `NavController`:

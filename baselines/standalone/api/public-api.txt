@@ -6,6 +6,7 @@ public final class dev.elu.analytics.Elu {
   public static void setup$default(android.content.Context, java.lang.String, dev.elu.analytics.EluOptions, int, java.lang.Object);
   public static final void capture(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
   public static void capture$default(java.lang.String, java.util.Map, int, java.lang.Object);
+  public static final void capture(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>, dev.elu.analytics.EluCaptureOptions);
   public final dev.elu.analytics.internal.network.NativeNetworkObservation beginNetworkObservation$elu_analytics_release(java.lang.String);
   public static final void identify(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
   public static void identify$default(java.lang.String, java.util.Map, int, java.lang.Object);
@@ -137,6 +138,25 @@ public final class dev.elu.analytics.EluFeatureFlagOptions {
   public boolean equals(java.lang.Object);
   public dev.elu.analytics.EluFeatureFlagOptions(boolean);
   public dev.elu.analytics.EluFeatureFlagOptions();
+}
+Compiled from "EluCaptureOptions.kt"
+public final class dev.elu.analytics.EluCaptureOptions {
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date, java.util.Map<java.lang.String, ? extends java.lang.Object>, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date, java.util.Map, java.util.Map, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final java.util.Date getTimestamp();
+  public final java.util.Map<java.lang.String, java.lang.Object> getSet();
+  public final java.util.Map<java.lang.String, java.lang.Object> getSetOnce();
+  public final java.util.Date component1();
+  public final java.util.Map<java.lang.String, java.lang.Object> component2();
+  public final java.util.Map<java.lang.String, java.lang.Object> component3();
+  public final dev.elu.analytics.EluCaptureOptions copy(java.util.Date, java.util.Map<java.lang.String, ? extends java.lang.Object>, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static dev.elu.analytics.EluCaptureOptions copy$default(dev.elu.analytics.EluCaptureOptions, java.util.Date, java.util.Map, java.util.Map, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public dev.elu.analytics.EluCaptureOptions(java.util.Date);
+  public dev.elu.analytics.EluCaptureOptions();
 }
 Compiled from "EluFeatureFlagResult.kt"
 public final class dev.elu.analytics.EluFeatureFlagResult {
