@@ -3,6 +3,7 @@ package dev.elu.analytics.internal.facade
 import dev.elu.analytics.EluPersonProfilesMode
 
 import dev.elu.analytics.EluFeatureFlagResult
+import dev.elu.analytics.EluFeatureFlagOptions
 import dev.elu.analytics.internal.runtime.NativeStartTrace
 import dev.elu.analytics.internal.runtime.NativeStartPhase
 
@@ -165,6 +166,9 @@ internal class StandaloneFacade(
     private val observedFlagKeys = LinkedHashSet<String>()
     private val reloadCompletions = mutableListOf<() -> Unit>()
     private var flagsFromRemote = false
+    // One immutable remote-origin fact is published to caller threads; never read the lane-only
+    // exposure-origin Boolean there. Its original token and generation must match the read.
+    @Volatile private var remoteFlagOrigin: RemoteFlagOrigin? = null
     private var flagEvaluationDigest: String? = null
     /** Identifies the loaded flags; a reset abandons the reload started for the previous one. */
     @Volatile private var flagGeneration = 0L
@@ -821,13 +825,24 @@ internal class StandaloneFacade(
 
     override fun getFeatureFlag(key: String): Any? = readFlag(key, expose = true)?.value
 
+    override fun getFeatureFlag(key: String, options: EluFeatureFlagOptions): Any? =
+        readFlag(key, expose = options.sendEvent, fresh = options.fresh)?.value
+
     override fun getFeatureFlagResult(key: String): EluFeatureFlagResult? = readFlag(key, expose = true)?.let {
         EluFeatureFlagResult(key, isTruthyVariant(it.value), it.value as? String, it.payload)
     }
 
+    override fun getFeatureFlagResult(key: String, options: EluFeatureFlagOptions): EluFeatureFlagResult? =
+        readFlag(key, expose = options.sendEvent, fresh = options.fresh)?.let {
+            EluFeatureFlagResult(key, isTruthyVariant(it.value), it.value as? String, it.payload)
+        }
+
     override fun getFeatureFlagPayload(key: String): Any? = readFlag(key, expose = false)?.payload
 
     override fun isFeatureEnabled(key: String): Boolean = isTruthyVariant(readFlag(key, expose = true)?.value)
+
+    override fun isFeatureEnabled(key: String, options: EluFeatureFlagOptions, defaultValue: Boolean?): Boolean? =
+        readFlag(key, expose = options.sendEvent, fresh = options.fresh)?.let { isTruthyVariant(it.value) } ?: defaultValue
 
     override fun reloadFeatureFlags(completion: (() -> Unit)?) {
         // A reload is a command, not a state change: it is never replayed from the hold buffer.
@@ -1323,6 +1338,13 @@ internal class StandaloneFacade(
 
     // ---- flag snapshot, listeners and exposure -------------------------------
 
+    private class RemoteFlagOrigin(
+        val generation: Long,
+        val intent: Long,
+        val token: FlagCacheLeaseToken,
+        val digest: String,
+    )
+
     private class FlagEntry(
         val present: Boolean,
         val value: Any?,
@@ -1334,31 +1356,44 @@ internal class StandaloneFacade(
     private fun readFlag(
         key: String,
         expose: Boolean,
+        fresh: Boolean = false,
     ): FlagEntry? {
         if (key.isEmpty()) return null
         val intent = flagIntentRevision
         if (!flagsLoaded || !flagIntentIsCurrent(intent) || !hasCurrentFlags()) return null
         val generation = flagGeneration
         val entry = flagProjection[key]?.takeIf(::entryIsCurrent)
+        val origin = remoteFlagOrigin
+        val eligible = {
+            !fresh || origin != null && remoteFlagOrigin === origin &&
+                origin.generation == generation && origin.intent == intent &&
+                origin.token == entry?.cacheLeaseToken && origin.digest == when (val read = entry?.read) {
+                    is FlagReadResult.Found -> read.metadata?.logicalDigest
+                    is FlagReadResult.CacheMiss -> read.metadata?.logicalDigest
+                    else -> null
+                }
+        }
         submit {
             // The owned client resolves one key at a time, so a key is read once here and then
             // refreshed on every later load.
             if (observedFlagKeys.add(key)) resolveFlag(key)
-            if (expose && generation == flagGeneration && flagIntentIsCurrent(intent)) reportExposure(key, entry)
+            if (expose && generation == flagGeneration && flagIntentIsCurrent(intent) && eligible()) {
+                reportExposure(key, entry, eligible)
+            }
         }
-        return entry?.takeIf { it.present && generation == flagGeneration && flagIntentIsCurrent(intent) && hasCurrentFlags() && entryIsCurrent(it) }
+        return entry?.takeIf { it.present && generation == flagGeneration && flagIntentIsCurrent(intent) && hasCurrentFlags() && entryIsCurrent(it) && eligible() }
     }
 
     private fun entryIsCurrent(entry: FlagEntry): Boolean =
         entry.cacheLeaseToken?.let { stack?.flags?.isCacheLeaseCurrent(it) } == true
 
     /** The original queue transaction owns anonymous-visitor dedupe, never this projection. */
-    private fun reportExposure(key: String, entry: FlagEntry?) {
+    private fun reportExposure(key: String, entry: FlagEntry?, readIsEligible: () -> Boolean) {
         val intent = flagIntentRevision
-        if (entry == null || !flagIntentIsCurrent(intent) || !hasCurrentFlags() || !entryIsCurrent(entry)) return
+        if (entry == null || !flagIntentIsCurrent(intent) || !hasCurrentFlags() || !entryIsCurrent(entry) || !readIsEligible()) return
         val read = entry.read ?: return
         val exposure = dev.elu.analytics.internal.runtime.RuntimeFlagExposureCapture.from(key, read, !flagsFromRemote) {
-            flagIntentIsCurrent(intent) && hasCurrentFlags() && entryIsCurrent(entry)
+            flagIntentIsCurrent(intent) && hasCurrentFlags() && entryIsCurrent(entry) && readIsEligible()
         } ?: return
         val occurredAt = now()
         dispatch(kind = OperationKind.ACTIVITY) {
@@ -1424,6 +1459,9 @@ internal class StandaloneFacade(
                 if (loadedCacheToken?.let { stack?.flags?.isCacheLeaseCurrent(it) } != true) {
                     finishFlagReload()
                     return
+                }
+                remoteFlagOrigin = result.metadata?.let {
+                    RemoteFlagOrigin(generation, flagIntentRevision, checkNotNull(result.cacheLeaseToken), it.logicalDigest)
                 }
                 result.metadata?.let { flagsFromRemote = true; flagEvaluationDigest = it.logicalDigest }
                 observedFlagKeys.forEach { key -> resolveFlag(key) }
@@ -1504,6 +1542,7 @@ internal class StandaloneFacade(
         }
         if (metadata != null && metadata.logicalDigest != flagEvaluationDigest) {
             flagsFromRemote = false
+            remoteFlagOrigin = null
             flagEvaluationDigest = metadata.logicalDigest
         }
         val entry =
@@ -1534,6 +1573,7 @@ internal class StandaloneFacade(
         flagProjection = emptyMap()
         flagsLoaded = false
         flagsFromRemote = false
+        remoteFlagOrigin = null
         flagEvaluationDigest = null
         loadedCacheToken = null
         flagGeneration = Math.incrementExact(flagGeneration)

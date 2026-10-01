@@ -138,6 +138,20 @@ reconcile the exact event and metadata together. Saturation suppresses new
 exposure events without evicting old reports, blocking getters or ordinary events.
 The raw frozen-protocol seam cannot produce this production exposure metadata.
 
+Additive public `EluFeatureFlagOptions(sendEvent = true, fresh = false)` overloads
+preserve the original getter descriptors. Quiet reads never reserve or consume
+an exposure digest. Fresh reads require the exact current cache lease and logical
+evaluation that an accepted response installed during the original facade's
+lifetime, joined to its current generation and identity/context intent. Restored
+cache alone is not fresh. Both the returned projection and any later exposure
+transaction recheck that origin and the existing authority/cache deadlines.
+Identity, context, consent and close fences still apply. No read option initiates
+a network request, extends expiry, changes storage, or grants authority. The
+existing per-key local lookup remains asynchronous. The new optional Boolean
+getter distinguishes unavailable from evaluated false and applies its fallback
+only to unavailable values; the original Boolean getter remains false on
+unavailability. Payload reads remain quiet.
+
 Exposure properties retain the validated evaluation request ID and evaluation
 time, including a missing key in an otherwise valid evaluation. No usable cache
 means no exposure report. The remote/cache bit compares flags revision, flags

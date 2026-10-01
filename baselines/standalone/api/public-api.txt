@@ -33,9 +33,13 @@ public final class dev.elu.analytics.Elu {
   public static void group$default(java.lang.String, java.lang.String, java.util.Map, int, java.lang.Object);
   public static final java.lang.String distinctId();
   public static final java.lang.Object getFeatureFlag(java.lang.String);
+  public static final java.lang.Object getFeatureFlag(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions);
   public static final dev.elu.analytics.EluFeatureFlagResult getFeatureFlagResult(java.lang.String);
+  public static final dev.elu.analytics.EluFeatureFlagResult getFeatureFlagResult(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions);
   public static final java.lang.Object getFeatureFlagPayload(java.lang.String);
   public static final boolean isFeatureEnabled(java.lang.String);
+  public static final java.lang.Boolean isFeatureEnabled(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions, java.lang.Boolean);
+  public static java.lang.Boolean isFeatureEnabled$default(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions, java.lang.Boolean, int, java.lang.Object);
   public static final void reloadFeatureFlags(kotlin.jvm.functions.Function0<kotlin.Unit>);
   public static void reloadFeatureFlags$default(kotlin.jvm.functions.Function0, int, java.lang.Object);
   public static final void onFeatureFlagsLoaded(kotlin.jvm.functions.Function0<kotlin.Unit>);
@@ -59,6 +63,7 @@ public final class dev.elu.analytics.Elu {
   public static final void optIn();
   public static final void registerOnce(java.util.Map<java.lang.String, ? extends java.lang.Object>);
   public static final void group(java.lang.String, java.lang.String);
+  public static final java.lang.Boolean isFeatureEnabled(java.lang.String, dev.elu.analytics.EluFeatureFlagOptions);
   public static final void reloadFeatureFlags();
   public static final void resetGroupPropertiesForFlags();
 }
@@ -116,6 +121,22 @@ public final class dev.elu.analytics.EluOptions {
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluPerformanceOptions);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions, dev.elu.analytics.EluPerformanceOptions);
   public dev.elu.analytics.EluOptions(dev.elu.analytics.EluDiagnosticsOptions);
+}
+Compiled from "EluFeatureFlagOptions.kt"
+public final class dev.elu.analytics.EluFeatureFlagOptions {
+  public dev.elu.analytics.EluFeatureFlagOptions(boolean, boolean);
+  public dev.elu.analytics.EluFeatureFlagOptions(boolean, boolean, int, kotlin.jvm.internal.DefaultConstructorMarker);
+  public final boolean getSendEvent();
+  public final boolean getFresh();
+  public final boolean component1();
+  public final boolean component2();
+  public final dev.elu.analytics.EluFeatureFlagOptions copy(boolean, boolean);
+  public static dev.elu.analytics.EluFeatureFlagOptions copy$default(dev.elu.analytics.EluFeatureFlagOptions, boolean, boolean, int, java.lang.Object);
+  public java.lang.String toString();
+  public int hashCode();
+  public boolean equals(java.lang.Object);
+  public dev.elu.analytics.EluFeatureFlagOptions(boolean);
+  public dev.elu.analytics.EluFeatureFlagOptions();
 }
 Compiled from "EluFeatureFlagResult.kt"
 public final class dev.elu.analytics.EluFeatureFlagResult {

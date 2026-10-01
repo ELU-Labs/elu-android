@@ -20,7 +20,9 @@ PINNED_FILES = {
         "531cc169655bb89c4544a7a52e03328fb3e24a486c1d5c7e07812b6b9f93aae6",
     # Approved public/config surfaces and the runtime dependency manifest.
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "5ec8e146d040c117c916190f512acfafaed18dcff58ef5bb33a0dfdca3271ba7",
+        "d34d64ebaae9d26cdcd5e4469743fe1d748264babfbe92359645a223fc2c42c5",
+    "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagOptions.kt":
+        "8d78e1650df46a5bacf42f2e6382000b56df8b172c84ec5a67b098b5239e0467",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":

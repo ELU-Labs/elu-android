@@ -10,6 +10,7 @@ dev.elu.analytics.EluConfigUrl
 dev.elu.analytics.EluDiagnosticsOptions
 dev.elu.analytics.EluEuGuard
 dev.elu.analytics.EluEventBuffer
+dev.elu.analytics.EluFeatureFlagOptions
 dev.elu.analytics.EluFeatureFlagResult
 dev.elu.analytics.EluFrameMetricsOptions
 dev.elu.analytics.EluOkHttpInterceptor

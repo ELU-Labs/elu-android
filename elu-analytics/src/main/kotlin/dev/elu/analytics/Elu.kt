@@ -218,8 +218,16 @@ public object Elu {
         return sink?.getFeatureFlag(key)
     }
 
+    /** Reads a flag with explicit exposure and current-instance freshness options. */
+    @JvmStatic
+    public fun getFeatureFlag(key: String, options: EluFeatureFlagOptions): Any? = sink?.getFeatureFlag(key, options)
+
     @JvmStatic
     public fun getFeatureFlagResult(key: String): EluFeatureFlagResult? = sink?.getFeatureFlagResult(key)
+
+    @JvmStatic
+    public fun getFeatureFlagResult(key: String, options: EluFeatureFlagOptions): EluFeatureFlagResult? =
+        sink?.getFeatureFlagResult(key, options)
 
     @JvmStatic
     public fun getFeatureFlagPayload(key: String): Any? {
@@ -230,6 +238,15 @@ public object Elu {
     public fun isFeatureEnabled(key: String): Boolean {
         return sink?.isFeatureEnabled(key) ?: false
     }
+
+    /** Unavailable values return [defaultValue]; an evaluated false remains false. */
+    @JvmStatic
+    @JvmOverloads
+    public fun isFeatureEnabled(
+        key: String,
+        options: EluFeatureFlagOptions,
+        defaultValue: Boolean? = null,
+    ): Boolean? = sink?.isFeatureEnabled(key, options, defaultValue) ?: defaultValue
 
     @JvmStatic
     @JvmOverloads

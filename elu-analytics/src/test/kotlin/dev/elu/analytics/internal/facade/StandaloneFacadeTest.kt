@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluFeatureFlagOptions
 import dev.elu.analytics.internal.core.FlagContextState
 import dev.elu.analytics.internal.core.IdentityState
 import dev.elu.analytics.internal.core.PersistedCoreState
@@ -825,6 +826,120 @@ class StandaloneFacadeTest {
         }
     }
 
+    @Test fun `quiet reads leave exposure ledger available to the next reporting read`() {
+        val h = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY); h.facade.applyConfiguration(config()); h.settle()
+        val quiet = EluFeatureFlagOptions(sendEvent = false)
+        assertNull(h.facade.getFeatureFlag("variant", quiet)); h.settle()
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant", quiet))
+        val result = checkNotNull(h.facade.getFeatureFlagResult("variant", quiet))
+        assertEquals("variant-a", result.variant)
+        assertEquals(mapOf("buttonColor" to "violet"), result.payload)
+        assertEquals(true, h.facade.isFeatureEnabled("variant", quiet, null)); h.settle()
+        assertTrue(h.exposures().isEmpty())
+        assertTrue(h.owner.snapshot().get().exposures!!.digests.isEmpty())
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions())); h.settle()
+        assertEquals(1, h.exposures().size)
+        assertEquals(1, h.owner.snapshot().get().exposures!!.digests.size)
+        h.facade.getFeatureFlagResult("variant", EluFeatureFlagOptions()); h.settle()
+        assertEquals(1, h.exposures().size)
+    }
+
+    @Test fun `optional enabled fallback distinguishes unavailable from evaluated false`() {
+        val h = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        val quiet = EluFeatureFlagOptions(sendEvent = false)
+        assertFalse(h.facade.isFeatureEnabled("bool-false"))
+        assertNull(h.facade.isFeatureEnabled("bool-false", quiet, null))
+        assertEquals(true, h.facade.isFeatureEnabled("bool-false", quiet, true))
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.getFeatureFlag("bool-false", quiet); h.settle()
+        assertEquals(false, h.facade.getFeatureFlag("bool-false", quiet))
+        assertEquals(false, h.facade.isFeatureEnabled("bool-false", quiet, true))
+        assertFalse(checkNotNull(h.facade.getFeatureFlagResult("bool-false", quiet)).enabled)
+        h.facade.getFeatureFlag("not-in-evaluation", quiet); h.settle()
+        assertNull(h.facade.isFeatureEnabled("not-in-evaluation", quiet, null))
+        assertEquals(true, h.facade.isFeatureEnabled("not-in-evaluation", quiet, true))
+        h.settle(); assertTrue(h.exposures().isEmpty())
+        assertTrue(h.owner.snapshot().get().exposures!!.digests.isEmpty())
+    }
+
+    @Test fun `fresh rejects reopened cache without fetching or consuming a report`() {
+        val backing = FakeRuntimeQueueBacking()
+        val quiet = EluFeatureFlagOptions(sendEvent = false)
+        val fresh = EluFeatureFlagOptions(fresh = true)
+        val first = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        first.facade.applyConfiguration(config()); first.settle()
+        first.facade.getFeatureFlag("variant", quiet); first.settle()
+        assertEquals("variant-a", first.facade.getFeatureFlag("variant", quiet))
+        first.settle(); first.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val transport = RespondingFlagTransport().apply { failing = true }
+        val reopened = harness(backing = backing, suppliedFlagTransport = transport, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        reopened.facade.applyConfiguration(config()); reopened.settle()
+        reopened.facade.getFeatureFlag("variant", quiet); reopened.settle()
+        assertEquals("variant-a", reopened.facade.getFeatureFlag("variant", quiet))
+        val requests = transport.requests.size
+        assertNull(reopened.facade.getFeatureFlag("variant", fresh))
+        assertNull(reopened.facade.getFeatureFlagResult("variant", fresh))
+        assertEquals(false, reopened.facade.isFeatureEnabled("variant", fresh, false))
+        reopened.settle()
+        assertEquals(requests, transport.requests.size)
+        assertTrue(reopened.exposures().isEmpty())
+        assertTrue(reopened.owner.snapshot().get().exposures!!.digests.isEmpty())
+        transport.failing = false
+        reopened.facade.reloadFeatureFlags {}; reopened.settle()
+        assertEquals("variant-a", reopened.facade.getFeatureFlag("variant", fresh)); reopened.settle()
+        assertEquals(1, reopened.exposures().size)
+        assertEquals(false, reopened.exposures().single()["\$used_bootstrap_value"])
+    }
+
+    @Test fun `fresh does not extend original cache expiry or initiate network work`() {
+        val advance = AtomicLong(0)
+        val clock = object : FlagClock {
+            override fun wallNowEpochMillis() = NOW_MS + advance.get()
+            override fun monotonicNowNanos() = 1_000_000_000L + advance.get() * 1_000_000L
+        }
+        val h = harness(flagClock = clock, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+        val freshQuiet = EluFeatureFlagOptions(sendEvent = false, fresh = true)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.getFeatureFlag("variant", freshQuiet); h.settle()
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant", freshQuiet)); h.settle()
+        val requests = h.flagTransport.requests.size
+        advance.set(180_001L) // The actual response expires at 00:04; NOW is 00:01.
+        assertNull(h.facade.getFeatureFlag("variant", freshQuiet))
+        assertNull(h.facade.getFeatureFlagResult("variant", freshQuiet))
+        assertEquals(true, h.facade.isFeatureEnabled("variant", freshQuiet, true))
+        h.settle()
+        assertEquals(requests, h.flagTransport.requests.size)
+        assertTrue(h.exposures().isEmpty())
+        assertTrue(h.owner.snapshot().get().exposures!!.digests.isEmpty())
+    }
+
+    @Test fun `fresh exposure queued before identity context reset or consent change cannot commit`() {
+        val changes: List<(StandaloneFacade) -> Unit> = listOf(
+            { it.identify("new-reader", null) },
+            { it.setPersonPropertiesForFlags(mapOf("plan" to "changed")) },
+            { it.reset() },
+            { it.optOut() },
+        )
+        for (change in changes) {
+            val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val h = harness(facadeLane = lane, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
+            h.facade.applyConfiguration(config()); h.settle()
+            h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)); h.settle()
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(fresh = true)))
+                change(h.facade)
+                assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(fresh = true)))
+            } finally { release.countDown() }
+            h.settle()
+            assertTrue(h.exposures().isEmpty())
+            assertTrue(h.owner.snapshot().get().exposures!!.digests.isEmpty())
+        }
+    }
+
     @Test fun `accepted exposure survives reopen and cached missing flag keeps original evaluation metadata`() {
         val backing = FakeRuntimeQueueBacking()
         fun selected(transport: RespondingFlagTransport = RespondingFlagTransport()) = harness(backing = backing,
@@ -1111,6 +1226,7 @@ class StandaloneFacadeTest {
         onCloseSettled: () -> SdkFuture<Unit> = { SdkFuture.completedFuture(Unit) },
         personProfiles: dev.elu.analytics.EluPersonProfilesMode? = null,
         suppliedFlagTransport: RespondingFlagTransport = RespondingFlagTransport(),
+        flagClock: FlagClock = FixedFlagClock,
         retryScheduler: dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler = ManualFlagRetryScheduler(),
         limits: RuntimeQueueLimits = RuntimeQueueLimits(10_000, 16_777_216),
         rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
@@ -1145,7 +1261,7 @@ class StandaloneFacadeTest {
                 owner,
                 StandaloneRuntime.defaultVersions(),
                 flagTransport,
-                FixedFlagClock,
+                flagClock,
                 FlagOpaqueIdSource { "flags_request_${flagTransport.requestIds.incrementAndGet()}" },
                 FlagOpaqueIdSource { "store_epoch_1" },
             )

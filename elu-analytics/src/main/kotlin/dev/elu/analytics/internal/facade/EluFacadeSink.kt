@@ -1,6 +1,7 @@
 package dev.elu.analytics.internal.facade
 
 import dev.elu.analytics.EluFeatureFlagResult
+import dev.elu.analytics.EluFeatureFlagOptions
 import java.util.Date
 
 /**
@@ -81,11 +82,17 @@ internal interface EluFacadeSink {
 
     fun getFeatureFlag(key: String): Any?
 
+    fun getFeatureFlag(key: String, options: EluFeatureFlagOptions): Any?
+
     fun getFeatureFlagResult(key: String): EluFeatureFlagResult?
+
+    fun getFeatureFlagResult(key: String, options: EluFeatureFlagOptions): EluFeatureFlagResult?
 
     fun getFeatureFlagPayload(key: String): Any?
 
     fun isFeatureEnabled(key: String): Boolean
+
+    fun isFeatureEnabled(key: String, options: EluFeatureFlagOptions, defaultValue: Boolean?): Boolean?
 
     fun reloadFeatureFlags(completion: (() -> Unit)?)
 

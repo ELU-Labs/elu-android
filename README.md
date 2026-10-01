@@ -473,6 +473,31 @@ calls also accept a separate set-once map. Flag results contain `key`, `enabled`
 `variant` and `payload`; unavailable or expired results are null. Account/context
 changes invalidate prior flag results immediately.
 
+Flag reads also accept `EluFeatureFlagOptions`:
+
+```kotlin
+val quiet = EluFeatureFlagOptions(sendEvent = false)
+val value = Elu.getFeatureFlag("checkout", quiet)
+val details = Elu.getFeatureFlagResult("checkout", quiet)
+val fresh = EluFeatureFlagOptions(sendEvent = false, fresh = true)
+val enabled: Boolean? = Elu.isFeatureEnabled("checkout", fresh)
+val withFallback: Boolean? = Elu.isFeatureEnabled("checkout", fresh, defaultValue = true)
+```
+
+`sendEvent` defaults to `true`. Setting it to `false` leaves the exposure ledger
+untouched, so a later reporting read can still emit the first exposure.
+`fresh` defaults to `false`; when `true`, a read requires a usable evaluation
+received from the server by this SDK instance for the current identity and
+context. Restored cache alone does not satisfy it. This option neither fetches
+flags nor extends cache or configuration expiry; use `reloadFeatureFlags` to
+request an evaluation. As with existing getters, the first read of a previously
+unobserved key can be unavailable while its local cache lookup completes.
+
+The options overload of `isFeatureEnabled` returns `null` when unavailable unless
+a Boolean `defaultValue` is supplied. An evaluated `false` remains `false` even
+with `defaultValue = true`. The original one-argument method still returns `false`
+when unavailable. `getFeatureFlagPayload` remains an exposure-free read.
+
 Profile processing is selected locally at setup:
 
 ```kotlin
