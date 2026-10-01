@@ -1,7 +1,7 @@
 # Android release evidence handoff
 
 The manual Maven workflow requires a completed **original ELU SDK Lab Android
-run** against the exact release AAR, together with a reviewed signed tag. The
+run** against the exact core and Compose distribution, together with a reviewed signed tag. The
 runtime-network file is a small sanitized export, not raw traffic and not a
 replacement for original Lab proof. Unit tests use protocol doubles only.
 
@@ -90,11 +90,18 @@ After successful original qualification and independent review:
    structure, and rechecks the original asset identity. Acquisition uses the
    workflow's read-only repository token, bounded size/time and system HTTPS;
    it never forwards the token to a redirected asset host or accepts a caller URL.
-5. Release checks build the AAR. The validator verifies the tag again and requires
-   the built AAR's actual hash and size to equal the Lab-installed artifact before
-   the existing API, legal-identifier, dependency, SBOM and publication gates.
-   A non-reproducible rebuild is a failure, not permission to substitute a similar
-   artifact. Dry-run skips only publication and still requires all this evidence.
+5. Release checks build both modules, stage the distribution and compile clean
+   Maven-coordinate consumers using Gradle metadata and POM-only resolution. The
+   schema-3 validator verifies the tag again and requires every distribution byte
+   to equal the Lab-qualified pair before both API, legal-identifier, dependency
+   and SBOM gates. A non-reproducible rebuild fails. Dry-run skips the publication
+   task and still requires the signed paired evidence and build checks.
+6. The `publishPairedRelease` task rechecks the signed evidence and current build
+   outputs, signs and stages both modules, then verifies the actual publication
+   payloads, signatures, metadata and checksums. The pinned publishing plugin
+   uploads one combined deployment only after the build succeeds. Direct partial
+   publication, alternate repositories and configuration-cache publication are
+   refused. A staging mismatch fails the build before upload.
 
 A missing draft/token access, missing or changed asset, incomplete Lab run,
 wrong origin/TLS, wrong source/tag, or any AAR byte mismatch blocks publication.
@@ -129,30 +136,29 @@ composite-build dependency. CI passes `-Pandroid.useAndroidX=true`; Java/Kotlin
 output remains 11, toolchain 17, with the required desugaring configuration.
 The existing Views-only and historical 0.1.0 consumer checks remain separate.
 
-The optional base publishing plugin has **no repository, Central deployment or
-signing registration**. Any optional Gradle Maven publishing task is rejected
-before execution. Core publication configuration and its signed single-core Lab
-evidence validator remain unchanged; that receipt cannot authorize optional
-publication. Both artifacts' metadata/dependencies/SBOM are scanned in CI, but
-these build checks do not replace exact installed-artifact Lab qualification.
+Both modules register Maven Central publishing and signing. The root publication
+gate requires the exact pair, the reviewed signed schema-3 Lab export and the
+final staged-byte check. A historical core-only receipt cannot authorize either
+member of this paired release. Normal CI needs no signing credentials and does
+not execute a publication task. Build checks do not replace installed-artifact
+Lab qualification.
 
-Before enabling optional publication, a separately reviewed Lab/exporter and
-release-consumer change must bind both exact AARs, their source/distribution
-closure and original installed use, including the new raster policy/routes and
-actual customer rendering/privacy. The protected release workflow must then gate
-the entire two-artifact publication set. Current candidate versions must not be
+Before executing publication, the reviewed Lab exporter must bind both exact
+AARs, their source/distribution closure and original installed use, including
+raster policy/routes and actual customer rendering/privacy. The protected
+release workflow gates the entire two-artifact publication set. Current candidate versions must not be
 advertised as available until actual package publication and clean-consumer
 verification finish. Annotation registration on API 23 does not change the
 current API 29+ replay eligibility or waive the API 26–28 gap.
 
-## Paired export consumer (publication remains disabled)
+## Paired export and publication gate
 
 The evidence consumer also accepts a separate closed **schema 3** for the exact
 core and Compose pair. This implements validation of a prospective signed
 export, not the missing original Lab exporter or its completion gate. No real
-paired release export or qualification is asserted here. The existing Maven
-workflow still uses the schema-2 core-only `--aar` check, and the optional
-module still refuses publication.
+paired release export or qualification is asserted here. The Maven release
+workflow requires the schema-3 `--distribution` check for both modules; schema 2
+remains available only for historical core-only evidence validation.
 
 The new envelope retains `evidenceKind`, `source`, `producer`, `run`,
 `completion`, and `environment` with their existing closed fields. It retains
@@ -219,7 +225,8 @@ The paired check compares the descriptor, version file and all 12 payload files,
 rejects extra/missing/linked members, and reuses the existing exact POM/GMM/SBOM
 validators. It checks original file and directory identities across the read.
 The local descriptor must retain `runtimeQualified:false`; it is never rewritten
-or promoted into qualification. A future separately reviewed publication gate
-must recheck the actual final publish bytes. This consumer does not register a
-repository, load signing credentials, upload, tag, deploy, or enable Compose
-publication.
+or promoted into qualification. `verify-paired-publication.py` additionally joins
+the current Gradle outputs and, after signing/staging, the actual payloads read
+by the pinned publisher. That check invokes only public-key signature validation;
+it never loads a private key, uploads, tags or deploys. Signing and publication
+remain the protected workflow's final step after all required evidence exists.

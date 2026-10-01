@@ -9,6 +9,8 @@ plugins {
     id("org.cyclonedx.bom") version "3.4.1" apply false
 }
 
+apply(from = "scripts/paired-publication.gradle.kts")
+
 tasks.register<Exec>("checkConformanceFixtures") {
     group = "verification"
     description = "Validates observational Android 0.1.0 behavior fixtures."

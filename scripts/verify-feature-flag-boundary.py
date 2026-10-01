@@ -44,6 +44,7 @@ PINNED_FILES = {
 
 ANNOTATED_EXTRA_FILES = (
     "build.gradle.kts",
+    "scripts/paired-publication.gradle.kts",
     "settings.gradle.kts",
     "fixtures/compose-consumer/settings.gradle.kts",
     "fixtures/compose-consumer/build.gradle.kts",
@@ -1225,15 +1226,26 @@ def verify_compose_distribution_boundary(root: pathlib.Path, errors: list[str]) 
         'id("com.vanniktech.maven.publish.base")',
         'configure(AndroidSingleVariantLibrary(javadocJar = JavadocJar.Javadoc(), variant = "release"))',
         'coordinates("dev.elu", "elu-analytics-compose", sdkVersion)',
-        'check(optionalProject.extensions.getByType<PublishingExtension>().repositories.isEmpty())',
-        'check(allTasks.none { it.project == optionalProject && it is AbstractPublishToMaven })',
+        'publishToMavenCentral()', 'signAllPublications()',
         'api(project(":elu-analytics"))', 'api("androidx.compose.ui:ui:1.7.8")',
         'implementation("androidx.compose.foundation:foundation:1.7.8")',
         'includeConfigs = listOf("releaseRuntimeClasspath")', 'testConfigs = emptyList()',
     )
-    if any(token not in optional for token in required) or re.search(
-            r'publishToMavenCentral\s*\(|signAllPublications\s*\(|id\("com\.vanniktech\.maven\.publish"\)', optional):
-        errors.append("optional Compose distribution must remain local metadata only with exact dependencies and publication refusal")
+    if any(token not in optional for token in required) or optional.count('publishToMavenCentral()') != 1:
+        errors.append("optional Compose distribution requires exact dependencies and paired publication registration")
+    gate = load_text(root, "scripts/paired-publication.gradle.kts")
+    if 'apply(from = "scripts/paired-publication.gradle.kts")' not in load_text(root, "build.gradle.kts") or any(
+            token not in gate for token in (
+                'listOf("elu-analytics", "elu-analytics-compose")',
+                'publications.map { it.path }.toSet() == publishPaths.toSet() && publications.size == 2',
+                'it is PublishToMavenRepository && it.repository.url.scheme == "file"',
+                'hasTask(":publishPairedRelease") && hasTask(":verifyPairedReleaseEvidence")',
+                'hasTask(":verifyStagedPairedPublication")',
+                'centralTasks.map { it.path }.toSet() == preparePaths + automaticPaths',
+                'check(!gradle.startParameter.isConfigurationCacheRequested)',
+                'dependsOn(checkEvidence)', 'dependsOn(checkPublished)',
+                '"scripts/verify-paired-publication.py", "--tag", releaseTag.get(), "--published"')):
+        errors.append("paired publication requires signed evidence and final exact-byte gates for both modules")
     settings = load_text(root, "fixtures/compose-consumer/settings.gradle.kts")
     build = load_text(root, "fixtures/compose-consumer/build.gradle.kts")
     if any(token not in settings for token in ('exclusiveContent {', 'filter { includeGroup("dev.elu") }',

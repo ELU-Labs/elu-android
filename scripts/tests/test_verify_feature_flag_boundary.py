@@ -115,7 +115,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             self.assertIn("restored raster facts cannot decode", "\n".join(errors))
         storage.write_text(original)
 
-    def test_compose_distribution_cannot_enable_remote_publication_or_substitute_project_consumer(self) -> None:
+    def test_compose_distribution_requires_paired_publication_and_coordinate_consumer(self) -> None:
         def errors() -> str:
             result: list[str] = []
             BOUNDARY.verify_compose_distribution_boundary(self.root, result)
@@ -125,13 +125,19 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             ("elu-analytics/build.gradle.kts", 'version = sdkVersion', 'version = "0.1.0"', "project identity"),
             ("elu-analytics-compose/build.gradle.kts", 'group = "dev.elu"', 'group = "other"', "project identity"),
             ("elu-analytics-compose/build.gradle.kts", 'id("com.vanniktech.maven.publish.base")',
-             'id("com.vanniktech.maven.publish")', "metadata only"),
+             'id("com.vanniktech.maven.publish")', "paired publication"),
             ("elu-analytics-compose/build.gradle.kts", 'coordinates("dev.elu", "elu-analytics-compose", sdkVersion)',
-             'coordinates("dev.elu", "elu-analytics-compose", sdkVersion); publishToMavenCentral()', "metadata only"),
-            ("elu-analytics-compose/build.gradle.kts", 'check(allTasks.none { it.project == optionalProject && it is AbstractPublishToMaven })',
-             'check(true)', "metadata only"),
-            ("elu-analytics-compose/build.gradle.kts", 'check(optionalProject.extensions.getByType<PublishingExtension>().repositories.isEmpty())',
-             'check(true)', "metadata only"),
+             'coordinates("dev.elu", "elu-analytics-compose", sdkVersion); publishToMavenCentral()', "paired publication"),
+            ("scripts/paired-publication.gradle.kts", 'hasTask(":verifyStagedPairedPublication")',
+             'true', "paired publication"),
+            ("scripts/paired-publication.gradle.kts", 'dependsOn(checkEvidence)',
+             'dependsOn()', "paired publication"),
+            ("scripts/paired-publication.gradle.kts", 'publications.size == 2',
+             'publications.size == 1', "paired publication"),
+            ("scripts/paired-publication.gradle.kts", 'centralTasks.map { it.path }.toSet() == preparePaths + automaticPaths',
+             'true', "paired publication"),
+            ("build.gradle.kts", 'apply(from = "scripts/paired-publication.gradle.kts")',
+             '', "paired publication"),
             ("fixtures/compose-consumer/settings.gradle.kts", 'filter { includeGroup("dev.elu") }',
              'filter { includeGroup("unrelated") }', "staged Maven"),
             ("fixtures/compose-consumer/settings.gradle.kts", 'mavenPom(); ignoreGradleMetadataRedirection()',

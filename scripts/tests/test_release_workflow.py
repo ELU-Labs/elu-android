@@ -16,7 +16,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         strict_input = text.index(
             "--input dependencies=build/reports/release-runtime-classpath.txt"
         )
-        publish = text.index("./gradlew publishAndReleaseToMavenCentral")
+        publish = text.index("./gradlew publishPairedRelease")
         self.assertLess(generate, strict_input)
         self.assertLess(strict_input, publish)
 
@@ -41,7 +41,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("REPLAY_EVIDENCE", text)
         self.assertNotIn("if ", text[require:verify])
         self.assertIn('--tag "$RELEASE_TAG"', text[require:verify])
-        self.assertIn('--aar elu-analytics/build/outputs/aar/elu-analytics-release.aar', text[require:verify])
+        self.assertIn('--distribution build/compose-distribution', text[require:verify])
+        self.assertIn('verify-paired-publication.py --tag "$RELEASE_TAG"', text[require:verify])
+        self.assertNotIn('--aar ', text[require:verify])
         acquire = text.index("name: Acquire reviewed draft Lab evidence")
         signed = text.index("name: Verify matching reviewed signed tag")
         build = text.index("name: Run release gates")
@@ -65,8 +67,21 @@ class ReleaseWorkflowTest(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertLess(
             text.index("checkFeatureFlagBoundary"),
-            text.index("./gradlew publishAndReleaseToMavenCentral"),
+            text.index("./gradlew publishPairedRelease"),
         )
+
+    def test_compose_build_consumers_api_and_scan_precede_paired_release(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        publish = text.index("./gradlew publishPairedRelease")
+        for command in (":elu-analytics-compose:assembleRelease", ":elu-analytics-compose:cyclonedxDirectBom",
+                        "fixtures/compose-consumer assembleDebug -PeluMetadataMode=module",
+                        "fixtures/compose-consumer assembleDebug -PeluMetadataMode=pom",
+                        "--compose-aar elu-analytics-compose/build/outputs/aar/elu-analytics-compose-release.aar",
+                        "--input compose-dependencies=build/reports/compose-release-runtime-classpath.txt"):
+            self.assertLess(text.index(command), publish)
+        self.assertIn('--no-configuration-cache --no-parallel', text[publish:])
+        self.assertIn('RELEASE_TAG: ${{ inputs.tag }}', text[publish:])
+        self.assertIn('ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS:', text[publish:])
 
 
 if __name__ == "__main__":

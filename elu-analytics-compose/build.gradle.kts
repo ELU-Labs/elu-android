@@ -3,8 +3,6 @@ import com.vanniktech.maven.publish.JavadocJar
 import org.cyclonedx.gradle.CyclonedxDirectTask
 import org.cyclonedx.model.Component
 import org.gradle.api.file.RegularFile
-import org.gradle.api.publish.PublishingExtension
-import org.gradle.api.publish.maven.tasks.AbstractPublishToMaven
 
 val sdkVersion =
     Regex("const val NAME: String = \"([^\"]+)\"")
@@ -56,10 +54,12 @@ dependencies {
     implementation("androidx.compose.foundation:foundation:1.7.8")
 }
 
-// Metadata only. No optional repository, Central deployment or signing registration.
-// The local consumer receives checked copies of these exact outputs, never a publish task.
+// The root paired-publication gate binds both modules to the same reviewed Lab export.
+// Ordinary local consumers still use the distribution checker without publication.
 mavenPublishing {
     configure(AndroidSingleVariantLibrary(javadocJar = JavadocJar.Javadoc(), variant = "release"))
+    publishToMavenCentral()
+    signAllPublications()
     coordinates("dev.elu", "elu-analytics-compose", sdkVersion)
     pom {
         name.set("ELU Analytics Compose annotations")
@@ -84,16 +84,6 @@ mavenPublishing {
             connection.set("scm:git:git://github.com/ELU-Labs/elu-android.git")
             developerConnection.set("scm:git:ssh://git@github.com/ELU-Labs/elu-android.git")
         }
-    }
-}
-
-val optionalProject = project
-gradle.taskGraph.whenReady {
-    check(optionalProject.extensions.getByType<PublishingExtension>().repositories.isEmpty()) {
-        "Optional remote publication requires reviewed two-artifact Lab evidence; no repository is permitted yet"
-    }
-    check(allTasks.none { it.project == optionalProject && it is AbstractPublishToMaven }) {
-        "Optional publication is disabled; use the validated local distribution staging checker"
     }
 }
 
