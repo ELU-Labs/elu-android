@@ -29,6 +29,8 @@ class EluFacadeSafetyTest {
         Elu.setGroupPropertiesForFlags("organization", mapOf("tier" to "test"))
         Elu.reloadFeatureFlags()
         Elu.onFeatureFlagsLoaded { error("must not fire before setup") }
+        assertNull(Elu.getFeatureFlagSnapshot())
+        Elu.subscribeToFeatureFlags { error("must not fire before setup") }.use { it.cancel(); it.cancel() }
         Elu.flush()
         Elu.stopSessionRecording()
         Elu.startSessionRecording()
@@ -73,6 +75,21 @@ class EluFacadeSafetyTest {
         assertEquals(EluCaptureOptions(), EluCaptureOptions::class.java.getConstructor().newInstance())
         val date = java.util.Date(42)
         assertEquals(EluCaptureOptions(date), EluCaptureOptions::class.java.getConstructor(java.util.Date::class.java).newInstance(date))
+    }
+
+    @Test fun `snapshot callback is a Java SAM and cancellation is Closeable`() {
+        assertEquals(EluFeatureFlagSnapshot::class.java, Elu::class.java.getMethod("getFeatureFlagSnapshot").returnType)
+        assertEquals(EluFeatureFlagSubscription::class.java,
+            Elu::class.java.getMethod("subscribeToFeatureFlags", EluFeatureFlagSnapshot.Listener::class.java).returnType)
+        val callbacks = EluFeatureFlagSnapshot.Listener::class.java.declaredMethods
+        assertEquals(1, callbacks.size)
+        assertEquals(java.lang.Void.TYPE, callbacks.single().returnType)
+        assertEquals(listOf(EluFeatureFlagSnapshot::class.java), callbacks.single().parameterTypes.toList())
+        assertTrue(java.io.Closeable::class.java.isAssignableFrom(EluFeatureFlagSubscription::class.java))
+        assertEquals(java.lang.Void.TYPE, EluFeatureFlagSubscription::class.java.getMethod("cancel").returnType)
+        assertEquals(java.lang.Void.TYPE, EluFeatureFlagSubscription::class.java.getMethod("close").returnType)
+        assertEquals(ByteArray::class.java, EluFeatureFlagSnapshot::class.java.getMethod("getFlagsJSON").returnType)
+        assertEquals(java.util.Date::class.java, EluFeatureFlagSnapshot::class.java.getMethod("getEvaluatedAt").returnType)
     }
 
     @Test

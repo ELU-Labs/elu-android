@@ -208,6 +208,34 @@ internal sealed interface FlagReadResult {
     data object Terminal : FlagReadResult
 }
 
+/** Complete immutable cache projection with the same original deadline token as keyed reads. */
+internal sealed interface FlagSnapshotReadResult {
+    data object Missing : FlagSnapshotReadResult
+    data class Found(val response: FlagResponse, val cacheLeaseToken: FlagCacheLeaseToken) : FlagSnapshotReadResult
+    data class Restricted(val reason: FlagRestrictionReason) : FlagSnapshotReadResult
+    data object Terminal : FlagSnapshotReadResult
+}
+
+internal fun validFlagKey(key: String): Boolean {
+    if (key.isEmpty() || key.codePointCount(0, key.length) > FLAG_MAX_KEY_SCALARS) return false
+    return try { FlagJson.fromPlatform(key); true } catch (_: FlagProtocolException) { false }
+}
+
+internal fun FlagSnapshotReadResult.forKey(key: String): FlagReadResult {
+    return when (this) {
+        FlagSnapshotReadResult.Missing -> FlagReadResult.Missing
+        FlagSnapshotReadResult.Terminal -> FlagReadResult.Terminal
+        is FlagSnapshotReadResult.Restricted -> FlagReadResult.Restricted(reason)
+        is FlagSnapshotReadResult.Found -> if (!validFlagKey(key)) FlagReadResult.Missing else response.flags.member(key)?.let {
+            FlagReadResult.Found(it.deepCopy(), response.payloads.member(key)?.deepCopy(),
+                response.flagsRevision, response.expiresAt, cacheLeaseToken, response.evaluationMetadata())
+        } ?: FlagReadResult.CacheMiss(response.expiresAt, cacheLeaseToken, response.evaluationMetadata())
+    }
+}
+
+internal fun FlagResponse.immutableCopy(): FlagResponse =
+    copy(flags = flags.immutableCopy(), payloads = payloads.immutableCopy())
+
 internal data class FlagCacheEnvelope(
     val authorization: FlagAuthorizationWitness,
     val witness: FlagEvaluationWitness,

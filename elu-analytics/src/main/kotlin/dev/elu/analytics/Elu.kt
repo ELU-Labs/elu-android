@@ -254,6 +254,15 @@ public object Elu {
         defaultValue: Boolean? = null,
     ): Boolean? = sink?.isFeatureEnabled(key, options, defaultValue) ?: defaultValue
 
+    /** Complete current evaluation without a fetch or an exposure event. */
+    @JvmStatic
+    public fun getFeatureFlagSnapshot(): EluFeatureFlagSnapshot? = sink?.getFeatureFlagSnapshot()
+
+    /** Cancel or close the returned token when the observer is no longer needed. */
+    @JvmStatic
+    public fun subscribeToFeatureFlags(listener: EluFeatureFlagSnapshot.Listener): EluFeatureFlagSubscription =
+        sink?.subscribeToFeatureFlags(listener) ?: EluFeatureFlagSubscription.inactive()
+
     @JvmStatic
     @JvmOverloads
     public fun reloadFeatureFlags(completion: (() -> Unit)? = null) {

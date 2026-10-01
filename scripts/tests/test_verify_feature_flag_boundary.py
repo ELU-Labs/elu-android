@@ -600,7 +600,7 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             ("internal/runtime/RuntimeQueueOwner.kt", "left.exposures == right.exposures", "true"),
             ("internal/runtime/RuntimeQueueOwner.kt", "RuntimeFlagExposureState.initial(committedState) else before.exposures", "before.exposures"),
             ("internal/runtime/RuntimeQueueOwner.kt", "if (!originalContextMatches()) throw PassiveCaptureWithdrawn()", "Unit"),
-            ("internal/facade/StandaloneFacade.kt", "metadata.logicalDigest != flagEvaluationDigest", "false"),
+            ("internal/facade/StandaloneFacade.kt", "flagPublication === publication", "true"),
             ("internal/facade/AndroidStandaloneStack.kt", "facade.configurationRefreshed(token)", "Unit"),
             ("internal/config/V2ConfigLifecycleDriver.kt", "minOf(5 * MINUTE", "minOf(10 * MINUTE"),
             ("internal/config/V2ConfigLifecycleDriver.kt", "result is V2ConfigSourceResult.Document && retained", "retained"),

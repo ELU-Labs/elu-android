@@ -893,6 +893,52 @@ class FeatureFlagActivityVectorTest {
         }
     }
 
+    @Test fun `complete cache and keyed projection share original token and immutable full response`() {
+        val backing = FakeRuntimeQueueBacking()
+        val owner = seededOwner(backing)
+        val full = owner.readFeatureFlagSnapshot(browserVersions(), { millis("2026-08-04T00:01:03.000Z") }).await()
+            as FlagSnapshotReadResult.Found
+        assertEquals(FlagCodec.decodeResponse(responseMixed()), full.response)
+        assertEquals(owner.readFlag("variant"), full.forKey("variant"))
+        assertEquals(owner.readFlag("absent"), full.forKey("absent"))
+        assertTrue(full.response.payloads.contains("orphan"))
+        org.junit.Assert.assertThrows(UnsupportedOperationException::class.java) {
+            (full.response.flags.members as MutableList<*>).clear()
+        }
+        val nested = full.response.payloads.member("variant") as FlagJsonValue.ObjectValue
+        org.junit.Assert.assertThrows(UnsupportedOperationException::class.java) { (nested.members as MutableList<*>).clear() }
+        assertEquals(full, owner.readFeatureFlagSnapshot(browserVersions(), { millis("2026-08-04T00:01:03.000Z") }).await())
+        assertEquals(0, owner.snapshot().await().queuedCount)
+        assertTrue(owner.readFeatureFlagSnapshot(browserVersions(), { millis("2026-08-04T00:04:00.000Z") }).await() is FlagSnapshotReadResult.Missing)
+        assertTrue(owner.readFlag("variant", "2026-08-04T00:04:00.000Z").isMissing())
+    }
+
+    @Test fun `complete client read cannot renew lifetime consumed by its original storage hop`() {
+        val owner = seededOwner()
+        val nanos = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)
+        val readWalls = AtomicInteger()
+        var armed = false
+        val clock = object : FlagClock {
+            override fun wallNowEpochMillis(): Long {
+                // Pre-hop sample is first, original owner transaction's wall read is second.
+                if (armed && readWalls.incrementAndGet() == 2) nanos.set(178_000_000_000L)
+                return millis("2026-08-04T00:01:03.000Z")
+            }
+            override fun monotonicNowNanos() = nanos.get()
+        }
+        val sent = AtomicInteger()
+        val client = AndroidFeatureFlagClient(owner, browserVersions(), FlagTransport {
+            sent.incrementAndGet(); SdkFuture()
+        }, clock, FlagOpaqueIdSource { "unused" }, FlagOpaqueIdSource { "unused_epoch" })
+        try {
+            assertTrue(client.applyConfiguration(configAllowed()).await() is V1FlagAuthorizationResolution.Allowed)
+            armed = true
+            assertTrue(client.readSnapshot().await() is FlagSnapshotReadResult.Missing)
+            assertTrue(readWalls.get() >= 2); assertEquals(0, sent.get())
+            assertTrue(client.read("variant").await() is FlagReadResult.Missing)
+        } finally { client.close() }
+    }
+
     @Test
     fun `cache lease expires its immutable origin while a newer request is active`() {
         val backing = FakeRuntimeQueueBacking()

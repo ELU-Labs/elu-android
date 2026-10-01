@@ -588,27 +588,32 @@ internal object FlagDurableStore {
         key: String,
         wallNowEpochMillis: Long,
     ): FlagReadResult {
-        if (key.isEmpty() || key.codePointCount(0, key.length) > FLAG_MAX_KEY_SCALARS) return FlagReadResult.Missing
-        try {
-            FlagJson.fromPlatform(key)
-        } catch (_: FlagProtocolException) {
-            return FlagReadResult.Missing
-        }
-        if (hasFutureCacheStorage(transaction)) return FlagReadResult.Terminal
+        if (!validFlagKey(key)) return FlagReadResult.Missing
+        return readSnapshot(transaction, authorization, state, versions, wallNowEpochMillis).forKey(key)
+    }
+
+    fun readSnapshot(
+        transaction: RuntimeQueueTransaction,
+        authorization: V1FlagAuthorizationSnapshot,
+        state: PersistedCoreState,
+        versions: RuntimeVersions,
+        wallNowEpochMillis: Long,
+    ): FlagSnapshotReadResult {
+        if (hasFutureCacheStorage(transaction)) return FlagSnapshotReadResult.Terminal
         when (val authority = validateAuthorityForUse(transaction, authorization, wallNowEpochMillis)) {
-            is AuthorityUse.Restricted -> return FlagReadResult.Restricted(authority.reason.toPublicRestriction())
-            AuthorityUse.Terminal -> return FlagReadResult.Terminal
+            is AuthorityUse.Restricted -> return FlagSnapshotReadResult.Restricted(authority.reason.toPublicRestriction())
+            AuthorityUse.Terminal -> return FlagSnapshotReadResult.Terminal
             is AuthorityUse.Allowed -> Unit
         }
         val metadataRead = readMetadata(transaction)
-        if (metadataRead is MetadataRead.Future) return FlagReadResult.Terminal
-        val metadata = (metadataRead as? MetadataRead.Current)?.metadata ?: return FlagReadResult.Missing
-        val pointer = metadata.cache ?: return FlagReadResult.Missing
+        if (metadataRead is MetadataRead.Future) return FlagSnapshotReadResult.Terminal
+        val metadata = (metadataRead as? MetadataRead.Current)?.metadata ?: return FlagSnapshotReadResult.Missing
+        val pointer = metadata.cache ?: return FlagSnapshotReadResult.Missing
         return when (val cache = readCache(transaction, pointer)) {
-            CacheRead.Future -> FlagReadResult.Terminal
+            CacheRead.Future -> FlagSnapshotReadResult.Terminal
             CacheRead.Corrupt -> {
                 clearKnownCurrentCache(transaction)
-                FlagReadResult.Missing
+                FlagSnapshotReadResult.Missing
             }
             is CacheRead.Current -> {
                 val witness = witnessFrom(state, versions)
@@ -620,27 +625,16 @@ internal object FlagDurableStore {
                     pointer.witnessHash != FlagCodec.witnessHash(witness)
                 ) {
                     clearKnownCurrentCache(transaction)
-                    return FlagReadResult.Missing
+                    return FlagSnapshotReadResult.Missing
                 }
                 val now = FlagExactInstant.fromEpochMillis(wallNowEpochMillis)
                 if (now >= envelope.response.expiresAt) {
                     expireCache(transaction, metadata)
-                    return FlagReadResult.Missing
+                    return FlagSnapshotReadResult.Missing
                 }
-                val value =
-                    envelope.response.flags.member(key)
-                        ?: return FlagReadResult.CacheMiss(
-                            envelope.response.expiresAt,
-                            cacheLeaseToken(metadata, pointer, envelope),
-                            envelope.response.evaluationMetadata(),
-                        )
-                FlagReadResult.Found(
-                    value.deepCopy(),
-                    envelope.response.payloads.member(key)?.deepCopy(),
-                    envelope.response.flagsRevision,
-                    envelope.response.expiresAt,
+                FlagSnapshotReadResult.Found(
+                    envelope.response.immutableCopy(),
                     cacheLeaseToken(metadata, pointer, envelope),
-                    envelope.response.evaluationMetadata(),
                 )
             }
         }

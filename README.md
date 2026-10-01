@@ -448,7 +448,7 @@ navController.addOnDestinationChangedListener { _, destination, _ ->
 `register`/`registerOnce`/`unregister` (super properties), `setPersonProperties`,
 `captureException`, `group`/`getGroups`/`resetGroups`, `flush`, and feature flags: `getFeatureFlag`,
 `getFeatureFlagPayload`, `getFeatureFlagResult`, `isFeatureEnabled`, `reloadFeatureFlags`,
-`onFeatureFlagsLoaded`, `setPersonPropertiesForFlags`,
+`onFeatureFlagsLoaded`, `getFeatureFlagSnapshot`, `subscribeToFeatureFlags`, `setPersonPropertiesForFlags`,
 `setGroupPropertiesForFlags`, `resetPersonPropertiesForFlags`, and
 `resetGroupPropertiesForFlags`.
 
@@ -514,13 +514,41 @@ untouched, so a later reporting read can still emit the first exposure.
 received from the server by this SDK instance for the current identity and
 context. Restored cache alone does not satisfy it. This option neither fetches
 flags nor extends cache or configuration expiry; use `reloadFeatureFlags` to
-request an evaluation. As with existing getters, the first read of a previously
-unobserved key can be unavailable while its local cache lookup completes.
+request an evaluation. Once a complete evaluation is available, keyed getters can
+read any evaluated key immediately. Reads are unavailable before that publication
+or after its identity, context, consent, configuration or expiry becomes invalid.
 
 The options overload of `isFeatureEnabled` returns `null` when unavailable unless
 a Boolean `defaultValue` is supplied. An evaluated `false` remains `false` even
 with `defaultValue = true`. The original one-argument method still returns `false`
 when unavailable. `getFeatureFlagPayload` remains an exposure-free read.
+
+Read all evaluated values or subscribe to complete updates without reporting exposures:
+
+```kotlin
+val current = Elu.getFeatureFlagSnapshot() // Null before a current publication.
+val subscription = Elu.subscribeToFeatureFlags { snapshot ->
+    val checkout = snapshot.getEntry("checkout")
+    // Handle snapshot.error; still-current cached values can accompany a failed load.
+}
+subscription.close() // Or cancel(); safe to call repeatedly.
+```
+
+Snapshots include typed Boolean, string, number and JSON-null values, complete
+canonical `flagsJSON` and `payloadsJSON`, request/revision metadata and original
+evaluation/expiry dates. An absent payload is distinct from a JSON-null payload.
+Arrays and dates are copied when returned. Snapshot reads do not fetch or reload.
+`source` distinguishes `REMOTE`, `CACHE` and `UNAVAILABLE`; a valid empty evaluation
+is available, while an unavailable load has no evaluation metadata. `error` is
+`TRANSPORT` or `INVALID_RESPONSE` for the load that produced that notification.
+
+Subscriptions run on the main callback dispatcher, receive a current value on
+late registration, and suppress stale queued notifications after identity,
+context, consent or configuration changes. Cancel prevents callbacks that have
+not begun; an already admitted callback may finish. Close the subscription when
+it is no longer needed. Keeping a snapshot retains its value, not permission to
+use it as a current evaluation. The original loaded-listener and reload-completion
+APIs remain available; concurrent reloads share the original request.
 
 Profile processing is selected locally at setup:
 

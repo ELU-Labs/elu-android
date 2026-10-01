@@ -40,6 +40,9 @@ import dev.elu.analytics.internal.flags.FlagConfigStoreResult
 import dev.elu.analytics.internal.flags.FlagDurableStore
 import dev.elu.analytics.internal.flags.FlagFinalizeStoreResult
 import dev.elu.analytics.internal.flags.FlagLeaseExpiryStoreResult
+import dev.elu.analytics.internal.flags.forKey
+import dev.elu.analytics.internal.flags.validFlagKey
+import dev.elu.analytics.internal.flags.FlagSnapshotReadResult
 import dev.elu.analytics.internal.flags.FlagReadResult
 import dev.elu.analytics.internal.flags.FlagReloadResult
 import dev.elu.analytics.internal.flags.FlagReloadWitnessSnapshot
@@ -2367,34 +2370,39 @@ internal class RuntimeQueueOwner private constructor(
     ): Future<FlagReadResult> =
         readFeatureFlag(versions, key, { wallNowEpochMillis })
 
-    /** Samples the owned clock after this operation reaches the serialized storage lane. */
+    /** Both keyed and complete reads use one original source/transaction/clock validation path. */
     internal fun readFeatureFlag(
         versions: RuntimeVersions,
         key: String,
         readWallNowEpochMillis: () -> Long,
-    ): Future<FlagReadResult> =
-        submit {
-            assertUsable()
-            if (featureFlagClockPoisoned) {
-                return@submit FlagReadResult.Restricted(FlagRestrictionReason.WALL_ROLLBACK)
-            }
-            val sourceWitness = flagConfiguration
-            val authorization = currentFlagAuthorization()
-                ?: return@submit FlagReadResult.Missing
-            database().transaction { transaction ->
-                val current = requireCurrent(transaction)
-                if (!flagConfigurationIsCurrent()) return@transaction FlagReadResult.Missing
-                FlagDurableStore.read(transaction, authorization, current.state, versions, key, readWallNowEpochMillis())
-                    .also { result ->
-                        if (
-                            result is FlagReadResult.Restricted &&
-                            result.reason == FlagRestrictionReason.WALL_ROLLBACK
-                        ) {
-                            featureFlagClockPoisoned = true
-                        }
+    ): Future<FlagReadResult> = submit {
+        readFeatureFlagsOnWorker(versions, readWallNowEpochMillis, key).forKey(key)
+    }
+
+    internal fun readFeatureFlagSnapshot(
+        versions: RuntimeVersions,
+        readWallNowEpochMillis: () -> Long,
+    ): Future<FlagSnapshotReadResult> = submit {
+        readFeatureFlagsOnWorker(versions, readWallNowEpochMillis)
+    }
+
+    private fun readFeatureFlagsOnWorker(versions: RuntimeVersions, readWallNowEpochMillis: () -> Long,
+        key: String? = null): FlagSnapshotReadResult {
+        assertUsable()
+        if (featureFlagClockPoisoned) return FlagSnapshotReadResult.Restricted(FlagRestrictionReason.WALL_ROLLBACK)
+        val sourceWitness = flagConfiguration
+        val authorization = currentFlagAuthorization() ?: return FlagSnapshotReadResult.Missing
+        return database().transaction { transaction ->
+            val current = requireCurrent(transaction)
+            if (!flagConfigurationIsCurrent() || key != null && !validFlagKey(key)) return@transaction FlagSnapshotReadResult.Missing
+            FlagDurableStore.readSnapshot(transaction, authorization, current.state, versions, readWallNowEpochMillis())
+                .also { result ->
+                    if (result is FlagSnapshotReadResult.Restricted && result.reason == FlagRestrictionReason.WALL_ROLLBACK) {
+                        featureFlagClockPoisoned = true
                     }
-            }.let { currentFlagResult(sourceWitness, FlagReadResult.Missing, it) }
-        }
+                }
+        }.let { currentFlagResult(sourceWitness, FlagSnapshotReadResult.Missing, it) }
+    }
 
     /** Bounded FIFO read. A first record larger than [maximumBytes] fails explicitly. */
     fun peek(

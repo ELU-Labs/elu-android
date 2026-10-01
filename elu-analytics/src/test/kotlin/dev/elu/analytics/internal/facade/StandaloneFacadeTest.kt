@@ -1,5 +1,7 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluFeatureFlagSnapshot
+import dev.elu.analytics.EluFeatureFlagSubscription
 import dev.elu.analytics.EluCaptureOptions
 import dev.elu.analytics.EluPersonProfilesMode
 import dev.elu.analytics.internal.runtime.RuntimeStartupObserver
@@ -253,13 +255,14 @@ class StandaloneFacadeTest {
         val anonymousBefore = harness.owner.snapshot().get().state.identity.anonymousId
 
         harness.facade.reset()
+        assertNull(harness.facade.getFeatureFlagSnapshot())
         harness.settle()
 
         val identity = harness.owner.snapshot().get().state.identity
         assertNull(identity.userId)
         assertTrue(identity.anonymousId != anonymousBefore)
         assertEquals(identity.anonymousId, harness.facade.distinctId())
-        assertNull(harness.facade.getFeatureFlag("variant"))
+        assertEquals("variant-a", harness.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
     }
 
     @Test
@@ -289,10 +292,8 @@ class StandaloneFacadeTest {
         harness.facade.applyConfiguration(config())
         harness.settle()
 
-        // The owned client resolves one key at a time, so the first read observes the key and the
-        // value is reported from the next read onwards.
-        assertNull(harness.facade.getFeatureFlag("variant"))
-        harness.settle()
+        // A complete admitted publication makes the first evaluated key immediately available.
+        assertEquals("variant-a", harness.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
 
         assertEquals("variant-a", harness.facade.getFeatureFlag("variant"))
         assertEquals(mapOf("buttonColor" to "violet"), harness.facade.getFeatureFlagPayload("variant"))
@@ -301,32 +302,34 @@ class StandaloneFacadeTest {
         harness.settle()
 
         val exposures = harness.exposures()
-        assertEquals(1, exposures.size)
-        assertEquals("variant", exposures.single()["\$feature_flag"])
-        assertEquals("variant-a", exposures.single()["\$feature_flag_response"])
-        assertTrue((exposures.single()["\$feature_flag_request_id"] as String).startsWith("flags_request_"))
-        assertEquals(NOW_MS, exposures.single()["\$feature_flag_evaluated_at"])
-        assertEquals(false, exposures.single()["\$used_bootstrap_value"])
-        assertTrue(exposures.single().containsKey("\$feature_flag_bootstrapped_response"))
-        assertNull(exposures.single()["\$feature_flag_bootstrapped_response"])
-        assertNull(exposures.single()["\$feature_flag_bootstrapped_payload"])
+        assertEquals(2, exposures.size)
+        val exposure = exposures.single { it["\$feature_flag"] == "variant" }
+        assertEquals(false, exposures.single { it["\$feature_flag"] == "bool-false" }["\$feature_flag_response"])
+        assertEquals("variant", exposure["\$feature_flag"])
+        assertEquals("variant-a", exposure["\$feature_flag_response"])
+        assertTrue((exposure["\$feature_flag_request_id"] as String).startsWith("flags_request_"))
+        assertEquals(NOW_MS, exposure["\$feature_flag_evaluated_at"])
+        assertEquals(false, exposure["\$used_bootstrap_value"])
+        assertTrue(exposure.containsKey("\$feature_flag_bootstrapped_response"))
+        assertNull(exposure["\$feature_flag_bootstrapped_response"])
+        assertNull(exposure["\$feature_flag_bootstrapped_payload"])
 
         harness.facade.getFeatureFlag("variant")
         harness.settle()
-        assertEquals(1, harness.exposures().size)
+        assertEquals(2, harness.exposures().size)
 
         harness.facade.identify("user_2", null)
         harness.settle()
         harness.facade.getFeatureFlag("variant")
         harness.settle()
-        assertEquals(1, harness.exposures().size)
+        assertEquals(2, harness.exposures().size)
         harness.facade.reloadFeatureFlags {}; harness.settle()
         harness.facade.getFeatureFlag("variant"); harness.settle()
-        assertEquals(1, harness.exposures().size)
+        assertEquals(2, harness.exposures().size)
         harness.facade.reset(); harness.settle()
         harness.facade.getFeatureFlag("variant"); harness.settle()
         harness.facade.getFeatureFlag("variant"); harness.settle()
-        assertEquals(2, harness.exposures().size)
+        assertEquals(3, harness.exposures().size)
     }
 
     @Test
@@ -693,8 +696,6 @@ class StandaloneFacadeTest {
         val harness = harness()
         harness.facade.applyConfiguration(config())
         harness.settle()
-        assertNull(harness.facade.getFeatureFlagResult("variant"))
-        harness.settle()
         val result = harness.facade.getFeatureFlagResult("variant")!!
         assertEquals("variant", result.key)
         assertTrue(result.enabled)
@@ -833,7 +834,7 @@ class StandaloneFacadeTest {
     @Test fun `quiet reads leave exposure ledger available to the next reporting read`() {
         val h = harness(personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY); h.facade.applyConfiguration(config()); h.settle()
         val quiet = EluFeatureFlagOptions(sendEvent = false)
-        assertNull(h.facade.getFeatureFlag("variant", quiet)); h.settle()
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant", quiet))
         assertEquals("variant-a", h.facade.getFeatureFlag("variant", quiet))
         val result = checkNotNull(h.facade.getFeatureFlagResult("variant", quiet))
         assertEquals("variant-a", result.variant)
@@ -981,7 +982,7 @@ class StandaloneFacadeTest {
             val backing = FakeRuntimeQueueBacking()
             val h = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
             h.facade.applyConfiguration(config()); h.settle()
-            h.facade.getFeatureFlag("variant"); h.settle()
+            h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)); h.settle()
             val attempts = backing.attemptedRecordAppends.size
             if (ambiguous) backing.ambiguousNextCommit = dev.elu.analytics.internal.runtime.FakeAmbiguousOutcome.ROLLBACK
             else backing.failNextKnownCommit = java.io.IOException("known rollback")
@@ -1018,7 +1019,7 @@ class StandaloneFacadeTest {
         val backing = FakeRuntimeQueueBacking()
         val h = harness(backing = backing, personProfiles = dev.elu.analytics.EluPersonProfilesMode.IDENTIFIED_ONLY)
         h.facade.applyConfiguration(config()); h.settle()
-        h.facade.getFeatureFlag("variant"); h.settle()
+        h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)); h.settle()
         backing.ambiguousNextCommit = dev.elu.analytics.internal.runtime.FakeAmbiguousOutcome.COMMIT
         h.facade.getFeatureFlag("variant"); h.settle()
         val before = h.owner.snapshot().get()
@@ -1098,7 +1099,7 @@ class StandaloneFacadeTest {
                     }) }
             } })
         h.facade.applyConfiguration(config()); h.settle()
-        h.facade.getFeatureFlag("variant"); h.settle()
+        h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)); h.settle()
         afterInsert = { h.facade.optOut() }
         h.facade.getFeatureFlag("variant"); h.settle()
         assertTrue(h.exposures().isEmpty())
@@ -1260,7 +1261,6 @@ class StandaloneFacadeTest {
             val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
             val h = harness(facadeLane = lane, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
             h.facade.applyConfiguration(config()); h.settle()
-            assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false))); h.settle()
             assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
@@ -1292,7 +1292,6 @@ class StandaloneFacadeTest {
         } finally { release.countDown() }
         h.settle()
         assertTrue(h.flagTransport.requests.size > reloads)
-        assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false))); h.settle()
         assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
         assertEquals(mapOf("tier" to "paid"), h.owner.snapshot().get().state.flagContext.personProperties)
     }
@@ -1309,7 +1308,6 @@ class StandaloneFacadeTest {
         h.facade.reloadFeatureFlags { completed = true }; h.settle()
         assertTrue(completed)
         assertTrue(h.flagTransport.requests.size > reloads)
-        assertNull(h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false))); h.settle()
         assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
     }
 
@@ -1439,6 +1437,206 @@ class StandaloneFacadeTest {
         assertEquals(1, h.diagnostics().dropped[EluFacadeDropReason.INVALID_INPUT])
     }
 
+    @Test fun `complete snapshot is immediate typed detached and does not expose or fetch`() {
+        val transport = RespondingFlagTransport().apply {
+            transform = { response ->
+                response.getJSONObject("flags").put("number", 2.5).put("null", JSONObject.NULL)
+                    .put("é", "composed").put("e\u0301", "decomposed")
+                response.getJSONObject("payloads").put("null", JSONObject.NULL).put("payload-only", JSONObject().put("nested", true))
+            }
+        }
+        val h = harness(suppliedFlagTransport = transport, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        val before = h.owner.snapshot().get()
+        val requestCount = transport.requests.size
+        val snapshot = checkNotNull(h.facade.getFeatureFlagSnapshot())
+        assertEquals(EluFeatureFlagSnapshot.Source.REMOTE, snapshot.source); assertTrue(snapshot.isAvailable)
+        assertNull(snapshot.error)
+        assertEquals(6, snapshot.entries.size)
+        assertEquals(EluFeatureFlagSnapshot.Value.BooleanValue(false), snapshot.getEntry("bool-false")!!.value)
+        assertEquals(EluFeatureFlagSnapshot.Value.NumberValue(2.5), snapshot.getEntry("number")!!.value)
+        assertEquals(EluFeatureFlagSnapshot.Value.NullValue, snapshot.getEntry("null")!!.value)
+        assertEquals(EluFeatureFlagSnapshot.Value.StringValue("composed"), snapshot.getEntry("é")!!.value)
+        assertEquals(EluFeatureFlagSnapshot.Value.StringValue("decomposed"), snapshot.getEntry("e\u0301")!!.value)
+        assertNull(snapshot.getEntry("payload-only"))
+        assertTrue(JSONObject(String(snapshot.payloadsJSON, Charsets.UTF_8)).getJSONObject("payload-only").getBoolean("nested"))
+        assertNull(snapshot.getEntry("number")!!.payloadJSON)
+        assertEquals("null", String(snapshot.getEntry("null")!!.payloadJSON!!, Charsets.UTF_8))
+        val bytes = snapshot.flagsJSON; bytes.fill(0)
+        val payload = snapshot.getEntry("variant")!!.payloadJSON!!; payload.fill(0)
+        val allPayloads = snapshot.payloadsJSON; allPayloads.fill(0)
+        snapshot.evaluatedAt!!.time = 0; snapshot.expiresAt!!.time = 0
+        assertEquals(NOW_MS, snapshot.evaluatedAt!!.time)
+        assertEquals(NOW_MS + 180_000L, snapshot.expiresAt!!.time)
+        assertTrue(JSONObject(String(snapshot.flagsJSON, Charsets.UTF_8)).has("number"))
+        assertEquals("violet", JSONObject(String(snapshot.getEntry("variant")!!.payloadJSON!!, Charsets.UTF_8)).getString("buttonColor"))
+        assertThrows(UnsupportedOperationException::class.java) { (snapshot.entries as MutableList<*>).clear() }
+        assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+        assertEquals(true, h.facade.getFeatureFlag("number", EluFeatureFlagOptions(sendEvent = false)))
+        assertEquals(false, h.facade.getFeatureFlag("null", EluFeatureFlagOptions(sendEvent = false)))
+        h.settle()
+        assertEquals(requestCount, transport.requests.size)
+        assertEquals(before, h.owner.snapshot().get()); assertTrue(h.exposures().isEmpty())
+    }
+
+    @Test fun `empty evaluated snapshot differs from unavailable and errors belong to original load`() {
+        val transport = RespondingFlagTransport().apply { failing = true }
+        val h = harness(suppliedFlagTransport = transport)
+        h.facade.applyConfiguration(config()); h.settle()
+        val unavailable = checkNotNull(h.facade.getFeatureFlagSnapshot())
+        assertFalse(unavailable.isAvailable); assertEquals(EluFeatureFlagSnapshot.Source.UNAVAILABLE, unavailable.source)
+        assertEquals(EluFeatureFlagSnapshot.LoadError.TRANSPORT, unavailable.error)
+        assertNull(unavailable.requestId); assertTrue(unavailable.entries.isEmpty())
+        transport.failing = false
+        transport.transform = { it.put("flags", JSONObject()).put("payloads", JSONObject()) }
+        h.facade.reloadFeatureFlags(null); h.settle()
+        val empty = checkNotNull(h.facade.getFeatureFlagSnapshot())
+        assertTrue(empty.isAvailable); assertTrue(empty.entries.isEmpty()); assertNull(empty.error)
+        assertTrue(empty.requestId!!.startsWith("flags_request_"))
+        transport.invalidBytes = true
+        h.facade.reloadFeatureFlags(null); h.settle()
+        val failed = checkNotNull(h.facade.getFeatureFlagSnapshot())
+        assertEquals(empty.requestId, failed.requestId)
+        assertEquals(EluFeatureFlagSnapshot.Source.REMOTE, failed.source)
+        assertEquals(EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE, failed.error)
+        assertNull(empty.error) // Existing detached values cannot acquire later mutable error state.
+        transport.invalidBytes = false
+        h.facade.reloadFeatureFlags(null); h.settle()
+        assertNull(checkNotNull(h.facade.getFeatureFlagSnapshot()).error)
+    }
+
+    @Test fun `cache snapshot retains original source and consumes original expiry without fetch`() {
+        val backing = FakeRuntimeQueueBacking()
+        val first = harness(backing = backing)
+        first.facade.applyConfiguration(config()); first.settle()
+        val original = checkNotNull(first.facade.getFeatureFlagSnapshot())
+        first.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        val advance = AtomicLong(0)
+        val clock = object : FlagClock {
+            override fun wallNowEpochMillis() = NOW_MS + advance.get()
+            override fun monotonicNowNanos() = 1_000_000_000L + advance.get() * 1_000_000L
+        }
+        val transport = RespondingFlagTransport().apply { failing = true }
+        val h = harness(backing = backing, suppliedFlagTransport = transport, flagClock = clock)
+        h.facade.applyConfiguration(config()); h.settle()
+        val cached = checkNotNull(h.facade.getFeatureFlagSnapshot())
+        assertEquals(original.requestId, cached.requestId); assertEquals(EluFeatureFlagSnapshot.Source.CACHE, cached.source)
+        assertEquals(EluFeatureFlagSnapshot.LoadError.TRANSPORT, cached.error)
+        val requests = transport.requests.size
+        advance.set(180_000)
+        assertNull(h.facade.getFeatureFlagSnapshot())
+        assertEquals(requests, transport.requests.size)
+        assertEquals(2, cached.entries.size) // Retained bytes are a value, never live permission.
+    }
+
+    @Test fun `subscriptions cancel queued callbacks preserve order and isolate client exceptions`() {
+        val queued = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+        val h = harness(callbackDelivery = { queued.add(it) })
+        val received = mutableListOf<String>()
+        val cancelled = h.facade.subscribeToFeatureFlags { received += "cancelled" }
+        h.facade.subscribeToFeatureFlags { received += "first"; error("customer callback") }
+        h.facade.subscribeToFeatureFlags { received += "second" }
+        h.facade.applyConfiguration(config()); h.settle()
+        cancelled.cancel(); cancelled.close()
+        while (true) (queued.poll() ?: break).run()
+        assertEquals(listOf("first", "second"), received)
+        assertEquals(1, h.diagnostics().listenerErrors)
+        lateinit var late: EluFeatureFlagSubscription
+        late = h.facade.subscribeToFeatureFlags { received += "late"; late.cancel() }
+        h.settle(); while (true) (queued.poll() ?: break).run()
+        assertEquals(listOf("first", "second", "late"), received)
+        h.facade.reloadFeatureFlags(null); h.settle()
+        while (true) (queued.poll() ?: break).run()
+        assertEquals(listOf("first", "second", "late", "first", "second"), received)
+        h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+        late.close(); cancelled.close()
+    }
+
+    @Test fun `cancel before registration prevents callback without preventing other listeners`() {
+        val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val h = harness(facadeLane = lane)
+        h.facade.applyConfiguration(config()); h.settle()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val token = h.facade.subscribeToFeatureFlags { fail("cancelled before registration") }
+            token.close(); token.cancel()
+            h.facade.subscribeToFeatureFlags { callbacks += "live" }
+        } finally { release.countDown() }
+        h.settle(); assertEquals(listOf("live"), callbacks)
+    }
+
+    @Test fun `queued snapshot is fenced by original identity consent expiry and close`() {
+        for (change in listOf("identity", "context", "optout", "expiry", "close")) {
+            val queued = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+            val advance = AtomicLong(0)
+            val clock = object : FlagClock {
+                override fun wallNowEpochMillis() = NOW_MS + advance.get()
+                override fun monotonicNowNanos() = 1_000_000_000L + advance.get() * 1_000_000L
+            }
+            val h = harness(callbackDelivery = { queued.add(it) }, flagClock = clock)
+            h.facade.applyConfiguration(config()); h.settle()
+            var delivered = 0
+            h.facade.subscribeToFeatureFlags { delivered++ }; h.settle()
+            val old = checkNotNull(queued.poll())
+            when (change) {
+                "identity" -> h.facade.identify("replacement", null)
+                "context" -> h.facade.setPersonPropertiesForFlags(mapOf("plan" to "replacement"))
+                "optout" -> h.facade.optOut()
+                "expiry" -> advance.set(180_000)
+                "close" -> h.facade.closeAndWait().get(5, TimeUnit.SECONDS)
+            }
+            old.run(); assertEquals(change, 0, delivered)
+            if (change != "close") h.settle()
+        }
+    }
+
+    @Test fun `coalesced reload callbacks finish from one original request with its current snapshot`() {
+        val transport = RespondingFlagTransport()
+        val h = harness(suppliedFlagTransport = transport)
+        h.facade.applyConfiguration(config()); h.settle()
+        val count = transport.requests.size
+        transport.hold = true; transport.requestObserved = CountDownLatch(1)
+        val completed = mutableListOf<String>()
+        h.facade.reloadFeatureFlags { completed += "first:" + h.facade.getFeatureFlagSnapshot()!!.requestId }
+        assertTrue(transport.requestObserved.await(5, TimeUnit.SECONDS))
+        h.facade.reloadFeatureFlags { completed += "second:" + h.facade.getFeatureFlagSnapshot()!!.requestId }
+        h.diagnostics() // Original facade queue has admitted the second caller into the same request.
+        assertTrue(completed.isEmpty()); assertEquals(count + 1, transport.requests.size)
+        transport.releaseHeld(); h.settle()
+        val current = checkNotNull(h.facade.getFeatureFlagSnapshot()).requestId
+        assertEquals(listOf("first:$current", "second:$current"), completed)
+    }
+
+    @Test fun `reload completion waits through quiet capture intent and cannot cross an identity reset`() {
+        for (reset in listOf(false, true)) {
+            val lane = java.util.concurrent.Executors.newSingleThreadExecutor()
+            val queued = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+            val transport = RespondingFlagTransport()
+            val h = harness(facadeLane = lane, callbackDelivery = { queued.add(it) }, suppliedFlagTransport = transport,
+                personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+            h.facade.applyConfiguration(config()); h.settle()
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            lane.execute { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+            var completed = 0
+            transport.hold = true; transport.requestObserved = CountDownLatch(1)
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                h.facade.reloadFeatureFlags { completed++ }
+                if (reset) h.facade.reset()
+                else h.facade.capture("quiet", null, EluCaptureOptions(set = mapOf("plan" to "paid")))
+            } finally { release.countDown() }
+            assertTrue(transport.requestObserved.await(5, TimeUnit.SECONDS))
+            h.diagnostics()
+            assertTrue("No premature completion from a deferred command", queued.isEmpty())
+            transport.releaseHeld(); h.settle()
+            while (true) (queued.poll() ?: break).run()
+            assertEquals(if (reset) 0 else 1, completed)
+            assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
+        }
+    }
+
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
@@ -1459,6 +1657,7 @@ class StandaloneFacadeTest {
         limits: RuntimeQueueLimits = RuntimeQueueLimits(10_000, 16_777_216),
         rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
         startupObserver: RuntimeStartupObserver = RuntimeStartupObserver.NONE,
+        callbackDelivery: (Runnable) -> Unit = { it.run() },
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -1497,7 +1696,7 @@ class StandaloneFacadeTest {
         val facade =
             StandaloneFacade(
                 open = { beforeOpen(); StandaloneStack(runtime, owner, flags) },
-                deliverCallback = { callback -> callback.run() },
+                deliverCallback = callbackDelivery,
                 wallClock = wall,
                 bufferLimit = bufferLimit,
                 onOpened = { onOpened(owner.snapshot().get().state.identity.optedOut) },
@@ -1568,11 +1767,21 @@ class StandaloneFacadeTest {
         val revisions = AtomicInteger()
         @Volatile var failing = false
         @Volatile var variant: Any = "variant-a"
+        @Volatile var transform: ((JSONObject) -> Unit)? = null
+        @Volatile var invalidBytes = false
+        @Volatile var hold = false
+        @Volatile var requestObserved = CountDownLatch(1)
+        private val held = mutableListOf<Pair<SdkFuture<ByteArray>, ByteArray>>()
+        @Synchronized fun releaseHeld() {
+            val pending = held.toList(); held.clear(); hold = false
+            pending.forEach { (future, bytes) -> future.complete(bytes) }
+        }
 
         @Synchronized
         override fun send(request: dev.elu.analytics.internal.flags.FlagTransportRequest): SdkFuture<ByteArray> {
             val body = JSONObject(String(request.canonicalBody, StandardCharsets.UTF_8))
             requests += body
+            requestObserved.countDown()
             if (failing) return SdkFuture<ByteArray>().also { it.completeExceptionally(java.io.IOException("offline")) }
             val response =
                 JSONObject()
@@ -1590,7 +1799,9 @@ class StandaloneFacadeTest {
                             .put("bool-false", false),
                     )
                     .put("payloads", JSONObject().put("variant", JSONObject().put("buttonColor", "violet")))
-            return SdkFuture.completedFuture(response.toString().toByteArray(StandardCharsets.UTF_8))
+            transform?.invoke(response)
+            val bytes = if (invalidBytes) byteArrayOf(0xc3.toByte(), 0x28) else response.toString().toByteArray(StandardCharsets.UTF_8)
+            return if (hold) SdkFuture<ByteArray>().also { held += it to bytes } else SdkFuture.completedFuture(bytes)
         }
     }
 

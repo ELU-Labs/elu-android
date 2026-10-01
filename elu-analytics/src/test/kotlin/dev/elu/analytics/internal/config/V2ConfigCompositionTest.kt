@@ -447,6 +447,7 @@ class V2ConfigCompositionTest {
                 override fun applyConfiguration(configBody: String?) = error("unused")
                 override fun reload() = error("unused")
                 override fun read(key: String) = error("unused")
+                override fun readSnapshot() = error("unused")
                 override fun isCacheLeaseCurrent(token: dev.elu.analytics.internal.flags.FlagCacheLeaseToken) = false
                 override fun close() { flagCloses++; flagsClosed.countDown() }
             })

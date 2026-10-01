@@ -157,58 +157,62 @@ internal class AndroidFeatureFlagClient(
     }
 
     override fun read(key: String): SdkFuture<FlagReadResult> {
+        if (!validFlagKey(key)) return SdkFuture.completedFuture(FlagReadResult.Missing)
         val result = SdkFuture<FlagReadResult>()
+        readSnapshot().whenComplete { snapshot, error ->
+            if (error != null) result.completeExceptionally(error)
+            else result.complete((snapshot ?: FlagSnapshotReadResult.Missing).forKey(key))
+        }
+        return result
+    }
+
+    override fun readSnapshot(): SdkFuture<FlagSnapshotReadResult> {
+        val result = SdkFuture<FlagSnapshotReadResult>()
         execute(result) {
             if (initializationFailure != null || closed || clockFailed) {
-                result.complete(FlagReadResult.Missing)
+                result.complete(FlagSnapshotReadResult.Missing)
                 return@execute
             }
             val sample =
                 try {
                     sampleClock()
                 } catch (_: Throwable) {
-                    result.complete(FlagReadResult.Missing)
+                    result.complete(FlagSnapshotReadResult.Missing)
                     return@execute
                 }
             val lease = usableConfigLease(sample)
             if (lease == null) {
-                result.complete(FlagReadResult.Missing)
+                result.complete(FlagSnapshotReadResult.Missing)
                 return@execute
             }
             if (!usableCacheLease(sample, lease)) {
-                result.complete(FlagReadResult.Missing)
+                result.complete(FlagSnapshotReadResult.Missing)
                 return@execute
             }
             val read =
                 try {
-                    owner.readFeatureFlag(versions, key, clock::wallNowEpochMillis).await()
+                    owner.readFeatureFlagSnapshot(versions, clock::wallNowEpochMillis).await()
                 } catch (_: Throwable) {
-                    FlagReadResult.Missing
+                    FlagSnapshotReadResult.Missing
                 }
             when (read) {
-                is FlagReadResult.Found -> {
-                    if (!installCacheLease(read.cacheLeaseToken, read.responseExpiresAt, sample, lease)) {
-                        result.complete(FlagReadResult.Missing)
+                is FlagSnapshotReadResult.Found -> {
+                    if (!installCacheLease(read.cacheLeaseToken, read.response.expiresAt, sample, lease)) {
+                        result.complete(FlagSnapshotReadResult.Missing)
                         return@execute
                     }
                 }
-                is FlagReadResult.CacheMiss -> {
-                    if (!installCacheLease(read.cacheLeaseToken, read.responseExpiresAt, sample, lease)) {
-                        result.complete(FlagReadResult.Missing)
-                        return@execute
-                    }
-                }
-                is FlagReadResult.Restricted -> {
+                is FlagSnapshotReadResult.Restricted -> {
                     if (read.reason == FlagRestrictionReason.WALL_ROLLBACK) poisonClock()
-                    result.complete(FlagReadResult.Missing)
+                    result.complete(FlagSnapshotReadResult.Missing)
                     return@execute
                 }
-                FlagReadResult.Terminal -> {
+                FlagSnapshotReadResult.Terminal -> {
                     poisonClock()
-                    result.complete(FlagReadResult.Missing)
+                    result.complete(FlagSnapshotReadResult.Missing)
                     return@execute
                 }
-                FlagReadResult.Missing -> Unit
+                FlagSnapshotReadResult.Missing -> Unit
             }
             // The owner's storage hop may consume the remaining cache lifetime. Keep the
             // original pre-hop deadline, then sample again before returning a projection.
@@ -216,11 +220,10 @@ internal class AndroidFeatureFlagClient(
             val currentConfig = completion?.let(::usableConfigLease)
             val currentCache = currentConfig != null && usableCacheLease(checkNotNull(completion), currentConfig)
             val token = when (read) {
-                is FlagReadResult.Found -> read.cacheLeaseToken
-                is FlagReadResult.CacheMiss -> read.cacheLeaseToken
+                is FlagSnapshotReadResult.Found -> read.cacheLeaseToken
                 else -> null
             }
-            result.complete(if (currentCache && (token == null || isCacheLeaseCurrent(token))) read else FlagReadResult.Missing)
+            result.complete(if (currentCache && (token == null || isCacheLeaseCurrent(token))) read else FlagSnapshotReadResult.Missing)
         }
         return result
     }

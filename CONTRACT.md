@@ -147,10 +147,30 @@ cache alone is not fresh. Both the returned projection and any later exposure
 transaction recheck that origin and the existing authority/cache deadlines.
 Identity, context, consent and close fences still apply. No read option initiates
 a network request, extends expiry, changes storage, or grants authority. The
-existing per-key local lookup remains asynchronous. The new optional Boolean
+complete cache read validates the original source, transaction, witness, hash,
+clock and expiry once; keyed reads project that same admitted publication. The optional Boolean
 getter distinguishes unavailable from evaluated false and applies its fallback
 only to unavailable values; the original Boolean getter remains false on
 unavailability. Payload reads remain quiet.
+
+`getFeatureFlagSnapshot` exposes only the current complete publication without a
+fetch or exposure. Exact typed entries and canonical flags/payload bytes preserve
+false, null, number and payload-only keys; returned dates/bytes are detached.
+`subscribeToFeatureFlags` returns an explicit `Closeable` cancellation token and
+uses the original main callback dispatcher. Each queued delivery retains one
+publication and rechecks its original generation, identity/context intent,
+source and cache lease immediately before admission. A later publication cannot
+supply values or errors to an older notification. Cancellation prevents later
+admission and never holds an SDK lock while running customer code.
+
+Remote origin requires the exact cache token from an accepted reload in this
+facade. Reopened cache remains cache even when its bytes match an earlier remote
+response. Transport/invalid-response errors are attached to that load's still
+current values, or an explicit unavailable publication; a valid empty evaluation
+is not unavailable. Retained snapshots convey no continuing authority. Original
+reload completions remain bound to the requesting identity/consent/source while
+coalescing and pending same-identity context work defer the actual reload. No new
+storage schema, network request, worker or exposure ledger is introduced.
 
 Exposure properties retain the validated evaluation request ID and evaluation
 time, including a missing key in an otherwise valid evaluation. No usable cache

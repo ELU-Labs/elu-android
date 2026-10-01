@@ -97,6 +97,10 @@ internal interface EluFacadeSink {
 
     fun isFeatureEnabled(key: String, options: EluFeatureFlagOptions, defaultValue: Boolean?): Boolean?
 
+    fun getFeatureFlagSnapshot(): dev.elu.analytics.EluFeatureFlagSnapshot?
+
+    fun subscribeToFeatureFlags(listener: dev.elu.analytics.EluFeatureFlagSnapshot.Listener): dev.elu.analytics.EluFeatureFlagSubscription
+
     fun reloadFeatureFlags(completion: (() -> Unit)?)
 
     fun onFeatureFlagsLoaded(callback: () -> Unit)

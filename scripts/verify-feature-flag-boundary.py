@@ -22,7 +22,11 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluCaptureOptions.kt":
         "7e7be13379168018540470848f11be2796b80f3294bceb12b6a9cfccead37299",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "3c3d8c15c33509fa2de3db81bb4a7c0afb34118c856523d2d08b5d27fea95e81",
+        "5aeffd6393238d5fbbfa1c4362e72fe5d72195b3c91ee77c4cfc4d2d40d9f3a3",
+    "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagSnapshot.kt":
+        "b6d3cea48f349c60bdd6d4f126d3b805f6d542377b212d19011909cf7c73dd6d",
+    "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagSubscription.kt":
+        "e9a324aaaf9c6c299ae68366d01eb4f4029d52a03f339add682d77b0d5e4481a",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagOptions.kt":
         "8d78e1650df46a5bacf42f2e6382000b56df8b172c84ec5a67b098b5239e0467",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
@@ -966,8 +970,10 @@ def verify_durable_flag_exposures(root: pathlib.Path, errors: list[str]) -> None
         "internal/runtime/RuntimeFlagExposureCapture.kt": [
             '"\\$feature_flag_request_id" to metadata.requestId', '"\\$feature_flag_evaluated_at" to metadata.evaluatedAt.toEpochMillisFloor()',
             '"\\$used_bootstrap_value" to usedBootstrap'],
-        "internal/facade/StandaloneFacade.kt": ["RuntimeFlagExposureCapture.from(key, read, !flagsFromRemote)",
-            "metadata.logicalDigest != flagEvaluationDigest", "floorMillis = 5_000L", "flagRetryAttempt >= 6"],
+        "internal/facade/StandaloneFacade.kt": ["RuntimeFlagExposureCapture.from(key, entry.read,",
+            "publication.snapshot.source == EluFeatureFlagSnapshot.Source.CACHE",
+            "flagPublication === publication", "publicationIsCurrent(publication)",
+            "stack?.flags?.isCacheLeaseCurrent(it)", "floorMillis = 5_000L", "flagRetryAttempt >= 6"],
         "internal/config/V2ConfigLifecycleDriver.kt": ["minOf(5 * MINUTE", "result is V2ConfigSourceResult.Document && retained", "publishedUpdate?.let(onRetainedRefresh)"],
         "internal/facade/AndroidStandaloneStack.kt": ["facade.configurationRefreshed(token)"],
     }

@@ -1,5 +1,8 @@
 package dev.elu.analytics.internal.facade
 
+import dev.elu.analytics.EluFeatureFlagSnapshot
+import dev.elu.analytics.EluFeatureFlagSubscription
+import dev.elu.analytics.FeatureFlagCancellation
 import dev.elu.analytics.EluCaptureOptions
 import dev.elu.analytics.EluPersonProfilesMode
 
@@ -15,6 +18,9 @@ import dev.elu.analytics.internal.core.JsonValues
 import dev.elu.analytics.internal.core.IdentityState
 import dev.elu.analytics.internal.flags.FlagCacheLeaseToken
 import dev.elu.analytics.internal.flags.FlagJsonValue
+import dev.elu.analytics.internal.flags.FlagSnapshotReadResult
+import dev.elu.analytics.internal.flags.forKey
+import dev.elu.analytics.internal.flags.validFlagKey
 import dev.elu.analytics.internal.flags.FlagReadResult
 import dev.elu.analytics.internal.flags.FlagReloadResult
 import dev.elu.analytics.internal.runtime.RuntimeAppendRejection
@@ -57,6 +63,8 @@ internal interface FacadeFlagClient : AutoCloseable {
     fun reload(): SdkFuture<FlagReloadResult>
 
     fun read(key: String): SdkFuture<FlagReadResult>
+
+    fun readSnapshot(): SdkFuture<FlagSnapshotReadResult>
 
     /** Checks the original client-owned wall/monotonic cache lease without extending it. */
     fun isCacheLeaseCurrent(token: FlagCacheLeaseToken): Boolean
@@ -165,13 +173,9 @@ internal class StandaloneFacade(
     // Lane-confined.
     private val buffer = ArrayDeque<Operation>()
     private val listeners = mutableListOf<() -> Unit>()
-    private val observedFlagKeys = LinkedHashSet<String>()
-    private val reloadCompletions = mutableListOf<() -> Unit>()
-    private var flagsFromRemote = false
-    // One immutable remote-origin fact is published to caller threads; never read the lane-only
-    // exposure-origin Boolean there. Its original token and generation must match the read.
-    @Volatile private var remoteFlagOrigin: RemoteFlagOrigin? = null
-    private var flagEvaluationDigest: String? = null
+    private val snapshotListeners = mutableListOf<FlagListener>()
+    private val reloadCompletions = mutableListOf<ReloadCompletion>()
+    @Volatile private var flagPublication: FlagPublication? = null
     /** Identifies the loaded flags; a reset abandons the reload started for the previous one. */
     @Volatile private var flagGeneration = 0L
     private var flagReloadGeneration: Long? = null
@@ -180,7 +184,7 @@ internal class StandaloneFacade(
     private var flagRetryTask: dev.elu.analytics.internal.config.V2ConfigLifecycleTask? = null
     private var flagRetryGeneration = 0L
     @Volatile private var stack: StandaloneStack? = null
-    private var configDocument: String? = null
+    @Volatile private var configDocument: String? = null
     private var hasConfigDecision = false
     @Volatile private var appliedConfiguration: V2ConfigAuthorityWitness? = null
     @Volatile private var flagsAuthorized = false
@@ -223,10 +227,7 @@ internal class StandaloneFacade(
     /** Non-null while a queued identity call has not settled, so getters follow call order. */
     @Volatile private var projectedIdentity: ProjectedIdentity? = null
 
-    @Volatile private var flagProjection: Map<String, FlagEntry> = emptyMap()
-
     @Volatile private var flagsLoaded = false
-    @Volatile private var loadedCacheToken: FlagCacheLeaseToken? = null
 
     /** Called on the existing facade lane only; no authority getter is sampled. */
     private fun observeLane(phase: RuntimeStartupPhase) = observeStartup(startupObserver) {
@@ -417,6 +418,8 @@ internal class StandaloneFacade(
                 val held = buffer.toList(); buffer.clear()
                 held.forEach { discard(it, EluFacadeDropReason.CLOSED) }
                 state = EluFacadeState.Closed
+                snapshotListeners.forEach { it.cancellation.cancel() }; snapshotListeners.clear()
+                listeners.clear(); reloadCompletions.clear(); flagPublication = null
                 val opened = stack
                 var flagFailure: Throwable? = null
                 try { opened?.flags?.close() } catch (error: Throwable) { flagFailure = error }
@@ -889,30 +892,49 @@ internal class StandaloneFacade(
     override fun isFeatureEnabled(key: String, options: EluFeatureFlagOptions, defaultValue: Boolean?): Boolean? =
         readFlag(key, expose = options.sendEvent, fresh = options.fresh)?.let { isTruthyVariant(it.value) } ?: defaultValue
 
+    override fun getFeatureFlagSnapshot(): EluFeatureFlagSnapshot? = currentFlagPublication()?.snapshot
+
+    override fun subscribeToFeatureFlags(listener: EluFeatureFlagSnapshot.Listener): EluFeatureFlagSubscription {
+        val cancellation = FeatureFlagCancellation()
+        val registration = FlagListener(listener, cancellation)
+        val weakOwner = java.lang.ref.WeakReference(this)
+        val token = EluFeatureFlagSubscription(cancellation) {
+            weakOwner.get()?.let { owner -> owner.submit { owner.snapshotListeners.remove(registration) } }
+        }
+        if (!submit {
+                if (!closed && !closeRequested.get() && cancellation.admit()) {
+                    snapshotListeners += registration
+                    currentFlagPublication()?.let { deliverSnapshot(registration, it) }
+                }
+            }) cancellation.cancel()
+        return token
+    }
+
     override fun reloadFeatureFlags(completion: (() -> Unit)?) {
-        // A reload is a command, not a state change: it is never replayed from the hold buffer.
+        // A completion belongs to this accepted command, including a deferred physical reload.
+        val completionRequest = synchronized(projectionLock) {
+            completion?.let { ReloadCompletion(it, identity, consentIntentRevision, configDocument, flagConfiguration) }
+        }
         submit {
             if (!hasCurrentFlags()) {
                 countDrop(currentDropReason())
                 return@submit
             }
-            completion?.let { reloadCompletions += it }
+            completionRequest?.takeIf(::reloadCompletionIsCurrent)?.let { reloadCompletions += it }
             synchronized(projectionLock) {
-                // A queued explicit command must survive a capture's no-auto-reload fence.
                 if (pendingFlagOperations != 0) pendingFlagReloadRequested = true
             }
             startFlagReload()
-            // Without a flag client there is nothing to load, so the completion runs now.
-            if (flagReloadGeneration == null) finishFlagReload()
+            // Pending context work is not a finished reload. Its last original intent starts it.
+            if (stack?.flags == null && pendingFlagOperations == 0) finishFlagReload()
         }
     }
 
     override fun onFeatureFlagsLoaded(callback: () -> Unit) {
         submit {
+            if (closed || closeRequested.get()) return@submit
             listeners += callback
-            // Add-and-fire on one lane: a listener either made this load's snapshot or missed it
-            // and replays once. Later loads legitimately re-fire every listener in order.
-            if (hasCurrentFlags() && flagsLoaded) deliverFlagCallback(callback)
+            currentFlagPublication()?.let { deliverFlagCallback(callback, it) }
         }
     }
 
@@ -1244,6 +1266,9 @@ internal class StandaloneFacade(
             }
         nativeSessionRefreshNeeded = false
         transition(next)
+        if (flagsAuthorized && !flagsLoaded && pendingFlagOperations == 0) {
+            publishFlagRead(null, null)?.let(::fireFlagListeners)
+        }
         if (flagsAuthorized && (!wasEnabled || !flagsLoaded)) startFlagReload()
         nativeEpoch?.let { requestNativeEvaluation(it, force = true) }
         open.runtime.requestAutomaticExceptions()
@@ -1408,67 +1433,86 @@ internal class StandaloneFacade(
 
     // ---- flag snapshot, listeners and exposure -------------------------------
 
-    private class RemoteFlagOrigin(
-        val generation: Long,
-        val intent: Long,
-        val token: FlagCacheLeaseToken,
-        val digest: String,
-    )
+    private class FlagListener(val callback: EluFeatureFlagSnapshot.Listener, val cancellation: FeatureFlagCancellation)
+    private class ReloadCompletion(val callback: () -> Unit, val identity: IdentityState?,
+        val consentRevision: Long, val configurationBody: String?, val source: V2ConfigAuthorityWitness?)
+    private class FlagPublication(val snapshot: EluFeatureFlagSnapshot, val read: FlagSnapshotReadResult.Found?,
+        val generation: Long, val intent: Long, val source: V2ConfigAuthorityWitness?)
+    private class FlagEntry(val present: Boolean, val value: Any?, val payload: Any?, val read: FlagReadResult)
 
-    private class FlagEntry(
-        val present: Boolean,
-        val value: Any?,
-        val payload: Any?,
-        val cacheLeaseToken: FlagCacheLeaseToken?,
-        val read: FlagReadResult? = null,
-    )
-
-    private fun readFlag(
-        key: String,
-        expose: Boolean,
-        fresh: Boolean = false,
-    ): FlagEntry? {
-        if (key.isEmpty()) return null
-        val intent = flagIntentRevision
-        if (!flagsLoaded || !flagIntentIsCurrent(intent) || !hasCurrentFlags()) return null
-        val generation = flagGeneration
-        val entry = flagProjection[key]?.takeIf(::entryIsCurrent)
-        val origin = remoteFlagOrigin
-        val eligible = {
-            !fresh || origin != null && remoteFlagOrigin === origin &&
-                origin.generation == generation && origin.intent == intent &&
-                origin.token == entry?.cacheLeaseToken && origin.digest == when (val read = entry?.read) {
-                    is FlagReadResult.Found -> read.metadata?.logicalDigest
-                    is FlagReadResult.CacheMiss -> read.metadata?.logicalDigest
-                    else -> null
-                }
-        }
-        submit {
-            // The owned client resolves one key at a time, so a key is read once here and then
-            // refreshed on every later load.
-            if (observedFlagKeys.add(key)) resolveFlag(key)
-            if (expose && generation == flagGeneration && flagIntentIsCurrent(intent) && eligible()) {
-                reportExposure(key, entry, eligible)
-            }
-        }
-        return entry?.takeIf { it.present && generation == flagGeneration && flagIntentIsCurrent(intent) && hasCurrentFlags() && entryIsCurrent(it) && eligible() }
+    private fun reloadCompletionIsCurrent(request: ReloadCompletion): Boolean = synchronized(projectionLock) {
+        val original = request.identity
+        val current = identity
+        !closed && !closeRequested.get() && !isOptedOut() &&
+            original?.anonymousId == current?.anonymousId && original?.userId == current?.userId &&
+            original?.revision == current?.revision && request.consentRevision == consentIntentRevision &&
+            request.configurationBody == configDocument &&
+            (configurationGate == null || request.source?.isCurrent() == true)
     }
 
-    private fun entryIsCurrent(entry: FlagEntry): Boolean =
-        entry.cacheLeaseToken?.let { stack?.flags?.isCacheLeaseCurrent(it) } == true
+    private fun publicationIsCurrent(publication: FlagPublication): Boolean =
+        flagPublication === publication && !closed && flagsLoaded &&
+            publication.generation == flagGeneration && flagIntentIsCurrent(publication.intent) &&
+            hasCurrentFlags() && (configurationGate == null || publication.source?.isCurrent() == true) &&
+            (publication.read?.cacheLeaseToken?.let { stack?.flags?.isCacheLeaseCurrent(it) } != false)
+
+    private fun currentFlagPublication(): FlagPublication? = flagPublication?.takeIf(::publicationIsCurrent)
+
+    private fun readFlag(key: String, expose: Boolean, fresh: Boolean = false): FlagEntry? {
+        if (!validFlagKey(key)) return null
+        val publication = currentFlagPublication() ?: return null
+        if (fresh && publication.snapshot.source != EluFeatureFlagSnapshot.Source.REMOTE) return null
+        val read = publication.read?.forKey(key) ?: return null
+        val entry = when (read) {
+            is FlagReadResult.Found -> FlagEntry(true, publicFlagValue(platformValue(read.value)),
+                read.payload?.let(::platformValue), read)
+            is FlagReadResult.CacheMiss -> FlagEntry(false, null, null, read)
+            else -> return null
+        }
+        if (expose) submit { reportExposure(key, entry, publication) }
+        return entry.takeIf { it.present && publicationIsCurrent(publication) }
+    }
 
     /** The original queue transaction owns anonymous-visitor dedupe, never this projection. */
-    private fun reportExposure(key: String, entry: FlagEntry?, readIsEligible: () -> Boolean) {
-        val intent = flagIntentRevision
-        if (entry == null || !flagIntentIsCurrent(intent) || !hasCurrentFlags() || !entryIsCurrent(entry) || !readIsEligible()) return
-        val read = entry.read ?: return
-        val exposure = dev.elu.analytics.internal.runtime.RuntimeFlagExposureCapture.from(key, read, !flagsFromRemote) {
-            flagIntentIsCurrent(intent) && hasCurrentFlags() && entryIsCurrent(entry) && readIsEligible()
+    private fun reportExposure(key: String, entry: FlagEntry, publication: FlagPublication) {
+        if (!publicationIsCurrent(publication)) return
+        val exposure = dev.elu.analytics.internal.runtime.RuntimeFlagExposureCapture.from(key, entry.read,
+            publication.snapshot.source == EluFeatureFlagSnapshot.Source.CACHE) {
+            publicationIsCurrent(publication)
         } ?: return
         val occurredAt = now()
         dispatch(kind = OperationKind.ACTIVITY) {
             if (exposure.isCurrent()) captureThrough { attempt -> requireStack().runtime.captureFlagExposure(exposure, occurredAt, attempt) }
         }
+    }
+
+    /** One original client read, not a collection of public keyed reads or exposures. */
+    private fun publishFlagRead(remoteToken: FlagCacheLeaseToken?, error: EluFeatureFlagSnapshot.LoadError?,
+        publishUnavailable: Boolean = false): FlagPublication? {
+        val generation = flagGeneration
+        val intent = flagIntentRevision
+        val source = flagConfiguration
+        if (!flagIntentIsCurrent(intent) || !hasCurrentFlags()) return null
+        val read = try { stack?.flags?.readSnapshot()?.await() ?: return null }
+            catch (failure: Throwable) { countDrop(classify(failure)); return null }
+        if (read is FlagSnapshotReadResult.Restricted || read == FlagSnapshotReadResult.Terminal) return null
+        val found = read as? FlagSnapshotReadResult.Found
+        if (generation != flagGeneration || !flagIntentIsCurrent(intent) || !hasCurrentFlags() ||
+            (configurationGate != null && source?.isCurrent() != true)) return null
+        if (remoteToken != null && found?.cacheLeaseToken != remoteToken) return null
+        if (found != null && stack?.flags?.isCacheLeaseCurrent(found.cacheLeaseToken) != true) return null
+        if (found == null && !publishUnavailable) return null
+        val previous = currentFlagPublication()
+        val remote = found != null && (remoteToken == found.cacheLeaseToken ||
+            previous?.snapshot?.source == EluFeatureFlagSnapshot.Source.REMOTE &&
+                previous.read?.cacheLeaseToken == found.cacheLeaseToken)
+        val origin = if (found == null) EluFeatureFlagSnapshot.Source.UNAVAILABLE
+            else if (remote) EluFeatureFlagSnapshot.Source.REMOTE else EluFeatureFlagSnapshot.Source.CACHE
+        val snapshot = EluFeatureFlagSnapshot(found?.response, origin, error)
+        val publication = FlagPublication(snapshot, found, generation, intent, source)
+        flagPublication = publication
+        flagsLoaded = true
+        return publication.takeIf(::publicationIsCurrent)
     }
 
     /**
@@ -1497,6 +1541,7 @@ internal class StandaloneFacade(
                 client.reload()
             } catch (error: Throwable) {
                 countDrop(classify(error))
+                publishFlagRead(null, EluFeatureFlagSnapshot.LoadError.TRANSPORT, true)?.let(::fireFlagListeners)
                 finishFlagReload()
                 scheduleFlagRetry()
                 return
@@ -1515,6 +1560,7 @@ internal class StandaloneFacade(
         if (generation != flagReloadGeneration) return
         if (error != null) {
             countDrop(classify(error))
+            publishFlagRead(null, EluFeatureFlagSnapshot.LoadError.TRANSPORT, true)?.let(::fireFlagListeners)
             finishFlagReload()
             scheduleFlagRetry()
             return
@@ -1525,19 +1571,8 @@ internal class StandaloneFacade(
         }
         when (result) {
             is FlagReloadResult.Updated -> {
-                loadedCacheToken = result.cacheLeaseToken
-                if (loadedCacheToken?.let { stack?.flags?.isCacheLeaseCurrent(it) } != true) {
-                    finishFlagReload()
-                    return
-                }
-                remoteFlagOrigin = result.metadata?.let {
-                    RemoteFlagOrigin(generation, flagIntentRevision, checkNotNull(result.cacheLeaseToken), it.logicalDigest)
-                }
-                result.metadata?.let { flagsFromRemote = true; flagEvaluationDigest = it.logicalDigest }
-                observedFlagKeys.forEach { key -> resolveFlag(key) }
-                flagsLoaded = true
-                // Listeners see the new snapshot before the reload's own completion runs.
-                fireFlagListeners()
+                val token = result.cacheLeaseToken
+                if (token != null) publishFlagRead(token, null)?.let(::fireFlagListeners)
                 finishFlagReload()
             }
             // The reload was superseded by a context or configuration change; the next attempt
@@ -1549,10 +1584,14 @@ internal class StandaloneFacade(
                     finishFlagReload()
                 }
             else -> {
-                // A load that failed still ends the "flags have not loaded" phase, so getters
-                // report their documented defaults instead of waiting for a retry.
-                flagsLoaded = true
-                fireFlagListeners()
+                val loadError = when ((result as? FlagReloadResult.Failed)?.reason) {
+                    "transport-failure" -> EluFeatureFlagSnapshot.LoadError.TRANSPORT
+                    "protocol-failure" -> EluFeatureFlagSnapshot.LoadError.INVALID_RESPONSE
+                    else -> null
+                }
+                if (result is FlagReloadResult.Failed) {
+                    publishFlagRead(null, loadError, publishUnavailable = true)?.let(::fireFlagListeners)
+                }
                 finishFlagReload()
                 if (result is FlagReloadResult.Failed) scheduleFlagRetry()
             }
@@ -1588,84 +1627,43 @@ internal class StandaloneFacade(
 
     private fun finishFlagReload() {
         flagReloadGeneration = null
+        val publication = currentFlagPublication()
         val completions = reloadCompletions.toList()
         reloadCompletions.clear()
-        completions.forEach { completion -> deliverFlagCallback(completion) }
+        if (publication != null) completions.filter(::reloadCompletionIsCurrent).forEach { request ->
+            deliverFlagCallback({ if (reloadCompletionIsCurrent(request)) request.callback() }, publication)
+        }
     }
 
-    private fun resolveFlag(key: String) {
-        val client = stack?.flags ?: return
-        val intent = flagIntentRevision
-        if (!flagIntentIsCurrent(intent)) return
-        val read =
-            try {
-                client.read(key).await()
-            } catch (error: Throwable) {
-                countDrop(classify(error))
-                return
-            }
-        if (!flagIntentIsCurrent(intent) || !hasCurrentFlags()) return
-        val metadata = when (read) {
-            is FlagReadResult.Found -> read.metadata
-            is FlagReadResult.CacheMiss -> read.metadata
-            else -> null
-        }
-        if (metadata != null && metadata.logicalDigest != flagEvaluationDigest) {
-            flagsFromRemote = false
-            remoteFlagOrigin = null
-            flagEvaluationDigest = metadata.logicalDigest
-        }
-        val entry =
-            when (read) {
-                is FlagReadResult.Found ->
-                    FlagEntry(
-                        present = true,
-                        value = publicFlagValue(platformValue(read.value)),
-                        payload = read.payload?.let(::platformValue),
-                        cacheLeaseToken = read.cacheLeaseToken,
-                        read = read,
-                    )
-                is FlagReadResult.CacheMiss -> FlagEntry(false, null, null, read.cacheLeaseToken, read)
-                // Every other outcome is "no value for this key from a usable cache".
-                else -> FlagEntry(present = false, value = null, payload = null, cacheLeaseToken = loadedCacheToken)
-            }
-        flagProjection = LinkedHashMap(flagProjection).apply { put(key, entry) }
-    }
-
-    private fun clearFlags() {
-        observedFlagKeys.clear()
-        invalidateFlagProjection()
-    }
+    private fun clearFlags() = invalidateFlagProjection()
 
     private fun invalidateFlagProjection() {
         cancelFlagRetry()
         flagRetryAttempt = 0
-        flagProjection = emptyMap()
+        flagPublication = null
         flagsLoaded = false
-        flagsFromRemote = false
-        remoteFlagOrigin = null
-        flagEvaluationDigest = null
-        loadedCacheToken = null
         flagGeneration = Math.incrementExact(flagGeneration)
         flagReloadGeneration = null
         flagReloadAttempts = 0
-        reloadCompletions.clear()
+        // A same-identity command deferred by a context intent still owns its completion.
+        reloadCompletions.removeAll { !reloadCompletionIsCurrent(it) }
     }
 
-    private fun fireFlagListeners() {
-        listeners.toList().forEach { listener -> deliverFlagCallback(listener) }
+    private fun fireFlagListeners(publication: FlagPublication) {
+        listeners.toList().forEach { deliverFlagCallback(it, publication) }
+        snapshotListeners.toList().forEach { deliverSnapshot(it, publication) }
     }
 
-    private fun deliverFlagCallback(callback: () -> Unit) {
-        val witness = flagConfiguration
-        val intent = flagIntentRevision
-        val generation = flagGeneration
-        val cacheToken = loadedCacheToken
+    private fun deliverSnapshot(listener: FlagListener, publication: FlagPublication) {
         deliver {
-            if ((cacheToken == null || stack?.flags?.isCacheLeaseCurrent(cacheToken) == true) &&
-                generation == flagGeneration && flagIntentIsCurrent(intent) && hasCurrentFlags() &&
-                (configurationGate == null || witness?.isCurrent() == true)) callback()
+            if (publicationIsCurrent(publication) && listener.cancellation.admit()) {
+                listener.callback.onFlags(publication.snapshot)
+            }
         }
+    }
+
+    private fun deliverFlagCallback(callback: () -> Unit, publication: FlagPublication) {
+        deliver { if (publicationIsCurrent(publication)) callback() }
     }
 
     private fun deliver(callback: () -> Unit) {
