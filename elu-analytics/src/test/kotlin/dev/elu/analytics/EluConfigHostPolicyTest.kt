@@ -13,9 +13,21 @@ class EluConfigHostPolicyTest {
     }
 
     @Test
-    fun `elu subdomains over https are approved and normalized`() {
-        assertEquals("https://config.elu.dev", EluConfigHostPolicy.resolve("https://config.elu.dev/", debuggable = false))
-        assertEquals("https://config.elu.dev", EluConfigHostPolicy.resolve(" HTTPS://Config.ELU.dev ", debuggable = false))
+    fun `the elu cloud origin is approved and normalized`() {
+        for (debuggable in listOf(false, true)) {
+            assertEquals("https://elu.dev", EluConfigHostPolicy.resolve("https://elu.dev/", debuggable))
+            assertEquals("https://elu.dev", EluConfigHostPolicy.resolve(" HTTPS://ELU.dev ", debuggable))
+            assertEquals("https://elu.dev", EluConfigHostPolicy.resolve("https://Elu.Dev", debuggable))
+        }
+    }
+
+    @Test
+    fun `elu subdomains are refused in every build`() {
+        for (candidate in listOf("https://config.elu.dev", "https://eu.elu.dev", "https://www.elu.dev",
+            "https://config.elu.dev/", " HTTPS://Config.ELU.dev ", "https://ingest.elu.dev", "https://a.b.elu.dev")) {
+            assertNull(candidate, EluConfigHostPolicy.resolve(candidate, debuggable = false))
+            assertNull(candidate, EluConfigHostPolicy.resolve(candidate, debuggable = true))
+        }
     }
 
     @Test

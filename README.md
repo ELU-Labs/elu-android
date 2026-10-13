@@ -154,10 +154,11 @@ import dev.elu.analytics.EluOptions
 Elu.setup(this, "YOUR_SITE_KEY", EluOptions(configHost = "http://10.0.2.2:8787"))
 ```
 
-`configHost` accepts an ELU HTTPS origin (`https://elu.dev` or one of its
-subdomains) in every build. A debuggable build may also use a loopback origin
-(`localhost`, `127.0.0.1`, `[::1]`, or the emulator host alias `10.0.2.2`, over
-HTTP or HTTPS, on any port). A declared self-hosted origin is described below.
+`configHost` accepts the ELU Cloud origin, exactly `https://elu.dev`, in every
+build; its subdomains are not accepted. A debuggable build may also use a
+loopback origin (`localhost`, `127.0.0.1`, `[::1]`, or the emulator host alias
+`10.0.2.2`, over HTTP or HTTPS, on any port). A declared self-hosted origin is
+described below.
 Any other value makes `Elu.setup` log a warning
 and leave the SDK idle. Release builds refuse undeclared third-party origins.
 
@@ -174,7 +175,7 @@ Elu.setup(
 )
 ```
 
-A `configHost` outside `elu.dev` is accepted only when it is exactly the
+Any other `configHost` is accepted only when it is exactly the
 declared `apiHost`: both HTTPS, the same host and path prefix, no explicit port,
 credentials, query or fragment. A root URL remains supported. A prefix consists
 of regular path segments; empty or dot segments, backslashes, non-ASCII raw

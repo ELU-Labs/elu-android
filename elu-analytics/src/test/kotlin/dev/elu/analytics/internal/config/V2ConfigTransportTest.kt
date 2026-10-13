@@ -129,10 +129,11 @@ class V2ConfigTransportTest {
 
     @Test
     fun `only canonical ELU credentials and HTTPS config origins can enter the transport`() {
-        assertEquals("https://eu.elu.dev/sdk/v2/$KEY/config", V2ConfigEndpoint.build("https://eu.elu.dev/", KEY).toString())
+        assertEquals("https://elu.dev/sdk/v2/$KEY/config", V2ConfigEndpoint.build("https://elu.dev/", KEY).toString())
         listOf("", "provider_token", "elu_pk_live_short", "$KEY/other", "$KEY?key=x", "$KEY#x", "$KEY\n", " $KEY", "..")
             .forEach { key -> assertThrows(key, IllegalArgumentException::class.java) { V2ConfigEndpoint.build("https://elu.dev", key) } }
-        listOf("http://elu.dev", "https://elu.dev.evil.test", "https://evil.test", "https://elu.dev:443", "https://u@elu.dev", "https://elu.dev/path", "https://elu.dev?x=1", "https://localhost")
+        listOf("http://elu.dev", "https://elu.dev.evil.test", "https://evil.test", "https://elu.dev:443", "https://u@elu.dev", "https://elu.dev/path", "https://elu.dev?x=1", "https://localhost",
+            "https://eu.elu.dev/", "https://config.elu.dev", "https://www.elu.dev")
             .forEach { host -> assertThrows(host, IllegalArgumentException::class.java) { V2ConfigEndpoint.build(host, KEY) } }
         var opened = false
         val transport = HttpURLConnectionV2ConfigTransport(elapsedRealtimeNanos = System::nanoTime, connectionFactory = { opened = true; FakeConnection(200) })
