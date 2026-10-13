@@ -237,7 +237,25 @@ class ComposeDistributionTest(unittest.TestCase):
                       "--input compose-javadoc=", "--input compose-dependencies=", "--input compose-sbom="):
             self.assertIn(token, source)
         self.assertNotIn("publishAndRelease", source)
-        self.assertIn("api-level: [29, 35]", source)
+
+    def test_workflow_runs_core_consumers_and_the_supported_emulator_range(self) -> None:
+        source = (REPOSITORY / ".github/workflows/ci.yml").read_text()
+        fixtures = source.index("./gradlew -p fixtures/core-consumers \\")
+        verify = source.index("validate-compose-distribution.py --verify-staged")
+        for token in (":r8:assembleRelease", ":r8:verifyR8KeepRules", ":r8-baseline:bundleRelease",
+                      ":okhttp5:verifyOkHttpResolution", ":okhttp5:verifyOkHttpLinkage", ":java:assembleDebug",
+                      "-PeluMetadataMode=pom :okhttp5:verifyOkHttpResolution",
+                      "./gradlew -p fixtures/kotlin20-consumer assembleDebug", "scripts/measure-consumer-size.py"):
+            self.assertIn(token, source[fixtures:verify])
+        matrix = source[source.index("  owned-runtime:"):]
+        for level, arch in (("23", "x86"), ("29", "x86_64"), ("35", "x86_64"), ("36", "x86_64")):
+            self.assertIn(f"- api-level: {level}\n            arch: {arch}\n", matrix)
+        self.assertIn("arch: ${{ matrix.arch }}", matrix)
+        self.assertNotIn('= "x86_64"', matrix)
+        for project in ("r8", "okhttp5"):
+            self.assertIn(f"bash scripts/run-consumer-smoke.sh fixtures/core-consumers/{project}/build/module/outputs/apk/"
+                          f"release/{project}-release.apk dev.elu.fixture.{project}\n", matrix)
+        self.assertLess(matrix.index(":elu-analytics:connectedDebugAndroidTest"), matrix.index("run-consumer-smoke.sh"))
 
 
 if __name__ == "__main__":
