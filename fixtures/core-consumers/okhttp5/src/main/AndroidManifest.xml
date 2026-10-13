@@ -1,0 +1,15 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The smoke's loopback responder is plain HTTP on 127.0.0.1. -->
+    <application
+        android:name="dev.elu.fixture.smoke.SmokeApplication"
+        android:label="ELU OkHttp 5 consumer"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:usesCleartextTraffic="true">
+        <activity android:name="dev.elu.fixture.smoke.SmokeActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
