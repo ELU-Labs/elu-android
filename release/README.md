@@ -19,18 +19,21 @@ Merge the reviewed release commit to `main`. The CI workflow
 keeps the AAR in its `android-sdk-reports` artifact.
 
 Use that exact AAR for the end-to-end check the decision record requires. To
-recompute its hash:
+recompute its hash, download the artifact outside the checkout (step 2 refuses a
+worktree with untracked files):
 
 ```sh
-gh run download <run-id> -R ELU-Labs/elu-android -n android-sdk-reports -D ci-artifacts
-shasum -a 256 ci-artifacts/elu-analytics/build/outputs/aar/elu-analytics-release.aar
+gh run download <run-id> -R ELU-Labs/elu-android -n android-sdk-reports -D "$TMPDIR/elu-ci-artifacts"
+shasum -a 256 "$TMPDIR/elu-ci-artifacts/elu-analytics/build/outputs/aar/elu-analytics-release.aar"
 ```
 
 ## 2. Sign the tag
 
-The tag name must equal `EluVersion.NAME`. Create an annotated OpenPGP-signed tag
-on the release commit with a trusted release key. The signed message must carry
-each of these trailers exactly once:
+The tag name must equal `EluVersion.NAME`. Tag the commit that the CI push run on
+`main` built (`git rev-parse origin/main` right after the merge), not the pull
+request's head commit: the release workflow requires the CI run's commit to be
+the tagged one. Create an annotated OpenPGP-signed tag with a trusted release
+key. The signed message must carry each of these trailers exactly once:
 
 ```text
 ELU Analytics for Android 0.2.0
@@ -44,8 +47,12 @@ Release-Decision: release/decisions/0.2.0.md
 Reviewed-by: <reviewer>
 ```
 
+Write the message to a file outside the checkout, for example
+`~/elu-0.2.0-tag-message.txt`, and sign in a terminal, because the passphrase
+prompt needs one. Name the key with `-u` so git cannot pick another one:
+
 ```sh
-git tag -s 0.2.0 <release-commit> -F tag-message.txt
+git tag -s -u 8170EB95A7E746B421D34BC12363FE13E599B25D 0.2.0 <release-commit> -F ~/elu-0.2.0-tag-message.txt
 git checkout --detach 0.2.0
 ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS=<fingerprint> python3 scripts/verify-release-tag.py 0.2.0
 git push origin 0.2.0
@@ -62,9 +69,11 @@ worktree.
 Run the **Publish to Maven Central** workflow with the tag. `dryRun` is on by
 default. A dry run passes every gate and uploads nothing. The workflow:
 
-1. imports the trusted public keys and requires the Maven artifact signing key
-   among them;
-2. verifies the signed tag as above;
+1. imports the trusted public keys and, before it runs any code from the
+   checkout, checks with git and GnuPG alone that the tag is annotated, points at
+   the checked-out commit and has a valid signature from a trusted fingerprint;
+2. requires the Maven artifact signing key among the imported keys, then verifies
+   the signed tag in full as above;
 3. requires the CI run named in the tag to be a successful push run on `main`
    for exactly the tagged commit, with every job successful, and requires the
    AAR in its `android-sdk-reports` artifact to match `Core-AAR-SHA256`;
@@ -80,8 +89,10 @@ default. A dry run passes every gate and uploads nothing. The workflow:
 Then run it again with `dryRun` off. `stageCentralRelease` signs the core
 artifact into a local staging repository, checks that every staged payload
 equals the checked build and that every signature verifies against the Maven
-artifact signing key, and uploads one deployment. The job waits until the
-Central Portal validates it. Nothing is released yet.
+artifact signing key, and uploads one deployment. The job ends when Central
+accepts the upload. Central then validates the deployment: wait until it shows
+**Validated** before you click Publish, and Drop it if it shows **Failed**.
+Nothing is released yet.
 
 ## 4. Publish in the Central Portal
 
@@ -102,15 +113,32 @@ metadata, sources and Javadoc JARs, their signatures and checksums. Click
 
 ## Repository setup
 
-The workflow runs in the protected `maven-central-reviewed` environment, which
-requires a reviewer's approval. It needs:
+The workflow runs in the protected `maven-central-reviewed` environment. GitHub
+creates an environment that a workflow names on its first run, but without any
+protection rules, so set it up before the first run, in this order:
 
-| Name | Kind | Value |
-| --- | --- | --- |
-| `ELU_RELEASE_SIGNING_PUBLIC_KEYS` | secret | Armored public keys of the trusted tag-signing keys and of the Maven artifact signing key `7559B8499C763DA9DAE9A48F71C7F8C6582E838B` |
-| `ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS` | variable | Full fingerprints of the trusted tag-signing keys |
-| `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD` | secrets | Central Portal user token |
-| `SIGNING_KEY`, `SIGNING_KEY_PASSWORD` | secrets | Armored secret key of the Maven artifact signing key and its passphrase |
+1. In the repository settings, create the environment `maven-central-reviewed`.
+2. Under **Required reviewers**, add the maintainer who approves releases.
+3. Under **Deployment branches and tags**, choose **Selected branches and tags**
+   and add `main`.
+4. Add these **environment** secrets:
+
+   | Secret | Value |
+   | --- | --- |
+   | `ELU_RELEASE_SIGNING_PUBLIC_KEYS` | One armored block with the public keys of the tag-signing key `8170EB95A7E746B421D34BC12363FE13E599B25D` and of the Maven artifact signing key `7559B8499C763DA9DAE9A48F71C7F8C6582E838B`. The workflow stops at its first step if the artifact key is missing. |
+   | `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD` | Central Portal user token |
+   | `SIGNING_KEY`, `SIGNING_KEY_PASSWORD` | Armored secret key of the Maven artifact signing key and its passphrase |
+
+5. Add the environment variable
+   `ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS=8170EB95A7E746B421D34BC12363FE13E599B25D`
+   (full fingerprints of the trusted tag-signing keys, separated by commas).
+6. Delete any repository-level `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
+   `SIGNING_KEY` and `SIGNING_KEY_PASSWORD` secrets. Repository secrets are
+   readable by every workflow in the repository; environment secrets reach only
+   jobs the reviewer approved.
+
+Also add a tag ruleset that lets only administrators create, update or delete
+tags matching `*.*.*`.
 
 To rotate the artifact signing key, change `ARTIFACT_SIGNING_FINGERPRINT` in
 `scripts/verify-release-publication.py` and this table in a reviewed commit, and
@@ -130,6 +158,7 @@ its metadata correct; they do not publish it.
 `fixtures/core-consumers` and `fixtures/kotlin20-consumer` resolve only the
 staged core artifact and check its AAR hash. They build a release app with R8
 full mode (and the same app without the SDK, for the size figures in the
-README), an app on OkHttp 5, a Java-only app and a Kotlin 2.0 app. CI also
+README), the same app compiled against android-34, an app on OkHttp 5, a
+Java-only app and a Kotlin 2.0 app. CI also
 installs the minified apps on every emulator level and runs
 `scripts/run-consumer-smoke.sh` against them.

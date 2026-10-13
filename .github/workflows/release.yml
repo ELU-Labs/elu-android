@@ -57,7 +57,36 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$ELU_RELEASE_SIGNING_PUBLIC_KEYS" | gpg --batch --import
-          python3 scripts/verify-release-publication.py --check-keyring
+      # Nothing from the checkout runs before this step: a tag pointing at edited
+      # verifier scripts must not be able to approve itself.
+      - name: Verify the tag signature before running repository code
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
+        run: |
+          if [[ "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" != "tag" ]]; then
+            echo "::error::${RELEASE_TAG} is not an annotated tag"
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" ]]; then
+            echo "::error::The checkout is not the commit tagged ${RELEASE_TAG}"
+            exit 1
+          fi
+          signers=$(git -c gpg.format=openpgp verify-tag --raw "${RELEASE_TAG}" 2>&1 \
+            | awk '/^\[GNUPG:\] VALIDSIG / { print $3; print $NF }' | tr '[:lower:]' '[:upper:]' || true)
+          trusted=$(printf '%s' "$ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS" | tr ',' ' ' | tr '[:lower:]' '[:upper:]')
+          for signer in $signers; do
+            for fingerprint in $trusted; do
+              if [[ "$signer" == "$fingerprint" ]]; then
+                echo "Tag ${RELEASE_TAG} is signed by trusted key ${fingerprint}"
+                exit 0
+              fi
+            done
+          done
+          echo "::error::${RELEASE_TAG} has no valid signature from a trusted release key"
+          exit 1
+      - name: Require the artifact signing key in the keyring
+        run: python3 scripts/verify-release-publication.py --check-keyring
       - name: Verify matching reviewed signed tag
         env:
           RELEASE_TAG: ${{ inputs.tag }}
@@ -169,8 +198,8 @@ jobs:
             if [[ "$DRY_RUN" == "true" ]]; then
               echo "- Dry run: every gate passed; nothing was uploaded."
             else
-              echo "- Uploaded and validated, not released. Check the deployment at"
-              echo "  https://central.sonatype.com/publishing/deployments and click **Publish**,"
-              echo "  or **Drop** it if anything looks wrong."
+              echo "- Uploaded, not released. Wait until the deployment at"
+              echo "  https://central.sonatype.com/publishing/deployments shows **Validated**,"
+              echo "  then click **Publish**, or **Drop** it (also if it shows **Failed**)."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

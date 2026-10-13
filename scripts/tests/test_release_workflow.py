@@ -36,17 +36,22 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_signed_tag_green_ci_and_tag_named_aar_gate_the_upload(self) -> None:
         keys = self.text.index("name: Import trusted release signing keys")
+        signature = self.text.index("name: Verify the tag signature before running repository code")
+        keyring = self.text.index("name: Require the artifact signing key in the keyring")
         signed = self.text.index("name: Verify matching reviewed signed tag")
         ci = self.text.index("name: Require green CI on the tagged commit")
         build = self.text.index("name: Run release gates")
         aar = self.text.index("name: Require the core AAR named in the signed tag")
         upload = self.text.index(UPLOAD)
-        self.assertLess(keys, signed)
+        self.assertLess(keys, signature)
+        self.assertLess(signature, keyring)
+        self.assertLess(keyring, signed)
         self.assertLess(signed, ci)
         self.assertLess(ci, build)
         self.assertLess(build, aar)
         self.assertLess(aar, upload)
-        self.assertIn("verify-release-publication.py --check-keyring", step(self.text, "Import trusted release signing keys"))
+        self.assertIn("verify-release-publication.py --check-keyring",
+                      step(self.text, "Require the artifact signing key in the keyring"))
         self.assertIn('verify-release-tag.py "$RELEASE_TAG"', step(self.text, "Verify matching reviewed signed tag"))
         ci_step = step(self.text, "Require green CI on the tagged commit")
         self.assertIn('verify-ci-run.py "$RELEASE_TAG"', ci_step)
@@ -55,6 +60,26 @@ class ReleaseWorkflowTest(unittest.TestCase):
                       step(self.text, "Require the core AAR named in the signed tag"))
         self.assertIn("environment: maven-central-reviewed", self.text)
         self.assertRegex(self.text, re.compile(r"^permissions:\n  contents: read\n  actions: read\n", re.MULTILINE))
+
+    def test_tag_signature_is_checked_before_any_repository_code_runs(self) -> None:
+        first_repository_code = min(self.text.index("python3 scripts/"), self.text.index("./gradlew"))
+        self.assertLess(self.text.index("name: Verify the tag signature before running repository code"),
+                        first_repository_code)
+        for gate in ("name: Import trusted release signing keys",
+                     "name: Verify the tag signature before running repository code"):
+            body = step(self.text, gate.removeprefix("name: "))
+            self.assertNotIn("scripts/", body)
+            self.assertNotIn("gradlew", body)
+        signature = step(self.text, "Verify the tag signature before running repository code")
+        for token in ('git cat-file -t "refs/tags/${RELEASE_TAG}"', "git -c gpg.format=openpgp verify-tag --raw",
+                      "VALIDSIG", "ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}",
+                      'git rev-parse "refs/tags/${RELEASE_TAG}^{commit}"'):
+            self.assertIn(token, signature)
+
+    def test_summary_does_not_claim_central_validation(self) -> None:
+        summary = step(self.text, "Release summary")
+        self.assertNotIn("validated, not released", summary)
+        self.assertIn("shows **Validated**", summary)
 
     def test_no_lab_evidence_or_runtime_network_export_is_required(self) -> None:
         for retired in ("acquire-runtime-network-evidence", "validate-runtime-network-evidence",
