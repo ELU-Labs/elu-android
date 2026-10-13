@@ -9,7 +9,7 @@ plugins {
     id("org.cyclonedx.bom") version "3.4.1" apply false
 }
 
-apply(from = "scripts/paired-publication.gradle.kts")
+apply(from = "scripts/release-publication.gradle.kts")
 
 tasks.register<Exec>("checkConformanceFixtures") {
     group = "verification"
