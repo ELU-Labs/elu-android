@@ -256,6 +256,9 @@ class ComposeDistributionTest(unittest.TestCase):
         for project in ("r8", "okhttp5"):
             self.assertIn(f"bash scripts/run-consumer-smoke.sh fixtures/core-consumers/{project}/build/module/outputs/apk/"
                           f"release/{project}-release.apk dev.elu.fixture.{project}\n", matrix)
+        self.assertIn("bash scripts/run-consumer-smoke.sh fixtures/core-consumers/r8-compile34/build/module/outputs/apk/"
+                      "release/r8-compile34-release.apk dev.elu.fixture.r8compile34\n", matrix)
+        self.assertIn(":r8-compile34:assembleRelease", matrix)
         self.assertLess(matrix.index(":elu-analytics:connectedDebugAndroidTest"), matrix.index("run-consumer-smoke.sh"))
 
 
