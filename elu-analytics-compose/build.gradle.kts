@@ -54,12 +54,12 @@ dependencies {
     implementation("androidx.compose.foundation:foundation:1.7.8")
 }
 
-// The root paired-publication gate binds both modules to the same reviewed Lab export.
-// Ordinary local consumers still use the distribution checker without publication.
+// Not published to Maven Central: this module has no Central repository or signing.
+// The local POM, Gradle metadata, sources and Javadoc feed the distribution checker
+// and the coordinate-only consumer fixture. The root release gate refuses any
+// publication task for this module.
 mavenPublishing {
     configure(AndroidSingleVariantLibrary(javadocJar = JavadocJar.Javadoc(), variant = "release"))
-    publishToMavenCentral()
-    signAllPublications()
     coordinates("dev.elu", "elu-analytics-compose", sdkVersion)
     pom {
         name.set("ELU Analytics Compose annotations")

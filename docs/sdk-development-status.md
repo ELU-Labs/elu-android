@@ -1,7 +1,8 @@
 # Android SDK development status
 
-The source candidate is 0.2.0. Published Maven 0.1.0 remains the previous release;
-this branch is not a qualified or published standalone replacement.
+Version 0.2.0 replaces 0.1.0 and publishes only `dev.elu:elu-analytics`, with
+session replay off, under the [0.2.0 release decision](../release/decisions/0.2.0.md).
+That decision defers the remaining gates below for 0.2.0 only; it does not claim them.
 
 The first-release support boundary is Android 6+ (API 23+) for analytics,
 events, identity and feature flags, with app-level core-library desugaring. Both
@@ -43,9 +44,7 @@ Physical-device testing is waived for this release. Remaining gates include:
   actual customer-player rendering, including state, scroll and viewport changes.
 - Resource and interaction-overhead measurements using the required matched
   cohorts; component tests and a small number of frames do not replace them.
-- Final paired-artifact consumer/API/ABI and distribution checks, trusted release
-  evidence, independent review, signing and gated package publication. Optional
-  Compose remote publication remains blocked pending that closure.
+- Publication of the optional Compose module, which 0.2.0 does not publish.
 
 HTTP responses, source guards and successful compilation alone cannot satisfy
 these gates.
@@ -54,5 +53,6 @@ The candidate requires a fresh owned installation with no persisted-data import
 from the 0.1.0 preview and never deletes former files. Current owned SQLite reopen
 and supported schema upgrades remain separate from preview import.
 
-Final release still requires current evidence, independent review and the gated
-publication process. No publication or production verification is claimed here.
+Each release follows [release/README.md](../release/README.md): a signed tag,
+green CI on the tagged commit, a byte-for-byte rebuild, a dry run and a manual
+Publish in the Central Portal.
