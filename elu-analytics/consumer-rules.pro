@@ -18,3 +18,7 @@
 -keepnames class androidx.appcompat.widget.FitWindowsLinearLayout
 -keepnames class androidx.appcompat.widget.FitWindowsFrameLayout
 -keepnames class androidx.appcompat.widget.ActionBarOverlayLayout
+
+# Startup diagnostics read android.app.ApplicationStartInfo only on API 35+.
+# Apps compiled against android-34 or lower do not have the class at build time.
+-dontwarn android.app.ApplicationStartInfo

@@ -29,5 +29,6 @@ rootProject.name = "elu-core-maven-consumers"
 // r8: optimized release app (R8 full mode) that runs the device smoke and is measured for size.
 // r8-baseline: the same minimal app without the SDK, for the size delta.
 // okhttp5: an app that already uses OkHttp 5.x, minified, with a bytecode linkage check.
+// r8-compile34: the r8 app compiled against android-34, below the SDK's own compileSdk.
 // java: a Java-only app without the Kotlin Gradle plugin.
-include(":r8", ":r8-baseline", ":okhttp5", ":java")
+include(":r8", ":r8-baseline", ":r8-compile34", ":okhttp5", ":java")

@@ -243,6 +243,7 @@ class ComposeDistributionTest(unittest.TestCase):
         fixtures = source.index("./gradlew -p fixtures/core-consumers \\")
         verify = source.index("validate-compose-distribution.py --verify-staged")
         for token in (":r8:assembleRelease", ":r8:verifyR8KeepRules", ":r8-baseline:bundleRelease",
+                      ":r8-compile34:assembleRelease", ":r8-compile34:verifyR8KeepRules",
                       ":okhttp5:verifyOkHttpResolution", ":okhttp5:verifyOkHttpLinkage", ":java:assembleDebug",
                       "-PeluMetadataMode=pom :okhttp5:verifyOkHttpResolution",
                       "./gradlew -p fixtures/kotlin20-consumer assembleDebug", "scripts/measure-consumer-size.py"):

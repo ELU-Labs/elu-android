@@ -7,7 +7,7 @@ tasks.register("verifyR8KeepRules") {
         val mapping = layout.buildDirectory.dir("outputs/mapping/release").get()
         val configuration = mapping.file("configuration.txt").asFile.readText()
         for (rule in listOf("-keep class dev.elu.analytics.Elu { public *; }", "-keep class dev.elu.analytics.EluOptions { public *; }",
-                "-keepnames class androidx.appcompat.widget.AppCompatTextView")) {
+                "-keepnames class androidx.appcompat.widget.AppCompatTextView", "-dontwarn android.app.ApplicationStartInfo")) {
             check(rule in configuration) { "R8 did not receive the SDK consumer rule: $rule" }
         }
         check(Regex("(?m)^-dontoptimize|^-dontshrink|^-dontobfuscate").find(configuration) == null) {

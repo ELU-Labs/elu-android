@@ -45,11 +45,12 @@ jobs:
           python3 scripts/validate-compose-distribution.py
           ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=module -Pandroid.useAndroidX=true --stacktrace
           ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=pom -Pandroid.useAndroidX=true --stacktrace
-          # Core consumers: R8 full-mode release (+ size baseline), an app on OkHttp 5.x,
-          # a Java-only app and, in its own build, a Kotlin 2.0 app.
+          # Core consumers: R8 full-mode release (+ size baseline), the same app compiled against
+          # android-34, an app on OkHttp 5.x, a Java-only app and, in its own build, a Kotlin 2.0 app.
           ./gradlew -p fixtures/core-consumers \
             :r8:assembleRelease :r8:bundleRelease :r8:verifyR8KeepRules \
             :r8-baseline:assembleRelease :r8-baseline:bundleRelease \
+            :r8-compile34:assembleRelease :r8-compile34:verifyR8KeepRules \
             :okhttp5:verifyOkHttpResolution :okhttp5:verifyOkHttpLinkage :okhttp5:assembleRelease :okhttp5:verifyR8KeepRules \
             :java:assembleDebug \
             --stacktrace

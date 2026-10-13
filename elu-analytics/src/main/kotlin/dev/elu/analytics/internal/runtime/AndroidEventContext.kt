@@ -2,7 +2,6 @@ package dev.elu.analytics.internal.runtime
 
 import android.content.Context
 import android.content.pm.PackageInfo
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.os.Build
@@ -54,13 +53,12 @@ internal object AndroidEventContext {
         )
     }
 
-    private fun packageInfo(app: Context): PackageInfo =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            app.packageManager.getPackageInfo(app.packageName, PackageManager.PackageInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            app.packageManager.getPackageInfo(app.packageName, 0)
-        }
+    /**
+     * The int-flags overload works unchanged on API 33+. Using it on every level keeps the API 33
+     * PackageInfoFlags class out of the AAR, so apps compiled against an older SDK still minify.
+     */
+    @Suppress("DEPRECATION")
+    private fun packageInfo(app: Context): PackageInfo = app.packageManager.getPackageInfo(app.packageName, 0)
 
     private fun versionCode(info: PackageInfo): Long =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

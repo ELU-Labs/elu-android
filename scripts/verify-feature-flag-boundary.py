@@ -38,7 +38,7 @@ PINNED_FILES = {
     "elu-analytics/build.gradle.kts":
         "e24a3c8fff83eea0a4d9045b2e1d442b918acb8ddc6d6fc881690c9b9ea46ec6",
     "elu-analytics/consumer-rules.pro":
-        "4fabc808ed8f99ec3660a83c224cdcf8e3fd041a51c404093195e4cd8bdbb6cb",
+        "303ddeb7e874103b072eb29afe663fc2aa35934ea8341d9284eb2c531010bb09",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/concurrent/SdkFuture.kt":
         "13b2077148db05774a72c47efb0c864b67b571dac72af77e1343f8a5e97de9a9",
     # These files carry the explicit no-wire release status.
