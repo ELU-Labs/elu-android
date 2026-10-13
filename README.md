@@ -108,6 +108,16 @@ The AAR supplies `INTERNET` permission, its lifecycle provider and consumer R8
 rules through normal Android library merging; no extra provider registration or
 manual OkHttp dependency is needed for basic setup.
 
+Kotlin apps need Kotlin 2.0 or later (Kotlin Gradle plugin 2.0+). The SDK is
+built with Kotlin 2.1, and a Kotlin compiler reads library metadata at most one
+minor version newer than itself, so a Kotlin 1.9 build stops with an
+incompatible-metadata error. Java-only apps need no Kotlin plugin; the SDK brings
+the Kotlin standard library as an ordinary dependency.
+
+The SDK depends on OkHttp 4.12.0 as an ordinary minimum, not a pinned version.
+An app that already uses a newer OkHttp, including 5.x, keeps its own version and
+the SDK runs on it (checked against OkHttp 5.4.0).
+
 ## Setup
 
 Call once from `Application.onCreate` — an **Application context is
@@ -208,7 +218,7 @@ or use a debug network security configuration.
 
 Installing the interceptor explicitly enables numeric request metrics for that
 customer client. It never installs a global network hook. Install it once as an
-application interceptor on your existing OkHttp 4.12-compatible client:
+application interceptor on your existing OkHttp client (4.12 or later, including 5.x):
 
 ```kotlin
 import dev.elu.analytics.EluOkHttpInterceptor
@@ -743,7 +753,29 @@ matrix are insufficient substitutes.
 Library module: `elu-analytics` (namespace `dev.elu.analytics`), AGP 8.13.x,
 Kotlin 2.1.x, compileSdk 36, Java 11 bytecode (JDK 17 toolchain). The build
 uses strict Kotlin compiler settings and is verified in CI. R8/ProGuard:
-consumer rules ship in the AAR; the SDK facade uses no reflection.
+consumer rules ship in the AAR; the SDK facade uses no reflection. Release builds
+with R8 full mode (the Android Gradle Plugin 8 default) need no extra keep rules
+for the SDK.
+
+### App size
+
+Measured by adding the SDK to a minimal app built for release with R8 full mode
+(minSdk 23, Android Gradle Plugin 8.13, core library desugaring enabled as the
+SDK requires). The SDK has no native code, so every device downloads the same
+code.
+
+| Measure | Without SDK | With SDK | Added by SDK |
+| --- | ---: | ---: | ---: |
+| Release APK (signed, universal) | 22,432 B | 800,416 B | +777,984 B (about 760 KiB) |
+| Release AAB, without the R8 mapping file | 20,301 B | 797,966 B | +777,665 B |
+| DEX method references | 12 | 10,878 | +10,866 |
+| DEX defined methods | 4 | 9,230 | +9,226 |
+
+Of the added methods, 3,425 are SDK code, 4,375 are the desugared Java library
+the SDK needs to run on API 23 (an app that already desugars the same APIs shares
+them), 889 are OkHttp and Okio, and 537 are the Kotlin standard library.
+`scripts/measure-consumer-size.py` reproduces these figures from the optimized
+consumer fixture in `fixtures/core-consumers`.
 
 ## SDK development
 
