@@ -19,6 +19,7 @@ import dev.elu.analytics.Elu
 import java.util.UUID
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -88,7 +89,10 @@ class NativeAppCompatReplayTest {
             AppCompatToggleButton(activity).apply { setEmojiCompatEnabled(false); isAllCaps = false; text = "Toggle" },
             AppCompatCheckedTextView(activity).apply { setEmojiCompatEnabled(false); text = "Checked" },
         )
-        views.forEachIndexed { index, view -> add(root, view, index * 70) }
+        // 70dp rows: a fixed pixel height clips the themed Button and Toggle labels on
+        // high-density screens, and clipped text is correctly not readable.
+        val row = (70 * activity.resources.displayMetrics.density).roundToInt()
+        views.forEachIndexed { index, view -> add(root, view, index * row, row) }
         val labels = listOf("Ordinary", "Button", "Checkbox", "Radio", "Toggle", "Checked")
         // The actual theme elevates some controls. Replay follows Android's public
         // drawing order: lower Z first, preserving sibling order for equal Z.
