@@ -11,7 +11,9 @@ import android.os.Bundle
 /** Framework-only bootstrap. It observes lifecycle facts and never starts an analytics runtime. */
 internal class EluLifecycleInitializer : ContentProvider() {
     override fun onCreate(): Boolean {
-        (context?.applicationContext as? Application)?.let(AndroidProcessLifecycle::install)
+        val application = context?.applicationContext as? Application ?: return true
+        // A manifest merge can move or multiply this provider; only the default process observes.
+        if (!AndroidDefaultProcess.isSecondary(application)) AndroidProcessLifecycle.install(application)
         return true
     }
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?,
@@ -29,8 +31,11 @@ internal object AndroidProcessLifecycle {
     val performanceObserved = dev.elu.analytics.internal.performance.NativePerformanceActivityLifecycle()
     private var installed = false
 
+    val isInstalled: Boolean @Synchronized get() = installed
+
+    /** Ignored outside the app's default process, which alone may own the runtime. */
     @Synchronized fun install(application: Application) {
-        if (installed) return
+        if (installed || AndroidDefaultProcess.isSecondary(application)) return
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) =
                 observed.activityStarted(activity, ActivityLifecycleEmitter.screenNameOf(activity))
