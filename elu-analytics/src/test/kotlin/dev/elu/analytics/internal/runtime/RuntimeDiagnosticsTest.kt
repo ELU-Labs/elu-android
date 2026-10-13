@@ -28,10 +28,11 @@ class RuntimeDiagnosticsTest {
         val ownershipKey: String = "diagnostics-${UUID.randomUUID()}",
         wrap: (RuntimeQueueDatabase) -> RuntimeQueueDatabase = { it },
         leaseClosed: () -> Unit = {},
+        eventContext: Map<String, Any?> = emptyMap(),
     ) {
         val owner = RuntimeQueueOwner.open(ownershipKey, RuntimeQueueLimits(1000, 1_000_000),
             { wrap(backing.connection()) }, { state() }, leaseFactory = { RuntimeOwnershipLease(leaseClosed) },
-            trustedSiteKey = "elu_pk_test_diagnostics", captureClock = clock).await().also { owners += it }
+            trustedSiteKey = "elu_pk_test_diagnostics", captureClock = clock, eventContext = eventContext).await().also { owners += it }
         fun configure(enabled: Boolean = true, launches: Boolean = true) =
             owner.configureDiagnostics(RuntimeDiagnosticsConfiguration(enabled, launches), clock).await()
         fun activate(longTasks: Boolean = true, config: String = config(longTasks)) =
@@ -70,10 +71,22 @@ class RuntimeDiagnosticsTest {
         val accepted = rig.capture(measurement) as RuntimeCaptureResult.Accepted
         assertEquals(before, accepted.snapshot.state.identity)
         assertTrue(accepted.record.record.groups.isEmpty())
-        assertEquals(JsonValues.objectValue(measurement.properties(), "measurement"), accepted.record.record.properties)
+        assertEquals(JsonValues.objectValue(measurement.properties(), "measurement") + versionProperties(),
+            accepted.record.record.properties)
         rig.clock.advance(2000)
         val next = rig.user() as RuntimeCaptureResult.Accepted
         assertNotEquals(before.session!!.id, next.record.record.sessionId)
+    }
+
+    @Test fun `startup receipt carries device context but never customer super properties`() {
+        val context = mapOf("\$os" to "Android", "\$app_version" to "4.2", "private" to "context")
+        val rig = Rig(eventContext = context); rig.configure(); rig.activate(); rig.user()
+        val measurement = rig.measurement()
+        val properties = (rig.capture(measurement) as RuntimeCaptureResult.Accepted).record.record.properties
+        assertEquals(context + JsonValues.objectValue(measurement.properties(), "measurement") + versionProperties(), properties)
+        val user = (rig.user() as RuntimeCaptureResult.Accepted).record.record.properties
+        assertEquals("value", user["private"])
+        assertEquals("4.2", user["\$app_version"])
     }
 
     @Test fun `event and dedupe reconcile both ambiguous outcomes atomically`() {
@@ -262,6 +275,8 @@ class RuntimeDiagnosticsTest {
     private fun resource(name: String) = javaClass.classLoader!!.getResource("contracts/v1/fixtures/$name")!!.readText()
     private fun versions() = RuntimeVersions(platform = RuntimePlatform.ANDROID,
         runtime = RuntimeVersionComponent("elu-android", "0.2.0"), facade = RuntimeVersionComponent("Elu", "0.2.0"))
+    private fun versionProperties() = mapOf("\$elu_contract_version" to "1.0.0", "\$elu_sdk_version" to "0.2.0",
+        "\$elu_facade_version" to "0.2.0")
     private fun <T> Future<T>.await(): T = get(5, TimeUnit.SECONDS)
     private companion object { const val NOW = "2026-08-04T00:01:00.000Z" }
 }

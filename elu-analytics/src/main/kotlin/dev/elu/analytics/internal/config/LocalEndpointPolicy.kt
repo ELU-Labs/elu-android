@@ -25,8 +25,12 @@ internal class LocalEndpointPolicy private constructor(val apiOrigin: String?) {
         }
     }
 
-    /** Exact raster role; caller must also own the original native-v3 policy/claim. */
+    /**
+     * Exact raster role; caller must also own the original native-v3 policy/claim. Raster replay
+     * is delivered only to the ELU Cloud ingest origin, never to a declared self-hosted base.
+     */
     fun requireNativeRasterApproved(endpoint: URI) {
+        require(apiOrigin == null) { "Raster replay is delivered only to the ELU Cloud ingest origin" }
         require(endpoint.rawPath == apiPrefix + "/v3/replay")
         // Reuse every original origin/credential/query restriction without broadening v1/v2 roles.
         val legacyRole = URI(endpoint.scheme + "://" + endpoint.rawAuthority + apiPrefix + "/v2/replay" +

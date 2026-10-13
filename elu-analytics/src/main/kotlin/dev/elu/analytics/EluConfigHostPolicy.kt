@@ -7,11 +7,11 @@ import java.util.Locale
 /**
  * Decides which `configHost` override the SDK may contact.
  *
- * Every application may use an ELU HTTPS origin (`https://elu.dev` or a
- * subdomain). An application that declares a self-hosted ELU instance as its
- * `apiHost` may use exactly that base: both must be HTTPS on the default
- * port with the same host and canonical path prefix, so the declaration
- * cannot widen the override to any other host. A debuggable application may
+ * Every application may use the ELU Cloud origin, exactly `https://elu.dev`;
+ * subdomains are not matched. An application that declares a self-hosted
+ * ELU instance as its `apiHost` may use exactly that base: both must be
+ * HTTPS on the default port with the same host and canonical path prefix,
+ * so the declaration cannot widen the override to any other host. A debuggable application may
  * additionally point at a local loopback origin over HTTP or HTTPS, on any
  * port, for development against a dev loader. Any other value is rejected so
  * the override cannot redirect a release build's configuration traffic to a
@@ -44,7 +44,7 @@ internal object EluConfigHostPolicy {
         val scheme = uri.scheme.lowercase(Locale.US)
         val host = uri.host.lowercase(Locale.US)
 
-        val isEluOrigin = scheme == "https" && uri.port == -1 && (host == ELU_ROOT || host.endsWith(".$ELU_ROOT"))
+        val isEluOrigin = scheme == "https" && uri.port == -1 && host == ELU_ROOT
         if (isEluOrigin) return "https://$host"
 
         val isLoopback = debuggable && (scheme == "http" || scheme == "https") && host in LOOPBACK_HOSTS

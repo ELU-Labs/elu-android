@@ -11,19 +11,30 @@ class LocalEndpointPolicyTest {
     private val origin = "https://analytics.example.com"
     private val selected = LocalEndpointPolicy.fromApiHost(origin)
 
-    @Test fun `explicit raster role preserves exact origin prefix and reserved query restrictions`() {
+    @Test fun `explicit raster role is the exact cloud ingest path with reserved query restrictions`() {
         val cloud = URI("https://ingest.elu.dev/v3/replay")
         LocalEndpointPolicy.CLOUD.requireNativeRasterApproved(cloud)
+        LocalEndpointPolicy.CLOUD.requireNativeRasterApproved(URI("https://ingest.elu.dev/v3/replay?route=eu"))
         assertThrows(IllegalArgumentException::class.java) { LocalEndpointPolicy.CLOUD.requireApproved(cloud, V1EndpointRole.REPLAY) }
-        val prefixed = LocalEndpointPolicy.fromApiHost("$origin/team")
-        prefixed.requireNativeRasterApproved(URI("$origin/team/v3/replay?route=eu"))
-        for (bad in listOf("$origin/v3/replay", "$origin/team/v2/replay", "$origin/team/v3/replay/",
-            "$origin/team/v3/replay?%73ite_key=secret", "$origin/team/v3/replay?site_key=secret",
-            "http://analytics.example.com/team/v3/replay", "$origin:444/team/v3/replay",
-            "https://user@analytics.example.com/team/v3/replay", "$origin/team/v3/replay#fragment",
-            "https://other.example.com/team/v3/replay")) {
-            assertThrows(bad, IllegalArgumentException::class.java) { prefixed.requireNativeRasterApproved(URI(bad)) }
+        for (bad in listOf("https://ingest.elu.dev/v2/replay", "https://ingest.elu.dev/v3/replay/",
+            "https://ingest.elu.dev/v3/replay?%73ite_key=secret", "https://ingest.elu.dev/v3/replay?site_key=secret",
+            "http://ingest.elu.dev/v3/replay", "https://ingest.elu.dev:444/v3/replay",
+            "https://user@ingest.elu.dev/v3/replay", "https://ingest.elu.dev/v3/replay#fragment",
+            "https://assets.elu.dev/v3/replay", "https://eu.ingest.elu.dev/v3/replay", "$origin/v3/replay")) {
+            assertThrows(bad, IllegalArgumentException::class.java) { LocalEndpointPolicy.CLOUD.requireNativeRasterApproved(URI(bad)) }
         }
+    }
+
+    @Test fun `declared self-hosted bases never receive raster replay`() {
+        val prefixed = LocalEndpointPolicy.fromApiHost("$origin/team")
+        for ((policy, endpoint) in listOf(selected to "$origin/v3/replay", prefixed to "$origin/team/v3/replay",
+            prefixed to "$origin/team/v3/replay?route=eu", selected to "https://ingest.elu.dev/v3/replay",
+            prefixed to "https://ingest.elu.dev/v3/replay")) {
+            assertThrows(endpoint, IllegalArgumentException::class.java) { policy.requireNativeRasterApproved(URI(endpoint)) }
+        }
+        // Their ordinary roles are unchanged.
+        prefixed.requireApproved(URI("$origin/team/v2/replay"), V1EndpointRole.REPLAY)
+        selected.requireApproved(URI("$origin/v1/events"), V1EndpointRole.EVENTS)
     }
 
     @Test fun `local origin alone changes every role while cloud defaults remain closed`() {

@@ -103,8 +103,9 @@ internal object NativeV3ConfigParser {
         ) reject(Rejection.INCOMPATIBLE_BASE)
         val originalEvents = events ?: reject(Rejection.INCOMPATIBLE_BASE)
         val origin = "${originalEvents.scheme}://${originalEvents.rawAuthority}"
-        // Frozen issuer origins only. A broader application local allowlist does not extend this leaf.
-        if (origin !in setOf("https://ingest.elu.dev", "https://35-224-68-29.sslip.io")) {
+        // Raster replay is accepted only from the ELU Cloud ingest origin. A declared self-hosted
+        // origin keeps its base endpoints but never extends this leaf.
+        if (origin != "https://ingest.elu.dev") {
             reject(Rejection.INCOMPATIBLE_BASE)
         }
         val endpoint = URI("$origin/v3/replay")

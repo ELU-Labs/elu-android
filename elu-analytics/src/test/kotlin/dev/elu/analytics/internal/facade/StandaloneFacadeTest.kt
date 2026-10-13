@@ -243,7 +243,10 @@ class StandaloneFacadeTest {
         harness.settle()
 
         val event = (harness.records().first() as RuntimeQueuedRecord.Event).record
-        assertEquals(mapOf<String, Any?>("amount" to 42), event.properties)
+        // Only the runtime's own version stamps join the customer's remaining property.
+        assertEquals(mapOf<String, Any?>("amount" to 42, "\$elu_contract_version" to "1.0.0",
+            "\$elu_sdk_version" to dev.elu.analytics.EluVersion.NAME,
+            "\$elu_facade_version" to dev.elu.analytics.EluVersion.FACADE_VERSION.toString()), event.properties)
         assertEquals(
             mapOf("plan" to "growth"),
             harness.owner.snapshot().get().state.identity.superProperties,

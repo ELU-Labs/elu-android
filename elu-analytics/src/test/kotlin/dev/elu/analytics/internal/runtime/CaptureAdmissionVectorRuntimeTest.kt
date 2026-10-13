@@ -212,9 +212,14 @@ class CaptureAdmissionVectorRuntimeTest {
                     expected.optString("kind").takeIf(String::isNotEmpty)?.let { kind ->
                         assertEquals(RuntimeEventKind.fromWireValue(kind), result.record.record.kind)
                     }
+                    val recorded = result.record.record.properties
                     expected.optJSONObject("properties")?.let { properties ->
-                        assertEquals(jsonObjectToMap(properties), result.record.record.properties)
+                        // The runtime adds only its own version stamps to the merged properties.
+                        assertEquals(jsonObjectToMap(properties), recorded.filterKeys { !it.startsWith("\$elu_") })
                     }
+                    assertEquals("1.0.0", recorded["\$elu_contract_version"])
+                    assertEquals("0.1.0", recorded["\$elu_sdk_version"])
+                    assertEquals("0.1.0", recorded["\$elu_facade_version"])
                     if (expected.optBoolean("reservedVersionPropertiesAuthoritative")) {
                         assertEquals(versions(), result.record.record.versions)
                     }

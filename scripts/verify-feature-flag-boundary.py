@@ -34,7 +34,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluConfigClient.kt":
         "ed9e65335829cf348ee992059efc03a523e61c79ef000575814f3e81f4eae642",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
-        "6ba1f7cc2ecd96f7f3609641f7fc386d1627f33acf290cb80b7a43c39c5e670e",
+        "1810731a7319e173946bce97cf420aac5c1b4aa9667789439eb68d24ecb7b3f6",
     "elu-analytics/build.gradle.kts":
         "467950f0497da666d721126a2518c3d94a33abf454bb04bfeabf6e45078d87d1",
     "elu-analytics/consumer-rules.pro":
@@ -1060,7 +1060,7 @@ def verify_event_filter_boundary(root: pathlib.Path, errors: list[str]) -> None:
             "val originalIntake = eventFilter.originalAdmission()", "attempt.filter.prepare(this, command, binding,",
             "eventFilter.apply(command, binding.properties, attempt.filter.person, attempt.filter.allowsPersonChanges)",
             "before.state.identity == original.identity && before.state.stream.streamId == original.streamId",
-            "attempt.filter.isCurrent()", "val mergedProperties = filtered?.properties ?:",
+            "attempt.filter.isCurrent()", "val mergedProperties = withVersionProperties(filtered?.properties ?:",
             "val result = captureEventOnWorker(command, backgroundBoundary, attempt, warningOf)",
             "result !is RuntimeCaptureResult.Accepted || attempt.filter.deferPersonContinuation || !eventFilter.enabled",
             "before.state.identity == accepted.identity && before.state.stream == accepted.stream",
@@ -1457,7 +1457,7 @@ def verify_native_v3_parser_boundary(root: pathlib.Path, errors: list[str]) -> N
         "trusted(it.flags, V1EndpointRole.FLAGS)", "trusted(replay, V1EndpointRole.REPLAY)",
         "trusted(assets, V1EndpointRole.ASSETS)", "replay.advertisedTransports.size != 1",
         "NativeReplayProtocol.match(replay.advertisedTransports.singleOrNull(), replay.replayProtocolGeneration)",
-        'setOf("https://ingest.elu.dev", "https://35-224-68-29.sslip.io")',
+        'if (origin != "https://ingest.elu.dev")',
         '"basePrivacy" to basePrivacy', '"replayAudience" to string(',
         "V1StrictCanonicalJson.canonicalize(candidate) != V1StrictCanonicalJson.canonicalize(expected)",
         "minOf(limits.replayChunkBytes, 5_242_880)",
@@ -1712,6 +1712,7 @@ def verify_native_raster_delivery_boundary(root: pathlib.Path, errors: list[str]
             "val body = claim.copyBody()", "val classified = claim.classify(result, 0, 0)",
             "rasterRefusal != null -> flight.result.complete(rasterRefusal)", "body.fill(0)"],
         base / "config/LocalEndpointPolicy.kt": [
+            "require(apiOrigin == null)",
             'require(endpoint.rawPath == apiPrefix + "/v3/replay")', "requireApproved(legacyRole, V1EndpointRole.REPLAY)"],
     }
     for path, tokens in required.items():

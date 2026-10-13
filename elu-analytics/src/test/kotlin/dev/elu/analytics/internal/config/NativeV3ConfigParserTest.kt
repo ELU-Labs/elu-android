@@ -200,17 +200,23 @@ class NativeV3ConfigParserTest {
         }
         for (bad in listOf("http://ingest.elu.dev/v3/replay", "https://ingest.elu.dev:443/v3/replay",
             "https://ingest.elu.dev/v3/replay?site_key=secret", "https://ingest.elu.dev/v3/replay#fragment",
-            "https://35-224-68-29.sslip.io/v3/replay")) {
+            "https://analytics.example.test/v3/replay", "https://eu.ingest.elu.dev/v3/replay")) {
             rejected(envelope().apply { getJSONObject("raster").put("endpoint", bad) })
         }
+        // A declared self-hosted instance keeps its own base endpoints, but raster replay is
+        // offered only by ELU Cloud, so an envelope that selects it is refused as a whole.
         val local = envelope(); val endpoints = local.getJSONObject("configV2").getJSONObject("endpoints")
         for (role in endpoints.keys().asSequence().toList()) {
-            val old = URI(endpoints.getString(role)); endpoints.put(role, "https://35-224-68-29.sslip.io${old.rawPath}")
+            val old = URI(endpoints.getString(role)); endpoints.put(role, "https://analytics.example.test${old.rawPath}")
         }
-        local.getJSONObject("raster").put("endpoint", "https://35-224-68-29.sslip.io/v3/replay")
+        local.getJSONObject("raster").put("endpoint", "https://analytics.example.test/v3/replay")
         rejected(local)
-        val policy = LocalEndpointPolicy.fromApiHost("https://35-224-68-29.sslip.io")
-        assertEquals(URI("https://35-224-68-29.sslip.io/v3/replay"), NativeV3ConfigParser.parse(local.toString().toByteArray(), policy).raster?.endpoint)
+        val policy = LocalEndpointPolicy.fromApiHost("https://analytics.example.test")
+        assertEquals(NativeV3ConfigParser.Rejection.INCOMPATIBLE_BASE, assertThrows(NativeV3ConfigParser.ParseException::class.java) {
+            NativeV3ConfigParser.parse(local.toString().toByteArray(), policy)
+        }.reason)
+        val withoutRaster = JSONObject(local.toString()).apply { remove("raster") }
+        assertNull(NativeV3ConfigParser.parse(withoutRaster.toString().toByteArray(), policy).raster)
         for (role in listOf("events", "flags", "replay", "assets")) {
             val bad = envelope(); val es = bad.getJSONObject("configV2").getJSONObject("endpoints")
             es.put(role, es.getString(role) + "?%73ite_key=secret"); rejected(bad)

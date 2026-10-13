@@ -118,6 +118,17 @@ semantics, omit customer groups/super properties, and use receipt identity stamp
 Quota refusal, rollback and uncommitted writes cannot advance the marker or device.
 Reset clears the marker; consent, ACK, flags, replay and restart preserve it.
 
+Library, OS, device and app context (`$lib`, `$lib_version`, `$os`, `$os_name`,
+`$os_version`, `$device_type`, `$device_manufacturer`, `$device_model`,
+`$is_emulator`, `$app_name`, `$app_version`, `$app_build`, `$app_namespace`,
+`$screen_width`, `$screen_height`, `$locale`, `$timezone`) is read once when the
+runtime opens, on the facade worker. Every event category receives it beneath super
+properties (which OS observations omit) and the call's own properties, before
+`propertyDenylist` and `beforeSend`, which may replace or remove it. An unavailable
+value is omitted and never fails setup. `$elu_contract_version`, `$elu_sdk_version`
+and `$elu_facade_version` are stamped from the record versions after filtering;
+neither customer input nor the filter can supply them.
+
 Production openers explicitly select a mode and validate a stream-bound singleton
 metadata row. The raw internal frozen-protocol conformance seam cannot reopen a
 store containing this metadata. Owned families 1–6, 7–12, 25–30 and 31–36 upgrade to 37–42,

@@ -156,6 +156,8 @@ internal class RuntimeQueueOwner private constructor(
     rateLimiting: dev.elu.analytics.EluRateLimitingOptions?,
     private val exceptionSpoolFactory: (() -> NativeExceptionSpool)?,
     private val eventFilter: RuntimeEventFilter,
+    /** Library, OS, device and app properties under every new event; read once by the opener. */
+    private val eventContext: Map<String, Any?>,
 ) {
     @Volatile private var exceptionIntake: NativeExceptionIntake? = null
     private var exceptionSpool: NativeExceptionSpool? = null
@@ -3159,6 +3161,24 @@ internal class RuntimeQueueOwner private constructor(
 
     private data class CaptureFilterInput(val identity: IdentityState, val streamId: String, val properties: Map<String, Any?>)
 
+    /**
+     * Event context sits under super properties, which sit under the call's own properties.
+     * OS observations keep the context but never receive customer super properties.
+     */
+    private fun mergedCaptureProperties(identity: IdentityState, source: RuntimeCaptureCommand,
+        captureProperties: Map<String, Any?>): Map<String, Any?> =
+        LinkedHashMap(eventContext).apply {
+            if (source.startupMeasurement == null && source.exceptionImport == null) putAll(identity.superProperties)
+            putAll(captureProperties)
+        }
+
+    private fun withVersionProperties(properties: Map<String, Any?>, versions: RuntimeVersions): Map<String, Any?> =
+        LinkedHashMap(properties).apply {
+            put(CONTRACT_VERSION_PROPERTY, versions.contractVersion)
+            put(SDK_VERSION_PROPERTY, versions.runtime.version)
+            put(FACADE_VERSION_PROPERTY, versions.facade.version)
+        }
+
     private fun captureOnWorker(command: RuntimeCaptureCommand,
         backgroundBoundary: dev.elu.analytics.internal.config.V2ConfigApplicationBackgrounded? = null,
         attempt: RuntimeCaptureRateAttempt = RuntimeCaptureRateAttempt(),
@@ -3241,8 +3261,7 @@ internal class RuntimeQueueOwner private constructor(
                 refused = captureAuthorityRejection(before, backgroundBoundary) ?:
                     captureSourceRejection(tx, before, source, checkExposureLedger = true)
                 if (refused != null) null else CaptureFilterInput(before.state.identity, before.state.stream.streamId,
-                    LinkedHashMap(if (source.startupMeasurement == null && source.exceptionImport == null)
-                        before.state.identity.superProperties else emptyMap()).apply { putAll(captureProperties) })
+                    mergedCaptureProperties(before.state.identity, source, captureProperties))
             } } catch (_: IllegalArgumentException) {
                 return RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.EVENT_INVALID, requireLoaded().publicSnapshot)
             }
@@ -3299,10 +3318,10 @@ internal class RuntimeQueueOwner private constructor(
                             } ?: true)
                         if (!originalContextMatches()) return@transaction CaptureCommit(
                             RuntimeCaptureResult.Rejected(RuntimeCaptureRejection.AUTHORITY_WITNESS_CHANGED, before.publicSnapshot), null)
-                        val mergedProperties = filtered?.properties ?:
-                            LinkedHashMap(if (source.startupMeasurement == null && source.exceptionImport == null) before.state.identity.superProperties else emptyMap()).apply {
-                                putAll(captureProperties)
-                            }
+                        // Version properties are stamped after filtering, so neither customer
+                        // input nor the filter can supply them.
+                        val mergedProperties = withVersionProperties(filtered?.properties ?:
+                            mergedCaptureProperties(before.state.identity, source, captureProperties), command.versions)
                         val draft =
                             RuntimeRecordDraft.Event(
                                 kind = command.kind,
@@ -5030,6 +5049,11 @@ internal class RuntimeQueueOwner private constructor(
         /** The ceiling the persisted state codec enforces on flag-context group types. */
         private const val MAX_FLAG_CONTEXT_GROUP_TYPES = 64
 
+        /** Stamped on every event, as on the other ELU SDKs. */
+        internal const val CONTRACT_VERSION_PROPERTY = "\$elu_contract_version"
+        internal const val SDK_VERSION_PROPERTY = "\$elu_sdk_version"
+        internal const val FACADE_VERSION_PROPERTY = "\$elu_facade_version"
+
         /** Asynchronously opens an internal runtime on its dedicated storage worker. */
         internal fun open(
             ownershipKey: String,
@@ -5052,9 +5076,11 @@ internal class RuntimeQueueOwner private constructor(
             rateLimiting: dev.elu.analytics.EluRateLimitingOptions? = null,
             exceptionSpoolFactory: (() -> NativeExceptionSpool)? = null,
             eventFilter: RuntimeEventFilter = RuntimeEventFilter(),
+            eventContext: Map<String, Any?> = emptyMap(),
         ): Future<RuntimeQueueOwner> {
             require(rateLimiting == null || personProfiles != null) { "Capture limiting requires a selected production profile mode" }
             require(ownershipKey.isNotEmpty()) { "ownershipKey must not be empty" }
+            val normalizedContext = JsonValues.objectValue(eventContext, "event.context")
             lateinit var worker: Thread
             val executor =
                 Executors.newSingleThreadExecutor(
@@ -5101,6 +5127,7 @@ internal class RuntimeQueueOwner private constructor(
                                 rateLimiting,
                                 exceptionSpoolFactory,
                                 eventFilter,
+                                normalizedContext,
                             )
                         owner.initialize()
                         owner.reconcileExplicitConsentOnWorker()
