@@ -252,6 +252,8 @@ dev.elu.analytics.internal.facade.EluFacadeState$Disabled
 dev.elu.analytics.internal.facade.EluFacadeState$Enabled
 dev.elu.analytics.internal.facade.EluFacadeState$Pending
 dev.elu.analytics.internal.facade.FacadeFlagClient
+dev.elu.analytics.internal.facade.FacadeJson
+dev.elu.analytics.internal.facade.FacadeJson$Projected
 dev.elu.analytics.internal.facade.StandaloneFacade
 dev.elu.analytics.internal.facade.StandaloneFacade$Companion
 dev.elu.analytics.internal.facade.StandaloneFacade$closeResult$1
