@@ -71,8 +71,8 @@ capturing any data. A 0.2.0 installation keeps its identity, consent and pending
 queue across app restarts, app updates and supported storage schema upgrades.
 
 Enable core library desugaring in your **app module** so the SDK's Java time and
-arithmetic APIs work on Android API 23. This configuration requires Android Gradle
-Plugin 8.0 or later:
+arithmetic APIs work on Android API 23. Consumer apps are tested with Android
+Gradle Plugin 8.13; version 8.0 or later is expected to work:
 
 ```kotlin
 android {
@@ -147,6 +147,9 @@ Register that class in `AndroidManifest.xml`. Keep the app's existing
 
 If the app already has an `Application` subclass, add `Elu.setup(...)` to its
 existing `onCreate`; do not create or register a second subclass.
+
+Use the site key of an ELU project set up for Android. A key from a project with
+iOS replay enabled can start replay capture in an Android app.
 
 Multi-process apps: call `Elu.setup` from `Application.onCreate`; secondary
 processes are ignored. Android runs `onCreate` in every process of the app, but
@@ -418,6 +421,10 @@ Elu.reset()
 Use the app's stable, immutable internal user ID. Do not use an email address,
 name, phone number, or another direct identifier as the ID.
 
+`Elu.alias(id)` links another ID to the identified user. Before `Elu.identify`
+there is no user to link to, so the call is ignored; the anonymous ID is never
+merged with another person.
+
 ## Events and screens
 
 ```kotlin
@@ -438,6 +445,15 @@ Elu.capture(
     ),
 )
 ```
+
+Property values are converted the way JSON serialization converts them. A `Date`
+becomes an RFC 3339 UTC string, a `URI`, `URL` or `Uri` becomes its string form,
+and arrays, sets and other collections become lists. A value JSON cannot carry,
+such as a NaN or infinite number, an enum or another object, is left out of a map
+and becomes null inside a list; the rest of the event is kept. Names the SDK sets
+itself (`distinct_id`, `$device_id`, `$session_id`, `$groups`, `$elu_*` and similar)
+are removed from event, person, group and super-property maps. Both kinds of removal
+are counted in the SDK's drop diagnostics.
 
 The SDK copies the timestamp and JSON values when called. A rejected event does
 not apply its person properties. After an accepted event, the person update runs
@@ -464,12 +480,16 @@ Elu.setup(applicationContext, "your-site-key", options)
 ```
 
 `propertyDenylist` removes exact top-level names after event properties and super
-properties are merged. `beforeSend` receives a detached `EluEvent` with mutable
+properties are merged. It takes up to 1024 names, each non-empty and at most 256
+characters (Unicode code points). An invalid list does not stop setup: the SDK then
+refuses every event and filtered person or group update, and feature flags keep
+working. `beforeSend` receives a detached `EluEvent` with mutable
 properties, event name, `Date`, and optional `set`/`setOnce`. It may return a
 modified event or null to drop it. The callback runs synchronously on the capture
 worker, outside storage transactions and SDK locks. Keep it short; do not perform
-UI/network work or wait for other SDK operations. Throws, invalid JSON, malformed
-Unicode or oversized output discard the event. A transaction retry reuses the
+UI/network work or wait for other SDK operations. A `Date` or link the callback
+returns becomes a string as described above. Throws, other non-JSON values,
+malformed Unicode or oversized output discard the event. A transaction retry reuses the
 validated result without calling the filter again.
 
 Filtering covers manual and automatic event captures, including screens, flag
@@ -484,7 +504,9 @@ that update is refused by consent, identity, time or queue limits; the two write
 are not atomic. `NEVER` profile mode performs no person update.
 
 Identify, alias, person-property and group calls also pass their supported property
-projection through the callback. Identity and group targets remain fixed. Returning
+projection through the callback. The callback sees the identity targets
+(`distinct_id` and `$anon_distinct_id` for `$identify`, `alias` and `distinct_id`
+for `$create_alias`), but identity and group targets remain fixed. Returning
 null drops that operation; removing property maps does not restore the original
 values. A group association can still change when its property map is removed.
 The denylist acts on the projection's top-level names, not nested fields or replay
@@ -779,15 +801,16 @@ data practices before you submit the form.
 | --- | --- | --- |
 | The user ID you pass to `Elu.identify`, and person and group properties you set | Personal info: User IDs, plus any other personal info you put in those properties | Only when your app calls these APIs |
 | A random anonymous ID and a random installation ID (`$device_id`) that the SDK creates and keeps in app storage | Device or other IDs | Always |
-| Custom events, screens (`Elu.screen`), app open and background events, and feature flag usage | App activity: App interactions (and Other actions for custom events that describe other user actions) | Always |
+| Custom events, screens (recorded automatically for each Activity, named by its class, and through `Elu.screen`), app open and background events, and feature flag usage | App activity: App interactions (and Other actions for custom events that describe other user actions) | Always |
 | Device and app context on events: OS and version, device manufacturer and model, app name, version, build and package name, screen size, locale and time zone | App info and performance: Diagnostics | Always |
 | Exceptions you report with `Elu.captureException` (type, message, stack trace), and opt-in automatic JVM crash reports (exception type only) | App info and performance: Crash logs | Only when you call it or opt in |
 | Opt-in performance samples, launch timing and OkHttp request metrics (method, status code and duration; no URLs) | App info and performance: Diagnostics, Other app performance data | Only when you enable them |
-| Session replay: the layout of supported views, readable on-screen text and single-finger touch movement. Inputs are masked; images, web views and blocked views are left out | App activity: App interactions, plus the categories of any personal info your screens display | Only when ELU's service configuration enables replay for your project. Not enabled for Android in 0.2.0 |
+| Session replay: the layout of supported views, readable on-screen text and single-finger touch movement. Inputs are masked; images, web views and blocked views are left out | App activity: App interactions, plus the categories of any personal info your screens display | Only when ELU's service configuration enables replay for the project whose site key the app uses. ELU does not enable replay for Android projects yet. Use a site key from a project set up for Android: a key from a project with iOS replay enabled can start replay capture in an Android app |
+| Approximate location (country, region and city) that ELU's service derives from the IP address of each request | Location: Approximate location | Always |
 
-ELU's service also derives approximate location, such as the country, from the
-IP address of each request. If your ELU project uses it, declare Location:
-Approximate location.
+ELU's service derives approximate location (country, region and city) from the
+IP address of every request. Declare Location: Approximate location, with the
+purpose Analytics.
 
 For each data type, the purpose is Analytics, and also App functionality if you
 use feature flags. ELU processes this data as your service provider, so under
@@ -808,7 +831,8 @@ Kotlin 2.1.x, compileSdk 36, Java 11 bytecode (JDK 17 toolchain). The build
 uses strict Kotlin compiler settings and is verified in CI. R8/ProGuard:
 consumer rules ship in the AAR; the SDK facade uses no reflection. Release builds
 with R8 full mode (the Android Gradle Plugin 8 default) need no extra keep rules
-for the SDK.
+for the SDK, including apps compiled against an older Android SDK (CI checks
+compileSdk 34 and 36).
 
 ### App size
 

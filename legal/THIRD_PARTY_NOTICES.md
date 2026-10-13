@@ -3,7 +3,26 @@
 This file provides attribution and license notices for third-party software
 used by the ELU Android SDK.
 
-## Runtime dependencies
+## Runtime dependencies (0.2.0)
+
+ELU Android `0.2.0` (`dev.elu:elu-analytics`) declares these published runtime
+dependencies:
+
+- `org.jetbrains.kotlin:kotlin-stdlib:2.1.20`, by JetBrains s.r.o., under the
+  Apache License, Version 2.0.
+- `com.squareup.okhttp3:okhttp:4.12.0` as a minimum version, by Square, Inc.,
+  under the Apache License, Version 2.0. It brings `com.squareup.okio:okio`
+  (Apache License, Version 2.0). An app may resolve a newer OkHttp, including
+  5.x.
+
+License: <https://www.apache.org/licenses/LICENSE-2.0>.
+
+The `0.2.0` AAR bundles no dependency classes. Maven resolves these artifacts
+and their transitive dependencies separately. The app's build also adds
+`com.android.tools:desugar_jdk_libs` through core library desugaring, as the
+README describes; the SDK does not declare it.
+
+## Historical: 0.1.0
 
 ELU Android `0.1.0` uses these exact Maven coordinates:
 
@@ -97,7 +116,8 @@ PostHog
 
 ## Owned replay HTTP dependency
 
-The internal ELU replay transport directly declares `com.squareup.okhttp3:okhttp:4.12.0`.
+The internal ELU replay transport directly declares `com.squareup.okhttp3:okhttp:4.12.0`
+as a minimum version.
 It does not rely on another analytics runtime to own this dependency. OkHttp and
 its `com.squareup.okio:okio:3.6.0` dependency (JVM artifact `okio-jvm:3.6.0`)
 are published by Square, Inc. under the Apache License, Version 2.0, according
