@@ -843,14 +843,14 @@ code.
 
 | Measure | Without SDK | With SDK | Added by SDK |
 | --- | ---: | ---: | ---: |
-| Release APK (signed, universal) | 22,432 B | 804,389 B | +781,957 B (about 764 KiB) |
-| Release AAB, without the R8 mapping file | 20,301 B | 801,937 B | +781,636 B |
-| DEX method references | 12 | 10,927 | +10,915 |
-| DEX defined methods | 4 | 9,253 | +9,249 |
+| Release APK (signed, universal) | 22,432 B | 806,783 B | +784,351 B (about 766 KiB) |
+| Release AAB, without the R8 mapping file | 20,301 B | 804,330 B | +784,029 B |
+| DEX method references | 12 | 10,947 | +10,935 |
+| DEX defined methods | 4 | 9,272 | +9,268 |
 
-Of the added methods, 3,445 are SDK code, 4,375 are the desugared Java library
+Of the added methods, 3,456 are SDK code, 4,375 are the desugared Java library
 the SDK needs to run on API 23 (an app that already desugars the same APIs shares
-them), 892 are OkHttp and Okio, and 537 are the Kotlin standard library.
+them), 892 are OkHttp and Okio, and 545 are the Kotlin standard library.
 `scripts/measure-consumer-size.py` reproduces these figures from the optimized
 consumer fixture in `fixtures/core-consumers`.
 
