@@ -473,7 +473,7 @@ internal class StandaloneFacade(
             return
         }
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.CAPTURE_CALL) }
-        val eventProperties = withoutReservedKeys(properties)
+        val eventProperties = projectProperties(properties)
         // The caller's timestamp, so a call held while pending is not re-stamped at release.
         val occurredAt = RuntimeWallTimestamps.rfc3339(timestamp.time)
         dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(eventProperties)) {
@@ -492,9 +492,9 @@ internal class StandaloneFacade(
         val set: Map<String, Any?>
         val setOnce: Map<String, Any?>
         try {
-            eventProperties = JsonValues.objectValue(withoutReservedKeys(properties), "capture.properties")
-            set = JsonValues.objectValue(options.set.orEmpty(), "capture.set")
-            setOnce = JsonValues.objectValue(options.setOnce.orEmpty(), "capture.setOnce")
+            eventProperties = JsonValues.objectValue(projectProperties(properties), "capture.properties")
+            set = JsonValues.objectValue(projectProperties(options.set), "capture.set")
+            setOnce = JsonValues.objectValue(projectProperties(options.setOnce), "capture.setOnce")
         } catch (_: IllegalArgumentException) {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
@@ -535,9 +535,15 @@ internal class StandaloneFacade(
     override fun screen(
         name: String,
         properties: Map<String, Any>?,
+    ) = screen(name, properties, now())
+
+    /** A lifecycle screen keeps the time the Activity was observed, not the time it reaches the facade. */
+    internal fun screen(
+        name: String,
+        properties: Map<String, Any>?,
+        occurredAt: String,
     ) {
-        val screenProperties = withoutReservedKeys(properties)
-        val occurredAt = now()
+        val screenProperties = projectProperties(properties)
         dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(screenProperties) || eventFilter.hasCallback,
             reloadFlagsAfter = false, restrictsEventFilter = false) {
             val runtime = requireStack().runtime
@@ -549,7 +555,7 @@ internal class StandaloneFacade(
         error: Throwable,
         properties: Map<String, Any>?,
     ) {
-        val exceptionProperties = withoutReservedKeys(properties)
+        val exceptionProperties = projectProperties(properties)
         val occurredAt = now()
         dispatch(OperationKind.ACTIVITY, affectsFlags = hasContextMutation(exceptionProperties) || eventFilter.hasCallback,
             reloadFlagsAfter = false, restrictsEventFilter = false) {
@@ -572,8 +578,8 @@ internal class StandaloneFacade(
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
-        val set = userProperties?.toMap().orEmpty()
-        val setOnce = userPropertiesOnce?.toMap().orEmpty()
+        val set = projectProperties(userProperties)
+        val setOnce = projectProperties(userPropertiesOnce)
         val occurredAt = now()
         val projected = projectIdentity(ProjectedIdentity(distinctId))
         dispatch(OperationKind.ACTIVITY, projected, affectsFlags = true) { identifyOnLane(distinctId, set, occurredAt, setOnce) }
@@ -587,13 +593,14 @@ internal class StandaloneFacade(
         }
         val occurredAt = now()
         dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
-            val canonicalId = persistedDistinctId()
-            if (alias == canonicalId) {
-                // Aliasing an id to itself is the identify transition for that id.
-                identifyOnLane(alias, emptyMap(), occurredAt)
-            } else {
-                appendMutations(listOf(RuntimeMutationChange.LinkAlias(alias, canonicalId)), occurredAt)
+            // An alias links another id to the identified user. Without one there is nothing to
+            // link it to, and the anonymous id must never become the canonical person of a merge.
+            val userId = identity?.userId ?: run {
+                countDrop(EluFacadeDropReason.INVALID_INPUT)
+                return@dispatch
             }
+            if (alias == userId) return@dispatch
+            appendMutations(listOf(RuntimeMutationChange.LinkAlias(alias, userId)), occurredAt)
         }
     }
 
@@ -629,7 +636,7 @@ internal class StandaloneFacade(
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
-        val eventProperties = withoutReservedKeys(properties)
+        val eventProperties = projectProperties(properties)
         synchronized(consentIntakeLock) {
             val intent = synchronized(projectionLock) {
                 consentIntentRevision = Math.incrementExact(consentIntentRevision)
@@ -801,7 +808,7 @@ internal class StandaloneFacade(
     // ---- properties ----------------------------------------------------------
 
     override fun register(properties: Map<String, Any>) {
-        val superProperties = withoutReservedKeys(properties)
+        val superProperties = projectProperties(properties)
         if (superProperties.isEmpty()) return
         if (superProperties.keys.any { it.isEmpty() }) {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
@@ -814,15 +821,20 @@ internal class StandaloneFacade(
     }
 
     override fun registerOnce(properties: Map<String, Any>, defaultValue: Any?) {
-        val selected = withoutReservedKeys(properties)
+        val selected = projectProperties(properties)
         if (selected.isEmpty()) return
         if (selected.keys.any { it.isEmpty() }) {
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
+        val projectedDefault = FacadeJson.value(defaultValue)
+        if (projectedDefault === FacadeJson.UNSUPPORTED) {
+            countDrop(EluFacadeDropReason.INVALID_INPUT)
+            return
+        }
         val occurredAt = now()
         dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
-            applyLocalChange(RuntimeLocalStateChange.RegisterSuperPropertiesOnce(selected, defaultValue, occurredAt))
+            applyLocalChange(RuntimeLocalStateChange.RegisterSuperPropertiesOnce(selected, projectedDefault, occurredAt))
         }
     }
 
@@ -844,9 +856,9 @@ internal class StandaloneFacade(
 
     override fun setPersonProperties(properties: Map<String, Any>, propertiesOnce: Map<String, Any>) {
         if (personProfiles == EluPersonProfilesMode.NEVER) return
-        if (properties.isEmpty() && propertiesOnce.isEmpty()) return
-        val set = properties.toMap()
-        val setOnce = propertiesOnce.toMap()
+        val set = projectProperties(properties)
+        val setOnce = projectProperties(propertiesOnce)
+        if (set.isEmpty() && setOnce.isEmpty()) return
         val occurredAt = now()
         dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
             if (hasCurrentCapture()) appendPersonProperties(set, reloadFlags = true, occurredAt = occurredAt, setOnce = setOnce)
@@ -863,7 +875,7 @@ internal class StandaloneFacade(
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
-        val groupProperties = properties?.toMap()
+        val groupProperties = properties?.let(::projectProperties)
         val occurredAt = now()
         dispatch(OperationKind.PERSON_GROUP_CONTEXT, affectsFlags = true) {
             if (!hasCurrentCapture()) {
@@ -982,8 +994,8 @@ internal class StandaloneFacade(
     }
 
     override fun setPersonPropertiesForFlags(properties: Map<String, Any>) {
-        if (properties.isEmpty()) return
-        val set = properties.toMap()
+        val set = projectProperties(properties)
+        if (set.isEmpty()) return
         val occurredAt = now()
         dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
             applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(set, occurredAt))
@@ -1014,7 +1026,7 @@ internal class StandaloneFacade(
             countDrop(EluFacadeDropReason.INVALID_INPUT)
             return
         }
-        val set = properties.toMap()
+        val set = projectProperties(properties)
         val occurredAt = now()
         dispatch(OperationKind.FLAG_CONTEXT, affectsFlags = true) {
             applyFlagContext(RuntimeLocalStateChange.SetFlagGroupProperties(type, set, occurredAt))
@@ -1872,18 +1884,15 @@ internal class StandaloneFacade(
         if (error is IllegalArgumentException) EluFacadeDropReason.INVALID_INPUT else EluFacadeDropReason.STORAGE
 
     /**
-     * Removes the properties the runtime derives from identity and session state, so a customer
-     * value can never shadow the identity an event is attributed to.
+     * Projects caller values onto JSON ([FacadeJson]) and removes the properties the runtime derives
+     * from identity and session state, so a customer value can never shadow the identity an event
+     * is attributed to. Event, person, group and flag-context maps all pass through here.
      */
-    private fun withoutReservedKeys(properties: Map<String, Any>?): Map<String, Any?> {
-        if (properties.isNullOrEmpty()) return emptyMap()
-        val kept = LinkedHashMap<String, Any?>(properties.size)
-        var removed = 0
-        properties.forEach { (key, value) ->
-            if (isReservedPropertyKey(key)) removed += 1 else kept[key] = value
-        }
-        countDrops(EluFacadeDropReason.RESERVED_PROPERTY, removed)
-        return kept
+    private fun projectProperties(properties: Map<String, Any>?): Map<String, Any?> {
+        val projected = FacadeJson.properties(properties) { isReservedPropertyKey(it) }
+        countDrops(EluFacadeDropReason.RESERVED_PROPERTY, projected.reserved)
+        countDrops(EluFacadeDropReason.INVALID_INPUT, projected.invalid)
+        return projected.properties
     }
 
     private fun now(): String = RuntimeWallTimestamps.rfc3339(wallClock())

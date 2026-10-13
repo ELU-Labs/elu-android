@@ -225,7 +225,7 @@ internal object AndroidStandaloneStack {
                 if (runtime == null) driver.onBackground()
                 else runtime.applicationBackgrounded(driver, occurredAt)
             }
-            override fun screenViewed(name: String, occurredAt: String) { facade.screen(name, null) }
+            override fun screenViewed(name: String, occurredAt: String) { facade.screen(name, null, occurredAt) }
         })
         return facade
     }

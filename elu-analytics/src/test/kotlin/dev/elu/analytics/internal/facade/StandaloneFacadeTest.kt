@@ -1319,16 +1319,103 @@ class StandaloneFacadeTest {
         assertEquals("variant-a", h.facade.getFeatureFlag("variant", EluFeatureFlagOptions(sendEvent = false)))
     }
 
+    @Test fun `facade projects dates links and unsupported values the way JSON serialization does`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.capture("projected", mapOf(
+            "at" to Date(0), "link" to java.net.URI("https://example.test/a?b=1"),
+            "url" to java.net.URL("https://example.test/u"), "ratio" to Double.NaN, "huge" to Double.POSITIVE_INFINITY,
+            "unit" to TimeUnit.SECONDS, "ok" to 1, "text" to StringBuilder("built"),
+            "list" to listOf(1, Double.NaN, TimeUnit.SECONDS, Date(1_000)), "array" to arrayOf("a", Any()),
+            "ints" to intArrayOf(1, 2), "set" to linkedSetOf("x"), "nested" to mapOf("bad" to Float.NaN, "at" to Date(0)),
+            "keys" to mapOf(1 to "not a string key"),
+        ), Date(NOW_MS))
+        h.settle()
+        val properties = (h.records().single() as RuntimeQueuedRecord.Event).record.properties
+        assertEquals("1970-01-01T00:00:00.000Z", properties["at"])
+        assertEquals("https://example.test/a?b=1", properties["link"])
+        assertEquals("https://example.test/u", properties["url"])
+        assertEquals(1, properties["ok"])
+        assertEquals("built", properties["text"])
+        assertEquals(listOf(1, null, null, "1970-01-01T00:00:01.000Z"), properties["list"])
+        assertEquals(listOf("a", null), properties["array"])
+        assertEquals(listOf(1, 2), properties["ints"])
+        assertEquals(listOf("x"), properties["set"])
+        assertEquals(mapOf("at" to "1970-01-01T00:00:00.000Z"), properties["nested"])
+        for (dropped in listOf("ratio", "huge", "unit", "keys")) assertFalse(dropped, properties.containsKey(dropped))
+        assertEquals(4, h.diagnostics().dropped[EluFacadeDropReason.INVALID_INPUT])
+
+        // Person, group and super-property maps use the same projection, and their reserved names are removed.
+        h.facade.identify("user-1", mapOf("joined" to Date(0), "bad" to Double.NaN, "\$device_id" to "forged"),
+            mapOf("first" to java.net.URI("https://example.test/first"), "\$elu_sdk_version" to "forged"))
+        h.facade.setPersonProperties(mapOf("seen" to Date(1_000), "\$process_person_profile" to false, "unit" to TimeUnit.DAYS))
+        h.facade.group("company", "acme", mapOf("since" to Date(0), "\$groups" to "forged"))
+        h.facade.register(mapOf("plan" to TimeUnit.HOURS, "launch" to Date(0), "\$is_identified" to true))
+        h.facade.registerOnce(mapOf("unused" to "value"), TimeUnit.MINUTES)
+        h.settle()
+        val changes = h.records().filterIsInstance<RuntimeQueuedRecord.Mutation>().map { it.envelope.mutation.change }
+        assertEquals(RuntimeMutationChange.Identify("user-1", mapOf("joined" to "1970-01-01T00:00:00.000Z"),
+            mapOf("first" to "https://example.test/first")), changes[0])
+        assertEquals(mapOf("seen" to "1970-01-01T00:00:01.000Z"), (changes[1] as RuntimeMutationChange.SetPersonProperties).set)
+        assertEquals(mapOf("since" to "1970-01-01T00:00:00.000Z"),
+            changes.filterIsInstance<RuntimeMutationChange.SetGroupProperties>().single().set)
+        val state = h.owner.snapshot().get().state
+        assertEquals(mapOf("launch" to "1970-01-01T00:00:00.000Z"), state.identity.superProperties)
+        assertEquals(5, h.diagnostics().dropped[EluFacadeDropReason.RESERVED_PROPERTY])
+        // ratio, huge, unit, keys; then bad, unit, plan and the registerOnce default.
+        assertEquals(8, h.diagnostics().dropped[EluFacadeDropReason.INVALID_INPUT])
+    }
+
+    @Test fun `alias links to the identified user and is ignored while anonymous`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY)
+        h.facade.applyConfiguration(config()); h.settle()
+        h.facade.alias("before-identify"); h.settle()
+        assertTrue(h.records().isEmpty())
+        assertEquals(1, h.diagnostics().dropped[EluFacadeDropReason.INVALID_INPUT])
+        h.facade.identify("user-1", null); h.settle()
+        h.facade.alias("user-1"); h.settle()
+        h.facade.alias("other-id"); h.settle()
+        val changes = h.records().filterIsInstance<RuntimeQueuedRecord.Mutation>().map { it.envelope.mutation.change }
+        assertEquals(listOf(RuntimeMutationChange.Identify("user-1", emptyMap(), emptyMap()),
+            RuntimeMutationChange.LinkAlias("other-id", "user-1")), changes)
+        assertEquals(1, h.diagnostics().dropped[EluFacadeDropReason.INVALID_INPUT])
+    }
+
+    @Test fun `a lifecycle screen keeps the time the activity was observed`() {
+        val clock = AtomicLong(NOW_MS)
+        val h = harness(wall = clock::get)
+        h.facade.applyConfiguration(config()); h.settle()
+        clock.addAndGet(250)
+        h.facade.screen("MainActivity", null, "2026-08-04T00:01:00.100Z")
+        h.settle()
+        val screen = (h.records().single() as RuntimeQueuedRecord.Event).record
+        assertEquals(RuntimeEventKind.SCREEN, screen.kind)
+        assertEquals("2026-08-04T00:01:00.100Z", screen.occurredAt)
+    }
+
+    @Test fun `an invalid property denylist refuses every event and mutation without failing setup`() {
+        val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
+            eventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(listOf("")))
+        h.facade.applyConfiguration(config()); h.settle()
+        assertEquals(EluFacadeState.Enabled, h.facade.state())
+        // Settle between calls: a later identify would otherwise fence the earlier filtered calls.
+        h.facade.capture("refused", mapOf("ok" to 1), Date(NOW_MS)); h.settle()
+        h.facade.screen("Home", null); h.settle()
+        h.facade.identify("user-1", mapOf("plan" to "paid")); h.settle()
+        assertTrue(h.records().isEmpty())
+        assertEquals(mapOf(EluFacadeDropReason.INVALID_INPUT to 3), h.diagnostics().dropped)
+    }
+
     @Test fun `invalid denied limited or full capture never appends accompanying person properties`() {
-        for (case in listOf("invalid", "json", "person-json", "disabled", "opted-out", "rate", "queue")) {
+        for (case in listOf("invalid", "disabled", "opted-out", "rate", "queue")) {
             val h = harness(personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY,
                 rateLimiting = if (case == "rate") dev.elu.analytics.EluRateLimitingOptions(1.0, 1.0) else null,
                 limits = if (case == "queue") RuntimeQueueLimits(10, 1) else RuntimeQueueLimits(10_000, 16_777_216))
             h.facade.applyConfiguration(if (case == "disabled") config("config-disabled.json") else config()); h.settle()
             if (case == "opted-out") { h.facade.optOut(); h.settle() }
             if (case == "rate") { h.facade.capture("spend", null, Date(NOW_MS)); h.settle() }
-            val options = EluCaptureOptions(Date(NOW_MS), mapOf("tier" to if (case == "person-json") Any() else "forbidden"))
-            h.facade.capture(if (case == "invalid") "" else "denied", if (case == "json") mapOf("bad" to Any()) else null, options)
+            val options = EluCaptureOptions(Date(NOW_MS), mapOf("tier" to "forbidden"))
+            h.facade.capture(if (case == "invalid") "" else "denied", null, options)
             h.settle()
             assertTrue(case, h.records().filterIsInstance<RuntimeQueuedRecord.Mutation>().isEmpty())
             assertTrue(case, h.owner.snapshot().get().state.flagContext.personProperties.isEmpty())

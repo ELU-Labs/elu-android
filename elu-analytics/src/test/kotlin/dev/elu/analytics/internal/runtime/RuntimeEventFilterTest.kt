@@ -60,7 +60,7 @@ class RuntimeEventFilterTest {
         rejected(apply(RuntimeEventFilter(callback = EluEvent.Filter { error("customer") })), RuntimeCaptureRejection.FILTER_INVALID)
         val mutations: List<(EluEvent) -> Unit> = listOf(
             { it.event = "" }, { it.event = "bad\uD800" },
-            { it.properties["number"] = Double.NaN }, { it.properties["date"] = Date() },
+            { it.properties["number"] = Double.NaN }, { it.properties["object"] = Any() },
             { val cycle = mutableListOf<Any?>(); cycle.add(cycle); it.properties["cycle"] = cycle },
             { it.properties["large"] = List(1025) { true } },
             { it.properties["bytes"] = "x".repeat(2_621_441) },
@@ -69,6 +69,67 @@ class RuntimeEventFilterTest {
         mutations.forEach { change -> rejected(apply(RuntimeEventFilter(callback = EluEvent.Filter {
             change(it); it
         })), RuntimeCaptureRejection.FILTER_INVALID) }
+    }
+
+    @Test fun `hook output dates and links become strings and person maps lose protected names`() {
+        val result = apply(RuntimeEventFilter(callback = EluEvent.Filter {
+            it.properties["at"] = Date(0); it.properties["link"] = java.net.URI("https://example.test/x")
+            it.set = mutableMapOf("tier" to "paid", "\$device_id" to "forged", "distinct_id" to "forged")
+            it.setOnce = mutableMapOf("\$elu_sdk_version" to "forged", "first" to Date(1_000))
+            it
+        }), person = RuntimeEventPerson(set = emptyMap())) as RuntimeEventFilterResult.Prepared
+        assertEquals("1970-01-01T00:00:00.000Z", result.properties["at"])
+        assertEquals("https://example.test/x", result.properties["link"])
+        assertEquals(mapOf("tier" to "paid"), result.person.set)
+        assertEquals(mapOf("first" to "1970-01-01T00:00:01.000Z"), result.person.setOnce)
+    }
+
+    @Test fun `an invalid denylist never throws and refuses every event and mutation`() {
+        val invalidLists = listOf(List(1025) { "name$it" }, listOf("ok", ""), listOf("x".repeat(257)), listOf("bad\uD800"))
+        for (list in invalidLists) {
+            val policy = RuntimeEventFilter(list)
+            assertTrue(policy.enabled)
+            rejected(apply(policy), RuntimeCaptureRejection.FILTER_INVALID)
+            rejected(apply(policy.boundTo { { true } }), RuntimeCaptureRejection.FILTER_INVALID)
+            val person = mutation(RuntimeMutationChange.SetPersonProperties(mapOf("tier" to "paid"), emptyMap(), emptyList()))
+            assertEquals(RuntimeCaptureRejection.FILTER_INVALID,
+                (policy.applyMutations(listOf(person), identity()) as RuntimeMutationFilterResult.Refused).reason)
+        }
+        // The limits themselves: 1024 names, each up to 256 code points (an astral character counts once).
+        val boundary = RuntimeEventFilter(listOf("\uD83D\uDE00".repeat(256)) + List(1023) { "name$it" })
+        val result = apply(boundary, mapOf("name1" to "denied", "kept" to true)) as RuntimeEventFilterResult.Prepared
+        assertEquals(mapOf("kept" to true), result.properties)
+    }
+
+    @Test fun `mutation projections show their identity targets to the hook but never return them`() {
+        val seen = linkedMapOf<String, Map<String, Any?>>()
+        val policy = RuntimeEventFilter(callback = EluEvent.Filter {
+            seen[it.event] = LinkedHashMap(it.properties)
+            it.properties["distinct_id"] = "forged"; it.properties["\$anon_distinct_id"] = "forged"
+            if (it.event == "\$set") it.properties["\$set"] = mutableMapOf("kept" to true, "\$device_id" to "forged", "distinct_id" to "forged")
+            if (it.event == "\$groupidentify") it.properties["\$group_set"] = mutableMapOf("size" to 3, "\$groups" to "forged")
+            it
+        })
+        val original = identity()
+        fun drafts(vararg changes: RuntimeMutationChange) =
+            (policy.applyMutations(changes.map(::mutation), original) as RuntimeMutationFilterResult.Prepared).drafts.map { it.change }
+        assertEquals(listOf(RuntimeMutationChange.Identify("next-user", mapOf("tier" to "gold"), emptyMap())),
+            drafts(RuntimeMutationChange.Identify("next-user", mapOf("tier" to "gold"), emptyMap())))
+        assertEquals("next-user", seen["\$identify"]!!["distinct_id"])
+        assertEquals("original-user", seen["\$identify"]!!["\$anon_distinct_id"])
+        val alias = RuntimeMutationChange.LinkAlias("next-alias", "original-user")
+        assertEquals(listOf(alias), drafts(alias))
+        assertEquals("next-alias", seen["\$create_alias"]!!["alias"])
+        assertEquals("original-user", seen["\$create_alias"]!!["distinct_id"])
+        assertEquals(listOf(RuntimeMutationChange.SetPersonProperties(mapOf("kept" to true), emptyMap(), emptyList())),
+            drafts(RuntimeMutationChange.SetPersonProperties(mapOf("tier" to "gold"), emptyMap(), emptyList())))
+        assertEquals(RuntimeMutationChange.SetGroupProperties("company", "old", mapOf("size" to 3), emptyMap(), emptyList()),
+            drafts(RuntimeMutationChange.SetGroupProperties("company", "old", mapOf("size" to 1), emptyMap(), emptyList())).single())
+        // An ordinary event still never shows a protected name to the hook.
+        var eventInput: Map<String, Any?>? = null
+        apply(RuntimeEventFilter(callback = EluEvent.Filter { eventInput = LinkedHashMap(it.properties); it }),
+            mapOf("distinct_id" to "caller", "kept" to 1))
+        assertEquals(mapOf("kept" to 1), eventInput)
     }
 
     @Test fun `automatic person output is explicitly refused but manual transformed maps remain separate`() {

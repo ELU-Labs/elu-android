@@ -7,25 +7,41 @@ import java.time.Instant
 import java.util.Date
 import java.util.IdentityHashMap
 
-/** Setup is copied once; this policy neither grants capture authority nor owns storage. */
-internal class RuntimeEventFilter(
-    propertyDenylist: List<String> = emptyList(),
-    private val callback: EluEvent.Filter? = null,
-    private val admission: () -> (() -> Boolean) = { { true } },
+/**
+ * Setup is copied once; this policy neither grants capture authority nor owns storage.
+ *
+ * An invalid denylist (more than 1024 names, an empty name, a name longer than 256 code points,
+ * or malformed Unicode) never fails setup. It refuses every event and filtered mutation instead,
+ * so nothing the app meant to withhold is sent, while feature flags keep working.
+ */
+internal class RuntimeEventFilter private constructor(
+    private val denied: Set<String>,
+    private val valid: Boolean,
+    private val callback: EluEvent.Filter?,
+    private val admission: () -> (() -> Boolean),
 ) {
-    private val denied = propertyDenylist.also { require(it.size <= 1024) }.toSet().also {
-        it.forEach { name -> require(name.length <= 1024); requireUnicode(name) }
-    }
-    val enabled: Boolean get() = denied.isNotEmpty() || callback != null
+    constructor(
+        propertyDenylist: List<String> = emptyList(),
+        callback: EluEvent.Filter? = null,
+        admission: () -> (() -> Boolean) = { { true } },
+    ) : this(validDenylist(propertyDenylist)?.toSet() ?: emptySet(), validDenylist(propertyDenylist) != null, callback, admission)
+
+    val enabled: Boolean get() = !valid || denied.isNotEmpty() || callback != null
     val hasCallback: Boolean get() = callback != null
-    fun boundTo(originalAdmission: () -> (() -> Boolean)) = RuntimeEventFilter(denied.toList(), callback, originalAdmission)
+    fun boundTo(originalAdmission: () -> (() -> Boolean)) = RuntimeEventFilter(denied, valid, callback, originalAdmission)
     fun originalAdmission(): () -> Boolean = admission()
 
+    /**
+     * A mutation projection ($identify, $create_alias, $set, $groupidentify) shows the callback
+     * its identity targets, as on iOS; they are removed from what it returns and cannot be redirected.
+     */
     fun apply(command: RuntimeCaptureCommand, merged: Map<String, Any?>,
-        person: RuntimeEventPerson, allowsPersonChanges: Boolean): RuntimeEventFilterResult = try {
+        person: RuntimeEventPerson, allowsPersonChanges: Boolean,
+        mutationProjection: Boolean = false): RuntimeEventFilterResult = try {
+        if (!valid) throw IllegalArgumentException("Invalid property denylist")
         val inputCopy = Copier()
         val properties = inputCopy.objectValue(merged).apply {
-            keys.removeAll { protected(it) || it in denied }
+            keys.removeAll { (!mutationProjection && protected(it)) || it in denied }
         }
         val originalTime = Instant.parse(command.occurredAt).toEpochMilli()
         val input = EluEvent(command.name, properties, Date(originalTime),
@@ -34,16 +50,19 @@ internal class RuntimeEventFilter(
         val output = if (callback == null) input else callback.filter(input)
         if (output == null) RuntimeEventFilterResult.Refused(RuntimeCaptureRejection.FILTER_DROPPED)
         else {
-            require(output.event.length in 1..1024 && output.event.codePointCount(0, output.event.length) in 1..512)
-            requireUnicode(output.event)
-            val outputTime = output.timestamp.time
+            // A mutation projection's name and clock are not records; they cannot be replaced.
+            if (!mutationProjection) {
+                require(output.event.length in 1..1024 && output.event.codePointCount(0, output.event.length) in 1..512)
+                requireUnicode(output.event)
+            }
+            val outputTime = if (mutationProjection) originalTime else output.timestamp.time
             val outputCopy = Copier()
             val props = outputCopy.objectValue(output.properties).apply { keys.removeAll(::protected) }
-            val set = output.set?.let(outputCopy::objectValue)
-            val once = output.setOnce?.let(outputCopy::objectValue)
+            val set = output.set?.let(outputCopy::objectValue)?.apply { keys.removeAll(::protected) }
+            val once = output.setOnce?.let(outputCopy::objectValue)?.apply { keys.removeAll(::protected) }
             if (!allowsPersonChanges && (set != null || once != null))
                 RuntimeEventFilterResult.Refused(RuntimeCaptureRejection.FILTER_PERSON_UNSUPPORTED)
-            else RuntimeEventFilterResult.Prepared(output.event,
+            else RuntimeEventFilterResult.Prepared(if (mutationProjection) command.name else output.event,
                 if (outputTime == originalTime) command.occurredAt else RuntimeWallTimestamps.rfc3339(outputTime),
                 JsonValues.objectValue(props, "filter.properties"), RuntimeEventPerson(
                     set?.let { JsonValues.objectValue(it, "filter.set") },
@@ -57,13 +76,13 @@ internal class RuntimeEventFilter(
     /** Released mutation projections expose mutable properties, never mutable identity targets.
      * Called once on the original queue worker, outside SQLite and its retry loop. */
     fun applyMutations(drafts: List<RuntimeRecordDraft.Mutation>, identity: IdentityState): RuntimeMutationFilterResult = try {
-        require(drafts.isNotEmpty())
+        require(valid && drafts.isNotEmpty())
         val first = drafts.first()
         fun project(name: String, properties: Map<String, Any?>,
             person: RuntimeEventPerson = RuntimeEventPerson()): RuntimeEventFilterResult.Prepared {
             val merged = LinkedHashMap(identity.superProperties).apply { putAll(properties) }
             return when (val result = apply(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, name,
-                first.occurredAt, properties, first.versions), merged, person, true)) {
+                first.occurredAt, properties, first.versions), merged, person, true, mutationProjection = true)) {
                 is RuntimeEventFilterResult.Prepared -> result
                 is RuntimeEventFilterResult.Refused -> throw MutationFilterRefusal(result.reason)
             }
@@ -71,8 +90,9 @@ internal class RuntimeEventFilter(
         fun objectValue(value: Any?): Map<String, Any?>? {
             if (value == null) return null
             require(value is Map<*, *> && value.keys.all { it is String })
+            // Nested person and group maps obey the same protected names as event properties.
             @Suppress("UNCHECKED_CAST")
-            return JsonValues.objectValue(value as Map<String, Any?>, "filter.mutation")
+            return JsonValues.objectValue((value as Map<String, Any?>).filterKeys { !protected(it) }, "filter.mutation")
         }
         fun row(change: RuntimeMutationChange) = first.copy(change = change)
         val group = drafts.last().change
@@ -145,6 +165,9 @@ internal class RuntimeEventFilter(
                 is Byte, is Short, is Int, is Long -> value
                 is Float -> value.also { require(it.isFinite()) }
                 is Double -> value.also { require(it.isFinite()) }
+                // A callback may set a date or a link the way the facade accepts them.
+                is Date -> text(RuntimeWallTimestamps.rfc3339(value.time))
+                is java.net.URI, is java.net.URL, is android.net.Uri -> text(value.toString())
                 is Map<*, *> -> {
                     require(value.size <= 1024 && visiting.put(value, true) == null)
                     try { linkedMapOf<String, Any?>().apply {
@@ -161,6 +184,17 @@ internal class RuntimeEventFilter(
     }
 
     private companion object {
+        const val MAXIMUM_DENIED_NAMES = 1024
+        const val MAXIMUM_DENIED_NAME_CODE_POINTS = 256
+
+        /** The list itself, or null when it is invalid and every event must be refused. */
+        fun validDenylist(names: List<String>): List<String>? = names.takeIf { list ->
+            list.size <= MAXIMUM_DENIED_NAMES && list.all { name ->
+                name.isNotEmpty() && name.codePointCount(0, name.length) <= MAXIMUM_DENIED_NAME_CODE_POINTS &&
+                    runCatching { requireUnicode(name) }.isSuccess
+            }
+        }
+
         fun protected(key: String): Boolean = key.startsWith("\$elu_") || key in setOf(
             "distinct_id", "\$device_id", "\$user_id", "\$anon_distinct_id", "\$session_id", "\$window_id",
             "\$groups", "\$is_identified", "\$process_person_profile", "\$epp")

@@ -112,6 +112,9 @@ Captured records retain their original identity and session through offline
 storage and retries. New account/context changes cannot expose a prior
 account's cached flag result.
 
+Alias links the alias to the identified user ID. Without an identified user it is
+dropped as invalid input, so an anonymous ID is never the canonical side of a merge.
+
 `EluOptions.personProfiles` defaults to `IDENTIFIED_ONLY`; `ALWAYS` and `NEVER`
 are explicit local alternatives. Accepted identify/alias/person-property mutations
 persist the processing marker. Any accepted processing-enabled event also persists
@@ -228,13 +231,24 @@ exists; a result contains its key, enabled state, variant and payload.
 UTF-16 property names are removed from the merged super/event map before the
 callback; nested values and person maps are separate. The callback can deliberately
 reintroduce an ordinary denied field. Protected identity/session/profile fields,
-`$elu_*` and `$epp` are removed and owned metadata is rederived afterward.
+`$elu_*` and `$epp` are removed and owned metadata is rederived afterward; they are
+also removed from returned `set`/`setOnce` maps and from nested mutation maps. The
+denylist holds at most 1,024 non-empty names of at most 256 code points each. An
+invalid list does not fail setup; it refuses every event and filtered mutation while
+flags continue.
+
+Facade input is projected like JSON serialization before any of this: `Date` becomes
+an RFC 3339 UTC string, `URI`/`URL`/`Uri` their string form, arrays and collections
+lists. An unsupported or non-finite value is left out of a map (counted as invalid
+input) and becomes null in a list, and the event is kept. Reserved names are removed
+from event, person, group, super-property and flag-context maps.
 
 The original capture worker reads a bounded input under its existing storage owner,
 then invokes the callback outside the database transaction and SDK locks. Input and
 output JSON are detached, with depth 16, 1,024 members per container, 4,096 nodes and
-a conservative 10 MiB text budget. Invalid Unicode, cycles, non-JSON values, callback
-errors and null output refuse capture. Original native fixed-name/provenance checks
+a conservative 10 MiB text budget. A returned `Date` or URI/URL becomes a string as
+above. Invalid Unicode, cycles, other non-JSON values, callback errors and null output
+refuse capture. Original native fixed-name/provenance checks
 remain enforced. Authority, identity, source and caller-intent currentness are
 checked again before and after writes. Known rollback and authority renewal reuse
 the original detached filter result; no callback runs inside transaction retry.
@@ -249,8 +263,9 @@ never a backdated event time, and preserves profile, source and intent restricti
 
 Standalone changed identify uses `$identify` with person maps; same-identity identify
 and person properties use `$set`/`$set_once`; alias uses `$create_alias`; group uses
-`$groupidentify`/`$group_set`. Targets and mutation chronology remain the original typed
-operation even if the callback edits metadata. Removed person maps are a no-op; a
+`$groupidentify`/`$group_set`. The callback input shows the identity targets
+(`distinct_id`, `$anon_distinct_id`, `alias`); they are removed from its output, and targets
+and mutation chronology remain the original typed operation even if the callback edits metadata. Removed person maps are a no-op; a
 changed group retains its association when its property map is removed. Public
 person/group updates in flags-only mode retain the original durable flag authority;
 explicit `ForFlags` and typed unset/set-once-only operations without these projections
