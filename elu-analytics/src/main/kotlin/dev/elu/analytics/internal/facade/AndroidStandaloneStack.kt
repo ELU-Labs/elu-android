@@ -19,6 +19,7 @@ import dev.elu.analytics.internal.replay.NativeReplayCapabilities
 import dev.elu.analytics.internal.replay.NativeReplayComposition
 import dev.elu.analytics.internal.replay.NativeReplayProtocol
 import dev.elu.analytics.internal.core.SystemCoreEpochClock
+import dev.elu.analytics.internal.runtime.AndroidEventContext
 import dev.elu.analytics.internal.runtime.AndroidProcessLifecycle
 import dev.elu.analytics.internal.runtime.StandaloneLifecycleBinding
 import dev.elu.analytics.internal.runtime.AndroidRuntimeQueue
@@ -102,6 +103,8 @@ internal object AndroidStandaloneStack {
                 // One explicit private component capability selection reaches both original owners.
                 val nativeReplayTransports = installedNativeReplayProtocols.map { it.transport }.toSet()
                 val nativeReplayGenerations = installedNativeReplayProtocols.map { it.generation }.toSet()
+                // Read once here, on the facade lane, never on the main thread.
+                val eventContext = AndroidEventContext.read(appContext, StandaloneRuntime.defaultVersions().runtime)
                 val owner = AndroidRuntimeQueue.open(appContext, siteKey, LIMITS, freshIdentityStartedAt,
                     readbackProvenReplayTransports = nativeReplayTransports,
                     supportedReplayProtocolGenerations = nativeReplayGenerations,
@@ -110,6 +113,7 @@ internal object AndroidStandaloneStack {
                     persistence = persistence,
                     rateLimiting = rateLimiting,
                     eventFilter = eventFilter.boundTo { facade.eventFilterAdmission() },
+                    eventContext = eventContext.properties,
                     assertStartupCurrent = { check(!closing.get()) { "Standalone stack is closed" } }).get()
                 var native: NativeReplayComposition? = null
                 try {

@@ -1060,7 +1060,7 @@ def verify_event_filter_boundary(root: pathlib.Path, errors: list[str]) -> None:
             "val originalIntake = eventFilter.originalAdmission()", "attempt.filter.prepare(this, command, binding,",
             "eventFilter.apply(command, binding.properties, attempt.filter.person, attempt.filter.allowsPersonChanges)",
             "before.state.identity == original.identity && before.state.stream.streamId == original.streamId",
-            "attempt.filter.isCurrent()", "val mergedProperties = filtered?.properties ?:",
+            "attempt.filter.isCurrent()", "val mergedProperties = withVersionProperties(filtered?.properties ?:",
             "val result = captureEventOnWorker(command, backgroundBoundary, attempt, warningOf)",
             "result !is RuntimeCaptureResult.Accepted || attempt.filter.deferPersonContinuation || !eventFilter.enabled",
             "before.state.identity == accepted.identity && before.state.stream == accepted.stream",

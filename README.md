@@ -619,6 +619,19 @@ from their current anonymous ID; earlier reset history cannot be reconstructed.
 Previously queued bytes retain their original identity and properties. No state
 is imported from the unused preview or provider stores.
 
+New events also carry library, OS, device and app context read once at setup,
+off the main thread: `$lib` (`elu-android`), `$lib_version`, `$os` and `$os_name`
+(`Android`), `$os_version`, `$device_type` (`Mobile` or `Tablet`),
+`$device_manufacturer`, `$device_model`, `$is_emulator`, `$app_name`,
+`$app_version` (the version name), `$app_build` (the version code),
+`$app_namespace` (the package name), `$screen_width` and `$screen_height`
+(portrait dp), `$locale`, and `$timezone`. Values the device cannot provide are
+omitted. Super properties and event properties override these values, and
+`propertyDenylist` or `beforeSend` can remove them. Every event also carries
+`$elu_contract_version`, `$elu_sdk_version` and `$elu_facade_version`, set after
+filtering. The SDK reads no advertising ID, Android ID, serial number or
+user-assigned device name, and needs no additional permission.
+
 If consent is initially denied, call `Elu.optOut()` before `Elu.setup(...)`.
 Before setup, the latest valid `optOut()`/`optIn(...)` choice is retained in
 memory; setup commits it before lifecycle collection begins. A choice made
