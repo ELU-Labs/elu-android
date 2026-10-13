@@ -78,8 +78,10 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     // Owned replay networking needs per-client cookie/authentication isolation.
+    // A plain (non-strict) requirement: an app that already uses a newer OkHttp,
+    // including 5.x, keeps its version instead of failing dependency resolution.
     implementation("com.squareup.okhttp3:okhttp") {
-        version { strictly("4.12.0") }
+        version { require("4.12.0") }
     }
 
     testImplementation("junit:junit:4.13.2")

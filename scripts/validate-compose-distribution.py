@@ -122,10 +122,10 @@ def validate_module(data: bytes, module: str, candidate: str, artifacts: dict[st
             key = (dep["group"], dep["module"])
             require(key not in actual and key in expected, "duplicate or unexpected Gradle dependency")
             desired = expected[key][0]
-            constraint = dep["version"]
-            require(constraint == {"requires": desired} or
-                    (key == ("com.squareup.okhttp3", "okhttp") and
-                     constraint == {"requires": desired, "strictly": desired}), "Gradle dependency version")
+            # Plain requirements only: a strict, rejected or preferred version on a
+            # published dependency (for example OkHttp) would break or pin customer
+            # dependency resolution forever once the release is on Maven Central.
+            require(dep["version"] == {"requires": desired}, "Gradle dependency version must be a plain requirement")
             actual[key] = desired
         wanted = {k: v for k, (v, scope) in expected.items() if role == "java-runtime" or
                   (role == "java-api" and scope == "compile")}

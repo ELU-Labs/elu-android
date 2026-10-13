@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:name="dev.elu.fixture.kotlin20.Kotlin20Application"
+        android:label="ELU Kotlin 2.0 consumer"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name="dev.elu.fixture.kotlin20.Kotlin20Activity" android:exported="false" />
+    </application>
+</manifest>

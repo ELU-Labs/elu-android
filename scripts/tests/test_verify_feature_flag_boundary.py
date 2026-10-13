@@ -1494,6 +1494,19 @@ internal class WiredTransport : FlagTransport {
         build.write_text(build.read_text() + '\nimplementation("com.example:unapproved-runtime:1.0.0")\n')
         self.assertIn("runtime dependencies must remain", self.run_guard().stderr)
 
+    def test_okhttp_requirement_cannot_become_strict_or_change_version(self) -> None:
+        path = self.root / "elu-analytics/build.gradle.kts"
+        original = path.read_text()
+        self.assertEqual("", self.run_guard().stderr)
+        for old, new in [('version { require("4.12.0") }', 'version { strictly("4.12.0") }'),
+                         ('version { require("4.12.0") }', 'version { require("4.12.0"); strictly("4.12.0") }'),
+                         ('version { require("4.12.0") }', 'version { require("4.12.0"); reject("5.0.0") }'),
+                         ('version { require("4.12.0") }', 'version { require("5.0.0") }')]:
+            with self.subTest(new=new):
+                self.assertIn(old, original); path.write_text(original.replace(old, new))
+                self.assertIn("OkHttp must remain a plain 4.12.0 requirement", self.run_guard().stderr)
+        path.write_text(original)
+
     def test_private_future_cannot_become_public(self) -> None:
         path = self.root / BOUNDARY.MAIN_KOTLIN / "dev/elu/analytics/internal/concurrent/SdkFuture.kt"
         original = path.read_text()

@@ -40,11 +40,30 @@ jobs:
           checkZeroBrandScanner
           checkZeroBrandRatchet
           --stacktrace
-      - name: Validate local distributions and compile Maven-only Compose consumers
+      - name: Validate local distributions and compile Maven-only consumers
         run: |
           python3 scripts/validate-compose-distribution.py
           ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=module -Pandroid.useAndroidX=true --stacktrace
           ./gradlew -p fixtures/compose-consumer assembleDebug -PeluMetadataMode=pom -Pandroid.useAndroidX=true --stacktrace
+          # Core consumers: R8 full-mode release (+ size baseline), an app on OkHttp 5.x,
+          # a Java-only app and, in its own build, a Kotlin 2.0 app.
+          ./gradlew -p fixtures/core-consumers \
+            :r8:assembleRelease :r8:bundleRelease :r8:verifyR8KeepRules \
+            :r8-baseline:assembleRelease :r8-baseline:bundleRelease \
+            :okhttp5:verifyOkHttpResolution :okhttp5:verifyOkHttpLinkage :okhttp5:assembleRelease :okhttp5:verifyR8KeepRules \
+            :java:assembleDebug \
+            --stacktrace
+          ./gradlew -p fixtures/core-consumers -PeluMetadataMode=pom :okhttp5:verifyOkHttpResolution --stacktrace
+          ./gradlew -p fixtures/kotlin20-consumer assembleDebug --stacktrace
+          python3 scripts/measure-consumer-size.py \
+            --baseline-apk fixtures/core-consumers/r8-baseline/build/module/outputs/apk/release/r8-baseline-release.apk \
+            --baseline-aab fixtures/core-consumers/r8-baseline/build/module/outputs/bundle/release/r8-baseline-release.aab \
+            --sdk-apk fixtures/core-consumers/r8/build/module/outputs/apk/release/r8-release.apk \
+            --sdk-aab fixtures/core-consumers/r8/build/module/outputs/bundle/release/r8-release.aab \
+            --sdk-mapping fixtures/core-consumers/r8/build/module/outputs/mapping/release/mapping.txt \
+            --output-json build/reports/consumer-size.json \
+            --output-markdown build/reports/consumer-size.md
+          cat build/reports/consumer-size.md >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/validate-compose-distribution.py --verify-staged
       - name: Verify public API and ABI snapshot
         run: >-
@@ -98,16 +117,29 @@ jobs:
             build/compose-distribution/
             fixtures/compose-consumer/build/module/reports/
             fixtures/compose-consumer/build/pom/reports/
+            fixtures/core-consumers/*/build/*/reports/
+            fixtures/core-consumers/r8/build/module/outputs/mapping/release/configuration.txt
+            fixtures/kotlin20-consumer/build/reports/
             build/reports/
 
   owned-runtime:
     name: Android owned runtime instrumentation (API ${{ matrix.api-level }})
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        api-level: [29, 35]
+        # 23 is the minimum supported level (analytics only; replay needs 29+), 36 the
+        # compile/target level. API 23 uses the x86 image the emulator action itself tests.
+        include:
+          - api-level: 23
+            arch: x86
+          - api-level: 29
+            arch: x86_64
+          - api-level: 35
+            arch: x86_64
+          - api-level: 36
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -115,6 +147,17 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - name: Build the staged distribution and optimized consumer smoke apps
+        run: |
+          ./gradlew \
+            :elu-analytics:assembleRelease :elu-analytics-compose:assembleRelease \
+            :elu-analytics:generatePomFileForMavenPublication :elu-analytics:generateMetadataFileForMavenPublication \
+            :elu-analytics:sourceReleaseJar :elu-analytics:javaDocReleaseJar :elu-analytics:cyclonedxDirectBom \
+            :elu-analytics-compose:generatePomFileForMavenPublication :elu-analytics-compose:generateMetadataFileForMavenPublication \
+            :elu-analytics-compose:sourceReleaseJar :elu-analytics-compose:javaDocReleaseJar :elu-analytics-compose:cyclonedxDirectBom \
+            --stacktrace
+          python3 scripts/validate-compose-distribution.py
+          ./gradlew -p fixtures/core-consumers :r8:assembleRelease :okhttp5:assembleRelease --stacktrace
       - name: Enable KVM group permissions
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -125,20 +168,22 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
-          arch: x86_64
+          arch: ${{ matrix.arch }}
           disable-animations: true
           script: |
             adb shell getprop ro.build.fingerprint
             adb shell getprop ro.build.version.sdk
             adb shell getprop ro.product.cpu.abi
             test "$(adb shell getprop ro.build.version.sdk | tr -d '\r')" = "${{ matrix.api-level }}"
-            test "$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" = "x86_64"
+            test "$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" = "${{ matrix.arch }}"
             mkdir -p elu-analytics/build/reports
             adb shell 'for key in ro.build.version.sdk ro.product.cpu.abi dalvik.vm.heapgrowthlimit dalvik.vm.heapsize dalvik.vm.heapstartsize ro.config.low_ram ro.sf.lcd_density; do printf "%s=" "$key"; getprop "$key"; done' | tee elu-analytics/build/reports/device-memory.txt
             adb shell wm size | tee -a elu-analytics/build/reports/device-memory.txt
             adb shell wm density | tee -a elu-analytics/build/reports/device-memory.txt
             if [ -r "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" ]; then awk -F '[[:space:]]*=[[:space:]]*' '$1 ~ /^(hw\.ramSize|vm\.heapSize|hw\.lcd\.width|hw\.lcd\.height|hw\.lcd\.density|hw\.cpu\.ncore)$/ { print }' "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" | tee -a elu-analytics/build/reports/device-memory.txt; else echo 'avd_config_available=0' | tee -a elu-analytics/build/reports/device-memory.txt; fi
             ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
+            bash scripts/run-consumer-smoke.sh fixtures/core-consumers/r8/build/module/outputs/apk/release/r8-release.apk dev.elu.fixture.r8
+            bash scripts/run-consumer-smoke.sh fixtures/core-consumers/okhttp5/build/module/outputs/apk/release/okhttp5-release.apk dev.elu.fixture.okhttp5
       - uses: actions/upload-artifact@v4
         if: always()
         with:

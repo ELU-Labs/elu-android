@@ -36,7 +36,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
         "1810731a7319e173946bce97cf420aac5c1b4aa9667789439eb68d24ecb7b3f6",
     "elu-analytics/build.gradle.kts":
-        "467950f0497da666d721126a2518c3d94a33abf454bb04bfeabf6e45078d87d1",
+        "26a45c03978f753f488dea504c3f1bac25b45231cc78da4c654524b32ae89b5b",
     "elu-analytics/consumer-rules.pro":
         "4fabc808ed8f99ec3660a83c224cdcf8e3fd041a51c404093195e4cd8bdbb6cb",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/concurrent/SdkFuture.kt":
@@ -184,6 +184,9 @@ def verify_owned_runtime(root: pathlib.Path, sources: dict[pathlib.Path, str], e
     runtime_dependencies = re.findall(r'(?m)^\s*(?:implementation|api|runtimeOnly)\s*\(\s*"([^"]+)"', build)
     if runtime_dependencies != ["com.squareup.okhttp3:okhttp"]:
         errors.append("runtime dependencies must remain the exact approved owned closure")
+    okhttp_requirement = 'implementation("com.squareup.okhttp3:okhttp") {\n        version { require("4.12.0") }\n    }'
+    if build.count(okhttp_requirement) != 1 or re.search(r"\b(?:strictly|reject|rejectAll)\s*\(", build):
+        errors.append("OkHttp must remain a plain 4.12.0 requirement so apps on newer OkHttp versions still resolve")
     if (not re.search(r"\bminSdk\s*=\s*23\b", build) or
         "isCoreLibraryDesugaringEnabled = true" not in build or
         'coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")' not in build):
