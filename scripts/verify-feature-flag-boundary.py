@@ -36,7 +36,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluOptions.kt":
         "1810731a7319e173946bce97cf420aac5c1b4aa9667789439eb68d24ecb7b3f6",
     "elu-analytics/build.gradle.kts":
-        "26a45c03978f753f488dea504c3f1bac25b45231cc78da4c654524b32ae89b5b",
+        "e24a3c8fff83eea0a4d9045b2e1d442b918acb8ddc6d6fc881690c9b9ea46ec6",
     "elu-analytics/consumer-rules.pro":
         "4fabc808ed8f99ec3660a83c224cdcf8e3fd041a51c404093195e4cd8bdbb6cb",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/internal/concurrent/SdkFuture.kt":

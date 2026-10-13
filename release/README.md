@@ -126,3 +126,10 @@ publish task and never overwrites an earlier stage. The
 repository, with Gradle metadata and with POM-only resolution, and checks both
 AAR hashes against the stage. These checks keep the Compose module buildable and
 its metadata correct; they do not publish it.
+
+`fixtures/core-consumers` and `fixtures/kotlin20-consumer` resolve only the
+staged core artifact and check its AAR hash. They build a release app with R8
+full mode (and the same app without the SDK, for the size figures in the
+README), an app on OkHttp 5, a Java-only app and a Kotlin 2.0 app. CI also
+installs the minified apps on every emulator level and runs
+`scripts/run-consumer-smoke.sh` against them.

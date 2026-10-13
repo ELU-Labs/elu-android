@@ -104,7 +104,8 @@ mavenPublishing {
     // portal token + a PGP key in the environment:
     //   ORG_GRADLE_PROJECT_mavenCentralUsername / mavenCentralPassword
     //   ORG_GRADLE_PROJECT_signingInMemoryKey / signingInMemoryKeyPassword
-    // then: ./gradlew publishAndReleaseToMavenCentral
+    // then: ./gradlew stageCentralRelease (see release/README.md); the release
+    // is published by hand from the Central Portal.
     publishToMavenCentral()
     signAllPublications()
 
