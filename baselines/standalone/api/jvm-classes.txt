@@ -1,3 +1,5 @@
+# Every public, non-synthetic JVM class in the release classes.jar.
+# Regenerate with: python3 scripts/check-api-snapshot.py --update-classes <aar>
 dev.elu.analytics.Elu
 dev.elu.analytics.EluAnnotatedReplayBinding
 dev.elu.analytics.EluAnnotatedReplayRootScope
@@ -8,6 +10,8 @@ dev.elu.analytics.EluConfigHostPolicy
 dev.elu.analytics.EluConfigUrl
 dev.elu.analytics.EluDiagnosticsOptions
 dev.elu.analytics.EluEuGuard
+dev.elu.analytics.EluEvent
+dev.elu.analytics.EluEvent$Filter
 dev.elu.analytics.EluEventBuffer
 dev.elu.analytics.EluFeatureFlagOptions
 dev.elu.analytics.EluFeatureFlagResult
@@ -660,6 +664,8 @@ dev.elu.analytics.internal.runtime.ActivityLifecycleEmitter
 dev.elu.analytics.internal.runtime.ActivityLifecycleEmitter$Companion
 dev.elu.analytics.internal.runtime.ActivityLifecycleTracker
 dev.elu.analytics.internal.runtime.AmbiguousRuntimeCommitException
+dev.elu.analytics.internal.runtime.AndroidDefaultProcess
+dev.elu.analytics.internal.runtime.AndroidEventContext
 dev.elu.analytics.internal.runtime.AndroidExplicitConsentStore
 dev.elu.analytics.internal.runtime.AndroidExplicitConsentStore$Faults
 dev.elu.analytics.internal.runtime.AndroidExplicitConsentStore$Faults$DefaultImpls
@@ -699,6 +705,9 @@ dev.elu.analytics.internal.runtime.PrivacyStateProjector
 dev.elu.analytics.internal.runtime.ProcessActivityLifecycle
 dev.elu.analytics.internal.runtime.ProcessActivityLifecycle$tracker$1
 dev.elu.analytics.internal.runtime.ProcessActivityState
+dev.elu.analytics.internal.runtime.ProcessNameSources
+dev.elu.analytics.internal.runtime.ProcessRole
+dev.elu.analytics.internal.runtime.ProcessRoleResolver
 dev.elu.analytics.internal.runtime.ProvenNotCommittedRuntimeTransactionException
 dev.elu.analytics.internal.runtime.RuntimeAcknowledgement
 dev.elu.analytics.internal.runtime.RuntimeAcknowledgementMismatchException
@@ -741,9 +750,17 @@ dev.elu.analytics.internal.runtime.RuntimeDiagnosticsEpoch
 dev.elu.analytics.internal.runtime.RuntimeDiagnosticsState
 dev.elu.analytics.internal.runtime.RuntimeDiagnosticsState$Companion
 dev.elu.analytics.internal.runtime.RuntimeDiagnosticsStateKt
+dev.elu.analytics.internal.runtime.RuntimeEventContext
+dev.elu.analytics.internal.runtime.RuntimeEventContext$Companion
+dev.elu.analytics.internal.runtime.RuntimeEventFilter
+dev.elu.analytics.internal.runtime.RuntimeEventFilterAttempt
+dev.elu.analytics.internal.runtime.RuntimeEventFilterResult
+dev.elu.analytics.internal.runtime.RuntimeEventFilterResult$Prepared
+dev.elu.analytics.internal.runtime.RuntimeEventFilterResult$Refused
 dev.elu.analytics.internal.runtime.RuntimeEventIdentity
 dev.elu.analytics.internal.runtime.RuntimeEventKind
 dev.elu.analytics.internal.runtime.RuntimeEventKind$Companion
+dev.elu.analytics.internal.runtime.RuntimeEventPerson
 dev.elu.analytics.internal.runtime.RuntimeEventRecord
 dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate
 dev.elu.analytics.internal.runtime.RuntimeEventSessionUpdate$Preserve
@@ -787,6 +804,9 @@ dev.elu.analytics.internal.runtime.RuntimeMutationChange$LinkAlias
 dev.elu.analytics.internal.runtime.RuntimeMutationChange$SetGroupProperties
 dev.elu.analytics.internal.runtime.RuntimeMutationChange$SetPersonProperties
 dev.elu.analytics.internal.runtime.RuntimeMutationEnvelope
+dev.elu.analytics.internal.runtime.RuntimeMutationFilterResult
+dev.elu.analytics.internal.runtime.RuntimeMutationFilterResult$Prepared
+dev.elu.analytics.internal.runtime.RuntimeMutationFilterResult$Refused
 dev.elu.analytics.internal.runtime.RuntimeMutationRecord
 dev.elu.analytics.internal.runtime.RuntimeMutationSubject
 dev.elu.analytics.internal.runtime.RuntimeNetworkExpectation
@@ -811,7 +831,7 @@ dev.elu.analytics.internal.runtime.RuntimeQueueOwner$CaptureAuthorityActivationS
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$CaptureAuthorityActivationStage$Terminate
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$Companion
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$PreparedAppend$Companion
-dev.elu.analytics.internal.runtime.RuntimeQueueOwner$claimReplayDelivery$lambda$179$lambda$175$$inlined$sortedBy$1
+dev.elu.analytics.internal.runtime.RuntimeQueueOwner$claimReplayDelivery$lambda$182$lambda$178$$inlined$sortedBy$1
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$closeAsync$completion$1
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$openReplayDeliveryQueue$1$2
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$submitNative$1$result$1
