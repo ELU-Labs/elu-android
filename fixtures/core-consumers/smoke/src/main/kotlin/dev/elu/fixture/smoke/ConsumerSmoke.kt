@@ -27,7 +27,7 @@ class SmokeApplication : Application() {
         val options = EluOptions(SMOKE_ORIGIN, SMOKE_ORIGIN)
         options.propertyDenylist = listOf("smoke_private")
         options.beforeSend = EluEvent.Filter { event -> event }
-        Elu.setup(this, "consumer-smoke-site-key", options)
+        Elu.setup(this, SMOKE_SITE_KEY, options)
     }
 }
 
@@ -97,3 +97,5 @@ internal object ConsumerSmoke {
 
 internal const val TAG = "EluConsumerSmoke"
 private const val SMOKE_ORIGIN = "https://consumer-smoke.invalid"
+// Setup refuses a site key outside the elu_pk_(live|test)_<22-64 letters or digits> format.
+private const val SMOKE_SITE_KEY = "elu_pk_test_ConsumerSmokeFixture0000000001"
