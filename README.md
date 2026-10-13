@@ -819,8 +819,8 @@ code.
 
 | Measure | Without SDK | With SDK | Added by SDK |
 | --- | ---: | ---: | ---: |
-| Release APK (signed, universal) | 22,432 B | 804,398 B | +781,966 B (about 764 KiB) |
-| Release AAB, without the R8 mapping file | 20,301 B | 801,959 B | +781,658 B |
+| Release APK (signed, universal) | 22,432 B | 804,389 B | +781,957 B (about 764 KiB) |
+| Release AAB, without the R8 mapping file | 20,301 B | 801,937 B | +781,636 B |
 | DEX method references | 12 | 10,927 | +10,915 |
 | DEX defined methods | 4 | 9,253 | +9,249 |
 
