@@ -8,6 +8,7 @@ import android.content.pm.ApplicationInfo
 import android.util.Log
 import dev.elu.analytics.internal.facade.AndroidStandaloneStack
 import dev.elu.analytics.internal.facade.EluConsentHandoff
+import dev.elu.analytics.internal.runtime.AndroidDefaultProcess
 import java.util.Date
 
 /**
@@ -28,6 +29,7 @@ public object Elu {
     // Never synchronize on `this`: the object is globally reachable, and
     // customer code locking on Elu could contend or deadlock with setup.
     private val setupLock = Any()
+    private var secondaryProcessLogged = false
 
     private val consent = EluConsentHandoff()
     private val sink get() = consent.sink
@@ -37,6 +39,10 @@ public object Elu {
      * `Application.onCreate` — an Application context is required for
      * foreground config refresh and lifecycle/screen autocapture.
      * Idempotent: a second call warns and is ignored.
+     *
+     * Only the app's default process collects. In any other process of a
+     * multi-process app (a component with its own `android:process`), setup
+     * logs once at debug level and leaves the SDK idle.
      */
     @JvmStatic
     @JvmOverloads
@@ -50,6 +56,7 @@ public object Elu {
                 Log.w(TAG, "Elu.setup called more than once; ignoring.")
                 return
             }
+            if (outsideDefaultProcess(context)) return
             if (siteKey.isBlank()) {
                 Log.w(TAG, "Elu.setup called with a blank siteKey; ignoring.")
                 return
@@ -76,6 +83,23 @@ public object Elu {
                 Log.w(TAG, "Elu.setup failed: $t")
             }
         }
+    }
+
+    /**
+     * Every process of an app runs `Application.onCreate`, but only the default one may own the
+     * runtime's storage lock. A secondary process must never take it from the UI process.
+     */
+    private fun outsideDefaultProcess(context: Context): Boolean {
+        val secondary = try {
+            AndroidDefaultProcess.isSecondary(context)
+        } catch (_: Throwable) {
+            false
+        }
+        if (secondary && !secondaryProcessLogged) {
+            secondaryProcessLogged = true
+            Log.d(TAG, "Elu.setup ignored outside the app's default process; only the default process collects.")
+        }
+        return secondary
     }
 
     // ---- events --------------------------------------------------------------

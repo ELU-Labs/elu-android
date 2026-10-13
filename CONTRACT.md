@@ -55,6 +55,14 @@ corresponding current authorization. A successful HTTP response by itself does
 not authorize collection. Unsupported, malformed, expired, revoked or mismatched
 configuration cannot open a capture or delivery path.
 
+Only the app's default process (`ApplicationInfo.processName`) opens the runtime.
+In any other process `Elu.setup` logs once at debug level and returns, and the
+lifecycle provider installs no observer, so a secondary process never takes the
+installation's exclusive storage lock. The process name comes from
+`Application.getProcessName()` on API 28 and later, otherwise from the system's
+running-process entry, then `/proc/self/cmdline`. If no name can be read, or a
+truncated command line could still be the default name, setup proceeds.
+
 The public `apiHost` declaration permits an exactly matching self-hosted config
 base: HTTPS with an optional regular path prefix, no explicit port, credentials,
 query, fragment or trailing-dot hostname. Empty/dot path segments, backslashes,

@@ -24,7 +24,7 @@ PINNED_FILES = {
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluCaptureOptions.kt":
         "7e7be13379168018540470848f11be2796b80f3294bceb12b6a9cfccead37299",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/Elu.kt":
-        "49d170182ebd6f646391f3705acddd3c2eed10082f19670bfd70c3fae8184ef2",
+        "94a2ef57d19d74d34baeb01c686e02c41f1560a72711a80ea20efcd90639a2a1",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagSnapshot.kt":
         "b6d3cea48f349c60bdd6d4f126d3b805f6d542377b212d19011909cf7c73dd6d",
     "elu-analytics/src/main/kotlin/dev/elu/analytics/EluFeatureFlagSubscription.kt":

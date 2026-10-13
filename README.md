@@ -139,6 +139,13 @@ Register that class in `AndroidManifest.xml`. Keep the app's existing
 If the app already has an `Application` subclass, add `Elu.setup(...)` to its
 existing `onCreate`; do not create or register a second subclass.
 
+Multi-process apps: call `Elu.setup` from `Application.onCreate`; secondary
+processes are ignored. Android runs `onCreate` in every process of the app, but
+only the default process collects. In a process started for a component with
+its own `android:process` (for example a `:remote` or `:sync` service),
+`Elu.setup` logs one debug message and leaves the SDK idle, so other `Elu.*`
+calls there collect nothing. Capture events from the default process.
+
 `Elu.setup` is idempotent and never throws. Every `Elu.*` method is safe in
 every state: before config arrives, event calls are buffered in memory
 (FIFO, cap 100) and replayed once the device is cleared to send; if the
