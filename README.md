@@ -12,20 +12,19 @@ is managed from your ELU dashboard and delivered as remote config. See
 - Android 6 or later (API 23+) for events, identity and feature flags. Native session replay
   requires Android 10 or later (API 29+) and current server authorization.
 
-This source checkout contains the ELU-owned analytics runtime. Its standalone
-0.2.0 release is still undergoing qualification and is not published yet.
-The published 0.1.0 release uses
-the previous runtime; building this checkout does not change an already
-published Maven artifact. Application code continues to use `Elu.*`.
+Version 0.2.0 uses the ELU-owned analytics runtime and replaces 0.1.0, which used
+the previous runtime. Application code continues to use `Elu.*`. It covers events,
+screens, identity, sessions, durable delivery and feature flags. Session replay is
+switched on by ELU's service configuration, not by the SDK version, and is not yet
+enabled for Android. The checks this release requires, and the ones it defers, are
+listed in [release/decisions/0.2.0.md](release/decisions/0.2.0.md).
 
-The first standalone release supports replay on Android 10 or later (API 29+).
-Replay is unavailable on API 23–28; events, identity and feature flags remain
-available there. Building this candidate does not establish release qualification.
+Replay, once enabled, requires Android 10 or later (API 29+). Replay is unavailable
+on API 23–28; events, identity and feature flags remain available there.
 
 ## Install
 
-Version 0.2.0 is not available from Maven Central yet. Use the source substitution
-below to evaluate this checkout. After publication, the dependency will be:
+Add the SDK to your app module:
 
 ```kotlin
 dependencies {
@@ -33,9 +32,11 @@ dependencies {
 }
 ```
 
-Keep that dependency in your app module. In the app's `settings.gradle.kts`,
-ensure the existing dependency repositories include Google Maven (desugaring)
-and Maven Central (the SDK and its dependencies):
+Only the core artifact `dev.elu:elu-analytics` is published. The optional
+`elu-analytics-compose` module in this repository is not published in 0.2.0.
+
+In the app's `settings.gradle.kts`, ensure the existing dependency repositories
+include Google Maven (desugaring) and Maven Central (the SDK and its dependencies):
 
 ```kotlin
 dependencyResolutionManagement {
@@ -46,9 +47,10 @@ dependencyResolutionManagement {
 }
 ```
 
-Merge into the existing block; preserve the app's repository policy. For the
-unpublished checkout, also add this Gradle composite substitution to that file,
-using the checkout's actual path relative to `settings.gradle.kts`:
+Merge into the existing block; preserve the app's repository policy. To build
+against a source checkout instead of Maven Central, add this Gradle composite
+substitution to that file, using the checkout's actual path relative to
+`settings.gradle.kts`:
 
 ```kotlin
 includeBuild("path/to/elu-android") {
@@ -58,22 +60,19 @@ includeBuild("path/to/elu-android") {
 }
 ```
 
-The substitution builds the local `:elu-analytics` module instead of requesting
-the unpublished Maven artifact. Source builds use this checkout's toolchain and
-installed Android SDK requirements listed under [Build notes](#build-notes).
+The substitution builds the local `:elu-analytics` module instead of the Maven
+artifact. Source builds use this checkout's toolchain and installed Android SDK
+requirements listed under [Build notes](#build-notes).
 
-The unused 0.1.0 preview has no supported persisted-data import into this
-owned release. Setup creates a fresh owned installation and leaves former
-preview files untouched. It does not transfer prior identity, consent, events,
-or replay, including from an unpublished aggregate-file build. Apply the user's
-current consent before capturing any data.
-Existing owned SQLite installations retain their identity, consent and pending
-queue on reopen and supported owned schema upgrades. Source qualification is
-still in progress; no new Maven release is being claimed here.
+Upgrading from 0.1.0: 0.2.0 does not import data stored by 0.1.0. Setup creates
+a fresh installation and leaves the 0.1.0 files untouched. It does not transfer
+prior identity, consent, events or replay. Apply the user's current consent before
+capturing any data. A 0.2.0 installation keeps its identity, consent and pending
+queue across app restarts, app updates and supported storage schema upgrades.
 
-For the owned source runtime, enable core library desugaring in your **app
-module** so its Java time and arithmetic APIs work on Android API 23. This
-configuration requires Android Gradle Plugin 8.0 or later:
+Enable core library desugaring in your **app module** so the SDK's Java time and
+arithmetic APIs work on Android API 23. This configuration requires Android Gradle
+Plugin 8.0 or later:
 
 ```kotlin
 android {
@@ -204,7 +203,7 @@ which Android 9 and later block by default: add
 debug-only manifest (`src/debug/AndroidManifest.xml`), as the sample app does,
 or use a debug network security configuration.
 
-## Customer OkHttp request metrics (unreleased source)
+## Customer OkHttp request metrics
 
 Installing the interceptor explicitly enables numeric request metrics for that
 customer client. It never installs a global network hook. Install it once as an
@@ -242,7 +241,7 @@ are not automatically instrumented.
 Once a session exists, automatic request metrics preserve its last user activity
 time; background polling cannot keep an idle session alive.
 
-## Native performance (unreleased source)
+## Native performance
 
 Performance sampling is disabled by default. Opt in explicitly during setup:
 
@@ -309,7 +308,7 @@ event properties. Include linked performance diagnostics in your app's privacy
 disclosures. Resource overhead, actual frame delivery and customer artifact
 behavior still require release qualification.
 
-## Observed OS startup timing (unreleased source)
+## Observed OS startup timing
 
 Startup timing is a separate default-off option on API 35+:
 
@@ -731,12 +730,45 @@ requested restrictions are never discarded to continue recording.
 Compose semantics replay and readable text from custom view subclasses
 are not yet supported; keep manual `Elu.screen()` navigation events. Analytics
 works on Android 6+ (API 23+), while first-release replay requires Android 10+
-(API 29+). Exact-artifact Compose qualification remains pending, so this source
-is not yet a complete standalone customer release. No Web Vitals or browser long-task metrics are
+(API 29+). Exact-artifact Compose qualification remains pending. No Web Vitals or browser long-task metrics are
 reported as native performance data.
 API 26–28 lack the public transition-alpha and animation-matrix observations
 used to exclude text hidden by framework transitions; ordinary view alpha and
 matrix are insufficient substitutes.
+
+## Google Play Data safety
+
+Use this when you fill in your app's Data safety form in Play Console. It covers
+what the SDK itself sends to ELU. Event properties, person properties and IDs
+that your code passes to the SDK, and anything your screens show in a replay,
+are your app's data: declare their categories too. Review your app's complete
+data practices before you submit the form.
+
+| What the SDK sends | Play Console data type | When |
+| --- | --- | --- |
+| The user ID you pass to `Elu.identify`, and person and group properties you set | Personal info: User IDs, plus any other personal info you put in those properties | Only when your app calls these APIs |
+| A random anonymous ID and a random installation ID (`$device_id`) that the SDK creates and keeps in app storage | Device or other IDs | Always |
+| Custom events, screens (`Elu.screen`), app open and background events, and feature flag usage | App activity: App interactions (and Other actions for custom events that describe other user actions) | Always |
+| Device and app context on events: OS and version, device manufacturer and model, app name, version, build and package name, screen size, locale and time zone | App info and performance: Diagnostics | Always |
+| Exceptions you report with `Elu.captureException` (type, message, stack trace), and opt-in automatic JVM crash reports (exception type only) | App info and performance: Crash logs | Only when you call it or opt in |
+| Opt-in performance samples, launch timing and OkHttp request metrics (method, status code and duration; no URLs) | App info and performance: Diagnostics, Other app performance data | Only when you enable them |
+| Session replay: the layout of supported views, readable on-screen text and single-finger touch movement. Inputs are masked; images, web views and blocked views are left out | App activity: App interactions, plus the categories of any personal info your screens display | Only when ELU's service configuration enables replay for your project. Not enabled for Android in 0.2.0 |
+
+ELU's service also derives approximate location, such as the country, from the
+IP address of each request. If your ELU project uses it, declare Location:
+Approximate location.
+
+For each data type, the purpose is Analytics, and also App functionality if you
+use feature flags. ELU processes this data as your service provider, so under
+Play's definitions it is collected, not shared. Data is encrypted in transit:
+the SDK sends only to HTTPS origins (a debuggable build may also use a local
+loopback origin). The SDK requests only the `INTERNET` permission and reads no
+advertising ID, Android ID, location, contacts or account data.
+
+On the device, `Elu.optOut()` stops collection and `Elu.reset(true)` replaces the
+anonymous and installation IDs. To delete a user's data that ELU already holds,
+email support@elu.dev, as described in the
+[ELU privacy policy](https://elu.dev/privacy-policy).
 
 ## Build notes
 
@@ -828,4 +860,4 @@ On API29+, retain each private-region identity independently of its conditional 
 
 Only validated redacted output is encoded or retained. A main-thread post-check that rejects a drawn candidate clears and closes that candidate. Root viewport/rebinding changes retire the original source; restoring an earlier size cannot revive it. The first retained prefix requires actual lawful samples spanning the configured minimum duration. Stopping or advancing time without a second sample does not establish that duration. Existing wireframe behavior, original physical cleanup, immutable request retries and durable refusal semantics remain in force.
 
-Core analytics (events, identity and feature flags) and annotation registration support Android 6+ (API23+). Both Views replay and annotated capture require Android 10+ (API29+); replay is unavailable on API23–28 in the first release. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. The optional module's remote publication and exact two-artifact release qualification remain separate; this source change does not announce an available package version or completed device/engine/player validation.
+Core analytics (events, identity and feature flags) and annotation registration support Android 6+ (API23+). Both Views replay and annotated capture require Android 10+ (API29+); replay is unavailable on API23–28 in the first release. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. The optional `elu-analytics-compose` module is not published to Maven Central in 0.2.0; use it only from a source checkout. Its device, engine and player validation is not complete.
