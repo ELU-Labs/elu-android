@@ -132,6 +132,31 @@ class ComposeDistributionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 DIST.collect(self.root)
 
+    def test_core_okhttp_is_a_plain_requirement_in_metadata_and_pom(self) -> None:
+        DIST.collect(self.root)
+        path = self.root / "elu-analytics/build/publications/maven/module.json"; original = path.read_bytes()
+        for constraint in ({"requires": "4.12.0", "strictly": "4.12.0"}, {"strictly": "4.12.0"},
+                           {"requires": "4.12.0", "rejects": ["5.0.0"]}, {"requires": "4.12.0", "prefers": "4.12.0"},
+                           {"requires": "[4.12.0,5.0.0)"}):
+            with self.subTest(constraint=constraint):
+                value = json.loads(original)
+                for variant in value["variants"]:
+                    for dependency in variant["dependencies"]:
+                        if dependency["module"] == "okhttp":
+                            dependency["version"] = constraint
+                path.write_text(json.dumps(value))
+                with self.assertRaisesRegex(ValueError, "plain requirement"):
+                    DIST.collect(self.root)
+        path.write_bytes(original)
+        pom = self.root / "elu-analytics/build/publications/maven/pom-default.xml"; source = pom.read_text()
+        for version in ("[4.12.0]", "[4.12.0,5.0.0)"):
+            with self.subTest(version=version):
+                pom.write_text(source.replace("<version>4.12.0</version>", f"<version>{version}</version>"))
+                with self.assertRaisesRegex(ValueError, "POM exact dependency"):
+                    DIST.collect(self.root)
+        pom.write_text(source)
+        DIST.collect(self.root)
+
     def test_gmm_indirection_or_unexpected_test_dependency_refused(self) -> None:
         path = self.optional_path("module.json"); original = path.read_bytes()
         for change in (lambda v: v["variants"][0].update({"available-at": {"url": "https://elsewhere"}}),
