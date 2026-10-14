@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Build
 import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -76,6 +77,15 @@ class NativeReadableTextTest {
                 try { snapshot = AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())
                     .collect(root, 0, 1000, NativeCollectionFence(), { true }, false) }
                 catch (caught: Throwable) { error = caught }
+            }
+            if (Build.VERSION.SDK_INT < 29) {
+                // The unmodified stock window's decor clips to its background outline, which is
+                // representable only from API 29. Before it, collection must refuse.
+                val refusal = error as? NativeCollectionException
+                    ?: throw (error ?: AssertionError("API ${Build.VERSION.SDK_INT} stock window must fail closed"))
+                assertEquals(NativeCollectionFailure.UNSUPPORTED_GEOMETRY, refusal.failure)
+                assertNull(snapshot)
+                return
             }
             error?.let { throw it }
             val readable = checkNotNull(snapshot).nodes.mapNotNull { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value }

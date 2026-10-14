@@ -185,6 +185,24 @@ class AndroidViewReplayCollectorTest {
         try { block(); fail("Expected $expected") } catch (error: NativeCollectionException) { assertEquals(expected, error.failure) }
     }
 
+    /**
+     * Touch projection needs public transition observation (API 29). Below it, construction must refuse
+     * before the window callback is read or replaced, so no touch is ever observed. True means refused.
+     */
+    private fun touchObserverRefusedBeforeApi29(root: View): Boolean {
+        if (Build.VERSION.SDK_INT >= 29) return false
+        val callback = activity.window.callback
+        val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+        try {
+            AndroidReplayTouchObserver(activity.window, root, collector, NativeCollectionFence(), { true }, { false })
+            fail("API ${Build.VERSION.SDK_INT} touch observation must fail closed")
+        } catch (error: IllegalStateException) {
+            assertEquals("touch projection requires public transition observation", error.message)
+        }
+        assertSame(callback, activity.window.callback)
+        return true
+    }
+
     private class TrapText(context: Context) : TextView(context) {
         var armed = false
         override fun getText(): CharSequence { check(!armed) { "raw text accessed" }; return super.getText() }
@@ -862,6 +880,7 @@ class AndroidViewReplayCollectorTest {
 
     @Test fun touchWrapperForwardsExactEventReturnAndPreservesAppThrow() = main { root ->
         val leaf = View(activity); add(root, leaf)
+        if (touchObserverRefusedBeforeApi29(root)) return@main
         val original = activity.window.callback; var received: MotionEvent? = null; var calls = 0
         var failure: Throwable? = null
         val app = object : Window.Callback by original {
@@ -895,6 +914,7 @@ class AndroidViewReplayCollectorTest {
 
     @Test fun touchWrapperRechecksPrivacyAfterOriginalCallbackAndDoesNotAdoptDisplacement() = main { root ->
         val leaf = View(activity); add(root, leaf)
+        if (touchObserverRefusedBeforeApi29(root)) return@main
         val original = activity.window.callback; var calls = 0
         val app = object : Window.Callback by original {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean {
@@ -925,6 +945,7 @@ class AndroidViewReplayCollectorTest {
 
     @Test fun touchWrapperCloseInsideOriginalCallbackJoinsAndReentrantDispatchStaysExact() = main { root ->
         val leaf = View(activity); add(root, leaf)
+        if (touchObserverRefusedBeforeApi29(root)) return@main
         val original = activity.window.callback; var calls = 0; var nested = false
         lateinit var observer: AndroidReplayTouchObserver
         var settlement: dev.elu.analytics.internal.concurrent.SdkFuture<Unit>? = null
@@ -959,6 +980,7 @@ class AndroidViewReplayCollectorTest {
     @Test fun touchConstructionIsUninstalledAndLocalStopRechecksQueuedPrivacy() {
         for (restrict in listOf(false, true)) main { root ->
             val leaf = View(activity); add(root, leaf)
+            if (touchObserverRefusedBeforeApi29(root)) return@main
             val original = activity.window.callback
             val app = object : Window.Callback by original { override fun dispatchTouchEvent(event: MotionEvent) = true }
             activity.window.callback = app
@@ -1011,6 +1033,7 @@ class AndroidViewReplayCollectorTest {
 
     @Test fun touchBudgetExhaustionForwardsAndStopsFullReadsThroughLift() = main { root ->
         val leaf = View(activity); add(root, leaf)
+        if (touchObserverRefusedBeforeApi29(root)) return@main
         val original = activity.window.callback; var calls = 0; var ticks = 0L; var ticking = false
         val app = object : Window.Callback by original {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean { calls += 1; return true }
@@ -1047,6 +1070,7 @@ class AndroidViewReplayCollectorTest {
 
     @Test fun touchClockFailureAfterBudgetRefusalStillForwardsAndPermanentlyWithdraws() = main { root ->
         val leaf = View(activity); add(root, leaf)
+        if (touchObserverRefusedBeforeApi29(root)) return@main
         val original = activity.window.callback; var calls = 0; var ticks = 0L
         var ticking = false; var failing = false
         val app = object : Window.Callback by original {

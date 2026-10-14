@@ -20,7 +20,8 @@ enabled for Android. The checks this release requires, and the ones it defers, a
 listed in [release/decisions/0.2.0.md](release/decisions/0.2.0.md).
 
 Replay, once enabled, requires Android 10 or later (API 29+). Replay is unavailable
-on API 23–28; events, identity and feature flags remain available there.
+on API 23–28: the SDK records no replay frames there, and events, identity and
+feature flags remain available.
 
 ## Install
 

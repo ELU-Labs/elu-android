@@ -427,7 +427,15 @@ Events, identity and feature flags require Android 6+ (API 23+) with app-level
 core-library desugaring. First-release Views replay requires Android 10+ (API 29+)
 because older versions lack public transition-alpha and animation-matrix
 observations. Replay on API 23–28, Compose semantics replay and readable
-custom-subclass text are not supported. Exact
+custom-subclass text are not supported. Below API 29 replay fails closed at each
+entry point: the capture owner does not start, native root discovery and selection
+return no root, annotated capture refuses, touch observation refuses construction
+before it reads the window callback, and a window decor that clips to its
+background outline cannot be collected. The View collector recognizes the window
+decor only by the exact framework name for the running level
+(`com.android.internal.policy.PhoneWindow$DecorView` on API 23,
+`com.android.internal.policy.DecorView` on API 24+) loaded by the boot class
+loader; that recognition grants no capture on API 23–28. Exact
 AppCompat support still requires current artifact/emulator and R8 qualification.
 Compose applications
 can use the analytics APIs and explicit screen events. These differences remain

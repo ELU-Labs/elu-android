@@ -41,6 +41,18 @@ internal class NativeCollectionException @JvmOverloads constructor(
     val ancestorFailure: NativeAncestorFailure? = null,
 ) : IllegalStateException(failure.name)
 
+/**
+ * Exact framework window decor name for one platform level. API 23 declares the decor as the nested
+ * PhoneWindow class; API 24 moved the same framework class to its own file. Each name is accepted
+ * only on the levels where the framework defines it, and the caller must still require the boot
+ * class loader. Any other name, including the API 22 policy.impl name, stays an unknown ancestor.
+ */
+internal fun isFrameworkWindowDecorName(name: String, sdkInt: Int): Boolean = when (name) {
+    "com.android.internal.policy.PhoneWindow\$DecorView" -> sdkInt == 23
+    "com.android.internal.policy.DecorView" -> sdkInt >= 24
+    else -> false
+}
+
 /** Called only after the original ancestry predicate has already refused. No View getter runs here. */
 internal fun unsupportedNativeAncestor(type: Class<*>): NativeCollectionException = NativeCollectionException(
     NativeCollectionFailure.UNSUPPORTED_GEOMETRY,
@@ -438,7 +450,7 @@ internal class AndroidViewReplayCollector(
                     (exactFrameworkActionBar || exactAppCompatActionBar) && ancestor === rootParent &&
                     guardedNativeViewRead(profile, readGuard) { root.id } == android.R.id.content
                 if (exactActionBar) frameworkActionBar = ancestor as ViewGroup
-                else if (!knownContainer(ancestor) && !(ancestor.javaClass.name == "com.android.internal.policy.DecorView" &&
+                else if (!knownContainer(ancestor) && !(isFrameworkWindowDecorName(ancestor.javaClass.name, Build.VERSION.SDK_INT) &&
                         ancestor.javaClass.classLoader === View::class.java.classLoader)) {
                     throw unsupportedNativeAncestor(ancestor.javaClass)
                 }

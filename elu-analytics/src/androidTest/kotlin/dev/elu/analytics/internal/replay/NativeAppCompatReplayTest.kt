@@ -3,6 +3,7 @@ package dev.elu.analytics.internal.replay
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.text.SpannableString
 import android.text.Spanned
@@ -80,6 +81,18 @@ class NativeAppCompatReplayTest {
         (it.kind as? NativeMaskedKind.ReadableText)?.text?.value
     }
 
+    /**
+     * Before API 29 an actual AppCompat window is not representable: the stock decor clips to its
+     * background outline and the action bar is admitted only from 29. Capture must refuse. True means refused.
+     */
+    private fun refusedBeforeApi29(activity: NativeAppCompatTestActivity, collector: AndroidViewReplayCollector =
+        AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())): Boolean {
+        if (Build.VERSION.SDK_INT >= 29) return false
+        try { capture(activity, collector); fail("API ${Build.VERSION.SDK_INT} AppCompat window must fail closed") }
+        catch (error: NativeCollectionException) { assertEquals(NativeCollectionFailure.UNSUPPORTED_GEOMETRY, error.failure) }
+        return true
+    }
+
     @Test fun plainAppCompatLeavesAreReadableInStandardNoActionBarWindow() = fixture { activity, root ->
         val views = listOf(
             ordinary(activity, "Ordinary"),
@@ -97,11 +110,13 @@ class NativeAppCompatReplayTest {
         // The actual theme elevates some controls. Replay follows Android's public
         // drawing order: lower Z first, preserving sibling order for equal Z.
         val expected = views.indices.sortedWith(compareBy<Int> { views[it].z }.thenBy { it }).map { labels[it] }
+        if (refusedBeforeApi29(activity)) return@fixture
         assertEquals(expected, readable(capture(activity)))
     }
 
     @Test fun actionBarContentUsesOriginalAncestryAndUncertainLayout() = fixture(true) { activity, root ->
         add(root, ordinary(activity, "Ordinary"))
+        if (refusedBeforeApi29(activity)) return@fixture
         val captured = capture(activity)
         assertEquals(listOf("Ordinary"), readable(captured))
         assertTrue(captured.containsLayoutBounds)
@@ -114,6 +129,7 @@ class NativeAppCompatReplayTest {
         val future = UnresolvedFuture()
         text.setTextFuture(future)
         try {
+            if (refusedBeforeApi29(activity)) { assertEquals(0, future.getCalls); return@fixture }
             assertEquals(listOf("Displayed"), readable(capture(activity)))
             assertEquals(0, future.getCalls)
         } finally { text.setTextFuture(null) }
@@ -136,6 +152,7 @@ class NativeAppCompatReplayTest {
             }
             UUID.randomUUID()
         })
+        if (refusedBeforeApi29(activity, lateCollector)) { assertEquals(0, allocations); return@fixture }
         try { capture(activity, lateCollector); fail("Changed displayed text must discard the frame") }
         catch (error: NativeCollectionException) { assertEquals(NativeCollectionFailure.TREE_CHANGED, error.failure) }
     }
@@ -153,6 +170,7 @@ class NativeAppCompatReplayTest {
         add(masked, ordinary(activity, "PRIVATE_MASKED")); Elu.maskView(masked)
         custom.armed = true
         try {
+            if (refusedBeforeApi29(activity)) return@fixture
             val result = capture(activity)
             assertTrue(readable(result).isEmpty())
             assertTrue(result.nodes.any { it.kind is NativeMaskedKind.Input })

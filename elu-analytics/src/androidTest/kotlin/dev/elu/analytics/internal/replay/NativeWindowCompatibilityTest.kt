@@ -129,6 +129,19 @@ class NativeWindowCompatibilityTest {
     @Test fun ordinaryControlsPreserveMaskedGeometryWithoutChangingTheirRendering(): Unit = main {
         val data = JSONObject().put("api", Build.VERSION.SDK_INT).put("windowWasNormalized", false)
             .put("controls", JSONArray(controls.map { facts(it) }))
+        if (Build.VERSION.SDK_INT < 29) {
+            // The actual default window's decor clips to its background outline, which is representable
+            // only from API 29. Before it, collection must refuse rather than guess the window clip.
+            val refusal = try {
+                AndroidViewReplayCollector().collect(root, 0, 1_788_883_200_000L, NativeCollectionFence(), { true }, false)
+                null
+            } catch (error: NativeCollectionException) { error }
+            data.put("collected", refusal == null).put("failure", refusal?.failure?.name ?: JSONObject.NULL)
+            export("controls.json", data)
+            assertEquals("API ${Build.VERSION.SDK_INT} default window must fail closed",
+                NativeCollectionFailure.UNSUPPORTED_GEOMETRY, refusal?.failure)
+            return@main
+        }
         try {
             val snapshot = AndroidViewReplayCollector().collect(root, 0, 1_788_883_200_000L,
                 NativeCollectionFence(), { true }, false)
