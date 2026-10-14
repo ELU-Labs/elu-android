@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
 """Compare the public JVM surface in an AAR with the reviewed snapshots.
 
-Three snapshots are checked:
-
-- ``baselines/current/api/public-api.txt``: the ``javap -public`` output of
-  the customer-facing facade classes, byte-for-byte against the reviewed
-  surface of the next release, so every public change is a deliberate edit.
-- ``baselines/0.1.0/api/public-api.txt``: the published 0.1.0 release's
-  surface, immutable. Every one of its lines must still be present, so a change
-  may add to the published API but never remove or alter any of it.
-- ``jvm-classes.txt``: every public, non-synthetic JVM class in the release
-  ``classes.jar``. The library is not minified, so Kotlin ``internal``
-  declarations compile to public JVM classes and any new one widens the
-  binary surface. Pass ``--update-classes`` to regenerate that inventory after
-  a deliberate change.
+The immutable published 0.1.0 facade is a required ABI subset. The separate
+standalone candidate snapshot and JVM class inventory record the reviewed current
+surface; additions never rewrite the published baseline. Internal JVM class
+inventory changes require explicit review, but are not customer API promises.
 """
 
 from __future__ import annotations
@@ -27,11 +18,29 @@ import tempfile
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-API_DIR = ROOT / "baselines" / "0.1.0" / "api"
+BASELINE = ROOT / "baselines" / "0.1.0" / "api" / "public-api.txt"
+API_DIR = ROOT / "baselines" / "standalone" / "api"
 SNAPSHOT = API_DIR / "public-api.txt"
-CURRENT_SNAPSHOT = ROOT / "baselines" / "current" / "api" / "public-api.txt"
 CLASS_INVENTORY = API_DIR / "jvm-classes.txt"
-PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions")
+PUBLIC_CLASSES = ("dev.elu.analytics.Elu", "dev.elu.analytics.EluOptions",
+                  "dev.elu.analytics.EluFeatureFlagOptions", "dev.elu.analytics.EluCaptureOptions",
+                  "dev.elu.analytics.EluEvent", "dev.elu.analytics.EluEvent$Filter",
+                  "dev.elu.analytics.EluFeatureFlagSnapshot", "dev.elu.analytics.EluFeatureFlagSubscription",
+                  "dev.elu.analytics.EluFeatureFlagSnapshot$Source", "dev.elu.analytics.EluFeatureFlagSnapshot$LoadError",
+                  "dev.elu.analytics.EluFeatureFlagSnapshot$Listener", "dev.elu.analytics.EluFeatureFlagSnapshot$Entry",
+                  "dev.elu.analytics.EluFeatureFlagSnapshot$Value", "dev.elu.analytics.EluFeatureFlagSnapshot$Value$BooleanValue",
+                  "dev.elu.analytics.EluFeatureFlagSnapshot$Value$StringValue", "dev.elu.analytics.EluFeatureFlagSnapshot$Value$NumberValue",
+                  "dev.elu.analytics.EluFeatureFlagSnapshot$Value$NullValue",
+                  "dev.elu.analytics.EluFeatureFlagResult", "dev.elu.analytics.EluPerformanceOptions",
+                  "dev.elu.analytics.EluOkHttpInterceptor", "dev.elu.analytics.EluFrameMetricsOptions",
+                  "dev.elu.analytics.EluDiagnosticsOptions", "dev.elu.analytics.EluPersonProfilesMode",
+                  "dev.elu.analytics.EluPersistenceMode", "dev.elu.analytics.EluRateLimitingOptions",
+                  "dev.elu.analytics.EluReplayPrivateRegion", "dev.elu.analytics.EluReplayPrivateRegion$Companion",
+                  "dev.elu.analytics.EluAnnotatedReplayBinding", "dev.elu.analytics.EluAnnotatedReplayRootScope",
+                  "dev.elu.analytics.EluAnnotatedReplayRootScope$Companion",
+                  "dev.elu.analytics.EluReplayRegionGeometry", "dev.elu.analytics.EluReplayGeometryReader")
+COMPOSE_PUBLIC_CLASSES = ("dev.elu.analytics.compose.EluComposeReplayKt",)
+COMPOSE_API_DIR = ROOT / "baselines" / "standalone" / "compose" / "api"
 
 ACC_PUBLIC = 0x0001
 ACC_SYNTHETIC = 0x1000
@@ -105,18 +114,59 @@ def public_jvm_classes(classes_jar: pathlib.Path) -> list[str]:
     return sorted(names)
 
 
-def facade_signatures(classes_jar: pathlib.Path) -> str:
+def facade_signatures(classes_jar: pathlib.Path, public_classes: tuple[str, ...] = PUBLIC_CLASSES) -> str:
     return subprocess.run(
-        ["javap", "-classpath", str(classes_jar), "-public", *PUBLIC_CLASSES],
+        ["javap", "-classpath", str(classes_jar), "-public", *public_classes],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
 
 
+def class_members(snapshot: str) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    current = None
+    for line in snapshot.splitlines():
+        value = line.strip()
+        if value.startswith("public ") and value.endswith("{"):
+            current = value
+            result[current] = set()
+        elif value == "}":
+            current = None
+        elif current is not None:
+            result[current].add(value)
+    return result
+
+
+def missing_legacy_members(baseline: str, candidate: str) -> list[str]:
+    actual = class_members(candidate)
+    missing = []
+    for declaration, members in class_members(baseline).items():
+        if declaration not in actual:
+            missing.append(declaration)
+        else:
+            missing.extend(f"{declaration} {member}" for member in sorted(members - actual[declaration]))
+    return missing
+
+
+def check_compose(aar: pathlib.Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="elu-compose-api-") as temp_dir:
+        classes = pathlib.Path(temp_dir) / "classes.jar"
+        with zipfile.ZipFile(aar) as archive:
+            classes.write_bytes(archive.read("classes.jar"))
+        facade = facade_signatures(classes, COMPOSE_PUBLIC_CLASSES)
+        inventory = public_jvm_classes(classes)
+    if facade != normalized_snapshot(COMPOSE_API_DIR / "public-api.txt"):
+        raise SystemExit("optional Compose API/ABI changed; review the compiled facade and update its snapshot")
+    if inventory != normalized_snapshot(COMPOSE_API_DIR / "jvm-classes.txt").splitlines():
+        raise SystemExit("optional Compose JVM class inventory changed; review the compiled classes and update its snapshot")
+    print(f"optional Compose API and {len(inventory)} JVM classes match the reviewed candidate")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("aar", type=pathlib.Path)
+    parser.add_argument("--compose-aar", type=pathlib.Path, help="also check the optional Compose release AAR")
     parser.add_argument(
         "--update-classes",
         action="store_true",
@@ -125,6 +175,8 @@ def main() -> None:
     args = parser.parse_args()
     if not args.aar.is_file():
         parser.error(f"AAR does not exist: {args.aar}")
+    if args.compose_aar is not None and not args.compose_aar.is_file():
+        parser.error(f"Compose AAR does not exist: {args.compose_aar}")
 
     with tempfile.TemporaryDirectory(prefix="elu-api-") as temp_dir:
         classes = pathlib.Path(temp_dir) / "classes.jar"
@@ -133,18 +185,17 @@ def main() -> None:
         facade = facade_signatures(classes)
         inventory = public_jvm_classes(classes)
 
-    published = normalized_snapshot(SNAPSHOT).splitlines()
-    missing = [line for line in published if line not in facade.splitlines()]
+    missing = missing_legacy_members(normalized_snapshot(BASELINE), facade)
     if missing:
-        raise SystemExit(
-            "public API/ABI removed or altered 0.1.0 declarations; published API may only grow\n"
-            + "\n".join(f"- {line}" for line in missing)
-        )
-
-    expected_facade = normalized_snapshot(CURRENT_SNAPSHOT)
+        raise SystemExit("published 0.1.0 facade ABI was removed or changed:\n" + "\n".join(missing))
+    main_snapshot = ROOT / "baselines/current/api/public-api.txt"
+    missing_main = missing_legacy_members(normalized_snapshot(main_snapshot), facade)
+    if missing_main:
+        raise SystemExit("reviewed main facade ABI was removed or changed:\n" + "\n".join(missing_main))
+    expected_facade = normalized_snapshot(SNAPSHOT)
     if facade != expected_facade:
         raise SystemExit(
-            "public API/ABI changed; review and deliberately update baselines/current/api/public-api.txt\n"
+            "public API/ABI changed; review and deliberately update the snapshot\n"
             f"--- expected ---\n{expected_facade}\n--- actual ---\n{facade}"
         )
 
@@ -153,6 +204,8 @@ def main() -> None:
             CLASS_INVENTORY_HEADER + "\n".join(inventory) + "\n", encoding="utf-8"
         )
         print(f"wrote {len(inventory)} public JVM classes to {CLASS_INVENTORY.relative_to(ROOT)}")
+        if args.compose_aar is not None:
+            check_compose(args.compose_aar)
         return
 
     expected_inventory = normalized_snapshot(CLASS_INVENTORY).splitlines()
@@ -163,7 +216,9 @@ def main() -> None:
         lines.extend(f"+ {name}" for name in added)
         lines.extend(f"- {name}" for name in removed)
         raise SystemExit("\n".join(lines))
-    print(f"public API/ABI keeps 0.1.0 and matches the reviewed current surface; {len(inventory)} public JVM classes match the inventory")
+    print(f"published 0.1.0 facade ABI preserved; standalone API and {len(inventory)} JVM classes match the reviewed candidate")
+    if args.compose_aar is not None:
+        check_compose(args.compose_aar)
 
 
 if __name__ == "__main__":

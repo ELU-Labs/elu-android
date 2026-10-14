@@ -1,0 +1,489 @@
+package dev.elu.analytics.internal.replay
+
+import android.app.Activity
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.view.View
+import android.view.ViewTreeObserver
+import java.lang.ref.WeakReference
+import dev.elu.analytics.internal.concurrent.SdkFuture
+import java.util.concurrent.atomic.AtomicBoolean
+
+/** A failed acquisition retains any cleanup whose completion could not be proven. */
+private class NativeReplayWatchAcquisitionFailure(val unsettledCleanup: AutoCloseable?, cause: Throwable) :
+    RuntimeException("Native watcher acquisition failed", cause)
+
+/** Main-thread observations only. Tests substitute this platform seam, never a physical use. */
+internal interface NativeReplaySelectionAccess {
+    fun onMain(action: () -> Unit)
+    /** Called only on main; the returned native root never leaves that callback. */
+    fun currentRoot(activity: Any, current: () -> Boolean): Any? = null
+    fun observe(activity: Any, root: Any, current: () -> Boolean): NativeReplayRootFacts?
+    fun watch(root: Any, withdrawn: () -> Unit): AutoCloseable
+}
+
+internal data class NativeReplayRootFacts(
+    val window: Any, val token: Any, val width: Int, val height: Int, val density: Float,
+    val apiLevel: Int,
+)
+
+internal enum class NativeReplayRootReadiness { INACTIVE, WAITING, AVAILABLE }
+
+/** Weak native facts are independent of process screen/foreground event semantics. */
+internal class NativeReplayLifecycle(private val access: NativeReplaySelectionAccess = AndroidNativeReplaySelectionAccess) {
+    private val monitor = Any()
+    // Activity equality is customer code; only the exact original object is a fact.
+    private val resumed = ArrayList<WeakReference<Any>>()
+    private var generation: Any = Any()
+    private val listeners = LinkedHashMap<Any, () -> Unit>()
+    // Unpublished failed acquisitions have no caller to retain their physical cleanup.
+    // Never revive a lifecycle after such cleanup becomes uncertain.
+    private val unsettledSelections = ArrayList<NativeReplaySelection>()
+
+    fun resumed(activity: Any) {
+        val callbacks = synchronized(monitor) {
+            removeCollectedActivities()
+            if (resumed.none { it.get() === activity }) resumed += WeakReference(activity)
+            generation = Any(); listeners.values.toList()
+        }
+        callbacks.forEach { runCatching { it() } }
+    }
+    fun withdrawing(activity: Any) {
+        val callbacks = synchronized(monitor) {
+            removeCollectedActivities()
+            if (!resumed.removeAll { it.get() === activity }) emptyList()
+            else { generation = Any(); listeners.values.toList() }
+        }
+        callbacks.forEach { runCatching { it() } }
+    }
+
+    /** Notifications are hints, never permission; original selection withdrawal is already visible. */
+    fun observeChanges(changed: () -> Unit): AutoCloseable {
+        val token = Any(); val active = AtomicBoolean(true)
+        synchronized(monitor) { listeners[token] = { if (active.get()) changed() } }
+        return AutoCloseable { active.set(false); synchronized(monitor) { listeners.remove(token) }; Unit }
+    }
+
+    private fun current(activity: Any, token: Any): Boolean = synchronized(monitor) {
+        removeCollectedActivities()
+        unsettledSelections.isEmpty() && generation === token && resumed.size == 1 && resumed.single().get() === activity
+    }
+
+    /** Called only while holding monitor; collection invalidates prior selections. */
+    private fun removeCollectedActivities() {
+        if (resumed.removeAll { it.get() == null }) generation = Any()
+    }
+
+    /** One read-only main hop; no selection, watcher, text, or authority is produced. */
+    fun observeRootReadiness(allowed: () -> Boolean): SdkFuture<NativeReplayRootReadiness> {
+        val result = object : SdkFuture<NativeReplayRootReadiness>() {
+            override fun cancel(mayInterruptIfRunning: Boolean) = false
+        }
+        val original = synchronized(monitor) {
+            removeCollectedActivities()
+            if (unsettledSelections.isNotEmpty()) null else resumed.singleOrNull()?.get()?.let { WeakReference(it) to generation }
+        } ?: return result.also { it.complete(NativeReplayRootReadiness.INACTIVE) }
+        try { access.onMain {
+            try {
+                val activity = original.first.get()
+                fun current() = activity != null && allowed() && current(activity, original.second) && allowed()
+                if (!current()) { result.complete(NativeReplayRootReadiness.INACTIVE); return@onMain }
+                val root = access.currentRoot(checkNotNull(activity), ::current)
+                val facts = if (root != null && current()) access.observe(activity, root, ::current) else null
+                val same = root != null && facts != null && facts.apiLevel >= 29 && facts.width > 0 && facts.height > 0 &&
+                    facts.density.isFinite() && facts.density > 0 && current() && access.currentRoot(activity, ::current) === root
+                result.complete(if (!current()) NativeReplayRootReadiness.INACTIVE
+                    else if (same) NativeReplayRootReadiness.AVAILABLE else NativeReplayRootReadiness.WAITING)
+            } catch (error: Throwable) { result.completeExceptionally(error) }
+        } } catch (error: Throwable) { result.completeExceptionally(error) }
+        return result
+    }
+
+    /** Discover only the sole actually resumed Activity's existing content root on main. */
+    fun selectCurrent(reusing: NativeReplaySelection? = null): SdkFuture<NativeReplaySelection?> {
+        val result = object : SdkFuture<NativeReplaySelection?>() {
+            override fun cancel(mayInterruptIfRunning: Boolean) = false
+        }
+        val original = synchronized(monitor) {
+            removeCollectedActivities()
+            if (unsettledSelections.isNotEmpty()) null else resumed.singleOrNull()?.get()?.let { WeakReference(it) to generation }
+        } ?: return result.also { it.complete(null) }
+        try {
+            access.onMain {
+                try {
+                    val activity = original.first.get()
+                    if (activity == null || !current(activity, original.second)) { result.complete(null); return@onMain }
+                    val root = access.currentRoot(activity) { current(activity, original.second) }
+                    if (root == null || !current(activity, original.second)) { reusing?.withdraw(); result.complete(null); return@onMain }
+                    if (reusing != null) {
+                        // Never install a replacement watcher before the caller joins old cleanup.
+                        if (!reusing.matchesRoot(activity, root)) { result.complete(null); return@onMain }
+                        reusing.validateCurrent().whenComplete { valid, error ->
+                            try {
+                                val originalActivity = original.first.get()
+                                val same = error == null && valid == true && originalActivity != null &&
+                                    current(originalActivity, original.second) &&
+                                    reusing.matchesRoot(originalActivity, access.currentRoot(originalActivity) {
+                                        current(originalActivity, original.second)
+                                    }) && current(originalActivity, original.second)
+                                if (!same) reusing.withdraw()
+                                if (error != null) result.completeExceptionally(error)
+                                else result.complete(reusing.takeIf { same && reusing.isCurrent() })
+                            } catch (failure: Throwable) { reusing.withdraw(); result.completeExceptionally(failure) }
+                        }
+                    } else selectOriginal(original.first, WeakReference(root), original.second, result, discovered = true)
+
+                } catch (error: Throwable) { result.completeExceptionally(error) }
+            }
+        } catch (error: Throwable) { result.completeExceptionally(error) }
+        return result
+    }
+
+    fun select(activity: Any, root: Any): SdkFuture<NativeReplaySelection?> {
+        val result = SdkFuture<NativeReplaySelection?>()
+        val original = synchronized(monitor) {
+            removeCollectedActivities()
+            if (unsettledSelections.isNotEmpty() || resumed.size != 1 || resumed.single().get() !== activity) null else generation
+        } ?: return result.also { it.complete(null) }
+        selectOriginal(WeakReference(activity), WeakReference(root), original, result)
+        return result
+    }
+
+    private fun selectOriginal(weakActivity: WeakReference<Any>, weakRoot: WeakReference<Any>,
+        original: Any, result: SdkFuture<NativeReplaySelection?>, discovered: Boolean = false) {
+        try {
+            access.onMain {
+                var acquired: NativeReplaySelection? = null
+                try {
+                    val selectedActivity = weakActivity.get()
+                    val selectedRoot = weakRoot.get()
+                    if (selectedActivity == null || selectedRoot == null || !current(selectedActivity, original)) {
+                        result.complete(null); return@onMain
+                    }
+                    fun matchesDiscovery(): Boolean = current(selectedActivity, original) &&
+                        (!discovered || access.currentRoot(selectedActivity) { current(selectedActivity, original) } === selectedRoot) &&
+                        current(selectedActivity, original)
+                    if (!matchesDiscovery()) { result.complete(null); return@onMain }
+                    val facts = access.observe(selectedActivity, selectedRoot, ::matchesDiscovery)
+                    if (facts == null || facts.apiLevel < 29 || !current(selectedActivity, original)) { result.complete(null); return@onMain }
+                    val selection = NativeReplaySelection.issue(access, selectedActivity, selectedRoot, facts, discovered) {
+                        weakActivity.get()?.let { current(it, original) } == true
+                    }
+                    acquired = selection
+                    selection.installWatch()
+                    if (selection.isCurrent() && matchesDiscovery()) {
+                        if (!result.complete(selection)) discardUnpublished(selection, result)
+                    } else discardUnpublished(selection, result)
+                } catch (error: Throwable) {
+                    val selection = acquired
+                    if (selection == null) result.completeExceptionally(error)
+                    else discardUnpublished(selection, result, error)
+                }
+            }
+        } catch (error: Throwable) { result.completeExceptionally(error) }
+    }
+
+    private fun discardUnpublished(selection: NativeReplaySelection,
+        result: SdkFuture<NativeReplaySelection?>, error: Throwable? = null) {
+        // Reserve the original disposal before it can post main work or invoke dependents.
+        // New selections cannot overlap either pending or uncertain unpublished cleanup.
+        synchronized(monitor) { unsettledSelections.add(selection); generation = Any() }
+        selection.closeAndWait().whenComplete { _, cleanupError ->
+            if (cleanupError == null) synchronized(monitor) { unsettledSelections.remove(selection) }
+            if (error != null && cleanupError != null && error !== cleanupError) error.addSuppressed(cleanupError)
+            val failure = error ?: cleanupError
+            if (failure == null) result.complete(null) else result.completeExceptionally(failure)
+        }
+    }
+}
+
+/** Identity-only restriction fact. It grants neither currentness nor access to the original root. */
+internal class NativeReplayOriginalRootIdentity(root: Any) {
+    private val root = WeakReference(root)
+    fun isCollected(): Boolean = root.get() == null
+    fun sameRoot(other: NativeReplayOriginalRootIdentity): Boolean =
+        root.get()?.let { it === other.root.get() } == true
+}
+
+internal class NativeReplaySelection private constructor(
+    private val access: NativeReplaySelectionAccess,
+    activity: Any, root: Any, facts: NativeReplayRootFacts,
+    private val discovered: Boolean,
+    private val originalCurrent: () -> Boolean,
+) : AutoCloseable {
+    private val activity = WeakReference(activity)
+    private val root = WeakReference(root)
+    private val window = WeakReference(facts.window)
+    private val token = WeakReference(facts.token)
+    private val width = facts.width; private val height = facts.height
+    private val density = facts.density; private val api = facts.apiLevel
+    private val withdrawn = AtomicBoolean(false)
+    private val rootBoundary = AtomicBoolean(false)
+    private var watcher: AutoCloseable? = null // touched only on main
+    private val closeRequested = AtomicBoolean(false)
+    private val closeResult = object : SdkFuture<Unit>() {
+        override fun cancel(mayInterruptIfRunning: Boolean) = false
+    }
+
+    internal fun withdraw() { withdrawn.set(true) }
+    private fun rootChanged() { rootBoundary.set(true); withdrawn.set(true) }
+    internal fun observedRootBoundary(): Boolean = rootBoundary.get() ||
+        (!withdrawn.get() && originalCurrent() && (root.get() == null || window.get() == null || token.get() == null))
+    internal fun matchesRoot(selectedActivity: Any, selectedRoot: Any?): Boolean {
+        val same = activity.get() === selectedActivity && root.get() === selectedRoot && isCurrent()
+        if (!same) rootChanged()
+        return same
+    }
+
+    /** Opaque weak root identity only; no Activity/access/selection or capture authority is retained. */
+    internal fun originalRootIdentity(): NativeReplayOriginalRootIdentity? =
+        root.get()?.let { NativeReplayOriginalRootIdentity(it) }
+
+    fun isCurrent(): Boolean = !withdrawn.get() && api >= 29 && activity.get() != null && root.get() != null &&
+        window.get() != null && token.get() != null && originalCurrent() && !withdrawn.get()
+
+    /** Invoked only inside a main callback, never by the worker-safe isCurrent getter. */
+    private fun matchesDiscovery(selectedActivity: Any, selectedRoot: Any): Boolean {
+        if (!discovered) return true
+        if (!isCurrent()) return false
+        val actual = access.currentRoot(selectedActivity, ::isCurrent)
+        if (isCurrent() && actual !== selectedRoot) rootChanged()
+        return actual === selectedRoot && isCurrent()
+    }
+
+    internal fun installWatch() {
+        val selected = root.get() ?: return close()
+        val weak = WeakReference(this)
+        try { watcher = access.watch(selected) { weak.get()?.rootChanged() } }
+        catch (error: Throwable) {
+            withdrawn.set(true); closeRequested.set(true)
+            val acquisition = error as? NativeReplayWatchAcquisitionFailure
+            watcher = acquisition?.unsettledCleanup
+            val failure = acquisition?.cause ?: error
+            if (acquisition != null && acquisition.unsettledCleanup == null) closeResult.complete(Unit)
+            else closeResult.completeExceptionally(failure)
+            throw failure
+        }
+    }
+
+    fun validateCurrent(): SdkFuture<Boolean> {
+        val result = SdkFuture<Boolean>()
+        if (!isCurrent()) return result.also { it.complete(false) }
+        try { access.onMain {
+            try {
+                val activity = activity.get(); val root = root.get()
+                val facts = if (activity != null && root != null && isCurrent() && matchesDiscovery(activity, root))
+                    access.observe(activity, root, ::isCurrent) else null
+                val same = facts != null && facts.window === window.get() && facts.token === token.get() &&
+                    facts.width == width && facts.height == height && facts.density == density && facts.apiLevel == api &&
+                    matchesDiscovery(checkNotNull(activity), checkNotNull(root)) && isCurrent()
+                if (!same) {
+                    if (isCurrent()) rootChanged() else withdrawn.set(true)
+                }
+                result.complete(same)
+            } catch (error: Throwable) { withdrawn.set(true); result.completeExceptionally(error) }
+        } } catch (error: Throwable) { withdrawn.set(true); result.completeExceptionally(error) }
+        return result
+    }
+
+    /**
+     * Consume only the original weak root on main and return a detached internal value.
+     * Neither callback nor View observation runs under a lifecycle/selection lock.
+     * The caller must retain this exact noncancelable completion until main work ends.
+     * The existing watcher is borrowed; this method does not join watcher disposal.
+     */
+    fun consumeOriginalRoot(
+        current: () -> Boolean,
+        locallyStopped: () -> Boolean = { false },
+        consume: (Any, () -> Boolean) -> NativeReplayCollectionAttempt?,
+    ): SdkFuture<NativeReplayCollectionAttempt?> = consumeOriginalWindow(current, locallyStopped) { root, _, allowed ->
+        consume(root, allowed)
+    }
+
+    /** Same original validation, borrowing the already-selected weak Window only on main. */
+    fun consumeOriginalWindow(
+        current: () -> Boolean,
+        locallyStopped: () -> Boolean = { false },
+        consume: (Any, Any, () -> Boolean) -> NativeReplayCollectionAttempt?,
+    ): SdkFuture<NativeReplayCollectionAttempt?> {
+        val result = object : SdkFuture<NativeReplayCollectionAttempt?>() {
+            override fun cancel(mayInterruptIfRunning: Boolean) = false
+        }
+        try {
+            access.onMain {
+                var owned: NativeReplayCollectionAttempt? = null
+                fun discard() { val original = owned; owned = null; original?.discard() }
+                try {
+                    val selectedActivity = activity.get()
+                    val selectedRoot = root.get()
+                    fun authorized(): Boolean = isCurrent() && current() && isCurrent()
+                    fun stopped(): Boolean = locallyStopped() && authorized() && locallyStopped()
+                    fun allowed(): Boolean = !locallyStopped() && authorized() && !locallyStopped()
+                    fun discoveredMatches(): Boolean {
+                        if (!discovered) return true
+                        if (selectedActivity == null || !allowed()) return false
+                        val actual = access.currentRoot(selectedActivity, ::allowed)
+                        if (allowed() && actual !== selectedRoot) rootChanged()
+                        return actual === selectedRoot && allowed()
+                    }
+                    fun matches(): Boolean {
+                        if (selectedActivity == null || selectedRoot == null || !allowed() || !discoveredMatches()) return false
+                        val facts = access.observe(selectedActivity, selectedRoot, ::allowed)
+                        val same = facts != null && facts.window === window.get() && facts.token === token.get() &&
+                            facts.width == width && facts.height == height && facts.density == density && facts.apiLevel == api
+                        if (!same && allowed()) rootChanged()
+                        return same && discoveredMatches() && allowed()
+                    }
+                    if (stopped()) {
+                        // This carries no frame and proves no fresh View facts. Existing tail
+                        // bytes still require their independent original admission guards.
+                        result.complete(NativeReplayCollectionAttempt.LocalStop)
+                    } else if (!matches()) {
+                        if (stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
+                        else { withdrawn.set(true); result.complete(null) }
+                    } else {
+                        val value = consume(checkNotNull(selectedRoot), checkNotNull(window.get()), ::allowed)
+                        owned = value
+                        if (value != null && stopped()) { discard(); result.complete(NativeReplayCollectionAttempt.LocalStop) }
+                        else if (value == null || value === NativeReplayCollectionAttempt.LocalStop || !matches()) {
+                            discard()
+                            if (value != null && stopped()) result.complete(NativeReplayCollectionAttempt.LocalStop)
+                            else { withdrawn.set(true); result.complete(null) }
+                        } else { owned = null; result.complete(value) }
+                    }
+                } catch (error: Throwable) {
+                    try { discard() } catch (cleanup: Throwable) { if (error !== cleanup) error.addSuppressed(cleanup) }
+                    withdrawn.set(true)
+                    result.completeExceptionally(error)
+                }
+            }
+        } catch (error: Throwable) {
+            withdrawn.set(true)
+            result.completeExceptionally(error)
+        }
+        return result
+    }
+
+    /** Cleanup has no selection/permission precondition; it closes only the original retained handle. */
+    fun closeOriginalTouchObserver(original: NativeReplayCaptureTouch): SdkFuture<Unit> {
+        val joined = object : SdkFuture<Unit>() { override fun cancel(mayInterruptIfRunning: Boolean) = false }
+        try { access.onMain {
+            try { original.closeAndWait().whenComplete { _, error ->
+                if (error == null) joined.complete(Unit) else joined.completeExceptionally(error)
+            } } catch (error: Throwable) { joined.completeExceptionally(error) }
+        } } catch (error: Throwable) { joined.completeExceptionally(error) }
+        return joined
+    }
+
+    override fun close() { closeAndWait() }
+
+    /** The original main-thread watcher is retained until its actual disposal result is known. */
+    fun closeAndWait(): SdkFuture<Unit> {
+        withdrawn.set(true)
+        if (!closeRequested.compareAndSet(false, true)) return closeResult
+        try {
+            access.onMain {
+                try { watcher?.close(); watcher = null; closeResult.complete(Unit) }
+                catch (error: Throwable) { closeResult.completeExceptionally(error) }
+            }
+        } catch (error: Throwable) { closeResult.completeExceptionally(error) }
+        return closeResult
+    }
+
+    companion object {
+        fun issue(access: NativeReplaySelectionAccess, activity: Any, root: Any, facts: NativeReplayRootFacts,
+            discovered: Boolean = false, current: () -> Boolean) =
+            NativeReplaySelection(access, activity, root, facts, discovered, current)
+    }
+}
+
+/** Known rectangles or explicitly marked boot-window layout uncertainty; customer geometry is never modified. */
+internal object AndroidNativeReplaySelectionAccess : NativeReplaySelectionAccess {
+    override fun onMain(action: () -> Unit) {
+        if (Looper.myLooper() === Looper.getMainLooper()) action()
+        else check(Handler(Looper.getMainLooper()).post(action)) { "Native selection main queue is unavailable" }
+    }
+    override fun currentRoot(activity: Any, current: () -> Boolean): Any? {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "Native root discovery requires main thread" }
+        if (Build.VERSION.SDK_INT < 29 || !current()) return null
+        val selected = activity as? Activity ?: return null
+        fun <T> read(action: () -> T): T? {
+            if (!current()) return null
+            val value = action()
+            return value.takeIf { current() }
+        }
+        if (read { selected.isFinishing } != false || read { selected.isDestroyed } != false) return null
+        val window = read { selected.window } ?: return null
+        // Never create a decor view or normalize a customer window in order to qualify it.
+        val decor = read { window.peekDecorView() } ?: return null
+        val root = read { decor.findViewById<View>(android.R.id.content) } ?: return null
+        if (read { selected.window } !== window || read { window.peekDecorView() } !== decor ||
+            read { root.rootView } !== decor || !current()) return null
+        return root
+    }
+    override fun observe(activity: Any, root: Any, current: () -> Boolean): NativeReplayRootFacts? {
+        check(Looper.myLooper() === Looper.getMainLooper()) { "Native selection requires main thread" }
+        if (Build.VERSION.SDK_INT < 29 || !current()) return null
+        val selected = activity as? Activity ?: return null
+        val view = root as? View ?: return null
+        fun <T> read(action: () -> T): T? {
+            if (!current()) return null
+            val value = action()
+            return value.takeIf { current() }
+        }
+        if (read { selected.isFinishing } != false || read { selected.isDestroyed } != false) return null
+        val window = read { selected.window } ?: return null
+        val decor = read { window.decorView } ?: return null
+        if (read { view.rootView } !== decor ||
+            read { view.isAttachedToWindow } != true || read { view.hasWindowFocus() } != true ||
+            read { view.visibility } != View.VISIBLE || read { view.windowVisibility } != View.VISIBLE ||
+            read { view.alpha } != 1f) return null
+        try { observeNativeReplayOutline(decor, decor) { check(current()) { "Native selection withdrawn" } } }
+        catch (_: Throwable) { return null }
+        val token = read { view.windowToken } ?: return null
+        val width = read { view.width } ?: return null; val height = read { view.height } ?: return null
+        val density = read { view.resources.displayMetrics.density } ?: return null
+        if (width <= 0 || height <= 0 || !density.isFinite() || density <= 0 || !current()) return null
+        if (read { selected.window } !== window || read { view.windowToken } !== token ||
+            read { view.hasWindowFocus() } != true || read { view.isAttachedToWindow } != true) return null
+        return NativeReplayRootFacts(window, token, width, height, density, Build.VERSION.SDK_INT)
+    }
+    override fun watch(root: Any, withdrawn: () -> Unit): AutoCloseable {
+        check(Looper.myLooper() === Looper.getMainLooper())
+        val view = root as View
+        val focus = ViewTreeObserver.OnWindowFocusChangeListener { focused -> if (!focused) withdrawn() }
+        val attachment = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) { withdrawn() }
+        }
+        val observer = view.viewTreeObserver
+        val weak = WeakReference(view)
+        val originalObserver = WeakReference(observer)
+        val cleanup = AutoCloseable {
+            var failure: Throwable? = null
+            fun attempt(block: () -> Unit) { try { block() } catch (error: Throwable) {
+                if (failure == null) failure = error else failure!!.addSuppressed(error)
+            } }
+            val old = originalObserver.get()
+            attempt { if (old?.isAlive == true) old.removeOnWindowFocusChangeListener(focus) }
+            weak.get()?.let { original ->
+                attempt { val active = original.viewTreeObserver
+                    if (active !== old && active.isAlive) active.removeOnWindowFocusChangeListener(focus) }
+                attempt { original.removeOnAttachStateChangeListener(attachment) }
+            }
+            failure?.let { throw it }
+        }
+        try {
+            observer.addOnWindowFocusChangeListener(focus)
+            view.addOnAttachStateChangeListener(attachment)
+        } catch (error: Throwable) {
+            try { cleanup.close() } catch (cleanupError: Throwable) {
+                if (error !== cleanupError) error.addSuppressed(cleanupError)
+                throw NativeReplayWatchAcquisitionFailure(cleanup, error)
+            }
+            throw NativeReplayWatchAcquisitionFailure(null, error)
+        }
+        return cleanup
+    }
+}

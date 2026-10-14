@@ -5,7 +5,7 @@ import dev.elu.analytics.internal.runtime.RuntimeAcknowledgement
 import dev.elu.analytics.internal.runtime.RuntimeQueuedRecord
 import java.io.IOException
 import java.util.Collections
-import java.util.concurrent.CompletableFuture
+import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import kotlin.math.floor
@@ -60,8 +60,8 @@ internal class RuntimeBatchDeliveryCoordinator(
     }
 
     /** Returns immediately when a running or delayed pass already owns delivery. */
-    fun trigger(): CompletableFuture<BatchDeliveryPassResult> {
-        val future = CompletableFuture<BatchDeliveryPassResult>()
+    fun trigger(): SdkFuture<BatchDeliveryPassResult> {
+        val future = SdkFuture<BatchDeliveryPassResult>()
         synchronized(stateLock) {
             when (state) {
                 CoordinatorState.CLOSED -> future.complete(BatchDeliveryPassResult(BatchDeliveryStop.CLOSED))
@@ -112,7 +112,7 @@ internal class RuntimeBatchDeliveryCoordinator(
     }
 
     private fun submitPass(
-        future: CompletableFuture<BatchDeliveryPassResult>?,
+        future: SdkFuture<BatchDeliveryPassResult>?,
         retryRecords: List<RuntimeQueuedRecord>? = null,
     ) {
         try {
@@ -124,7 +124,7 @@ internal class RuntimeBatchDeliveryCoordinator(
     }
 
     private fun executePass(
-        future: CompletableFuture<BatchDeliveryPassResult>?,
+        future: SdkFuture<BatchDeliveryPassResult>?,
         retryRecords: List<RuntimeQueuedRecord>? = null,
     ) {
         val result =

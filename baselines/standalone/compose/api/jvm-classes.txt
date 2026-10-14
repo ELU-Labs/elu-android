@@ -1,0 +1,5 @@
+# Reviewed optional Compose candidate; generated from the actual release AAR.
+dev.elu.analytics.compose.EluComposeReplayKt
+dev.elu.analytics.compose.EluComposeReplayKt$EluAnnotatedReplayRoot$lambda$7$lambda$6$$inlined$onDispose$1
+dev.elu.analytics.compose.internal.ComposeReplayNode
+dev.elu.analytics.compose.internal.ComposeReplayNodesKt

@@ -3,19 +3,22 @@ package dev.elu.analytics.internal.runtime
 import java.io.Closeable
 import java.io.IOException
 
-/** Runtime-state row schema. It remains v1 when the additive database schema moves to v2. */
+/** Runtime-state row schema. Additive flag/replay tables never change this core row schema. */
 internal const val RUNTIME_STORAGE_SCHEMA_VERSION: Int = 1
 internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS: Int = 2
+internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_REPLAY: Int = 3
+internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_REPLAY: Int = 4
+internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_NATIVE_REPLAY: Int = 5
+internal const val RUNTIME_DATABASE_SCHEMA_VERSION_WITH_FLAGS_AND_NATIVE_REPLAY: Int = 6
 internal const val RUNTIME_FLAG_AUTHORITY_KEY: String = "authority"
 internal const val RUNTIME_FLAG_CACHE_METADATA_KEY: String = "cache-metadata"
 internal const val MAX_RUNTIME_QUEUE_RECORDS: Int = 10_000
 internal const val MAX_RUNTIME_QUEUE_BYTES: Long = 268_435_456L
 
 /**
- * Android CursorWindow capacity is implementation-dependent and historically as small as 2 MiB.
- * Keeping one complete SQLite row at or below 1 MiB leaves room for metadata and makes every row
- * inserted by this SDK readable through the platform Cursor API. Larger contract-valid records
- * are rejected permanently before insertion.
+ * Conservative existing event/mutation row policy. CursorWindow capacity depends on the Android
+ * implementation; this is not a universal platform ceiling. Larger event rows are rejected before
+ * insertion. Prepared replay requests use smaller segments and retain their full contract limit.
  */
 internal const val MAX_ANDROID_SQLITE_RUNTIME_RECORD_BYTES: Int = 1_048_576
 internal const val MAX_RUNTIME_APPEND_RECORDS: Int = 100
@@ -48,6 +51,11 @@ internal data class RuntimeStoredCore(
     val stateJson: ByteArray,
     val queueCount: Long,
     val queueBytes: Long,
+    val replayAudience: RuntimeReplayAudienceState = RuntimeReplayAudienceState.Unseen,
+    val diagnostics: RuntimeDiagnosticsState = RuntimeDiagnosticsState(),
+    val person: RuntimePersonState? = null,
+    val exposures: RuntimeFlagExposureState? = null,
+    val exceptions: RuntimeExceptionState? = null,
 )
 
 internal data class RuntimeStoredRecord(
@@ -67,8 +75,18 @@ internal data class RuntimeFlagStoredRow(
     val payload: ByteArray,
 )
 
+internal data class RuntimeReplayStoredRow(
+    val key: String,
+    val storageSchemaVersion: Long,
+    val payload: ByteArray,
+)
+
 /** Minimal transaction surface shared by the SQLite implementation and deterministic fake. */
 internal interface RuntimeQueueTransaction {
+    /** Missing schema is allowed only for the raw conformance seam; present rows are strict. */
+    fun readCaptureRateState(): RuntimeCaptureRateState?
+    fun writeCaptureRateState(state: RuntimeCaptureRateState)
+
     fun readCore(): RuntimeStoredCore?
 
     fun insertCore(core: RuntimeStoredCore)
@@ -84,6 +102,19 @@ internal interface RuntimeQueueTransaction {
     fun insertRecord(record: RuntimeStoredRecord)
 
     fun deleteRecord(sequence: Long): Boolean
+
+    /** Absent replay schema has zero replay rows; ordinary event startup does not migrate. */
+    fun replaySchemaPresent(): Boolean
+
+    /** Native accounting is required only in explicitly activated database versions 5/6. */
+    fun nativeReplaySchemaPresent(): Boolean
+
+    fun nativeRasterReplaySchemaPresent(): Boolean
+
+    fun readReplayRow(key: String): RuntimeReplayStoredRow?
+    fun scanReplayRows(prefix: String, visitor: (RuntimeReplayStoredRow) -> Unit)
+    fun putReplayRow(row: RuntimeReplayStoredRow)
+    fun deleteReplayRow(key: String): Boolean
 
     fun readFlagRow(key: String): RuntimeFlagStoredRow?
 
@@ -101,8 +132,42 @@ internal interface RuntimeQueueTransaction {
 }
 
 internal interface RuntimeQueueDatabase : Closeable {
+    /** Memory owners must reconcile on this exact connection; replacing it would erase evidence. */
+    fun validateMemoryReconciliation() { error("This database is not an original memory connection") }
+
+    /** Validated owned upgrade; device continuity starts at the existing anonymous identity. */
+    fun ensurePersonSchema()
+
+    fun ensureExceptionSchema()
+
+    fun ensureCaptureRateSchema()
+
+    /** Optional metadata I/O is classified separately; ambiguous writes must still escape. */
+    fun <T> captureRateTransaction(block: (RuntimeQueueTransaction) -> T): T = transaction(block)
+
+    /** Production visitor ledger; legacy reports cannot be reconstructed. */
+    fun ensureExposureSchema()
+
+    /** Explicit local opt-in first validates the whole owned store, then adds a closed epoch. */
+    fun ensureDiagnosticsSchema()
+
+    /** Existing payloads must be validated before this conservative history upgrade. */
+    fun ensureReplayAudienceSchema()
+
+    /** Only used after a complete read establishes that no runtime core exists. */
+    fun initialReplayAudienceState(): RuntimeReplayAudienceState
+
     /** Explicit, internal-only lazy v1→v2 migration. Ordinary open never invokes this. */
     fun ensureFlagSchema(initialAuthority: RuntimeFlagStoredRow)
+
+    /** Explicit additive 1→3 or 2→4 migration, never called by ordinary open. */
+    fun ensureReplaySchema(initialState: RuntimeReplayStoredRow)
+
+    /** Atomic 3→5 or 4→6 activation in the existing replay table. */
+    fun ensureNativeReplaySchema(initialAuthority: RuntimeReplayStoredRow)
+
+    /** Original replay table/state only; never called by ordinary open. */
+    fun ensureNativeRasterReplaySchema()
 
     /**
      * Executes [block] in a full synchronous transaction. A known pre-commit failure rolls back;

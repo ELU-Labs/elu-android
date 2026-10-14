@@ -630,11 +630,14 @@ private fun requireInt(
 ): Long {
     val number = json.opt(key) as? Number ?: protocol("$path.$key must be an integer")
     val decimal = runCatching { BigDecimal(number.toString()) }.getOrElse { protocol("$path.$key must be an integer") }
-    val value = runCatching { decimal.toBigIntegerExact().longValueExact() }.getOrElse {
+    val value = runCatching { decimal.toBigIntegerExact() }.getOrElse {
         protocol("$path.$key must be an integer")
     }
-    if (value !in minimum..maximum) protocol("$path.$key is outside the supported range")
-    return value
+    // Check before narrowing: BigInteger.longValueExact is unavailable below Android API31.
+    if (value < BigInteger.valueOf(minimum) || value > BigInteger.valueOf(maximum)) {
+        protocol("$path.$key is outside the supported range")
+    }
+    return value.toLong()
 }
 
 private fun optionalRequiredLong(

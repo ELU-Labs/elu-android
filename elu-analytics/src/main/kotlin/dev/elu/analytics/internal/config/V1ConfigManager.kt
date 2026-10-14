@@ -10,7 +10,6 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.LinkedHashSet
-import java.util.Locale
 import java.util.TreeMap
 
 /**
@@ -25,9 +24,18 @@ internal class V1ConfigManager(
     readbackProvenReplayTransports: Set<V1ReplayTransport> = emptySet(),
     private val trustedFlagSiteKey: String? = null,
     private val trustedFlagNamespaceDigest: String? = null,
+    private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
+    replayTransportGenerations: Map<V1ReplayTransport, String> = emptyMap(),
 ) {
     private val readbackProvenReplayTransports: Set<V1ReplayTransport> =
         Collections.unmodifiableSet(LinkedHashSet(readbackProvenReplayTransports))
+
+    // Optional restrictions only: this map cannot add a locally proven transport.
+    private val replayTransportGenerations: Map<V1ReplayTransport, String> =
+        Collections.unmodifiableMap(LinkedHashMap(replayTransportGenerations))
+
+    private fun generationMatches(pair: V1ReplayTransport, generation: String?): Boolean =
+        pair !in replayTransportGenerations || replayTransportGenerations[pair] == generation
 
     private var activeConfig: InstalledConfig? = null
     private var newestBoundary: V1ParsedConfigBoundary? = null
@@ -44,6 +52,8 @@ internal class V1ConfigManager(
         configBody: String?,
         nowEpochMillis: Long,
     ): V1ConfigUpdateResult {
+        val retainedCapture = activeConfig
+        val retainedFlags = activeFlagAuthorization.takeIf { pendingFlagConfiguration == null }
         invalidateFlagProjection()
         val parsed: V1ParsedConfig
         try {
@@ -54,7 +64,28 @@ internal class V1ConfigManager(
             return installInvalidDocument(configBody, nowEpochMillis, V1ConfigRejection.MALFORMED)
         }
 
-        return installAtBoundary(parsed.toBoundary(), parsed, nowEpochMillis, null)
+        val result = installAtBoundary(parsed.toBoundary(), parsed, nowEpochMillis, null)
+        // Capture re-evaluation of the already installed document does not replace Flags
+        // authority. Keep the exact original witness only after strict validation succeeds;
+        // this synchronized call exposes no intermediate allow state or new lease deadline.
+        if (result is V1ConfigUpdateResult.Enabled && !flagProjectionTerminal &&
+            retainedCapture != null && activeConfig === retainedCapture && retainedFlags != null &&
+            parsed.configSemanticHash == retainedCapture.config.configSemanticHash &&
+            parsed.status == V1ConfigStatus.ENABLED && parsed.features?.flags == true
+        ) {
+            val witness = retainedFlags.witness
+            if (witness.trustedSiteKey == trustedFlagSiteKey &&
+                witness.siteNamespaceDigest == trustedFlagNamespaceDigest &&
+                witness.siteId == parsed.siteId &&
+                witness.endpoint == retainedCapture.endpoints.flags &&
+                witness.endpoint.toString() == parsed.endpoints?.flags &&
+                witness.configRevision == parsed.revision &&
+                witness.configSemanticHash == parsed.configSemanticHash &&
+                witness.configIssuedAt == parsed.issuedAtInstant.toFlagInstant(parsed.issuedAt) &&
+                witness.configExpiresAt == parsed.expiresAtInstant.toFlagInstant(parsed.expiresAt)
+            ) activeFlagAuthorization = retainedFlags
+        }
+        return result
     }
 
     /** Resolves authority from the one active config without mutating its issuance boundary. */
@@ -124,6 +155,31 @@ internal class V1ConfigManager(
                 limits = checkNotNull(config.limits),
             ),
         )
+    }
+
+    /** Current permission for immutable sealed rows. This never grants recorder admission. */
+    @Synchronized
+    fun authorizeSealedReplayDelivery(
+        effectivePrivacyBody: String?,
+        identity: IdentityState,
+        nowEpochMillis: Long,
+    ): V1SealedReplayDelivery? {
+        val fresh = (authorize(effectivePrivacyBody, identity, nowEpochMillis) as? V1ConfigResolution.Authorized)?.config
+            ?: return null
+        val installed = activeConfig ?: return null
+        val config = installed.config
+        val generation = config.replayCapabilities?.replayProtocolGeneration ?: return null
+        if (config.schemaVersion != 2 || fresh.captureAuthorization.status != V1ChannelAuthorizationStatus.AUTHORIZED ||
+            fresh.replayAuthorization.status == V1ChannelAuthorizationStatus.INVALID ||
+            !fresh.features.replay || !fresh.privacy.replay.enabled) return null
+        val privacy = fresh.effectivePrivacy ?: return null
+        val selected = privacy.replayTransport ?: return null
+        val pair = V1ReplayTransport(selected.codec, selected.compression)
+        if (!selected.advertised || pair !in fresh.replayCapabilities.advertisedTransports ||
+            pair !in readbackProvenReplayTransports || !generationMatches(pair, generation) ||
+            !maskingIsEqualOrStricter(fresh.privacy.masking, privacy.effectiveMasking) ||
+            (androidPlatformFallbackRequired(fresh.privacy.masking) && !privacy.effectiveMasking.platformFallbackApplied)) return null
+        return V1SealedReplayDelivery(fresh, installed.endpoints.replay ?: return null, pair, generation)
     }
 
     /** Explicit lifecycle reset; ordinary failed/stale updates retain the anti-rollback boundary. */
@@ -535,7 +591,8 @@ internal class V1ConfigManager(
                 selectedPair == null -> restricted(V1ChannelAuthorizationReason.TRANSPORT_MISSING)
                 androidPlatformFallbackRequired(policy.masking) && !effective.effectiveMasking.platformFallbackApplied ->
                     restricted(V1ChannelAuthorizationReason.PLATFORM_FALLBACK_REQUIRED)
-                selectedPair !in readbackProvenReplayTransports ->
+                selectedPair !in readbackProvenReplayTransports ||
+                    !generationMatches(selectedPair, replayCapabilities.replayProtocolGeneration) ->
                     restricted(V1ChannelAuthorizationReason.LOCAL_TRANSPORT_UNPROVEN)
                 else -> authorized()
             }
@@ -609,8 +666,7 @@ internal class V1ConfigManager(
         if (uri.rawFragment != null) unauthorized("$role endpoint must not contain a fragment")
         if (uri.port != -1 && uri.port != 443) unauthorized("$role endpoint uses an untrusted port")
 
-        val authority = endpointAuthority(role, schemaVersion)
-        if (uri.host.lowercase(Locale.US) != authority.host || uri.rawPath != authority.path) {
+        if (!endpointPolicy.matchesRole(uri, role, schemaVersion)) {
             unauthorized("$role endpoint is outside its ELU role allowlist")
         }
         if (containsReservedSiteKey(uri.rawQuery)) unauthorized("$role endpoint contains reserved authorization state")
@@ -665,11 +721,6 @@ internal class V1ConfigManager(
         cause: Throwable? = null,
     ): Nothing = throw V1EndpointAuthorizationException(message, cause)
 
-    private data class EndpointAuthority(
-        val host: String,
-        val path: String,
-    )
-
     private data class ParsedEndpointSet(
         val events: URI,
         val replay: URI?,
@@ -689,23 +740,6 @@ internal class V1ConfigManager(
     )
 
     private companion object {
-        /** Contract v1 roles. Replay v1 is the only role whose path changes under contract v2. */
-        val ENDPOINT_AUTHORITIES =
-            mapOf(
-                V1EndpointRole.EVENTS to EndpointAuthority("ingest.elu.dev", "/v1/events"),
-                V1EndpointRole.REPLAY to EndpointAuthority("ingest.elu.dev", "/v1/replay"),
-                V1EndpointRole.FLAGS to EndpointAuthority("ingest.elu.dev", "/v1/flags"),
-                V1EndpointRole.ASSETS to EndpointAuthority("assets.elu.dev", "/sdk/"),
-            )
-        val V2_ENDPOINT_AUTHORITIES =
-            ENDPOINT_AUTHORITIES + (V1EndpointRole.REPLAY to EndpointAuthority("ingest.elu.dev", "/v2/replay"))
-
-        fun endpointAuthority(
-            role: V1EndpointRole,
-            schemaVersion: Int,
-        ): EndpointAuthority =
-            (if (schemaVersion == V2_CONFIG_SCHEMA_VERSION) V2_ENDPOINT_AUTHORITIES else ENDPOINT_AUTHORITIES).getValue(role)
-
         val RECOGNIZED_ANDROID_MASKING_DIALECTS: Set<String> = emptySet()
         const val SITE_KEY_QUERY_PARAMETER = "site_key"
     }

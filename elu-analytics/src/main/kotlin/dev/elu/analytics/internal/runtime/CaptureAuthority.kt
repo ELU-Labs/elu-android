@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.runtime
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
 import dev.elu.analytics.internal.config.V1ExactTimestamp
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -70,12 +71,34 @@ internal sealed interface RuntimeCaptureAuthorityUpdateResult {
     data class Terminated(val authority: RuntimeCaptureAuthorityState.Terminal) : RuntimeCaptureAuthorityUpdateResult
 }
 
+/** Optional original aggregate context, checked inside the final queue transaction. */
+internal data class RuntimeCaptureExpectation(
+    val identityRevision: Long,
+    val contextRevision: Long,
+    val sessionId: String,
+    val isCurrent: () -> Boolean,
+)
+
+/** Request-start state, checked again inside the final event transaction. */
+internal data class RuntimeNetworkExpectation(
+    val identityRevision: Long,
+    val contextRevision: Long,
+    val sessionId: String?,
+    val sessionStartedAt: String?,
+    val isCurrent: () -> Boolean,
+)
+
 internal data class RuntimeCaptureCommand(
     val kind: RuntimeEventKind,
     val name: String,
     val occurredAt: String,
     val properties: Map<String, Any?>,
     val versions: RuntimeVersions,
+    val expectation: RuntimeCaptureExpectation? = null,
+    val networkExpectation: RuntimeNetworkExpectation? = null,
+    val startupMeasurement: dev.elu.analytics.internal.diagnostics.NativeStartupMeasurement? = null,
+    val flagExposure: RuntimeFlagExposureCapture? = null,
+    val exceptionImport: RuntimeExceptionImport? = null,
 )
 
 internal enum class RuntimeCaptureRejection {
@@ -87,12 +110,20 @@ internal enum class RuntimeCaptureRejection {
     OPTED_OUT,
     EVENT_INVALID,
     QUEUE_LIMIT,
+    EXPOSURE_ALREADY_REPORTED,
+    EXCEPTION_ALREADY_REPORTED,
+    RATE_LIMITED,
+    FILTER_DROPPED,
+    FILTER_INVALID,
+    FILTER_PERSON_UNSUPPORTED,
 }
 
 internal sealed interface RuntimeCaptureResult {
     data class Accepted(
         val record: RuntimeQueuedRecord.Event,
         val snapshot: RuntimeQueueSnapshot,
+        /** A confirmed event remains accepted if its separate person mutation is refused. */
+        val personMutationRejected: Boolean = false,
     ) : RuntimeCaptureResult
 
     data class Rejected(
@@ -127,5 +158,10 @@ internal object RuntimeSiteNamespace {
         }
     }
 
-    fun directory(exactConstructorSiteKey: String): String = "site-${digest(exactConstructorSiteKey)}"
+    fun directory(exactConstructorSiteKey: String, endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD): String {
+        val keyDigest = digest(exactConstructorSiteKey)
+        val origin = endpointPolicy.apiOrigin ?: return "site-$keyDigest" // Preserve all owned cloud upgrades.
+        val material = "elu-runtime-selfhost-v1\u0000$origin\u0000$keyDigest"
+        return "host-${digest(material)}"
+    }
 }

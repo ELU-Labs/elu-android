@@ -329,7 +329,9 @@ internal object CoreStateCodec {
                 // the aggregate marker is absent or malformed.
                 false
             }
-        if (hasValidAggregateSchema) {
+        // Retired pre-release import checkpoints remain unsupported, even with a damaged
+        // aggregate marker. Never reinterpret their children as a fresh owned installation.
+        if (hasValidAggregateSchema || root.has("startupMigration") || root.has("startupHistory")) {
             rejectUnknownFields(root, aggregateFields, emptySet(), "core state")
         }
 

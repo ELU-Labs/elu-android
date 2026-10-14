@@ -32,6 +32,15 @@ internal object V1StrictCanonicalJson {
 
     fun parse(source: String): Value = Parser(source).parse()
 
+    data class RootPropertyDocument(val value: Value, val propertySource: String?)
+
+    /** Original value spelling is returned only after the entire document passes strict parsing. */
+    fun parseRetainingRootProperty(source: String, name: String): RootPropertyDocument {
+        val parser = Parser(source, name)
+        val value = parser.parse()
+        return RootPropertyDocument(value, parser.rootPropertyRange?.let(source::substring))
+    }
+
     fun canonicalize(value: Value): String =
         buildString { appendCanonical(value) }
 
@@ -395,8 +404,10 @@ internal object V1StrictCanonicalJson {
             Array(MAX_POWER_OF_TEN + 1) { exponent -> BigInteger.TEN.pow(exponent) }
     }
 
-    private class Parser(private val source: String) {
+    private class Parser(private val source: String, private val retainedRootProperty: String? = null) {
         private var index = 0
+        var rootPropertyRange: IntRange? = null
+            private set
 
         fun parse(): Value {
             skipWhitespace()
@@ -434,7 +445,9 @@ internal object V1StrictCanonicalJson {
                 skipWhitespace()
                 requireCharacter(':')
                 skipWhitespace()
+                val valueStart = index
                 members += name to parseValue(depth)
+                if (depth == 1 && name == retainedRootProperty) rootPropertyRange = valueStart until index
                 skipWhitespace()
                 when {
                     consume('}') -> return Value.ObjectValue(members)

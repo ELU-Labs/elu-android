@@ -1,5 +1,7 @@
 package dev.elu.analytics.internal.runtime.delivery
 
+import dev.elu.analytics.internal.config.LocalEndpointPolicy
+import dev.elu.analytics.internal.config.V1EndpointRole
 import dev.elu.analytics.internal.runtime.MAX_RUNTIME_DELIVERY_BYTES
 import dev.elu.analytics.internal.runtime.MAX_RUNTIME_DELIVERY_RECORDS
 import dev.elu.analytics.internal.runtime.RuntimeAcknowledgement
@@ -11,8 +13,6 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URLDecoder
-import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -30,6 +30,7 @@ internal class V1BatchAuthorizationSnapshot(
     val expiresAt: String,
     val eventBatchCount: Int,
     val eventBatchBytes: Int,
+    private val endpointPolicy: LocalEndpointPolicy = LocalEndpointPolicy.CLOUD,
 ) {
     val eventsEndpoint: URI = URI(eventsEndpoint.toASCIIString())
     val expiresAtEpochMillisFloor: Long
@@ -43,7 +44,7 @@ internal class V1BatchAuthorizationSnapshot(
         ) {
             "siteKey must be a non-empty authorization-header-safe value"
         }
-        requireAuthorizedEventsEndpoint(this.eventsEndpoint)
+        endpointPolicy.requireApproved(this.eventsEndpoint, V1EndpointRole.EVENTS)
         RuntimeRecordCodec.compareTimestamps(expiresAt, expiresAt)
         expiresAtEpochMillisFloor = RuntimeRecordCodec.timestampToEpochMillisFloor(expiresAt)
         require(eventBatchCount in 1..MAX_RUNTIME_DELIVERY_RECORDS) {
@@ -54,28 +55,6 @@ internal class V1BatchAuthorizationSnapshot(
         }
     }
 
-    private fun requireAuthorizedEventsEndpoint(endpoint: URI) {
-        require(
-            endpoint.isAbsolute &&
-                endpoint.scheme == "https" &&
-                endpoint.host?.lowercase(Locale.US) == EVENTS_HOST &&
-                endpoint.rawPath == EVENTS_PATH &&
-                (endpoint.port == -1 || endpoint.port == 443) &&
-                endpoint.rawUserInfo == null &&
-                endpoint.rawFragment == null,
-        ) { "eventsEndpoint is outside the authorized ELU events endpoint" }
-        val containsSiteKey =
-            endpoint.rawQuery?.split('&')?.any { part ->
-                val name = part.substringBefore('=')
-                runCatching { URLDecoder.decode(name, StandardCharsets.UTF_8.name()) }.getOrNull() == "site_key"
-            } == true
-        require(!containsSiteKey) { "eventsEndpoint must not contain authorization state" }
-    }
-
-    private companion object {
-        const val EVENTS_HOST = "ingest.elu.dev"
-        const val EVENTS_PATH = "/v1/events"
-    }
 }
 
 internal data class BatchWallInstant(

@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:name="dev.elu.fixture.smoke.SmokeApplication"
+        android:label="ELU optimized consumer"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name="dev.elu.fixture.smoke.SmokeActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

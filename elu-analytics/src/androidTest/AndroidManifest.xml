@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name="dev.elu.analytics.internal.replay.NativeCollectorTestActivity"
+            android:exported="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name="dev.elu.analytics.internal.replay.NativeWindowCompatibilityTestActivity"
+            android:exported="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name="dev.elu.analytics.internal.replay.NativeAppCompatTestActivity"
+            android:exported="false" android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
+        <!-- A component in its own process, as a multi-process app's :remote or :sync service. -->
+        <service android:name="dev.elu.analytics.SecondaryProcessSetupService"
+            android:exported="false" android:process=":elu_secondary" />
+    </application>
+</manifest>
