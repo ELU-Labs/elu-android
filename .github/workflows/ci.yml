@@ -141,15 +141,23 @@ jobs:
       matrix:
         # 23 is the minimum supported level (analytics only; replay needs 29+), 36 the
         # compile/target level. API 23 uses the x86 image the emulator action itself tests.
+        # Every level runs at density 160 so dp sizes in the tests stay pixel sizes. 320x640
+        # is the avdmanager default. API 36 also runs the full-HD replay tests
+        # (@SdkSuppress(minSdkVersion = 36)), which need a window above the 1,048,576-pixel
+        # image cap, so it gets 1080x1920.
         include:
           - api-level: 23
             arch: x86
+            display: 320x640
           - api-level: 29
             arch: x86_64
+            display: 320x640
           - api-level: 35
             arch: x86_64
+            display: 320x640
           - api-level: 36
             arch: x86_64
+            display: 1080x1920
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -176,10 +184,15 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Verify clean setup, owned SQLite continuity, refusal and privacy
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          AVD_DISPLAY: ${{ matrix.display }}
+          AVD_DENSITY: '160'
         with:
           api-level: ${{ matrix.api-level }}
           arch: ${{ matrix.arch }}
           disable-animations: true
+          pre-emulator-launch-script: |
+            bash scripts/set-avd-display.sh "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" "$AVD_DISPLAY" "$AVD_DENSITY"
           script: |
             adb shell getprop ro.build.fingerprint
             adb shell getprop ro.build.version.sdk
@@ -191,6 +204,8 @@ jobs:
             adb shell wm size | tee -a elu-analytics/build/reports/device-memory.txt
             adb shell wm density | tee -a elu-analytics/build/reports/device-memory.txt
             if [ -r "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" ]; then awk -F '[[:space:]]*=[[:space:]]*' '$1 ~ /^(hw\.ramSize|vm\.heapSize|hw\.lcd\.width|hw\.lcd\.height|hw\.lcd\.density|hw\.cpu\.ncore)$/ { print }' "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" | tee -a elu-analytics/build/reports/device-memory.txt; else echo 'avd_config_available=0' | tee -a elu-analytics/build/reports/device-memory.txt; fi
+            test "$(adb shell wm size | tr -d '\r')" = "Physical size: $AVD_DISPLAY"
+            test "$(adb shell wm density | tr -d '\r')" = "Physical density: $AVD_DENSITY"
             ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
             bash scripts/run-consumer-smoke.sh fixtures/core-consumers/r8/build/module/outputs/apk/release/r8-release.apk dev.elu.fixture.r8
             bash scripts/run-consumer-smoke.sh fixtures/core-consumers/okhttp5/build/module/outputs/apk/release/okhttp5-release.apk dev.elu.fixture.okhttp5
