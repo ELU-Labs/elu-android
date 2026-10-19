@@ -31,12 +31,14 @@ internal class NativeReplayStartReceipt private constructor(
     val epoch: String,
     val replayId: String,
     val anchor: NativeReplayClockAnchor,
+    /** In memory only: this recording's begin wall. No chunk may start earlier. */
+    val epochStartedAt: String,
 ) {
     fun belongsTo(value: Any): Boolean = owner === value
     companion object {
         fun issue(owner: Any, namespaceHash: String, streamId: String, key: NativeReplaySessionState.Key,
-            firstStartAt: String, epoch: String, replayId: String, anchor: NativeReplayClockAnchor) =
-            NativeReplayStartReceipt(owner, namespaceHash, streamId, key, firstStartAt, epoch, replayId, anchor)
+            firstStartAt: String, epoch: String, replayId: String, anchor: NativeReplayClockAnchor, epochStartedAt: String) =
+            NativeReplayStartReceipt(owner, namespaceHash, streamId, key, firstStartAt, epoch, replayId, anchor, epochStartedAt)
     }
 }
 

@@ -39,6 +39,18 @@ internal class FakeRuntimeQueueBacking {
         connectionCalls += 1
         return FakeRuntimeQueueDatabase(this)
     }
+
+    /** Only the committed rows, as the files an ended process leaves; no injected fault is copied. */
+    fun committedCopy(): FakeRuntimeQueueBacking = synchronized(this) {
+        FakeRuntimeQueueBacking().also { copy ->
+            copy.captureRateState = captureRateState
+            copy.core = core?.let { it.copy(stateJson = it.stateJson.copyOf()) }
+            copy.databaseSchemaVersion = databaseSchemaVersion
+            records.forEach { (sequence, row) -> copy.records[sequence] = row.deepCopy() }
+            replayRows.forEach { (key, row) -> copy.replayRows[key] = row.deepCopy() }
+            flagRows.forEach { (key, row) -> copy.flagRows[key] = row.deepCopy() }
+        }
+    }
 }
 
 private class FakeRuntimeQueueDatabase(

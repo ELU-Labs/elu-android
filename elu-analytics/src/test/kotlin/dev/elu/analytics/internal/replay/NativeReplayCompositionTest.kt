@@ -329,6 +329,72 @@ class NativeReplayCompositionTest {
         }
     } }
 
+    @Test fun `background terminate relaunch inside the idle timeout records a new replay`() = Rig().use { rig ->
+        lateinit var old: List<PreparedReplayRequest>
+        MainAccess().use { access ->
+            rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+            try {
+                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                awaitCondition("first prefix") { rig.rows().size == 1 }
+                rig.advance(10); ticks.release()
+                awaitCondition("second chunk") { rig.rows().size == 2 }
+                old = rig.rows().map { it.prepared }
+                assertEquals(1, old.map { it.replayId }.toSet().size); assertEquals(listOf(0L, 1L), old.map { it.sequence })
+                rig.owner.markBackgrounded(rig.now()).get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                awaitCondition("background settles capture") { !owner.recordingStarted() && rig.state().session?.activeEpoch == null }
+            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        }
+        // The system ends the backgrounded app; it is opened again inside the idle timeout.
+        // The closed time counts toward the replay budget.
+        rig.advance(5); rig.reopen(); rig.publish()
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        MainAccess().use { access ->
+            val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val owner = composition(rig, life, Platform(rig, access))
+            try {
+                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                awaitCondition("relaunched recording stored") { rig.rows().size == 3 }
+                val fresh = rig.rows().last().prepared
+                assertTrue(old.none { it.replayId == fresh.replayId })
+                assertEquals(old[0].sessionId, fresh.sessionId); assertEquals(0L, fresh.sequence)
+                assertTrue(fresh.startedAtInstant > old.maxOf { it.endedAtInstant })
+                assertTrue(owner.recordingStarted())
+                val ledger = checkNotNull(rig.state().session)
+                assertEquals(old[0].sessionId, ledger.key.sessionId); assertFalse(ledger.interrupted)
+                assertTrue(ledger.elapsedFloorMicroseconds >= 15_000_000)
+            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        }
+    }
+
+    @Test fun `local stop does not persist across relaunch`() = Rig().use { rig ->
+        lateinit var first: PreparedReplayRequest
+        MainAccess().use { access ->
+            rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val owner = composition(rig, life, Platform(rig, access))
+            try {
+                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                awaitCondition("first prefix") { rig.rows().isNotEmpty() }
+                first = rig.rows().first().prepared
+                owner.stopRecording().get(3, TimeUnit.SECONDS); assertFalse(owner.recordingStarted())
+                assertNull(checkNotNull(rig.state().session).activeEpoch)
+            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        }
+        rig.advance(5); rig.reopen(); rig.publish()
+        // No start call: the local stop belonged only to the ended runtime.
+        MainAccess().use { access ->
+            val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+            val owner = composition(rig, life, Platform(rig, access))
+            try {
+                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                awaitCondition("relaunched recording stored") { rig.rows().any { it.prepared.replayId != first.replayId } }
+                val fresh = rig.rows().first { it.prepared.replayId != first.replayId }.prepared
+                assertEquals(first.sessionId, fresh.sessionId); assertEquals(0L, fresh.sequence)
+                assertTrue(owner.recordingStarted())
+            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        }
+    }
+
     @Test fun `explicit declared support does not lower original API29 root floor`() {
         for (declared in listOf(false, true)) Rig().use { rig -> MainAccess().use { access ->
             rig.minimum(); rig.activate(); access.apiLevel = 28

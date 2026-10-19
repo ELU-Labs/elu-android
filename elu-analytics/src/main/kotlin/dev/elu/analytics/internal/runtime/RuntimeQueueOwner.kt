@@ -908,7 +908,8 @@ internal class RuntimeQueueOwner private constructor(
         }
         database().transaction { ReplayQueueStore.validate(it, namespace) }
         nativeAccountingActivated = true
-        Unit
+        // A new schema has no started session; an existing one may still hold an unsettled owner gap.
+        settleNativeOwnerGapOnWorker()
     }
 
     /** Explicit dormant raster storage; the default stack never invokes this seam. */
@@ -1094,7 +1095,7 @@ internal class RuntimeQueueOwner private constructor(
             admission.source.nativeV3?.raster == admission.policy && request.digest == stored.digest &&
             stored.replayId == receipt.replayId && stored.sessionId == identity.session?.id &&
             V1ExactTimestamp.fromEpochMillis(stored.timestamp) >= V1ConfigJson.parseExactTimestamp(checkNotNull(identity.session).startedAt) &&
-            V1ExactTimestamp.fromEpochMillis(stored.timestamp) >= V1ConfigJson.parseExactTimestamp(receipt.firstStartAt) &&
+            V1ExactTimestamp.fromEpochMillis(stored.timestamp) >= V1ConfigJson.parseExactTimestamp(receipt.epochStartedAt) &&
             stored.anonymousId == identity.anonymousId && stored.userId == identity.userId && stored.identityRevision == identity.revision &&
             stored.contextRevision == identity.contextRevision && stored.policyRevision == admission.policy.revision &&
             stored.effectivePolicyHash == admission.policy.effectivePolicyHash && admission.isCurrent() && request.originalCaptureIsCurrent()
@@ -1112,18 +1113,22 @@ internal class RuntimeQueueOwner private constructor(
         val key = nativeKey(requireLoaded(), capture)
         if (nativeReceipt?.key?.let { it != key } == true) return null
         var observation: NativeReplaySessionObservation? = null
+        var settled: NativeReplayClockAnchor? = null
         nativeTransaction {
+            settled = null
             val current = requireCurrent(it)
             if (nativeCurrentConfig(current, source, capture) == null || nativeKey(current, capture) != key) throw ReplaySourceWithdrawn()
             val before = nativeState(it)
             if (before.session?.activeEpoch != null && !before.session.interrupted && before.session.key != key) return@nativeTransaction Unit
-            val after = observeNativeState(before, key, config)
+            val observed = observeNativeState(it, before, key, config)
+            val after = observed.state; settled = observed.settled
             if (after != before) it.putReplayRow(NativeReplayAccounting.row(after))
             val session = checkNotNull(after.session)
             observation = NativeReplaySessionObservation.issue(nativeOwnerToken, source, capture, session,
                 session.selected(checkNotNull(config.privacy).replay.sampleRate))
             if (nativeCurrentConfig(requireCurrent(it), source, capture) == null || nativeKey(requireCurrent(it), capture) != key) throw ReplaySourceWithdrawn()
         }
+        settled?.let { nativeAnchor = it }
         var result: NativeReplaySessionObservation? = null
         // Match dispatch lock order: lifecycle intent linearizes before source consumption.
         synchronized(lifecycleLock) {
@@ -1237,6 +1242,8 @@ internal class RuntimeQueueOwner private constructor(
             nativeScope.resolved(key)
             nativeSettlementUncertain = previousUncertain
         } catch (error: Throwable) {
+            // Keep the installation from a second owner in this process; a later process
+            // cannot see this denial and settles the gap against the stored marks instead.
             nativeSettlementUncertain = true
             throw error
         }
@@ -1262,6 +1269,7 @@ internal class RuntimeQueueOwner private constructor(
         var candidate: NativeReplayStartReceipt? = null
         var originalState: NativeReplaySessionState? = null
         var preparedState: NativeReplaySessionState? = null
+        var settled: NativeReplayClockAnchor? = null
         try {
             nativeTransaction { tx ->
                 val disk = requireCurrent(tx)
@@ -1272,23 +1280,27 @@ internal class RuntimeQueueOwner private constructor(
                     if (original.key != key || original.samplingHash != observation.session.samplingHash ||
                         original.originalSampleRate != observation.session.originalSampleRate || original.firstStartAt != observation.session.firstStartAt) return@nativeTransaction Unit
                     originalState = before
-                    val observed = observeNativeState(before, key, config)
-                    val wall = checkNotNull(observed.session).observedWallAt
+                    val observed = observeNativeState(tx, before, key, config)
+                    settled = observed.settled
+                    val wall = checkNotNull(observed.state.session).observedWallAt
                     val continuous = captureClock.elapsedRealtimeNanos()
                     if (continuous < 0) {
-                        preparedState = observed.denyClock(key)
+                        preparedState = observed.state.denyClock(key)
                     } else {
-                        val begun = observed.begin(epoch, wall, checkNotNull(config.privacy).replay.sampleRate)
+                        val begun = observed.state.begin(epoch, wall, checkNotNull(config.privacy).replay.sampleRate)
                         val session = checkNotNull(begun.session)
+                        // The settled or retained anchor. Only a session's first recording starts a new
+                        // clock origin; an unanchored started session is interrupted and cannot begin.
+                        val anchor = observed.anchor ?: session.firstStartAt?.takeIf { original.firstStartAt == null }
+                            ?.let { NativeReplayClockAnchor(key, it, continuous, session.elapsedFloorMicroseconds) }
                         if (session.activeEpoch != epoch) preparedState = begun
+                        else if (anchor == null) preparedState = observed.state
                         else {
                             val allocated = begun.allocateReplayId()
                             if (ReplayQueueStore.headers(tx).any { it.replayId == allocated.replayId }) corrupt("Native replay identifier collision")
                             val first = checkNotNull(session.firstStartAt)
-                            val anchor = nativeAnchor?.takeIf { it.key == key && it.firstStartAt == first }
-                                ?: NativeReplayClockAnchor(key, first, continuous, session.elapsedFloorMicroseconds)
                             candidate = NativeReplayStartReceipt.issue(nativeOwnerToken, checkNotNull(ownerNamespaceHash),
-                                disk.state.stream.streamId, key, first, epoch, allocated.replayId, anchor)
+                                disk.state.stream.streamId, key, first, epoch, allocated.replayId, anchor, wall)
                             nativeReceipt = candidate
                             nativeSettlementUncertain = true
                             preparedState = allocated.state
@@ -1305,7 +1317,7 @@ internal class RuntimeQueueOwner private constructor(
             if (poison == null) settleNativeCandidateAfterFailure(candidate)
             throw error
         }
-        val result = candidate ?: return null
+        val result = candidate ?: run { settled?.let { nativeAnchor = it }; return null }
         nativeSettlementUncertain = false
         nativeAnchor = result.anchor
         var currentResult: NativeReplayStartReceipt? = null
@@ -1389,21 +1401,65 @@ internal class RuntimeQueueOwner private constructor(
 
     private fun nativeWall(): String = RuntimeWallTimestamps.rfc3339(captureClock.wallNowEpochMillis())
 
-    private fun observeNativeState(before: NativeReplaySessionState, key: NativeReplaySessionState.Key,
-        config: dev.elu.analytics.internal.config.V1ParsedConfig): NativeReplaySessionState {
-        val session = before.session?.takeIf { it.key == key }
-        var state = before
+    /** [settled] is a new owner-gap clock origin; the caller publishes it only after its ledger commits. */
+    private class NativeObservedState(val state: NativeReplaySessionState, val anchor: NativeReplayClockAnchor?,
+        val settled: NativeReplayClockAnchor?)
+
+    private fun observeNativeState(tx: RuntimeQueueTransaction, before: NativeReplaySessionState, key: NativeReplaySessionState.Key,
+        config: dev.elu.analytics.internal.config.V1ParsedConfig): NativeObservedState {
+        // Settle with these same samples before observing, whichever of open, schema setup
+        // and observation touches the ledger first.
+        val gap = settleNativeOwnerGap(tx, before)
+        var state = gap.state
+        val session = state.session?.takeIf { it.key == key }
         val first = session?.firstStartAt
         var elapsed: Long? = null
+        var anchor: NativeReplayClockAnchor? = null
+        // A settled stored session of another key is replaced by this observation; its origin is unused.
+        var settled = gap.anchor?.takeIf { it.key == key }
         if (first != null) {
-            val continuous = captureClock.elapsedRealtimeNanos()
-            val anchor = nativeAnchor?.takeIf { it.key == key && it.firstStartAt == first }
-                ?: NativeReplayClockAnchor(key, first, continuous, session.elapsedFloorMicroseconds)
-            val sample = anchor.observe(continuous, session.elapsedFloorMicroseconds)
-            if (sample == null) state = state.denyClock(key) else { nativeAnchor = sample.anchor; elapsed = sample.elapsedMicroseconds }
+            val original = (settled ?: nativeAnchor)?.takeIf { it.key == key && it.firstStartAt == first }
+            if (original == null) {
+                // Never manufacture a clock origin except from a settled, charged owner gap.
+                state = state.copy(session = session.copy(interrupted = true))
+            } else {
+                val sample = original.observe(gap.continuous ?: captureClock.elapsedRealtimeNanos(), session.elapsedFloorMicroseconds)
+                if (sample == null) state = state.denyClock(key)
+                else {
+                    anchor = sample.anchor; elapsed = sample.elapsedMicroseconds
+                    if (settled != null) settled = sample.anchor else nativeAnchor = sample.anchor
+                }
+            }
         }
         val policy = checkNotNull(config.privacy).replay
-        return state.observe(key, policy.sampleRate, policy.maximumDurationSeconds, nativeWall(), nativeReceipt?.epoch, elapsed)
+        return NativeObservedState(state.observe(key, policy.sampleRate, policy.maximumDurationSeconds,
+            gap.wall ?: nativeWall(), nativeReceipt?.epoch, elapsed), anchor, settled)
+    }
+
+    /** One owner-gap settlement and the clock samples it took, for reuse by the same observation. */
+    private class NativeOwnerGap(val state: NativeReplaySessionState, val anchor: NativeReplayClockAnchor?,
+        val continuous: Long?, val wall: String?)
+
+    /**
+     * The exclusive installation lease and owner registry mean a started session without this
+     * owner's anchor belongs to a closed or dead owner. The gap is proven only by a wall clock
+     * at or after the ledger's observed wall and the replay store's wall floor, which every
+     * sealed chunk's end precedes. The continuous clock is sampled first and the wall only after
+     * it; a missing sample denies. This writes nothing itself and never throws for clock reasons.
+     */
+    private fun settleNativeOwnerGap(tx: RuntimeQueueTransaction, value: NativeReplaySessionState): NativeOwnerGap {
+        val session = value.session
+        val first = session?.firstStartAt
+        if (first == null || nativeReceipt != null ||
+            nativeAnchor?.let { it.key == session.key && it.firstStartAt == first } == true) return NativeOwnerGap(value, null, null, null)
+        val continuous = try { captureClock.elapsedRealtimeNanos().takeIf { it >= 0 } } catch (_: Exception) { null }
+        val wall = if (continuous == null) null else try { nativeWall() } catch (_: Exception) { null }
+        val mark = checkNotNull(ReplayQueueStore.state(tx)).wallFloor.takeIf { it > 0 }?.let(V1ExactTimestamp::fromEpochMillis)
+        val gap = value.settleOwnerGap(wall, mark)
+        val resumed = gap.state.session?.takeIf { gap.outcome == NativeReplaySessionState.OwnerGapOutcome.RESUMED }
+        return NativeOwnerGap(gap.state, resumed?.let {
+            NativeReplayClockAnchor(it.key, first, checkNotNull(continuous), it.elapsedFloorMicroseconds)
+        }, continuous, wall)
     }
 
     /** Unlike event transactions, this keeps the exact returned start receipt after a commit.
@@ -1439,16 +1495,30 @@ internal class RuntimeQueueOwner private constructor(
         error("Native accounting reconciliation exhausted")
     }
 
-    private fun interruptNativeEpochOnOpen() {
+    /**
+     * Open and schema setup. A new exclusive owner settles the previous owner's gap by wall
+     * clock against the durable ledger and replay marks; a new clock origin starts only at the
+     * charged floor, and only after that ledger commits. An unprovable gap stays interrupted.
+     * A live owner never holds an epoch without its anchor, or an anchor beside another
+     * owner's epoch: either fails closed.
+     */
+    private fun settleNativeOwnerGapOnWorker() {
         if (!database().transaction { it.nativeReplaySchemaPresent() }) return
         nativeAccountingActivated = true
+        var settled: NativeReplayClockAnchor? = null
         nativeTransaction { tx ->
-            val state = nativeState(tx)
-            val session = state.session
-            if (session?.firstStartAt != null && !session.interrupted) {
-                tx.putReplayRow(NativeReplayAccounting.row(state.copy(session = session.copy(interrupted = true))))
-            }
+            settled = null
+            val before = nativeState(tx)
+            val session = before.session
+            val first = session?.firstStartAt ?: return@nativeTransaction Unit
+            val retainsClock = nativeAnchor?.let { it.key == session.key && it.firstStartAt == first } == true
+            val retainsEpoch = session.activeEpoch == null || session.activeEpoch == nativeReceipt?.epoch
+            if (retainsClock && retainsEpoch) return@nativeTransaction Unit
+            val after = if (!retainsClock && nativeReceipt == null) settleNativeOwnerGap(tx, before).also { settled = it.anchor }.state
+                else before.copy(session = session.copy(interrupted = true))
+            if (after != before) tx.putReplayRow(NativeReplayAccounting.row(after))
         }
+        settled?.let { nativeAnchor = it }
     }
 
     /** An accounting handoff cannot interrupt an in-flight commit or discard its receipt. */
@@ -1559,7 +1629,7 @@ internal class RuntimeQueueOwner private constructor(
             request.transport == admission.permit.prepared.projection.privacy.transport &&
             !request.startedAtInstant.isLeapSecond && request.startedAtInstant.fractionalDigits.length <= 3 &&
             !request.endedAtInstant.isLeapSecond && request.endedAtInstant.fractionalDigits.length <= 3 &&
-            request.replayId == receipt.replayId && request.startedAtInstant >= V1ConfigJson.parseExactTimestamp(receipt.firstStartAt) &&
+            request.replayId == receipt.replayId && request.startedAtInstant >= V1ConfigJson.parseExactTimestamp(receipt.epochStartedAt) &&
             request.captureProtocolGeneration == admission.permit.prepared.projection.privacy.protocolGeneration &&
             request.effectivePolicyHash == admission.input.observation.capture.decisionHash &&
             nativeCurrentConfig(disk, admission.source, admission.input.observation.capture) != null && admission.isCurrent()
@@ -2627,7 +2697,7 @@ internal class RuntimeQueueOwner private constructor(
             loaded = existing
             database().ensureReplayAudienceSchema()
             initializePersonState()
-            interruptNativeEpochOnOpen()
+            settleNativeOwnerGapOnWorker()
             return
         }
 
@@ -4887,7 +4957,12 @@ internal class RuntimeQueueOwner private constructor(
         throw error
     }
 
-    /** Resource-only process quarantine. No owner/self, callbacks or database work retained. */
+    /**
+     * Resource-only process quarantine. No owner/self, callbacks or database work retained.
+     * It keeps the installation from a second owner in this process only: a denial that never
+     * became durable is not carried to a later process, which settles the gap against the
+     * stored ledger and replay marks instead.
+     */
     private fun quarantineNativeResources() {
         synchronized(NATIVE_QUARANTINED_RESOURCES) {
             if (database != null || lease != null) NATIVE_QUARANTINED_RESOURCES += database to lease
