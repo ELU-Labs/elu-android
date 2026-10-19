@@ -333,6 +333,29 @@ internal object V1BatchResponseCodec {
 }
 
 internal object RetryAfterParser {
+    /** Longest pause honoured from a 429/5xx that is not the validated error object. */
+    const val FOREIGN_MAXIMUM_DELAY_MILLIS = 300_000L
+
+    fun isRetryableStatus(status: Int): Boolean = status == 429 || status in 500..599
+
+    /**
+     * A readable Retry-After on a 429/5xx that is not the validated error object is honoured up
+     * to five minutes. A missing or unreadable value yields 0 so the caller's backoff applies.
+     */
+    fun foreignDelayMillis(
+        value: String?,
+        responseEpochMillis: Long,
+    ): Long {
+        if (value == null) return 0
+        val parsed =
+            try {
+                parseDelayMillis(value, responseEpochMillis)
+            } catch (_: BatchProtocolException) {
+                return 0
+            }
+        return minOf(maxOf(0, parsed), FOREIGN_MAXIMUM_DELAY_MILLIS)
+    }
+
     fun parseDelayMillis(
         value: String,
         responseEpochMillis: Long,

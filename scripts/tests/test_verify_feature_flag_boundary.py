@@ -277,6 +277,8 @@ class FeatureFlagBoundaryGuardTest(unittest.TestCase):
             ('"sequence" -> NativeRasterConflictScope.SEQUENCE', '"session" -> NativeRasterConflictScope.SEQUENCE', 'original request'),
             ('require(response.retryAfter == null)', 'Unit', 'bounded retry'),
             ('RetryAfterParser.parseDelayMillis(it, now)', 'RetryAfterParser.other(it, now)', 'exact static'),
+            ('RetryAfterParser.foreignDelayMillis(response.retryAfter, now)', 'RetryAfterParser.other(response.retryAfter, now)', 'exact static'),
+            ('RetryAfterParser.isRetryableStatus(response.status)', 'RetryAfterParser.other(response.status)', 'exact static'),
         ]:
             with self.subTest(before=before):
                 self.assertIn(before, original); path.write_text(original.replace(before, after))

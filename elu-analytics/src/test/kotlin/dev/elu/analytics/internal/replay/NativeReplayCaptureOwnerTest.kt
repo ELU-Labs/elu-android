@@ -474,6 +474,45 @@ class NativeReplayCaptureOwnerTest {
             assertArrayEquals(body, rig.rows().single().prepared.copyBytes())
         }
     }
+    @Test fun `kill mid-capture relaunch discards the unsealed tail and records a new replay`(): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate()
+        lateinit var sealed: List<ReplayStoredChunk>; lateinit var killed: FakeRuntimeQueueBacking
+        Session(rig).use { session ->
+            val tail = CountDownLatch(1); val platform = Platform(rig, session.access)
+            // The second frame is collected at once, so it cannot seal: it exists only in memory.
+            platform.onPause = { stopped ->
+                if (platform.collections.get() == 1) true else { tail.countDown(); !stopped.await(3, TimeUnit.SECONDS) }
+            }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            try {
+                assertTrue(tail.await(3, TimeUnit.SECONDS)); assertEquals(2, platform.collections.get())
+                sealed = rig.rows(); assertEquals(1, sealed.size)
+                // Ending the process here keeps exactly the committed store, as a copy of its files does.
+                killed = rig.backing.committedCopy()
+                assertNotNull(NativeReplayAccounting.read(checkNotNull(killed.replayRows[NativeReplayAccounting.KEY])).session!!.activeEpoch)
+            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+        }
+        rig.advance(30); rig.relaunch(killed)
+        assertEquals(sealed.map { it.prepared.copyBytes().toList() }, rig.rows().map { it.prepared.copyBytes().toList() })
+        val settled = rig.state().session!!
+        assertNull(settled.activeEpoch); assertFalse(settled.interrupted); assertFalse(settled.clockDenied)
+        Session(rig).use { session ->
+            val owner = session.start(checkNotNull(session.prepare()), Platform(rig, session.access))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+        }
+        val rows = rig.rows(); assertEquals(2, rows.size)
+        assertArrayEquals(sealed.single().prepared.copyBytes(), rows[0].prepared.copyBytes())
+        val old = sealed.single().prepared; val fresh = rows[1].prepared
+        assertNotEquals(old.replayId, fresh.replayId); assertEquals(old.sessionId, fresh.sessionId); assertEquals(0L, fresh.sequence)
+        assertTrue(fresh.startedAtInstant > old.endedAtInstant)
+        assertEquals("the unsealed tail is gone", 1, rows.count { it.prepared.replayId == old.replayId })
+        // The ended process's sealed chunk keeps its delivery permission.
+        val delivery = rig.owner.openReplayDeliveryQueue(PrivacyStateProjector.nativeSealedDeliveryPolicy(
+            NativeReplayCapabilities(setOf(rig.protocol.transport), setOf(rig.protocol.generation))) { false }).get()
+        val claim = checkNotNull(delivery.claim())
+        assertArrayEquals(old.copyBytes(), claim.row.prepared.copyBytes())
+        delivery.abandon(claim)
+    }
     @Test fun `explicit internal trace selects profile collector while default capture has no profile`() = Rig().use { rig ->
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val records = CopyOnWriteArrayList<ByteArray>()
@@ -635,6 +674,25 @@ class NativeReplayCaptureOwnerTest {
             val owner = session.start(checkNotNull(session.prepare()), platform)
             assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
             assertEquals(1, rig.rows().size); assertEquals(1, platform.collections.get())
+        }
+    }
+    @Test fun `a held earlier chunk ends the recording and reports it without appending a suffix`(): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate(); Session(rig).use { session ->
+            val platform = Platform(rig, session.access, 11)
+            // Hold the first durable chunk as if its upload got an unexpected response.
+            rig.afterReplayCommit = { rig.backing.connection().use { db -> db.transaction { tx ->
+                val header = ReplayQueueStore.headers(tx).single()
+                tx.putReplayRow(ReplayDeliveryMetadata(header.ordinal, header.digest, ReplayDeliveryState.BLOCKED,
+                    UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1, delayMillis = REPLAY_PROTOCOL_HOLD_MIN_MILLIS,
+                    notBeforeMillis = rig.clock.wall + REPLAY_PROTOCOL_HOLD_MIN_MILLIS, blockKind = ReplayBlockKind.PROTOCOL.name,
+                    credentialWitness = "sha256:" + "b".repeat(64), scopeWitness = "sha256:" + "c".repeat(64),
+                    protocolGeneration = rig.protocol.generation).row())
+                val state = checkNotNull(ReplayQueueStore.state(tx))
+                tx.putReplayRow(state.copy(deliveryMetadataCount = (state.deliveryMetadataCount ?: 0L) + 1).row())
+            } } }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            assertEquals(NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(1, rig.rows().size); assertNull(rig.state().session!!.activeEpoch)
         }
     }
     @Test fun `withdrawal below positive minimum never seals initial only`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
@@ -1033,12 +1091,12 @@ class NativeReplayCaptureOwnerTest {
     }
 
     private class Rig(val protocol: NativeReplayProtocol = NativeReplayProtocol.V1) : AutoCloseable {
-        val clock = Clock(); val worker = Worker(); val gate = V2ConfigAuthorityGate()
+        val clock = Clock(); var worker = Worker(); var gate = V2ConfigAuthorityGate()
         var body = ReplayFixtures.resource("contracts/v2/fixtures/config-enabled.json")
-        val source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
-        val driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
-        val backing = FakeRuntimeQueueBacking()
-        val ownership = "native-accounting-" + UUID.randomUUID()
+        var source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+        var driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+        var backing = FakeRuntimeQueueBacking()
+        var ownership = "native-accounting-" + UUID.randomUUID()
         @Volatile var ownerNanos: Long? = null
         @Volatile var onOwnerNanos: (() -> Long)? = null
         @Volatile var onConnection: (() -> Unit)? = null
@@ -1120,6 +1178,16 @@ class NativeReplayCaptureOwnerTest {
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
         fun reopen() { owner.closeAsync().get(100, TimeUnit.MILLISECONDS); owner = openSame().get().also { it.bindConfigurationGate(gate).get() } }
+        /** The next process on [store], the committed rows an ended process left, with a new owner, source and gate. */
+        fun relaunch(store: FakeRuntimeQueueBacking) {
+            runCatching { owner.closeAsync().get(3, TimeUnit.SECONDS) }; driver.close()
+            backing = store; worker = Worker(); gate = V2ConfigAuthorityGate()
+            source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+            driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+            ownership = "native-accounting-" + UUID.randomUUID()
+            owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
+            driver.start(); worker.runNext(); publish()
+        }
         fun now() = RuntimeWallTimestamps.rfc3339(clock.wall)
         fun advance(seconds: Long = 1) { clock.wall += seconds * 1000; clock.nanos += seconds * 1_000_000_000 }
         fun event() = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "activity", now(), emptyMap(), StandaloneRuntime.defaultVersions())

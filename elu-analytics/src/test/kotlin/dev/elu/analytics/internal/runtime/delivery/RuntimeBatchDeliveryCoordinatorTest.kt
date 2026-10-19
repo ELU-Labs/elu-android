@@ -224,7 +224,8 @@ class RuntimeBatchDeliveryCoordinatorTest {
                     BatchHTTPResponse(503, oversized)
                 },
             )
-        assertEquals(BatchDeliveryStop.PROTOCOL_FAILURE, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        // An oversized body is not the validated error object; the 503 status still retries.
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
         assertEquals(listOf(0L), queue.records().map { it.sequence })
         coordinator.close()
     }
@@ -767,6 +768,89 @@ class RuntimeBatchDeliveryCoordinatorTest {
         assertEquals(1, forbiddenTransport.requests.size)
         assertEquals(1, forbiddenQueue.records().size)
         forbidden.close()
+    }
+
+    @Test
+    fun `429 and 5xx without the ELU error object retry the same request with backoff`() {
+        val responses: List<(String) -> BatchHTTPResponse> =
+            listOf(
+                { _ -> BatchHTTPResponse(503, "503 Service Unavailable".encodeToByteArray()) },
+                { _ -> BatchHTTPResponse(502, "<html><body>Bad Gateway</body></html>".encodeToByteArray()) },
+                { _ -> BatchHTTPResponse(500, ByteArray(0)) },
+                { _ -> BatchHTTPResponse(504, "{\"error\":\"upstream timeout\"}".encodeToByteArray()) },
+                { _ -> BatchHTTPResponse(429, "Too Many Requests".encodeToByteArray()) },
+                { id -> BatchHTTPResponse(429, transportError(429, id)) },
+                { id -> BatchHTTPResponse(503, transportError(503, id), retryAfter = "soon") },
+                { id -> BatchHTTPResponse(429, transportError(429, id), retryAfter = "1.5") },
+            )
+        responses.forEach { respond ->
+            val queue = FakeDeliveryQueue(listOf(event(0, START)))
+            val clock = FakeClock(plusSeconds(START, 60))
+            val scheduler = FakeScheduler()
+            val requestIds = mutableListOf<String>()
+            val transport =
+                RecordingTransport { raw ->
+                    val request = requestFrom(raw, queue.records())
+                    requestIds += request.requestId
+                    if (requestIds.size == 1) respond(request.requestId) else BatchHTTPResponse(200, acknowledgement(request, 1))
+                }
+            val coordinator = coordinator(queue, transport, clock, scheduler)
+
+            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+            assertEquals(500L, scheduler.entries.single().delayMillis)
+            assertEquals(listOf(0L), queue.records().map { it.sequence })
+
+            clock.monotonicNanos += TimeUnit.MILLISECONDS.toNanos(500)
+            scheduler.runNext()
+            awaitCondition { requestIds.size == 2 && queue.records().isEmpty() }
+            assertEquals(requestIds.first(), requestIds.last())
+            coordinator.close()
+        }
+    }
+
+    @Test
+    fun `a readable Retry-After on a foreign 429 or 5xx is honored up to five minutes`() {
+        listOf(
+            "30" to 30_000L,
+            "999999" to 300_000L,
+            "Wed, 01 Jan 2031 00:00:00 GMT" to 300_000L,
+            "-1" to 500L,
+        ).forEach { (retryAfter, expected) ->
+            val queue = FakeDeliveryQueue(listOf(event(0, START)))
+            val scheduler = FakeScheduler()
+            val transport = RecordingTransport { BatchHTTPResponse(503, "busy".encodeToByteArray(), retryAfter) }
+            val coordinator = coordinator(queue, transport, scheduler = scheduler)
+            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+            assertEquals(retryAfter, expected, scheduler.entries.single().delayMillis)
+            coordinator.close()
+        }
+
+        // The validated error object keeps its exact Retry-After.
+        val queue = FakeDeliveryQueue(listOf(event(0, START)))
+        val scheduler = FakeScheduler()
+        val transport =
+            RecordingTransport { raw ->
+                val id = JSONObject(raw.bodyBytes().decodeToString()).getString("requestId")
+                BatchHTTPResponse(503, transportError(503, id), retryAfter = "3600")
+            }
+        val coordinator = coordinator(queue, transport, scheduler = scheduler)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(3_600_000L, scheduler.entries.single().delayMillis)
+        coordinator.close()
+    }
+
+    @Test
+    fun `other statuses without the ELU error object still fail closed`() {
+        listOf(400 to BatchDeliveryStop.PERMANENT_FAILURE, 401 to BatchDeliveryStop.PROTOCOL_FAILURE,
+            413 to BatchDeliveryStop.PROTOCOL_FAILURE, 200 to BatchDeliveryStop.PROTOCOL_FAILURE).forEach { (status, stop) ->
+            val queue = FakeDeliveryQueue(listOf(event(0, START)))
+            val transport = RecordingTransport { BatchHTTPResponse(status, "<html>error</html>".encodeToByteArray()) }
+            val coordinator = coordinator(queue, transport)
+            assertEquals("HTTP $status", stop, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+            assertEquals(1, queue.records().size)
+            assertEquals(1, transport.requests.size)
+            coordinator.close()
+        }
     }
 
     @Test

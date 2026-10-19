@@ -572,6 +572,8 @@ dev.elu.analytics.internal.replay.NativeReplaySessionState
 dev.elu.analytics.internal.replay.NativeReplaySessionState$Allocation
 dev.elu.analytics.internal.replay.NativeReplaySessionState$Companion
 dev.elu.analytics.internal.replay.NativeReplaySessionState$Key
+dev.elu.analytics.internal.replay.NativeReplaySessionState$OwnerGap
+dev.elu.analytics.internal.replay.NativeReplaySessionState$OwnerGapOutcome
 dev.elu.analytics.internal.replay.NativeReplaySessionState$Session
 dev.elu.analytics.internal.replay.NativeReplaySessionState$Stop
 dev.elu.analytics.internal.replay.NativeReplayStartReceipt
@@ -833,7 +835,7 @@ dev.elu.analytics.internal.runtime.RuntimeQueueOwner$CaptureAuthorityActivationS
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$CaptureAuthorityActivationStage$Terminate
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$Companion
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$PreparedAppend$Companion
-dev.elu.analytics.internal.runtime.RuntimeQueueOwner$claimReplayDelivery$lambda$182$lambda$178$$inlined$sortedBy$1
+dev.elu.analytics.internal.runtime.RuntimeQueueOwner$claimReplayDelivery$lambda$196$lambda$192$$inlined$sortedBy$1
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$closeAsync$completion$1
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$openReplayDeliveryQueue$1$2
 dev.elu.analytics.internal.runtime.RuntimeQueueOwner$submitNative$1$result$1

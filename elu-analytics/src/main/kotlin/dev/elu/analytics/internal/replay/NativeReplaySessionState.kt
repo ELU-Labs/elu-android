@@ -37,6 +37,8 @@ internal data class NativeReplaySessionState(
 
     internal data class Allocation(val state: NativeReplaySessionState, val replayId: String)
     internal data class Stop(val state: NativeReplaySessionState, val matched: Boolean)
+    internal enum class OwnerGapOutcome { NONE, RESUMED, UNPROVEN, DENIED }
+    internal data class OwnerGap(val state: NativeReplaySessionState, val outcome: OwnerGapOutcome)
 
     fun validate(): NativeReplaySessionState {
         require(namespaceHash.matches(Regex("[a-f0-9]{64}")))
@@ -152,6 +154,34 @@ internal data class NativeReplaySessionState(
             s.copy(elapsedFloorMicroseconds = maxOf(s.elapsedFloorMicroseconds, elapsedMicroseconds))
         } else s.copy(clockDenied = true)
         return Stop(copy(session = s.copy(activeEpoch = null)).validate(), true)
+    }
+
+    /**
+     * Only a new exclusive store owner calls this, for the stored session. Here `interrupted`
+     * means elapsed time across an owner gap is not yet proven. The wall-clock gap since the
+     * last observation is charged on top of the retained floor; the draw, cap, first start and
+     * ordinal never change and a denial is never cleared. A wall below either durable mark
+     * denies the session; a wall that did not move proves nothing and is retried later.
+     */
+    fun settleOwnerGap(wallAt: String?, highWater: V1ExactTimestamp?): OwnerGap {
+        validate()
+        val s = session
+        val first = s?.firstStartAt ?: return OwnerGap(this, OwnerGapOutcome.NONE)
+        val observed = timestamp(s.observedWallAt)
+        val wall = wallAt?.let { runCatching { timestamp(it) }.getOrNull() }
+        val gap = wall?.takeIf { !s.clockDenied && it >= observed && (highWater == null || it >= highWater) }
+            ?.let { elapsedCeilMicroseconds(observed, it) }
+        val sinceFirst = wall?.let { elapsedCeilMicroseconds(timestamp(first), it) }
+        if (wall == null || gap == null || sinceFirst == null) {
+            return OwnerGap(copy(session = s.copy(clockDenied = true, interrupted = true)).validate(), OwnerGapOutcome.DENIED)
+        }
+        // Compare the native wire's millisecond buckets; neither value is a leap second here.
+        if (wall.toEpochMillisFloor() <= observed.toEpochMillisFloor()) {
+            return OwnerGap(copy(session = s.copy(interrupted = true)).validate(), OwnerGapOutcome.UNPROVEN)
+        }
+        val floor = minOf(MAXIMUM_MICROSECONDS, maxOf(s.elapsedFloorMicroseconds + gap, sinceFirst))
+        return OwnerGap(copy(session = s.copy(elapsedFloorMicroseconds = floor, observedWallAt = checkNotNull(wallAt),
+            activeEpoch = null, interrupted = false)).validate(), OwnerGapOutcome.RESUMED)
     }
 
     fun denyClock(key: Key): NativeReplaySessionState {

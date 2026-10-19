@@ -102,6 +102,7 @@ internal class NativeReplayComposition(
     private var subscription: AutoCloseable? = null
     private var selection: NativeReplaySelection? = null // worker only; contains weak native references
     private var lastAttempt: IdentityKey? = null // a scheduling cache, never authority
+    private var blockedWireframe: NativeReplayPreparedAuthority? = null
     private var deadlineRetry: ScheduledFuture<*>? = null // monitor; at most one pending timer
     private var deadlineRetryToken: Any? = null // monitor; withdrawal defeats already-queued wakes
     private var captureAttempt: Any? = null // worker only; a prior completion cannot schedule for its replacement
@@ -303,6 +304,7 @@ internal class NativeReplayComposition(
                                         !closed && restrictionGeneration === originalRestriction
                                     } && acceptance() && intakeAllowed() }
                                     val committed = { weak.get()?.flushSealed(); Unit }
+                                    var wireframePrepared: NativeReplayPreparedAuthority? = null
                                     val discovery = if (!capabilities.rasterSupported) AnnotatedRootDiscovery.Absent
                                         else (selected.consumeOriginalWindow(::accepted) { root, window, allowed ->
                                             NativeReplayCollectionAttempt.RasterDiscovery(
@@ -331,9 +333,9 @@ internal class NativeReplayComposition(
                                             } else {
                                                 val prepared = originalAuthority.prepare(selected, nativeStartTrace).awaitExact()
                                                 nativeStartTrace.mark(NativeStartPhase.PREPARE_RESULT, prepared != null)
-                                                if (prepared == null || !accepted() || !recordingEnabled() || !selected.isCurrent()) null
+                                                if (prepared == null || wireframeRefused(prepared) || !accepted() || !recordingEnabled() || !selected.isCurrent()) null
                                                 else NativeReplayCaptureOwner.start(queue, originalAuthority, prepared, versions, platform,
-                                                    nativeStartTrace, fresh, intake, committed)
+                                                    nativeStartTrace, fresh, intake, committed).also { wireframePrepared = prepared }
                                             }
                                         }
                                     }
@@ -344,9 +346,12 @@ internal class NativeReplayComposition(
                                         if (!recordingEnabled()) opened?.stopRecording()
                                         nativeStartTrace.mark(NativeStartPhase.CAPTURE_OWNER_RESULT, opened != null)
                                         if (opened != null) {
+                                            val blockable = wireframePrepared
                                             opened.finished().whenComplete { outcome, _ ->
                                                 weak.get()?.let {
                                                     it.publishCompletedCapture(opened)
+                                                    if (outcome == NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED && blockable != null)
+                                                        synchronized(it.monitor) { it.blockedWireframe = blockable }
                                                     if (outcome == NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED)
                                                         it.retrySettledRoot(opened, key, attempt, original, acceptance)
                                                     else if (outcome == NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE)
@@ -600,6 +605,17 @@ internal class NativeReplayComposition(
             }
         } catch (error: Throwable) { closeResult.completeExceptionally(error) }
         return closeResult
+    }
+
+    /**
+     * A recording that ended behind its held or refused chunk is not replaced by a new recording
+     * until the source, identity or session changes.
+     */
+    private fun wireframeRefused(value: NativeReplayPreparedAuthority): Boolean = synchronized(monitor) {
+        val blocked = blockedWireframe
+        if (blocked != null && blocked.sameCaptureContext(value)) return@synchronized true
+        blockedWireframe = null
+        false
     }
 
     private data class IdentityKey(val revision: Long, val contextRevision: Long, val sessionId: String?,

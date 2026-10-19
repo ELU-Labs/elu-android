@@ -929,6 +929,17 @@ cleanup prevent automatic recovery. Hosted component tests cover continuity and
 native-v2 touch capture; exact-artifact emulator, canonical engine and customer-player
 qualification remains pending. Compose content remains opaque.
 
+If the app is closed, ended by the system or updated and then opened again while
+its analytics session is still active, replay continues under a new replay ID in
+the same session, with the same sampling decision and the remaining time budget.
+The time the app was closed counts toward the session's replay limit. If the device
+clock reads earlier than the last recorded replay time, replay stays off for the rest
+of that session. Chunks sealed before the app ended keep their delivery
+permission; frames that were not yet sealed are discarded. A local
+`stopSessionRecording()` does not carry over to the next launch: call it again after
+setup on each launch where recording must stay off, or use `Elu.optOut()` to stop
+recording persistently.
+
 
 ## Explicit declared-region replay setup
 

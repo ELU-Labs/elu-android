@@ -122,14 +122,251 @@ class NativeReplaySessionQueueTest {
             assertTrue(rig.owner.stopNativeReplayAccounting(receipt).get())
         }
     }
-    @Test fun `clean close cannot prove first start monotonic continuity across new owner`() = Rig().use { rig ->
-        rig.activate(); val first = checkNotNull(rig.owner.beginNativeReplayAccounting(rig.observe()).get())
-        assertTrue(rig.owner.stopNativeReplayAccounting(first).get())
-        rig.reopen(); rig.publish()
-        val observation = rig.observe()
-        assertTrue(observation.session.interrupted)
+    @Test fun `frozen wall reopen stays unproven then wall advance resumes`() {
+        for (clean in listOf(false, true)) for (activate in listOf(false, true)) Rig().use { rig ->
+            rig.activate(); val first = rig.begin()
+            // The continuous clock runs while the wall clock stays put, in both processes.
+            rig.clock.nanos += 400_000_000L
+            if (clean) { assertTrue(rig.owner.stopNativeReplayAccounting(first).get()); rig.owner.closeAsync().get() }
+            rig.clock.nanos += 10_000_000_000L
+            rig.relaunch()
+            if (activate) rig.ensure()
+            // A wall clock that did not move cannot prove the gap: unproven, not denied.
+            val reopened = rig.observe().session
+            assertTrue(reopened.interrupted); assertFalse(reopened.clockDenied)
+            assertEquals(first.firstStartAt, reopened.firstStartAt); assertEquals(clean, reopened.activeEpoch == null)
+            assertNull(rig.owner.beginNativeReplayAccounting(rig.observe()).get())
+            if (clean) assertEquals(400_000L, reopened.elapsedFloorMicroseconds)
+            // Once the wall moves, the next touch charges the gap on top of the floor and resumes.
+            val ordinal = rig.state().nextReplayOrdinal
+            rig.clock.wall += 10_000
+            if (activate) rig.ensure() else rig.observe()
+            val settled = rig.state().session!!
+            assertFalse(settled.interrupted); assertFalse(settled.clockDenied); assertNull(settled.activeEpoch)
+            assertEquals(if (clean) 10_400_000L else 10_000_000L, settled.elapsedFloorMicroseconds)
+            val next = rig.begin()
+            assertNotEquals(first.replayId, next.replayId); assertEquals(first.firstStartAt, next.firstStartAt)
+            assertEquals(ordinal + 1, rig.state().nextReplayOrdinal)
+            assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+        }
+    }
+    @Test fun `same live owner keeps its clock across schema setup without sampling clocks`() = Rig().use { rig ->
+        rig.activate(); val receipt = rig.begin(); rig.elapse(1_000); rig.observe()
+        val before = rig.row().payload.copyOf()
+        rig.clock.throwOnRead = true; rig.ensure(); rig.clock.throwOnRead = false
+        assertArrayEquals(before, rig.row().payload)
+        assertTrue(rig.owner.stopNativeReplayAccounting(receipt).get())
+        val stopped = rig.row().payload.copyOf()
+        rig.clock.throwOnRead = true; rig.ensure(); rig.clock.throwOnRead = false
+        assertArrayEquals(stopped, rig.row().payload)
+        val next = rig.begin(); assertNotEquals(receipt.replayId, next.replayId)
+        assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+    }
+    @Test fun `live owner beside a foreign stored epoch fails closed on schema setup`() = Rig().use { rig ->
+        rig.activate(); val receipt = rig.begin()
+        val stored = rig.state()
+        rig.replace(stored.copy(session = stored.session!!.copy(activeEpoch = UUID.randomUUID().toString())))
+        rig.ensure()
+        assertTrue(rig.state().session!!.interrupted); assertFalse(rig.state().session!!.clockDenied)
+        assertFalse(rig.owner.stopNativeReplayAccounting(receipt).get())
+        assertTrue(rig.observe().session.interrupted)
+    }
+    @Test fun `open settles the closed gap before observation with the additive charge`() = Rig().use { rig ->
+        rig.activate(); val old = rig.begin()
+        rig.clock.nanos += 400_000_000L; assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+        rig.owner.closeAsync().get(); rig.clock.wall += 10_000; rig.relaunch()
+        // Opening an existing store settles before observation or schema setup reads the ledger.
+        assertEquals(10_400_000L, rig.state().session!!.elapsedFloorMicroseconds); assertFalse(rig.state().session!!.interrupted)
+        val first = rig.observe().session
+        assertFalse(first.interrupted); assertFalse(first.clockDenied); assertEquals(10_400_000L, first.elapsedFloorMicroseconds)
+        rig.ensure(); assertEquals(10_400_000L, rig.state().session!!.elapsedFloorMicroseconds)
+        val next = rig.begin(); assertNotEquals(old.replayId, next.replayId)
+        assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+    }
+    @Test fun `next owner settles an epoch left by a failed stop once wall advances`() = Rig().use { rig ->
+        rig.activate(); val receipt = rig.begin()
+        rig.backing.ambiguousNextCommit = FakeAmbiguousOutcome.DIVERGE
+        failure { rig.owner.stopNativeReplayAccounting(receipt).get() }
+        failure { rig.owner.closeAsync().get() }
+        failure { rig.openSame().get() }
+        assertEquals(receipt.epoch, rig.state().session!!.activeEpoch)
+        rig.elapse(5_000); rig.relaunch(); rig.ensure()
+        val state = rig.observe().session
+        assertFalse(state.interrupted); assertFalse(state.clockDenied); assertNull(state.activeEpoch)
+        assertTrue(state.elapsedFloorMicroseconds >= 5_000_000)
+        val next = rig.begin(); assertNotEquals(receipt.replayId, next.replayId)
+        assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+    }
+    @Test fun `relaunch after kill mid-capture settles the orphaned epoch`() = Rig().use { rig ->
+        rig.activate(); val old = rig.begin()
+        rig.elapse(2_000); rig.observe()
+        assertEquals(old.epoch, rig.state().session!!.activeEpoch)
+        // The process ends mid-capture: no stop and no close.
+        rig.elapse(30_000); rig.relaunch(); rig.ensure()
+        val settled = rig.state().session!!
+        assertNull(settled.activeEpoch); assertFalse(settled.interrupted); assertFalse(settled.clockDenied)
+        assertEquals(old.firstStartAt, settled.firstStartAt)
+        val elapsed = checkNotNull(NativeReplaySessionState.elapsedCeilMicroseconds(
+            V1ConfigJson.parseExactTimestamp(old.firstStartAt), V1ConfigJson.parseExactTimestamp(rig.now())))
+        assertTrue(settled.elapsedFloorMicroseconds >= elapsed)
+        // The ended owner's receipt cannot act through the new owner.
+        val before = rig.row().payload.copyOf()
+        assertFalse(rig.owner.stopNativeReplayAccounting(old).get()); assertArrayEquals(before, rig.row().payload)
+        val next = rig.begin()
+        assertNotEquals(old.replayId, next.replayId); assertEquals(old.firstStartAt, next.firstStartAt)
+        assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+    }
+    @Test fun `relaunch wall below the replay high water denies for the rest of the session`() = Rig().use { rig ->
+        rig.activate(); val old = rig.begin(); val begun = rig.clock.wall
+        rig.elapse(5_000)
+        // Replay storage work in the ended process raised the replay store's wall past the ledger's.
+        rig.owner.reconcilePreparedReplay(rig.privacy()).get()
+        assertEquals(begun + 5_000, ReplayStoredState.decode(checkNotNull(rig.backing.replayRows["state"])).wallFloor)
+        rig.clock.wall = begun + 2_000; rig.relaunch(); rig.ensure()
+        val denied = rig.state().session!!
+        assertTrue(denied.clockDenied); assertTrue(denied.interrupted); assertEquals(old.epoch, denied.activeEpoch)
+        val observation = rig.observe(); assertTrue(observation.session.clockDenied)
         assertNull(rig.owner.beginNativeReplayAccounting(observation).get())
-        assertEquals(1L, rig.state().nextReplayOrdinal)
+        // A later wall well ahead of both marks never clears the session's denial.
+        rig.clock.wall = begun + 60_000; rig.relaunch(); rig.ensure()
+        val again = rig.observe(); assertTrue(again.session.clockDenied)
+        assertEquals(old.firstStartAt, again.session.firstStartAt)
+        assertNull(rig.owner.beginNativeReplayAccounting(again).get())
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+    }
+    @Test fun `wall rollback across a clean gap denies the session but a new session starts clean`() = Rig().use { rig ->
+        rig.activate(); val old = rig.begin(); val begun = rig.clock.wall
+        rig.elapse(1_000); assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+        val stopped = rig.state().session!!
+        rig.owner.closeAsync().get(); rig.clock.wall = begun + 500; rig.relaunch(); rig.ensure()
+        val denied = rig.observe()
+        assertTrue(denied.session.clockDenied)
+        assertEquals(stopped.elapsedFloorMicroseconds, denied.session.elapsedFloorMicroseconds)
+        assertNull(rig.owner.beginNativeReplayAccounting(denied).get())
+        rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish()
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        val fresh = rig.observe()
+        assertNotEquals(denied.session.key, fresh.session.key); assertNotEquals(denied.session.samplingHash, fresh.session.samplingHash)
+        assertFalse(fresh.session.clockDenied); assertFalse(fresh.session.interrupted); assertNull(fresh.session.firstStartAt)
+        val next = rig.begin(); assertNotEquals(old.replayId, next.replayId)
+        assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+    }
+    @Test fun `relaunch forward clock jump only shrinks the budget`() = Rig().use { rig ->
+        rig.configure { it.getJSONObject("privacy").getJSONObject("replay").put("maximumDurationSeconds", 60) }
+        rig.activate(); val old = rig.begin(); rig.elapse(1_000); assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+        rig.owner.closeAsync().get(); rig.clock.wall += 120_000; rig.relaunch(); rig.ensure()
+        val jumped = rig.observe().session
+        assertFalse(jumped.clockDenied); assertFalse(jumped.interrupted)
+        assertTrue(jumped.elapsedFloorMicroseconds >= 121_000_000); assertEquals(0L, jumped.remainingMicroseconds)
+        assertNull(rig.owner.beginNativeReplayAccounting(rig.observe()).get())
+    }
+    @Test fun `relaunch does not reroll sampling or renew the cap`() {
+        Rig().use { rig ->
+            rig.configure { it.getJSONObject("privacy").getJSONObject("replay").put("sampleRate", 0) }
+            rig.activate(); val original = rig.observe(); assertFalse(original.session.originalSelected)
+            rig.owner.closeAsync().get(); rig.elapse(10_000); rig.policy("2026-08-05T00:01:05.000Z", 1.0, 60)
+            rig.relaunch(); rig.ensure()
+            val reopened = rig.observe()
+            assertEquals(original.session.samplingHash, reopened.session.samplingHash); assertFalse(reopened.currentSelected)
+            assertNull(rig.owner.beginNativeReplayAccounting(reopened).get())
+        }
+        Rig().use { rig ->
+            rig.configure { it.getJSONObject("privacy").getJSONObject("replay").put("maximumDurationSeconds", 60) }
+            rig.activate(); val old = rig.begin(); rig.elapse(1_000); assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+            val before = rig.state().session!!
+            rig.owner.closeAsync().get(); rig.elapse(10_000); rig.policy("2026-08-05T00:01:05.000Z", 0.0, 30)
+            rig.relaunch(); rig.ensure()
+            val restricted = rig.observe()
+            assertFalse(restricted.currentSelected); assertFalse(restricted.session.interrupted)
+            assertNull(rig.owner.beginNativeReplayAccounting(restricted).get())
+            rig.policy("2026-08-05T00:01:06.000Z", 1.0, 120); rig.refresh()
+            val restored = rig.observe()
+            assertTrue(restored.currentSelected)
+            assertEquals(before.samplingHash, restored.session.samplingHash)
+            assertEquals(before.originalSampleRate, restored.session.originalSampleRate, 0.0)
+            assertEquals(before.firstStartAt, restored.session.firstStartAt); assertEquals(30, restored.session.maximumDurationSeconds)
+            val next = rig.begin(); assertNotEquals(old.replayId, next.replayId)
+            assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+        }
+    }
+    @Test fun `legacy interrupted ledger resumes unless denied`() {
+        for (variant in listOf("clean", "orphan", "denied")) Rig().use { rig ->
+            rig.activate(); val old = rig.begin(); rig.elapse(1_000)
+            if (variant != "orphan") { assertTrue(rig.owner.stopNativeReplayAccounting(old).get()); rig.owner.closeAsync().get() }
+            // The ledger as an earlier release left it after its own relaunch.
+            val legacy = rig.state()
+            rig.replace(legacy.copy(session = legacy.session!!.copy(interrupted = true, clockDenied = variant == "denied")))
+            rig.elapse(10_000); rig.relaunch(); rig.ensure()
+            val current = rig.observe()
+            if (variant == "denied") {
+                assertTrue(current.session.clockDenied); assertTrue(current.session.interrupted)
+                assertNull(rig.owner.beginNativeReplayAccounting(current).get())
+            } else {
+                assertFalse(variant, current.session.interrupted); assertFalse(variant, current.session.clockDenied)
+                assertNull(variant, current.session.activeEpoch)
+                val next = rig.begin()
+                assertNotEquals(old.replayId, next.replayId); assertEquals(old.firstStartAt, next.firstStartAt)
+                assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+            }
+        }
+    }
+    @Test fun `resumed ledger keeps the stored metadata shape and database version`() = Rig().use { rig ->
+        rig.activate(); val old = rig.begin(); rig.elapse(1_000); assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+        val version = rig.backing.databaseSchemaVersion
+        rig.owner.closeAsync().get(); rig.elapse(10_000); rig.relaunch(); rig.ensure()
+        val row = rig.row(); assertEquals(1L, row.storageSchemaVersion)
+        val root = JSONObject(String(row.payload, Charsets.UTF_8))
+        assertEquals(setOf("schemaVersion", "namespaceHash", "streamId", "nextReplayOrdinal", "session"), root.keys().asSequence().toSet())
+        assertEquals(1, root.getInt("schemaVersion"))
+        val session = root.getJSONObject("session")
+        assertEquals(setOf("siteId", "sessionId", "sessionStartedAt", "samplingHash", "originalSampleRate", "originalSelected",
+            "firstStartAt", "maximumDurationSeconds", "elapsedFloorMicroseconds", "observedWallAt", "clockDenied", "interrupted",
+            "activeEpoch"), session.keys().asSequence().toSet())
+        assertFalse(session.getBoolean("interrupted")); assertFalse(NativeReplayAccounting.read(row).session!!.interrupted)
+        assertEquals(version, rig.backing.databaseSchemaVersion)
+        // A wall pinned across a later relaunch proves nothing, which is also what an older reader concludes.
+        val next = rig.begin(); assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+        rig.owner.closeAsync().get(); rig.relaunch()
+        assertTrue(rig.observe().session.interrupted)
+    }
+    @Test fun `relaunch without a continuous clock denies`() = Rig().use { rig ->
+        rig.activate(); val old = rig.begin(); rig.elapse(1_000); assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+        rig.owner.closeAsync().get(); rig.elapse(10_000)
+        rig.ownerNanos = -1; rig.relaunch(publish = false); rig.ownerNanos = null; rig.publish()
+        rig.ensure(); assertTrue(rig.state().session!!.clockDenied)
+        val observation = rig.observe(); assertTrue(observation.session.clockDenied)
+        assertNull(rig.owner.beginNativeReplayAccounting(observation).get())
+    }
+    @Test fun `opt-out during the gap never resumes the earlier session`() = Rig().use { rig ->
+        rig.activate(); val before = rig.observe(); val old = rig.begin(); rig.elapse(1_000)
+        assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+        rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, rig.now())).get()
+        rig.owner.closeAsync().get(); rig.elapse(10_000); rig.relaunch(publish = false)
+        rig.owner.submitCaptureAuthority(rig.body, rig.privacy()).get()
+        val identity = rig.owner.snapshot().get().state.identity
+        assertTrue(identity.optedOut); assertNull(identity.session)
+        rig.ensure(); assertNull(rig.owner.observeNativeReplaySession().get())
+        rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(false, rig.now())).get(); rig.publish()
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        val current = rig.observe()
+        assertNotEquals(before.session.key, current.session.key); assertNull(current.session.firstStartAt)
+        val next = rig.begin(); assertNotEquals(old.replayId, next.replayId)
+        assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
+    }
+    @Test fun `relaunch after the idle timeout uses a new ledger`() = Rig().use { rig ->
+        rig.configure { it.getJSONObject("session").put("idleTimeoutSeconds", 60) }
+        rig.activate(); val old = rig.begin(); rig.elapse(1_000); assertTrue(rig.owner.stopNativeReplayAccounting(old).get())
+        val previous = rig.state()
+        rig.owner.closeAsync().get(); rig.elapse(61_000); rig.relaunch()
+        assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+        val fresh = rig.observe().session
+        assertNotEquals(previous.session!!.key.sessionId, fresh.key.sessionId)
+        assertNotEquals(previous.session!!.samplingHash, fresh.samplingHash)
+        assertNull(fresh.firstStartAt); assertFalse(fresh.interrupted)
+        val next = rig.begin()
+        assertNotEquals(old.replayId, next.replayId); assertNotEquals(old.firstStartAt, next.firstStartAt)
+        assertEquals(previous.nextReplayOrdinal + 1, rig.state().nextReplayOrdinal)
+        assertTrue(rig.owner.stopNativeReplayAccounting(next).get())
     }
     @Test fun `unstarted session survives clean reopen without interruption`() = Rig().use { rig ->
         rig.activate(); rig.observe(); rig.reopen(); rig.publish()
@@ -338,7 +575,7 @@ class NativeReplaySessionQueueTest {
         var source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
         var driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
         val backing = FakeRuntimeQueueBacking()
-        val ownership = "native-accounting-" + UUID.randomUUID()
+        var ownership = "native-accounting-" + UUID.randomUUID()
         @Volatile var ownerNanos: Long? = null
         @Volatile var onWrite: (() -> Unit)? = null
         @Volatile var afterWriteCommit: (() -> Unit)? = null
@@ -388,7 +625,15 @@ class NativeReplaySessionQueueTest {
             configure { it.put("issuedAt", "2026-08-05T00:01:05.000Z").put("revision", "renewed"); change(it) }
             driver.onBackground(); driver.onForeground(); worker.runNext(); publish()
         }
+        fun policy(issuedAt: String, rate: Double, cap: Int) = configure {
+            it.put("issuedAt", issuedAt).put("revision", "policy-$issuedAt")
+            it.getJSONObject("privacy").getJSONObject("replay").put("sampleRate", rate).put("maximumDurationSeconds", cap)
+        }
+        fun refresh() { driver.onBackground(); driver.onForeground(); worker.runNext(); publish() }
         fun observe() = checkNotNull(owner.observeNativeReplaySession().get())
+        fun begin() = checkNotNull(owner.beginNativeReplayAccounting(observe()).get())
+        fun ensure() = owner.ensureNativeReplayAccounting().get()
+        fun elapse(millis: Long) { clock.wall += millis; clock.nanos += millis * 1_000_000 }
         fun row() = checkNotNull(backing.replayRows[NativeReplayAccounting.KEY])
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
@@ -402,6 +647,19 @@ class NativeReplaySessionQueueTest {
             driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
             owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
             driver.start(); worker.runNext()
+        }
+        /**
+         * The next process on this store, whether or not the current one closed: a new owner and
+         * source on the same rows. An unclosed owner is abandoned untouched, as a killed process is.
+         */
+        fun relaunch(publish: Boolean = true) {
+            worker = Worker(); gate = V2ConfigAuthorityGate()
+            source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
+            driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
+            ownership = "native-accounting-" + UUID.randomUUID()
+            owner = openSame().get().also { it.bindConfigurationGate(gate).get() }
+            driver.start(); worker.runNext()
+            if (publish) publish()
         }
         fun now() = RuntimeWallTimestamps.rfc3339(clock.wall)
         fun event() = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "activity", now(), emptyMap(), StandaloneRuntime.defaultVersions())

@@ -27,10 +27,10 @@ class NativeReplayCaptureQueueTest {
         var permit: NativeReplayPermit? = null
         fun begin(): NativeReplayPermit = checkNotNull(authority.start(prepared, use).get()).also { permit = it }
         fun admission() = checkNotNull(authority.captureAdmission(checkNotNull(permit), use).get())
-        fun request(admission: NativeReplayCaptureAdmission): PreparedReplayRequest {
+        fun request(admission: NativeReplayCaptureAdmission, timestamp: Long = rig.clock.wall): PreparedReplayRequest {
             val sealer = NativeReplaySealer(checkNotNull(permit).replayId, admission.identity,
                 admission.authorization, admission.privacy, admission.profile, StandaloneRuntime.defaultVersions())
-            val frame = NativeMaskedSnapshot(0, rig.clock.wall, NativeViewport(320, 480), emptyList())
+            val frame = NativeMaskedSnapshot(0, timestamp, NativeViewport(320, 480), emptyList())
             return when (rig.protocol) {
                 NativeReplayProtocol.V1 -> sealer.seal(listOf(frame))
                 NativeReplayProtocol.V2 -> sealer.sealV2(listOf(NativeReplayV2Geometry(frame)))
@@ -262,6 +262,23 @@ class NativeReplayCaptureQueueTest {
             assertEquals(request.captureProtocolGeneration, row.captureProtocolGeneration)
             assertEquals(protocol.transport, row.prepared.transport)
             assertEquals(protocol.generation, row.captureProtocolGeneration)
+        }
+    } }
+    @Test fun `a chunk starting before its recording began is refused`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
+        rig.activate()
+        // An earlier recording fixes the session's first start; this recording begins later.
+        val earlier = checkNotNull(rig.owner.beginNativeReplayAccounting(rig.observe()).get()); val firstStart = rig.clock.wall
+        rig.clock.wall += 2_000; rig.clock.nanos += 2_000_000_000L
+        assertTrue(rig.owner.stopNativeReplayAccounting(earlier).get())
+        Session(rig).use { session ->
+            session.begin(); val admission = session.admission()
+            assertEquals(earlier.firstStartAt, rig.state().session!!.firstStartAt)
+            val early = session.request(admission, firstStart)
+            assertTrue(rig.owner.appendNativeReplay(early, admission, session.use).get() is NativeReplayAppendOutcome.Rejected)
+            assertTrue(rig.owner.storedPreparedReplayForTesting().get().isEmpty())
+            // The same admission then stores a chunk at its recording's begin.
+            assertTrue(rig.owner.appendNativeReplay(session.request(admission), admission, session.use).get() is NativeReplayAppendOutcome.Committed)
+            assertEquals(listOf(checkNotNull(session.permit).replayId), rig.owner.storedPreparedReplayForTesting().get().map { it.prepared.replayId })
         }
     } }
     @Test fun `native tuple mismatch and foreign admission cannot append even well formed original bytes`() {

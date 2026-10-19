@@ -116,9 +116,9 @@ class NativeRasterStorageTest {
             val originalOwner = "d682cd3e-9bfb-4d07-bc80-0b194bc11b86"
             val claim = checkNotNull(ReplayQueueStore.claim(tx, originalOwner, authorization, rig.clock.wall, 1) { true })
             assertArrayEquals(old.copyBytes(), claim.row.prepared.copyBytes())
-            assertEquals(ReplayDeliveryCommit.COMMITTED, ReplayQueueStore.commit(tx, claim, ReplayDeliveryOutcome.Accepted, 2))
+            assertEquals(ReplayDeliveryCommit.COMMITTED, ReplayQueueStore.commit(tx, claim, ReplayDeliveryOutcome.Accepted, 2, 0))
             assertNull(ReplayQueueStore.claim(tx, originalOwner, authorization, rig.clock.wall, 3) { true })
-            assertNull(ReplayQueueStore.nextWakeDelay(tx, originalOwner, authorization, 3))
+            assertNull(ReplayQueueStore.nextWakeDelay(tx, originalOwner, authorization, 3, 0))
             assertArrayEquals(raster.copyBytes(), ReplayQueueStore.readRaster(tx, ReplayQueueStore.headers(tx).single()).request.copyBytes())
             ReplayQueueStore.validate(tx, RasterQueueRig.namespace)
             Unit

@@ -188,8 +188,8 @@ class AndroidReplayStorageInstrumentationTest {
         } }
     }
 
-    @Test fun freshOwnerPreservesFirstWindowAndInterruptsEvenCleanInactiveGap() {
-        for (wasActive in listOf(false, true)) withNativeFile { file, siteKey, namespace ->
+    @Test fun freshOwnerSettlesClosedGapByWallClockAndPreservesFirstWindow() {
+        for (wasActive in listOf(false, true)) for (advanced in listOf(false, true)) withNativeFile { file, siteKey, namespace ->
             val key = NativeReplaySessionState.Key("fixture-site", "session_fixture", "2026-08-05T00:00:00Z")
             val epoch = UUID.randomUUID().toString()
             val begun = NativeReplaySessionState(namespace, "stream_native_fixture")
@@ -203,15 +203,24 @@ class AndroidReplayStorageInstrumentationTest {
                 db.transaction { it.insertCore(core) }; db.ensureReplaySchema(ReplayStoredState(namespace).row())
                 db.ensureNativeReplaySchema(NativeReplayAccounting.row(original))
             }
+            // A wall that did not move proves nothing; a later wall charges the closed gap.
+            val wall = java.time.Instant.parse(original.session!!.observedWallAt).toEpochMilli() + if (advanced) 10_000L else 0L
+            val clock = object : RuntimeCaptureClock {
+                override fun wallNowEpochMillis() = wall
+                override fun elapsedRealtimeNanos() = 1L
+            }
             val owner = AndroidRuntimeQueue.openForTesting(file, RuntimeQueueLimits(100, MAX_RUNTIME_QUEUE_BYTES),
-                legacyStateLoader = { error("Existing core must not be replaced") }, trustedSiteKey = siteKey).get(5, java.util.concurrent.TimeUnit.SECONDS)
+                legacyStateLoader = { error("Existing core must not be replaced") }, trustedSiteKey = siteKey,
+                captureClock = clock).get(5, java.util.concurrent.TimeUnit.SECONDS)
             owner.closeAsync().get(5, java.util.concurrent.TimeUnit.SECONDS)
             AndroidSQLiteRuntimeDatabase.open(file).use { db -> db.transaction { tx ->
                 val retained = NativeReplayAccounting.read(tx.readReplayRow(NativeReplayAccounting.KEY)!!)
-                assertTrue(retained.session!!.interrupted)
+                assertEquals(!advanced, retained.session!!.interrupted); assertFalse(retained.session!!.clockDenied)
+                assertEquals(if (advanced) null else original.session!!.activeEpoch, retained.session!!.activeEpoch)
                 assertEquals(original.session!!.firstStartAt, retained.session!!.firstStartAt)
                 assertEquals(original.nextReplayOrdinal, retained.nextReplayOrdinal)
-                assertEquals(original.session!!.elapsedFloorMicroseconds, retained.session!!.elapsedFloorMicroseconds)
+                assertEquals(original.session!!.elapsedFloorMicroseconds + if (advanced) 10_000_000L else 0L,
+                    retained.session!!.elapsedFloorMicroseconds)
                 ReplayQueueStore.validate(tx, namespace)
             } }
         }

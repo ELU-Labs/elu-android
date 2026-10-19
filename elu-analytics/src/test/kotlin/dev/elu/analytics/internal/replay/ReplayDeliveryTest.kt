@@ -68,9 +68,9 @@ class ReplayDeliveryTest {
             .put("code","replay-identity-conflict").put("disposition","permanent").put("conflictScope","sequence")
         assertEquals(ReplayDeliveryOutcome.Blocked(ReplayBlockKind.CONFLICT), ReplayResponseClassifier.classify(ReplayTransportResponse(409, conflict.toString().toByteArray()), request,0,1000))
     }
-    @Test fun `429 requires retry header and 503 preserves exact bytes for retry`() = Rig().use { rig ->
+    @Test fun `429 without retry header retries only its row and 503 preserves exact bytes for retry`() = Rig().use { rig ->
         rig.activate(); rig.append(); val claim = checkNotNull(rig.delivery().claim())
-        assertEquals(ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL), ReplayResponseClassifier.classify(ReplayTransportResponse(429,error(429,claim.row.prepared.requestId)),claim.row.prepared,rig.clock.wall,1000))
+        assertEquals(ReplayDeliveryOutcome.Retry(1000), ReplayResponseClassifier.classify(ReplayTransportResponse(429,error(429,claim.row.prepared.requestId)),claim.row.prepared,rig.clock.wall,1000))
         val retry = ReplayResponseClassifier.classify(ReplayTransportResponse(503,error(503,claim.row.prepared.requestId),"2"),claim.row.prepared,rig.clock.wall,1000)
         assertEquals(ReplayDeliveryOutcome.Retry(2000), retry)
         assertEquals(ReplayDeliveryCommit.COMMITTED,rig.delivery().commit(claim,retry)); assertNull(rig.delivery().claim())
@@ -222,6 +222,97 @@ class ReplayDeliveryTest {
         pass.get(3,TimeUnit.SECONDS);assertEquals(1,rig.rows().size);co.close()
     }
 
+    @Test fun `429 and 5xx without the ELU error object retry the row only and never pause the endpoint`() {
+        val request = PreparedReplayRequest.parse(ReplayFixtures.bytes(), ReplayFixtures.GENERATION)
+        fun classify(status: Int, body: String, retryAfter: String? = null) = ReplayResponseClassifier.classify(
+            ReplayTransportResponse(status, body.toByteArray(), retryAfter), request, 0, 1000)
+        for ((status, body) in listOf(503 to "503 Service Unavailable", 502 to "<html><body>Bad Gateway</body></html>",
+            500 to "", 504 to "{\"error\":\"upstream timeout\"}", 429 to "Too Many Requests"))
+            assertEquals("HTTP $status", ReplayDeliveryOutcome.Retry(1000), classify(status, body))
+        // A readable hint is honoured up to five minutes; an unreadable one falls back to backoff.
+        assertEquals(ReplayDeliveryOutcome.Retry(30_000), classify(503, "busy", "30"))
+        assertEquals(ReplayDeliveryOutcome.Retry(300_000), classify(503, "busy", "999999"))
+        assertEquals(ReplayDeliveryOutcome.Retry(1000), classify(429, "busy", "soon"))
+        // A validated error object with an unreadable Retry-After also retries only this row.
+        assertEquals(ReplayDeliveryOutcome.Retry(1000), classify(503, String(error(503, request.requestId)), "soon"))
+        // Acknowledgements and other statuses stay strictly validated.
+        for (status in listOf(200, 400, 404, 409, 413))
+            assertEquals("HTTP $status", ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL), classify(status, "<html>error</html>"))
+    }
+    @Test fun `protocol hold offers the same bytes again after the row age bounded to one hour then grows`() = Rig().use { rig ->
+        rig.activate(); rig.append(); val q = rig.delivery(); val claim = checkNotNull(q.claim())
+        assertEquals(ReplayDeliveryCommit.COMMITTED, q.commit(claim, ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL)))
+        assertNull(q.claim()); assertEquals(REPLAY_PROTOCOL_HOLD_MIN_MILLIS, q.nextWakeDelayMillis())
+        rig.backing.connection().use { db -> db.transaction { tx ->
+            val hold = checkNotNull(ReplayQueueStore.delivery(tx, claim.ordinal))
+            assertEquals(REPLAY_PROTOCOL_HOLD_MIN_MILLIS, hold.delayMillis)
+            assertEquals(rig.clock.wall + REPLAY_PROTOCOL_HOLD_MIN_MILLIS, hold.notBeforeMillis)
+            assertEquals(hold, ReplayDeliveryMetadata.decode(hold.row()))
+            val owner = UUID.randomUUID().toString()
+            assertNull(ReplayQueueStore.claim(tx, owner, claim.authorization, hold.notBeforeMillis - 1, 1) { true })
+            val again = checkNotNull(ReplayQueueStore.claim(tx, owner, claim.authorization, hold.notBeforeMillis, 1) { true })
+            assertArrayEquals(claim.row.prepared.copyBytes(), again.row.prepared.copyBytes())
+            assertEquals(2, again.attemptCount)
+            // A second hold is the row's age when it is held again, bounded to one day.
+            val later = Instant.parse("2026-08-05T06:01:00Z").toEpochMilli()
+            assertEquals(ReplayDeliveryCommit.COMMITTED, ReplayQueueStore.commit(tx, again, ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL), 1, later))
+            assertEquals(6 * 3_600_000L, checkNotNull(ReplayQueueStore.delivery(tx, claim.ordinal)).delayMillis)
+            assertEquals(REPLAY_PROTOCOL_HOLD_MAX_MILLIS, ReplayQueueStore.protocolHoldMillis(0, 3 * REPLAY_PROTOCOL_HOLD_MAX_MILLIS))
+            assertEquals(REPLAY_PROTOCOL_HOLD_MIN_MILLIS, ReplayQueueStore.protocolHoldMillis(later, later - 1))
+            Unit
+        } }
+    }
+    @Test fun `credential refusal and validated conflict stay final after the protocol hold window`() {
+        for (kind in listOf(ReplayBlockKind.FORBIDDEN, ReplayBlockKind.CONFLICT)) Rig().use { rig ->
+            rig.activate(); rig.append(); val q = rig.delivery(); val claim = checkNotNull(q.claim())
+            q.commit(claim, ReplayDeliveryOutcome.Blocked(kind))
+            rig.backing.connection().use { db -> db.transaction { tx ->
+                assertNull(ReplayQueueStore.claim(tx, UUID.randomUUID().toString(), claim.authorization,
+                    rig.clock.wall + REPLAY_PROTOCOL_HOLD_MAX_MILLIS, 1) { true })
+            } }
+        }
+    }
+    @Test fun `a held chunk stops its recording while a pending retry does not`() {
+        for (held in listOf(true, false)) Rig().use { rig ->
+            rig.activate(); rig.append(); val q = rig.delivery(); val claim = checkNotNull(q.claim())
+            q.commit(claim, if (held) ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL) else ReplayDeliveryOutcome.Retry(2000))
+            val next = rig.append(rig.request { it.put("chunkId", "a7").put("sequence", 7) })
+            if (held) assertEquals(ReplayAppendResult.Rejected(ReplayAppendRejection.STREAM_BLOCKED), next)
+            else assertTrue(next is ReplayAppendResult.Stored)
+            // The exact stored chunk is still an idempotent duplicate, and another recording is unaffected.
+            assertEquals(ReplayAppendResult.Stored(claim.ordinal, true), rig.append())
+            assertTrue(rig.append(rig.request { it.put("replayId", "replay-b").put("chunkId", "b0").put("sequence", 0) }) is ReplayAppendResult.Stored)
+        }
+    }
+    @Test fun `a transient failure ends the pass and other triggers fold into its growing pause`() = Rig().use { rig ->
+        rig.activate(); rig.append()
+        rig.append(rig.request { it.put("replayId", "replay-b").put("chunkId", "b0").put("sequence", 0) })
+        val tasks = java.util.concurrent.CopyOnWriteArrayList<Pair<Long, () -> Unit>>()
+        val sent = java.util.concurrent.atomic.AtomicInteger(); val accept = java.util.concurrent.atomic.AtomicBoolean()
+        val co = ReplayDeliveryCoordinator(rig.delivery(), ReplayDeliveryTransport { claim, _ -> sent.incrementAndGet(); Op().also {
+                it.settlement.complete(if (accept.get()) ReplayTransportResponse(200, ack(claim.row.prepared))
+                    else ReplayTransportResponse(503, "503 Service Unavailable".toByteArray())) } },
+            Executors.newSingleThreadExecutor(), ReplayDeliveryScheduler { delay, task -> tasks.add(delay to task); ReplayDeliveryScheduledTask {} },
+            { rig.clock.wall }, { rig.clock.nanos / 1_000_000 }, { 0.5 })
+        fun await(condition: () -> Boolean) { val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            while (!condition() && System.nanoTime() < limit) Thread.yield(); assertTrue(condition()) }
+        // The first pass sends one request although a second recording is queued.
+        assertEquals(1, co.flush().get(3, TimeUnit.SECONDS).attempted)
+        assertEquals(1, sent.get()); assertEquals(1, co.transientStreakForTesting()); assertEquals(750L, tasks.last().first)
+        // A trigger during the pause sends nothing and rearms the pause wake.
+        assertEquals(0, co.flush().get(3, TimeUnit.SECONDS).attempted); assertEquals(1, sent.get())
+        assertEquals(750L, tasks.last().first)
+        // The pause wake takes the next eligible head: the other recording, not the failed row.
+        rig.clock.nanos += 750_000_000L; tasks.last().second()
+        // Each request also schedules its own deadline timer; wait for the second pause itself.
+        await { co.transientStreakForTesting() == 2 && tasks.last().first == 1500L }
+        assertEquals(2, sent.get()); assertEquals(2, co.transientStreakForTesting()); assertEquals(1500L, tasks.last().first)
+        // Success resets the streak and the queue drains.
+        accept.set(true); rig.clock.nanos += 1_500_000_000L; tasks.last().second()
+        await { rig.rows().isEmpty() }
+        assertEquals(4, sent.get()); assertEquals(0, co.transientStreakForTesting())
+        co.close()
+    }
     @Test fun `long Retry After remains honored within the shared twenty four hour bound`() {
         val request=PreparedReplayRequest.parse(ReplayFixtures.bytes(),ReplayFixtures.GENERATION)
         assertEquals(ReplayDeliveryOutcome.Retry(3_600_000,true),ReplayResponseClassifier.classify(

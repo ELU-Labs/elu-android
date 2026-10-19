@@ -3,6 +3,7 @@ package dev.elu.analytics.internal.replay
 import dev.elu.analytics.internal.config.V1ConfigJson
 import dev.elu.analytics.internal.config.V1ExactTimestamp
 import dev.elu.analytics.internal.config.V1StrictCanonicalJson
+import dev.elu.analytics.internal.replay.NativeReplaySessionState.OwnerGapOutcome
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -108,6 +109,98 @@ internal class NativeReplaySessionStateTest {
         val value = active(1).stop(key, start, epoch, "2026-09-09T00:00:02Z", 1_000_000).state
         assertEquals(value, value.begin(otherEpoch, "2026-09-09T00:00:02Z", 1.0))
         assertEquals(0L, value.session!!.remainingMicroseconds)
+    }
+
+    /** A recording that began at [start] and stopped at [stoppedAt] with a continuous-clock floor. */
+    private fun stopped(floor: Long, stoppedAt: String = start, cap: Int = 60) =
+        active(cap).stop(key, start, epoch, stoppedAt, floor).also { assertTrue(it.matched) }.state
+    private fun settle(value: NativeReplaySessionState, wall: String?, mark: String? = null) =
+        value.settleOwnerGap(wall, mark?.let(V1ConfigJson::parseExactTimestamp))
+
+    @Test fun ownerGapChargesWallGapOnTopOfRetainedFloorWithoutRebasing() {
+        val value = stopped(400_000); val before = value.session!!
+        val settled = settle(value, "2026-09-09T00:00:11.000Z")
+        assertEquals(OwnerGapOutcome.RESUMED, settled.outcome)
+        val after = settled.state.session!!
+        assertEquals(10_400_000L, after.elapsedFloorMicroseconds)
+        assertEquals(before.firstStartAt, after.firstStartAt); assertEquals(before.samplingHash, after.samplingHash)
+        assertEquals(before.originalSampleRate, after.originalSampleRate, 0.0); assertEquals(before.originalSelected, after.originalSelected)
+        assertEquals(before.maximumDurationSeconds, after.maximumDurationSeconds)
+        assertEquals(value.nextReplayOrdinal, settled.state.nextReplayOrdinal)
+        assertEquals("2026-09-09T00:00:11.000Z", after.observedWallAt)
+        assertNull(after.activeEpoch); assertFalse(after.interrupted); assertFalse(after.clockDenied)
+        val restarted = settled.state.begin(otherEpoch, "2026-09-09T00:00:11.000Z", 1.0).session!!
+        assertEquals(otherEpoch, restarted.activeEpoch); assertEquals(start, restarted.firstStartAt)
+        assertEquals(10_400_000L, restarted.elapsedFloorMicroseconds)
+
+        // A recording the previous owner never stopped is settled the same way.
+        val orphan = settle(active(), "2026-09-09T00:00:04.000Z", "2026-09-09T00:00:03.000Z")
+        assertEquals(OwnerGapOutcome.RESUMED, orphan.outcome)
+        assertNull(orphan.state.session!!.activeEpoch); assertEquals(3_000_000L, orphan.state.session.elapsedFloorMicroseconds)
+    }
+
+    @Test fun ownerGapAdditiveTermChargesStalledWallRecording() {
+        val value = stopped(30_000_000, "2026-09-09T00:00:11.000Z")
+        assertEquals(30_000_000L, value.session!!.elapsedFloorMicroseconds)
+        val settled = settle(value, "2026-09-09T00:00:16.000Z")
+        assertEquals(OwnerGapOutcome.RESUMED, settled.outcome)
+        // The gap is added to the floor, not max(30 s, 15 s).
+        assertEquals(35_000_000L, settled.state.session!!.elapsedFloorMicroseconds)
+    }
+
+    @Test fun ownerGapDeniesBelowEitherMarkAndNeverClearsDenial() {
+        val stoppedAt = "2026-09-09T00:00:11.000Z"
+        for ((wall, mark) in listOf("2026-09-09T00:00:10.999Z" to null, "2026-09-09T00:00:12.000Z" to "2026-09-09T00:00:13.000Z",
+            null to null, "malformed" to null)) {
+            val value = stopped(400_000, stoppedAt); val before = value.session!!
+            val denied = settle(value, wall, mark)
+            assertEquals(OwnerGapOutcome.DENIED, denied.outcome)
+            val session = denied.state.session!!
+            assertTrue(session.clockDenied); assertTrue(session.interrupted)
+            assertEquals(before.elapsedFloorMicroseconds, session.elapsedFloorMicroseconds); assertEquals(stoppedAt, session.observedWallAt)
+            val again = settle(denied.state, "2026-09-09T00:01:00.000Z")
+            assertEquals(OwnerGapOutcome.DENIED, again.outcome); assertTrue(again.state.session!!.clockDenied)
+            assertEquals(again.state, again.state.begin(otherEpoch, "2026-09-09T00:01:00.000Z", 1.0))
+        }
+        // Denial leaves an orphaned recording exactly as fail-closed as before.
+        val orphan = settle(observed().begin(epoch, "2026-09-09T00:00:05.000Z", 1.0), "2026-09-09T00:00:04.000Z")
+        assertEquals(OwnerGapOutcome.DENIED, orphan.outcome)
+        assertEquals(epoch, orphan.state.session!!.activeEpoch); assertEquals(0L, orphan.state.session.elapsedFloorMicroseconds)
+    }
+
+    @Test fun ownerGapUnmovedWallIsUnprovenNotDenied() {
+        val value = stopped(400_000, "2026-09-09T00:00:11.000Z"); val before = value.session!!
+        val unproven = settle(value, "2026-09-09T00:00:11.0009Z", "2026-09-09T00:00:11.000Z")
+        assertEquals(OwnerGapOutcome.UNPROVEN, unproven.outcome)
+        val session = unproven.state.session!!
+        assertTrue(session.interrupted); assertFalse(session.clockDenied)
+        assertEquals(before.elapsedFloorMicroseconds, session.elapsedFloorMicroseconds); assertEquals(before.observedWallAt, session.observedWallAt)
+        assertEquals(unproven.state, unproven.state.begin(otherEpoch, "2026-09-09T00:00:11.0009Z", 1.0))
+        val resumed = settle(unproven.state, "2026-09-09T00:00:11.001Z")
+        assertEquals(OwnerGapOutcome.RESUMED, resumed.outcome)
+        assertFalse(resumed.state.session!!.interrupted); assertEquals(10_001_000L, resumed.state.session.elapsedFloorMicroseconds)
+    }
+
+    @Test fun ownerGapNoOpForUnstartedOrUnselected() {
+        val empty = NativeReplaySessionState("a".repeat(64), "stream-a")
+        assertEquals(NativeReplaySessionState.OwnerGap(empty, OwnerGapOutcome.NONE), empty.settleOwnerGap(null, null))
+        for (rate in listOf(1.0, 0.0)) {
+            val value = observed(rate); assertEquals(rate == 1.0, value.session!!.originalSelected)
+            for ((wall, mark) in listOf(null to "2026-09-09T01:00:00Z", "2026-09-09T00:30:00Z" to null)) {
+                val result = settle(value, wall, mark)
+                assertEquals(OwnerGapOutcome.NONE, result.outcome); assertArrayEquals(value.encoded(), result.state.encoded())
+            }
+        }
+    }
+
+    @Test fun ownerGapExhaustsBudgetWithoutRefill() {
+        val value = stopped(40_000_000, "2026-09-09T00:00:41.000Z")
+        val settled = settle(value, "2026-09-09T00:01:11.000Z")
+        assertEquals(OwnerGapOutcome.RESUMED, settled.outcome); assertEquals(0L, settled.state.session!!.remainingMicroseconds)
+        assertEquals(settled.state, settled.state.begin(otherEpoch, "2026-09-09T00:01:11.000Z", 1.0))
+        val raised = settled.state.observe(key, 1.0, 120, "2026-09-09T00:01:12.000Z", null, null)
+        assertEquals(60, raised.session!!.maximumDurationSeconds); assertEquals(0L, raised.session.remainingMicroseconds)
+        assertEquals(raised, raised.begin(otherEpoch, "2026-09-09T00:01:12.000Z", 1.0))
     }
 
     @Test fun wallRollbackLatchesForActualSessionEvenAfterRecovery() {

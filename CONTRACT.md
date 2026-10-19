@@ -308,6 +308,20 @@ the submitted stream and records before local retirement. Lost acknowledgements
 can cause retransmission of the same identities; HTTP 200 alone is not enough
 to delete queued records.
 
+For a `429` or `5xx` response, the SDK retries the unchanged request with
+backoff, whatever the response body. When the body is ELU's error object, its
+`Retry-After` is honoured (up to one day for replay), and a replay `429` pauses
+that upload endpoint. For any other body, a valid `Retry-After` is honoured up to
+five minutes, and a missing or invalid one is ignored. After a temporary failure,
+replay uploads wait up to a minute before the next recording is tried. `401` and
+`403` stop delivery of that request, and a validated replay `409` identity
+conflict stops that chunk permanently. Other unexpected replay responses hold the
+chunk: the same bytes are offered again after one hour to one day, until the chunk
+expires seven days after capture. While the first undelivered chunk of a
+recording is held or refused, new chunks for that recording are not stored, and a
+new recording starts only once the configuration is refreshed, the identity or
+analytics session changes, or the app is opened again.
+
 Process restart reopens the existing owned queue and current schema upgrades
 preserve it. `flush` schedules work; it cannot guarantee network completion
 before Android stops the process. Queue and age limits can prevent admission
@@ -624,6 +638,18 @@ Each replacement uses a new replay ID and sequence zero through existing queue
 authority, retaining session/sample/first-start/remaining-budget state. Changed
 viewport frames and unsealed boundary tails are never appended or used to satisfy
 initial minimum duration. The v1 fixed-viewport contract is unchanged.
+
+When the app is ended, killed or updated and opened again inside the same
+analytics session, the new process starts a new replay ID under that session's
+original sample decision, first start and remaining budget; it never continues an
+earlier replay ID. The time the app was closed is charged to the budget by the
+device wall clock, which must not read earlier than the last recorded replay time;
+otherwise replay stays off for the rest of that session. A wall clock that has not
+moved past the last recorded replay time cannot measure the closed time, so replay
+waits until it does. Sealed chunks from the earlier process keep their delivery
+permission, and unsealed frames are discarded. Local stop does not carry over to the
+next launch; it must be requested again after setup, and opt-out is the persistent
+control.
 
 Only closed unsupported-geometry failures may retry the original collector after
 full selection and authority postvalidation. No failed frame, ordinal or projection

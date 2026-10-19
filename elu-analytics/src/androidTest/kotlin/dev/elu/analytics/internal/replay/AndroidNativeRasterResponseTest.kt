@@ -43,8 +43,12 @@ class AndroidNativeRasterResponseTest {
             .replace("\"schemaVersion\":3", "\"schemaVersion\":3.0")
             .replace("\"sequence\":0", "\"sequence\":0e0").toByteArray()
         assertEquals(NativeRasterResponseOutcome.Accepted, classify(200, equivalent, request))
-        for (status in listOf(201, 202, 204, 206, 299, 400, 409, 413, 429, 500)) {
+        for (status in listOf(201, 202, 204, 206, 299, 400, 409, 413)) {
             assertEquals("HTTP $status", NativeRasterResponseOutcome.ProtocolBlocked, classify(status, body, request))
+        }
+        // A 429/5xx that is not the closed error object retries only this row.
+        for (status in listOf(429, 500)) {
+            assertEquals("HTTP $status", NativeRasterResponseOutcome.Retry(0), classify(status, body, request))
         }
         for (schema in listOf(1, 2, 4)) {
             assertBlocked(200, ack(request).put("schemaVersion", schema), request)
@@ -112,9 +116,10 @@ class AndroidNativeRasterResponseTest {
             "chunk" to NativeRasterConflictScope.CHUNK, "sequence" to NativeRasterConflictScope.SEQUENCE)) {
             val body = encoded(conflict(request, wire))
             assertEquals(NativeRasterResponseOutcome.IdentityConflict(scope), classify(409, body, request))
-            for (status in listOf(200, 201, 400, 413, 429, 500)) {
+            for (status in listOf(200, 201, 400, 413)) {
                 assertEquals(NativeRasterResponseOutcome.ProtocolBlocked, classify(status, body, request))
             }
+            for (status in listOf(429, 500)) assertEquals(NativeRasterResponseOutcome.Retry(0), classify(status, body, request))
         }
     }
 
@@ -148,18 +153,20 @@ class AndroidNativeRasterResponseTest {
 
     @Test fun retryAfterDatesClampAndOriginalBackoffArePreservedWithoutInventedAck() {
         val request = prepared(); val body = encoded(error(429, request))
-        assertEquals(NativeRasterResponseOutcome.ProtocolBlocked, classify(429, body, request))
+        // Without a readable Retry-After, a 429 retries only this row and never cools the endpoint.
+        assertEquals(NativeRasterResponseOutcome.Retry(0), classify(429, body, request))
+        assertEquals(NativeRasterResponseOutcome.Retry(5_000), classify(429, body, request, backoff = 5_000))
         assertEquals(NativeRasterResponseOutcome.Retry(2_000, true), classify(429, body, request, "2"))
         assertEquals(NativeRasterResponseOutcome.Retry(REPLAY_MAX_RETRY_MILLIS, true), classify(429, body, request, "999999"))
         assertEquals(NativeRasterResponseOutcome.Retry(3_000, true), classify(429, body, request, "Thu, 01 Jan 1970 00:00:03 GMT"))
         assertEquals(NativeRasterResponseOutcome.Retry(4_000, true), classify(429, body, request, "2", 4_000))
         assertEquals(NativeRasterResponseOutcome.Retry(0, true), classify(429, body, request, "0", -1))
         for (bad in listOf("invalid", "-1", "1.5", "1, 2")) {
-            assertEquals(NativeRasterResponseOutcome.ProtocolBlocked, classify(429, body, request, bad))
+            assertEquals(NativeRasterResponseOutcome.Retry(0), classify(429, body, request, bad))
         }
     }
 
-    @Test fun serverFailuresRequireBoundedStructuredOriginalSchemaOneErrors() {
+    @Test fun serverFailuresWithoutTheStructuredErrorRetryOnlyThisRow() {
         val request = prepared()
         for (status in listOf(500, 503, 599)) {
             val body = encoded(error(status, request))
@@ -169,9 +176,13 @@ class AndroidNativeRasterResponseTest {
         for ((key, value) in listOf("message" to "", "message" to "x".repeat(257), "code" to "Upper",
             "code" to "x".repeat(65), "requestId" to JSONObject.NULL, "status" to 500,
             "schemaVersion" to 3, "disposition" to "permanent", "extra" to true)) {
-            assertBlocked(503, error(503, request).put(key, value), request)
+            assertEquals(NativeRasterResponseOutcome.Retry(0), classify(503, encoded(error(503, request).put(key, value)), request))
         }
-        assertEquals(NativeRasterResponseOutcome.ProtocolBlocked, classify(503, byteArrayOf(), request))
+        assertEquals(NativeRasterResponseOutcome.Retry(0), classify(503, byteArrayOf(), request))
+        assertEquals(NativeRasterResponseOutcome.Retry(0), classify(502, "<html>Bad Gateway</html>".toByteArray(), request))
+        // A readable hint is honoured up to five minutes.
+        assertEquals(NativeRasterResponseOutcome.Retry(30_000), classify(503, byteArrayOf(), request, "30"))
+        assertEquals(NativeRasterResponseOutcome.Retry(300_000), classify(503, byteArrayOf(), request, "999999"))
     }
 
     private fun ack(request: NativeRasterPreparedRequest) = JSONObject().put("schemaVersion", 3)
