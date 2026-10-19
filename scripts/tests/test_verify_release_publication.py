@@ -16,7 +16,7 @@ SIGNER = PUBLICATION.ARTIFACT_SIGNING_FINGERPRINT
 
 
 def signed(*_args, **_kwargs) -> subprocess.CompletedProcess:
-    status = f"[GNUPG:] GOODSIG 71C7F8C6582E838B ELU\n[GNUPG:] VALIDSIG {SIGNER} 2026-10-13 0 4 0 1 10 00 {SIGNER}\n"
+    status = f"[GNUPG:] GOODSIG BECDBFA573963BFD ELU\n[GNUPG:] VALIDSIG {SIGNER} 2026-10-13 0 4 0 1 10 00 {SIGNER}\n"
     return subprocess.CompletedProcess(["gpg"], 0, status, "")
 
 
@@ -171,7 +171,7 @@ class ReleasePublicationTest(unittest.TestCase):
             PUBLICATION.verify("0.2.0", True)
 
     def test_keyring_check_requires_the_artifact_signing_key(self):
-        listing = subprocess.CompletedProcess(["gpg"], 0, f"pub:-:4096:1:71C7F8C6582E838B:::::::::\nfpr:::::::::{SIGNER}:\n", "")
+        listing = subprocess.CompletedProcess(["gpg"], 0, f"pub:-:4096:1:BECDBFA573963BFD:::::::::\nfpr:::::::::{SIGNER}:\n", "")
         with patch.object(PUBLICATION.subprocess, "run", return_value=listing):
             PUBLICATION.check_keyring()
         missing = subprocess.CompletedProcess(["gpg"], 2, "", "")

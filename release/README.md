@@ -125,7 +125,7 @@ protection rules, so set it up before the first run, in this order:
 
    | Secret | Value |
    | --- | --- |
-   | `ELU_RELEASE_SIGNING_PUBLIC_KEYS` | One armored block with the public keys of the tag-signing key `8170EB95A7E746B421D34BC12363FE13E599B25D` and of the Maven artifact signing key `7559B8499C763DA9DAE9A48F71C7F8C6582E838B`. The workflow stops at its first step if the artifact key is missing. |
+   | `ELU_RELEASE_SIGNING_PUBLIC_KEYS` | One armored block with the public keys of the tag-signing key `8170EB95A7E746B421D34BC12363FE13E599B25D` and of the Maven artifact signing key `C80C9F80FFBDE134020957F8BECDBFA573963BFD`. The workflow stops at its first step if the artifact key is missing. |
    | `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD` | Central Portal user token |
    | `SIGNING_KEY`, `SIGNING_KEY_PASSWORD` | Armored secret key of the Maven artifact signing key and its passphrase |
 
