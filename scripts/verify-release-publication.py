@@ -26,7 +26,7 @@ UNPUBLISHED_MODULES = ("elu-analytics-compose",)
 PAYLOAD_SUFFIXES = (".aar", ".pom", ".module", "-sources.jar", "-javadoc.jar")
 # Public key that signs the Maven artifacts (also on keys.openpgp.org). Rotating
 # it is a reviewed change to this constant and to release/README.md.
-ARTIFACT_SIGNING_FINGERPRINT = "7559B8499C763DA9DAE9A48F71C7F8C6582E838B"
+ARTIFACT_SIGNING_FINGERPRINT = "C80C9F80FFBDE134020957F8BECDBFA573963BFD"
 
 
 def load(name: str):
