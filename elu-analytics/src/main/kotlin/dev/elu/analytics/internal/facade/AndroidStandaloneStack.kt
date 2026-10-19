@@ -36,6 +36,8 @@ import java.util.concurrent.atomic.AtomicReference
 /** Owns the runtime and resources behind the public Elu facade. */
 internal object AndroidStandaloneStack {
     private val LIMITS = RuntimeQueueLimits(maximumCount = 10_000, maximumBytes = 16_777_216)
+    // The public facade's logcat tag (Elu.kt).
+    private const val LOG_TAG = "EluAnalytics"
     // Installed implementation only: every capture still requires the exact current remote tuple.
     // Explicit membership prevents a future enum case from silently enabling another protocol.
     internal val installedNativeReplayProtocols: Set<NativeReplayProtocol> =
@@ -171,6 +173,7 @@ internal object AndroidStandaloneStack {
             networkApiHost = endpointPolicy.apiHost,
             personProfiles = personProfiles,
             eventFilter = eventFilter,
+            log = { message -> android.util.Log.d(LOG_TAG, message) },
             onOpened = {
                 if (performanceOptions.enabled && !closing.get()) {
                     val monitor = dev.elu.analytics.internal.performance.AndroidPerformanceMonitor(
