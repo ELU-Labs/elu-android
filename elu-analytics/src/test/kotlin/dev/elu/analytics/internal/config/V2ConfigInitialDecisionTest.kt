@@ -28,6 +28,11 @@ import java.util.ArrayDeque
 import java.util.Date
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -168,6 +173,136 @@ class V2ConfigInitialDecisionTest {
             "First configuration decision: 2 held calls; dropped: none"), rig.logs)
     }
 
+    @Test fun `a stored opt-out discards calls made before open even after a later opt-in`() {
+        val opening = CountDownLatch(1)
+        Rig(optedOutAtStart = true, openLatch = opening).use { rig ->
+            rig.offline = true
+            // Open has not read the stored choice yet, so nothing refuses these at the call.
+            rig.facade.capture("before-open", null, Date(rig.clock.wall))
+            rig.facade.identify("user-1", null)
+            rig.facade.register(mapOf("tier" to "gold"))
+            opening.countDown()
+            rig.settle()
+            assertTrue(rig.facade.isOptedOut())
+            assertEquals(0, rig.diagnostics().buffered)
+            assertEquals(mapOf(EluFacadeDropReason.OPTED_OUT to 3), rig.diagnostics().dropped)
+
+            rig.facade.optIn(null, null)
+            rig.settle()
+            rig.facade.capture("after-opt-in", null, Date(rig.clock.wall))
+            rig.settle()
+            rig.start()
+            assertEquals(1, rig.diagnostics().buffered)
+            rig.offline = false
+            rig.retry()
+            assertEquals(EluFacadeState.Enabled, rig.facade.state())
+            assertEquals(listOf("event:after-opt-in"), rig.queued())
+            val event = rig.events().single()
+            assertNull(event.identity.userId)
+            assertNull(event.properties["tier"])
+            assertEquals(listOf("First configuration decision: 1 held calls; dropped: none"), rig.logs)
+        }
+    }
+
+    @Test fun `an opt-in before open releases only the calls made after it under a stored opt-out`() {
+        val opening = CountDownLatch(1)
+        Rig(optedOutAtStart = true, openLatch = opening).use { rig ->
+            rig.offline = true
+            rig.facade.capture("before-opt-in", null, Date(rig.clock.wall))
+            rig.facade.identify("user-1", null)
+            rig.facade.optIn(null, null)
+            rig.facade.capture("after-opt-in", null, Date(rig.clock.wall))
+            // Open applies the opt-in before these calls reach the lane, so only their call-time
+            // consent revision shows which were made under the stored opt-out.
+            opening.countDown()
+            rig.settle()
+            assertEquals(false, rig.facade.isOptedOut())
+            assertEquals(1, rig.diagnostics().buffered)
+            assertEquals(mapOf(EluFacadeDropReason.OPTED_OUT to 2), rig.diagnostics().dropped)
+
+            rig.start()
+            rig.offline = false
+            rig.retry()
+            assertEquals(EluFacadeState.Enabled, rig.facade.state())
+            assertEquals(listOf("event:after-opt-in"), rig.queued())
+            assertNull(rig.events().single().identity.userId)
+        }
+    }
+
+    @Test fun `a call that reaches the lane after an opt-out and an opt-in is never released`() {
+        val lane = ParkingLane()
+        Rig(lane = lane).use { rig ->
+            rig.offline = true
+            // Accepted before the opt-out, as on a thread preempted before its call reaches the lane.
+            lane.parkNext = true
+            rig.facade.capture("raced", null, Date(rig.clock.wall))
+            rig.facade.optOut()
+            rig.facade.optIn(null, null)
+            rig.settle()
+            lane.releaseParked()
+            rig.settle()
+            assertEquals(0, rig.diagnostics().buffered)
+            assertEquals(mapOf(EluFacadeDropReason.OPTED_OUT to 1), rig.diagnostics().dropped)
+
+            rig.facade.capture("after-opt-in", null, Date(rig.clock.wall))
+            rig.settle()
+            rig.start()
+            rig.offline = false
+            rig.retry()
+            assertEquals(EluFacadeState.Enabled, rig.facade.state())
+            assertEquals(listOf("event:after-opt-in"), rig.queued())
+        }
+    }
+
+    @Test fun `opt-out reports the overflow before it and the decision reports only what followed`() = Rig().use { rig ->
+        rig.offline = true
+        repeat(102) { index -> rig.facade.capture("event-$index", null, Date(rig.clock.wall)) }
+        rig.facade.optOut()
+        rig.settle()
+        assertEquals(listOf("Opt-out: 100 held calls; dropped: OPTED_OUT=100, BUFFER_FULL=2"), rig.logs)
+
+        rig.facade.optIn(null, null)
+        rig.settle()
+        rig.facade.capture("after-opt-in", null, Date(rig.clock.wall))
+        rig.settle()
+        rig.start()
+        rig.offline = false
+        rig.retry()
+        assertEquals(listOf("event:after-opt-in"), rig.queued())
+        assertEquals(listOf("Opt-out: 100 held calls; dropped: OPTED_OUT=100, BUFFER_FULL=2",
+            "First configuration decision: 1 held calls; dropped: none"), rig.logs)
+    }
+
+    @Test fun `close reports the held calls and the overflow it discards`() = Rig().use { rig ->
+        rig.offline = true
+        repeat(101) { index -> rig.facade.capture("event-$index", null, Date(rig.clock.wall)) }
+        rig.settle()
+        rig.facade.closeAndWait().get(10, TimeUnit.SECONDS)
+        assertEquals(listOf("Close: 100 held calls; dropped: BUFFER_FULL=1, CLOSED=100"), rig.logs)
+    }
+
+    @Test fun `a document superseded during the first apply keeps the calls held`() = Rig().use { rig ->
+        rig.offline = true
+        rig.facade.capture("held", null, Date(rig.clock.wall))
+        rig.settle()
+        rig.start()
+        rig.offline = false
+        // Backgrounding publishes a suspension while the runtime is still applying the document.
+        rig.duringApply = { rig.driver.onBackground() }
+        rig.retry()
+        assertEquals(EluFacadeState.Pending, rig.facade.state())
+        assertEquals(1, rig.diagnostics().buffered)
+        assertEquals(emptyMap<EluFacadeDropReason, Int>(), rig.diagnostics().dropped)
+        assertTrue(rig.logs.isEmpty())
+
+        rig.drainNotifications(); rig.settle()
+        assertEquals(EluFacadeState.Pending, rig.facade.state())
+        rig.driver.onForeground(); rig.fetch()
+        assertEquals(EluFacadeState.Enabled, rig.facade.state())
+        assertEquals(listOf("event:held"), rig.queued())
+        assertEquals(listOf("First configuration decision: 1 held calls; dropped: none"), rig.logs)
+    }
+
     @Test fun `the hold keeps the first 100 calls and drops the newest`() = Rig().use { rig ->
         rig.offline = true
         repeat(105) { index -> rig.facade.capture("event-$index", null, Date(rig.clock.wall)) }
@@ -228,7 +363,14 @@ class V2ConfigInitialDecisionTest {
         assertEquals(emptyMap<EluFacadeDropReason, Int>(), rig.diagnostics().dropped)
     }
 
-    private class Rig(deviceInEu: Boolean = false) : AutoCloseable {
+    private class Rig(
+        deviceInEu: Boolean = false,
+        optedOutAtStart: Boolean = false,
+        openLatch: CountDownLatch? = null,
+        lane: ExecutorService? = null,
+    ) : AutoCloseable {
+        /** Runs once inside the next runtime configuration apply. */
+        @Volatile var duringApply: (() -> Unit)? = null
         val clock = Clock()
         val worker = Worker()
         val scheduler = Scheduler()
@@ -248,7 +390,8 @@ class V2ConfigInitialDecisionTest {
         val owner = RuntimeQueueOwner.open(
             "initial-decision-" + UUID.randomUUID(), RuntimeQueueLimits(1_000, 10_000_000),
             databaseFactory = { FakeRuntimeQueueBacking().connection() },
-            legacyStateLoader = { initialState() }, trustedSiteKey = KEY,
+            legacyStateLoader = { initialState().let { it.copy(identity = it.identity.copy(optedOut = optedOutAtStart)) } },
+            trustedSiteKey = KEY,
             captureClock = object : RuntimeCaptureClock {
                 override fun wallNowEpochMillis() = clock.wall
                 override fun elapsedRealtimeNanos() = clock.nanos
@@ -260,10 +403,11 @@ class V2ConfigInitialDecisionTest {
                 override fun monotonicNowNanos() = clock.nanos
             },
             transportFactory = { BatchHTTPTransport { BatchHTTPResponse(503, ByteArray(0)) } },
-            deviceInEuTimezone = { deviceInEu }, configurationGate = gate)
+            deviceInEuTimezone = { duringApply?.also { duringApply = null }?.invoke(); deviceInEu }, configurationGate = gate)
         val facade: StandaloneFacade = StandaloneFacade(
-            open = { StandaloneStack(runtime, owner, null) }, deliverCallback = { it.run() }, wallClock = { clock.wall },
+            open = { openLatch?.await(10, TimeUnit.SECONDS); StandaloneStack(runtime, owner, null) }, deliverCallback = { it.run() }, wallClock = { clock.wall },
             configurationGate = gate, onCloseRequested = { driver.close(); gate.close() }, log = { logs += it },
+            lane = lane ?: Executors.newSingleThreadExecutor { runnable -> Thread(runnable).apply { isDaemon = true } },
         ).also { it.start() }
 
         fun drainNotifications() {
@@ -284,6 +428,17 @@ class V2ConfigInitialDecisionTest {
             }
         }
         override fun close() { facade.close(); runCatching { owner.closeAsync().get(2, TimeUnit.SECONDS) }; driver.close() }
+    }
+
+    /** The facade lane, able to hold back one submission so it runs after later ones. */
+    private class ParkingLane : ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, LinkedBlockingQueue(),
+        { runnable -> Thread(runnable).apply { isDaemon = true } }) {
+        @Volatile var parkNext = false
+        @Volatile private var parked: Runnable? = null
+        override fun execute(command: Runnable) {
+            if (parkNext) { parkNext = false; parked = command } else super.execute(command)
+        }
+        fun releaseParked() { super.execute(checkNotNull(parked).also { parked = null }) }
     }
 
     private class Clock : V2ConfigClock {

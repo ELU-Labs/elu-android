@@ -127,7 +127,9 @@ internal data class EluFacadeDiagnostics(
  * - `pending`: no configuration decision has been applied. State-changing calls are held in order
  *   up to [PRE_INIT_BUFFER_LIMIT] and later calls are dropped as [EluFacadeDropReason.BUFFER_FULL];
  *   getters return their documented defaults. With a configuration gate, the decision is the first
- *   validated document: a failed or unavailable fetch keeps the calls held. Opt-out discards them.
+ *   validated document: a failed or unavailable fetch keeps the calls held. Calls made while opted
+ *   out are not held, and opt-out, including a stored one found at open, discards every held call
+ *   except reset.
  * - `enabled`: executable capture authority exists and the identity is not opted out. Calls map
  *   onto the runtime through one serialized lane, in call order.
  * - `disabled`: the region policy blocks the device, the identity is opted out, or there is no
@@ -178,6 +180,11 @@ internal class StandaloneFacade(
     private val buffer = ArrayDeque<Operation>()
     /** Calls refused by the full buffer since the hold began, reported with its release. */
     private var bufferOverflow = 0
+    /**
+     * Held calls accepted before this consent revision were made during a denial: before an
+     * opt-out, or before any choice while the stored identity was opted out. They never run.
+     */
+    private var heldDeniedBelow = 0L
     /** Set on the lane thread only while held calls run, so other threads' drops are not counted. */
     private val heldCallDrops = ThreadLocal<EnumMap<EluFacadeDropReason, Int>?>()
     private val listeners = mutableListOf<() -> Unit>()
@@ -268,6 +275,9 @@ internal class StandaloneFacade(
                     startupConsent.also { startupConsent = null }
                 }
                 syncIdentity(opened.owner.snapshot().await().state.identity)
+                // Calls made before open could not see the stored choice. Revision 0 marks those
+                // made before any consent choice this process, which the stored opt-out denied.
+                if (identity?.optedOut == true) discardHeldDuringDenial(1L, "Stored opt-out")
                 if (requestedOptOut) opened.runtime.restrictForConsent()
                 pendingConsent?.let { intent ->
                     applyConsentOnLane(intent)
@@ -431,7 +441,7 @@ internal class StandaloneFacade(
                 closed = true
                 val held = buffer.toList(); buffer.clear()
                 held.forEach { discard(it, EluFacadeDropReason.CLOSED) }
-                logHeldCalls("Close", held.size, if (held.isEmpty()) emptyMap() else mapOf(EluFacadeDropReason.CLOSED to held.size))
+                logHeldCalls("Close", held.size, heldDrops(EluFacadeDropReason.CLOSED, held.size))
                 state = EluFacadeState.Closed
                 snapshotListeners.forEach { it.cancellation.cancel() }; snapshotListeners.clear()
                 listeners.clear(); reloadCompletions.clear(); flagPublication = null
@@ -659,21 +669,24 @@ internal class StandaloneFacade(
         if (stack == null) startupConsent = intent
         dispatch(OperationKind.CONSENT, affectsFlags = true) {
             // Even when a later opt-in supersedes this choice, calls held before it never run.
-            if (intent.optedOut) discardHeldForOptOut()
+            if (intent.optedOut) discardHeldDuringDenial(intent.revision, "Opt-out")
             applyConsentOnLane(intent)
         }
     }
 
     /**
-     * Opt-out discards what it would discard after the decision. A held reset still applies, as
-     * it does while opted out: it collects nothing and preserves the consent choice.
+     * Discards the held calls accepted before [deniedBelow], and refuses any that reach the lane
+     * later. Every kind but reset goes: while opted out, activity is discarded and flag and group
+     * context has no authority. A held reset still applies, as it does while opted out: it
+     * collects nothing and preserves the consent choice.
      */
-    private fun discardHeldForOptOut() {
-        val discarded = buffer.filter { it.kind != OperationKind.RESET }
-        if (discarded.isEmpty()) return
-        buffer.removeAll { it.kind != OperationKind.RESET }
+    private fun discardHeldDuringDenial(deniedBelow: Long, boundary: String) {
+        heldDeniedBelow = maxOf(heldDeniedBelow, deniedBelow)
+        val denied = { operation: Operation -> operation.kind != OperationKind.RESET && operation.consentRevision < deniedBelow }
+        val discarded = buffer.filter(denied)
+        buffer.removeAll(denied)
         discarded.forEach { discard(it, EluFacadeDropReason.OPTED_OUT) }
-        logHeldCalls("Opt-out", discarded.size, mapOf(EluFacadeDropReason.OPTED_OUT to discarded.size))
+        logHeldCalls(boundary, discarded.size, heldDrops(EluFacadeDropReason.OPTED_OUT, discarded.size))
     }
 
     private fun isCurrentConsent(intent: ConsentIntent): Boolean =
@@ -1087,6 +1100,9 @@ internal class StandaloneFacade(
         val flagIntent: Boolean,
         val nativeChange: NativeChange?,
         val nativeEpoch: Any,
+        /** The latest consent choice accepted when the caller made this call. */
+        val consentRevision: Long,
+        val optedOutAtCall: Boolean,
         val onDropped: (() -> Unit)?,
         val run: () -> Unit,
     ) { val settled = java.util.concurrent.atomic.AtomicBoolean(false) }
@@ -1152,8 +1168,11 @@ internal class StandaloneFacade(
         onDropped: (() -> Unit)? = null,
         run: () -> Unit,
     ) {
+        // One read with the opt-out's own update: a call accepted ahead of an opt-out keeps the
+        // older revision, and one accepted after it sees the denial.
+        val (consentRevision, optedOutAtCall) = synchronized(projectionLock) { consentIntentRevision to isOptedOut() }
         // A later opt-in must never backfill activity submitted during a denial.
-        val deniedAtCall = kind == OperationKind.ACTIVITY && isOptedOut()
+        val deniedAtCall = kind == OperationKind.ACTIVITY && optedOutAtCall
         if (affectsFlags) stack?.runtime?.withdrawAutomaticExceptions(retire = true)
         if (affectsFlags) synchronized(projectionLock) {
             pendingFlagOperations += 1
@@ -1163,7 +1182,8 @@ internal class StandaloneFacade(
         }
         val nativeChange = if (affectsFlags) acceptNativeChange(restrictive = false) else null
         val nativeEpoch = synchronized(projectionLock) { nativeIntentEpoch }
-        val operation = Operation(kind, projected, affectsFlags, nativeChange, nativeChange?.epoch ?: nativeEpoch, onDropped, run)
+        val operation = Operation(kind, projected, affectsFlags, nativeChange, nativeChange?.epoch ?: nativeEpoch,
+            consentRevision, optedOutAtCall, onDropped, run)
         val accepted =
             submit {
                 if (closed) {
@@ -1175,6 +1195,13 @@ internal class StandaloneFacade(
                     return@submit
                 }
                 if (state is EluFacadeState.Pending && kind != OperationKind.CONSENT) {
+                    // The hold can outlast an opt-out and a later opt-in. Refuse a call made during
+                    // a denial, or one accepted before an opt-out that already cleared the held
+                    // calls, so the opt-in cannot release it.
+                    if (kind != OperationKind.RESET && (optedOutAtCall || consentRevision < heldDeniedBelow)) {
+                        discard(operation, EluFacadeDropReason.OPTED_OUT)
+                        return@submit
+                    }
                     if (buffer.size >= bufferLimit) {
                         // Drop the newest, never the oldest: the held calls are an ordered identity
                         // history, and a coherent prefix is worth more than a recent fragment.
@@ -1301,9 +1328,7 @@ internal class StandaloneFacade(
         if (next is EluFacadeState.Pending || next is EluFacadeState.Closed) return
         val released = buffer.toList()
         buffer.clear()
-        val dropped = EnumMap<EluFacadeDropReason, Int>(EluFacadeDropReason::class.java)
-        if (bufferOverflow > 0) dropped[EluFacadeDropReason.BUFFER_FULL] = bufferOverflow
-        bufferOverflow = 0
+        val dropped = heldDrops()
         // Held calls carry the identity, groups and flag context the first evaluation must use, so
         // they all run before the initial flag load the caller of this method starts.
         heldCallDrops.set(dropped)
@@ -1369,6 +1394,9 @@ internal class StandaloneFacade(
                     EluFacadeState.Disabled(disabledReasonFor(result.authority.reason))
             }
         nativeSessionRefreshNeeded = false
+        // A document superseded while it was applied is not the initial decision either. The
+        // newer publication queues its own renewal, which decides the held calls.
+        if (state is EluFacadeState.Pending && configurationGate != null && witness?.isCurrent() != true) return
         transition(next)
         if (flagsAuthorized && !flagsLoaded && pendingFlagOperations == 0) {
             publishFlagRead(null, null)?.let(::fireFlagListeners)
@@ -1913,6 +1941,14 @@ internal class StandaloneFacade(
             is EluFacadeState.Disabled -> current.reason.drop
             is EluFacadeState.Closed -> EluFacadeDropReason.CLOSED
             else -> EluFacadeDropReason.UNAUTHORIZED
+        }
+
+    /** [count] drops for [reason], plus the overflow since the last report, which this one takes. */
+    private fun heldDrops(reason: EluFacadeDropReason? = null, count: Int = 0): EnumMap<EluFacadeDropReason, Int> =
+        EnumMap<EluFacadeDropReason, Int>(EluFacadeDropReason::class.java).also { dropped ->
+            if (reason != null && count > 0) dropped[reason] = count
+            if (bufferOverflow > 0) dropped[EluFacadeDropReason.BUFFER_FULL] = bufferOverflow
+            bufferOverflow = 0
         }
 
     /** One line per release or drop of held calls: counts and reasons only, never call content. */

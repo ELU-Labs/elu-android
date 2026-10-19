@@ -168,7 +168,9 @@ a valid config arrives, they are recorded in call order with their original
 timestamps. If that config blocks the device (EU) or the site key is disabled
 or revoked, the held calls are discarded, later event calls are no-ops, and no
 analytics events or replay leave the device. `Elu.optOut()` discards held
-calls; a held `reset()` still applies. Held calls are not saved to disk: if the
+calls; a held `reset()` still applies. Calls made while opted out, including
+under an opt-out saved in an earlier launch, are never held, so a later
+`Elu.optIn()` does not record them. Held calls are not saved to disk: if the
 app process ends before config arrives, they are lost. ELU config fetches
 continue so a re-enabled site can recover.
 

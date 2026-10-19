@@ -102,8 +102,9 @@ stay held while fetches retry. Under a document that permits collection they run
 in call order with their original call time, so events keep the identity and
 super properties set before them; any other validated result discards them.
 `optOut` discards held operations other than `reset`, and a later `optIn` does
-not restore them. Each release or discard of held operations logs one debug
-line with counts by reason.
+not restore them. Operations made while opted out, including under an opt-out
+saved by an earlier launch, are never held. Each release or discard of held
+operations logs one debug line with counts by reason.
 This pre-initialization buffer is not a durable offline queue: a process that
 ends before configuration arrives loses its held operations. Feature-flag
 reload commands are not replayed from that buffer. Invalid or unavailable
