@@ -160,11 +160,17 @@ its own `android:process` (for example a `:remote` or `:sync` service),
 calls there collect nothing. Capture events from the default process.
 
 `Elu.setup` is idempotent and never throws. Every `Elu.*` method is safe in
-every state: before config arrives, event calls are buffered in memory
-(FIFO, cap 100) and replayed once the device is cleared to send; if the
-device is blocked (EU) or the site key is disabled, event calls are no-ops and
-no analytics events or replay leave the device. ELU config fetches continue so
-a re-enabled site can recover.
+every state. Until the first config arrives, event, identity and property calls
+are held in memory (FIFO, cap 100; later calls are dropped) and
+`Elu.distinctId()` returns null. A failed config fetch (offline, ELU
+unreachable, or an error response) keeps them held while the SDK retries. When
+a valid config arrives, they are recorded in call order with their original
+timestamps. If that config blocks the device (EU) or the site key is disabled
+or revoked, the held calls are discarded, later event calls are no-ops, and no
+analytics events or replay leave the device. `Elu.optOut()` discards held
+calls; a held `reset()` still applies. Held calls are not saved to disk: if the
+app process ends before config arrives, they are lost. ELU config fetches
+continue so a re-enabled site can recover.
 
 Dev override for the config endpoint:
 

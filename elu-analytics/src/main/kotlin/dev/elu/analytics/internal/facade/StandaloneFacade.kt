@@ -126,7 +126,8 @@ internal data class EluFacadeDiagnostics(
  *
  * - `pending`: no configuration decision has been applied. State-changing calls are held in order
  *   up to [PRE_INIT_BUFFER_LIMIT] and later calls are dropped as [EluFacadeDropReason.BUFFER_FULL];
- *   getters return their documented defaults.
+ *   getters return their documented defaults. With a configuration gate, the decision is the first
+ *   validated document: a failed or unavailable fetch keeps the calls held. Opt-out discards them.
  * - `enabled`: executable capture authority exists and the identity is not opted out. Calls map
  *   onto the runtime through one serialized lane, in call order.
  * - `disabled`: the region policy blocks the device, the identity is opted out, or there is no
@@ -160,6 +161,8 @@ internal class StandaloneFacade(
     private val eventFilter: dev.elu.analytics.internal.runtime.RuntimeEventFilter = dev.elu.analytics.internal.runtime.RuntimeEventFilter(),
     private val flagRetryScheduler: dev.elu.analytics.internal.config.V2ConfigLifecycleScheduler = dev.elu.analytics.internal.config.ScheduledV2ConfigLifecycleScheduler(),
     private val flagRetryJitter: () -> Double = Math::random,
+    /** Debug diagnostics carrying counts and reasons only; production writes them to logcat. */
+    private val log: (String) -> Unit = {},
     private val lane: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "elu-facade").apply { isDaemon = true }
     },
@@ -173,6 +176,10 @@ internal class StandaloneFacade(
 
     // Lane-confined.
     private val buffer = ArrayDeque<Operation>()
+    /** Calls refused by the full buffer since the hold began, reported with its release. */
+    private var bufferOverflow = 0
+    /** Set on the lane thread only while held calls run, so other threads' drops are not counted. */
+    private val heldCallDrops = ThreadLocal<EnumMap<EluFacadeDropReason, Int>?>()
     private val listeners = mutableListOf<() -> Unit>()
     private val snapshotListeners = mutableListOf<FlagListener>()
     private val reloadCompletions = mutableListOf<ReloadCompletion>()
@@ -424,6 +431,7 @@ internal class StandaloneFacade(
                 closed = true
                 val held = buffer.toList(); buffer.clear()
                 held.forEach { discard(it, EluFacadeDropReason.CLOSED) }
+                logHeldCalls("Close", held.size, if (held.isEmpty()) emptyMap() else mapOf(EluFacadeDropReason.CLOSED to held.size))
                 state = EluFacadeState.Closed
                 snapshotListeners.forEach { it.cancellation.cancel() }; snapshotListeners.clear()
                 listeners.clear(); reloadCompletions.clear(); flagPublication = null
@@ -649,7 +657,23 @@ internal class StandaloneFacade(
     /** Acceptance and enqueue stay ordered; only one latest pre-open choice is retained. */
     private fun enqueueConsent(intent: ConsentIntent) {
         if (stack == null) startupConsent = intent
-        dispatch(OperationKind.CONSENT, affectsFlags = true) { applyConsentOnLane(intent) }
+        dispatch(OperationKind.CONSENT, affectsFlags = true) {
+            // Even when a later opt-in supersedes this choice, calls held before it never run.
+            if (intent.optedOut) discardHeldForOptOut()
+            applyConsentOnLane(intent)
+        }
+    }
+
+    /**
+     * Opt-out discards what it would discard after the decision. A held reset still applies, as
+     * it does while opted out: it collects nothing and preserves the consent choice.
+     */
+    private fun discardHeldForOptOut() {
+        val discarded = buffer.filter { it.kind != OperationKind.RESET }
+        if (discarded.isEmpty()) return
+        buffer.removeAll { it.kind != OperationKind.RESET }
+        discarded.forEach { discard(it, EluFacadeDropReason.OPTED_OUT) }
+        logHeldCalls("Opt-out", discarded.size, mapOf(EluFacadeDropReason.OPTED_OUT to discarded.size))
     }
 
     private fun isCurrentConsent(intent: ConsentIntent): Boolean =
@@ -1154,6 +1178,7 @@ internal class StandaloneFacade(
                     if (buffer.size >= bufferLimit) {
                         // Drop the newest, never the oldest: the held calls are an ordered identity
                         // history, and a coherent prefix is worth more than a recent fragment.
+                        bufferOverflow += 1
                         discard(operation, EluFacadeDropReason.BUFFER_FULL)
                         return@submit
                     }
@@ -1276,9 +1301,14 @@ internal class StandaloneFacade(
         if (next is EluFacadeState.Pending || next is EluFacadeState.Closed) return
         val released = buffer.toList()
         buffer.clear()
+        val dropped = EnumMap<EluFacadeDropReason, Int>(EluFacadeDropReason::class.java)
+        if (bufferOverflow > 0) dropped[EluFacadeDropReason.BUFFER_FULL] = bufferOverflow
+        bufferOverflow = 0
         // Held calls carry the identity, groups and flag context the first evaluation must use, so
         // they all run before the initial flag load the caller of this method starts.
-        released.forEach { execute(it) }
+        heldCallDrops.set(dropped)
+        try { released.forEach { execute(it) } } finally { heldCallDrops.remove() }
+        logHeldCalls(if (closeRequested.get()) "Close" else "First configuration decision", released.size, dropped)
     }
 
     // ---- runtime mapping -----------------------------------------------------
@@ -1293,6 +1323,10 @@ internal class StandaloneFacade(
         val open = stack ?: return
         if (!hasConfigDecision && (configurationGate == null || configurationGate.snapshot() == null)) return
         val witness = configurationGate?.snapshot()
+        // A failed, unavailable or withdrawn source is not the initial decision. Keep the calls
+        // held until the first validated document decides them; a missing document would disable
+        // capture and discard every one of them.
+        if (state is EluFacadeState.Pending && configurationGate != null && witness?.body == null) return
         if (witness?.isApplicationSuspended == true) {
             // Gate withdrawal already makes every retained source witness unusable. Retire
             // scheduling and projections without feeding a nonexistent document to the permanent
@@ -1869,6 +1903,7 @@ internal class StandaloneFacade(
     ) {
         if (count <= 0) return
         synchronized(dropCounts) { dropCounts[reason] = (dropCounts[reason] ?: 0) + count }
+        heldCallDrops.get()?.let { it[reason] = (it[reason] ?: 0) + count }
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.DROP,
             drop = RuntimeStartupDrop.valueOf(reason.name), dropCount = synchronized(dropCounts) { dropCounts[reason] }) }
     }
@@ -1879,6 +1914,13 @@ internal class StandaloneFacade(
             is EluFacadeState.Closed -> EluFacadeDropReason.CLOSED
             else -> EluFacadeDropReason.UNAUTHORIZED
         }
+
+    /** One line per release or drop of held calls: counts and reasons only, never call content. */
+    private fun logHeldCalls(boundary: String, held: Int, dropped: Map<EluFacadeDropReason, Int>) {
+        if (held == 0 && dropped.isEmpty()) return
+        val reasons = if (dropped.isEmpty()) "none" else dropped.entries.joinToString { "${it.key}=${it.value}" }
+        runCatching { log("$boundary: $held held calls; dropped: $reasons") }
+    }
 
     private fun classify(error: Throwable): EluFacadeDropReason =
         if (error is IllegalArgumentException) EluFacadeDropReason.INVALID_INPUT else EluFacadeDropReason.STORAGE

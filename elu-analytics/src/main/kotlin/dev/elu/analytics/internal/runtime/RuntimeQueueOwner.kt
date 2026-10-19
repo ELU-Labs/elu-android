@@ -661,7 +661,10 @@ internal class RuntimeQueueOwner private constructor(
             // Only a known successful ordering read reaches the existing install/activation
             // path, which retains its own Pending latch and previous-authority semantics.
             captureAuthority = previousAuthority
-            if (configurationGate != null && witness == null) {
+            // Under the gate, a source without a document (failed fetch, expiry, withdrawal) is a
+            // withdrawal, not an invalid document. The config manager never sees it, so it cannot
+            // mark the current issuance invalid and refuse the same document on recovery.
+            if (configurationGate != null && (witness == null || configBody == null)) {
                 return@submit terminateAuthority(RuntimeCaptureAuthorityTerminalReason.STALE, null, null, null)
             }
             pendingCaptureConfiguration = witness

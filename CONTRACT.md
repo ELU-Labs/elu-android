@@ -94,8 +94,18 @@ recover. There is no customer override that bypasses remote privacy policy.
 
 Before the initial configuration decision, state-changing facade operations
 have a bounded in-memory FIFO of 100 entries; overflow drops the newest entry
-to preserve the already accepted identity history.
-This pre-initialization buffer is not a durable offline queue. Feature-flag
+to preserve the already accepted identity history. The initial decision is the
+first validated configuration document, including a disabled, blocked or
+revoked one. A failed or unavailable fetch (no network, a refused connection,
+any non-200 response or an invalid document) is not a decision: the operations
+stay held while fetches retry. Under a document that permits collection they run
+in call order with their original call time, so events keep the identity and
+super properties set before them; any other validated result discards them.
+`optOut` discards held operations other than `reset`, and a later `optIn` does
+not restore them. Each release or discard of held operations logs one debug
+line with counts by reason.
+This pre-initialization buffer is not a durable offline queue: a process that
+ends before configuration arrives loses its held operations. Feature-flag
 reload commands are not replayed from that buffer. Invalid or unavailable
 operations return safe facade defaults.
 
