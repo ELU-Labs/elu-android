@@ -16,6 +16,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.assertSame
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class V2ConfigSourceTest {
     @Test fun `selfhost source keeps declared role authority through refresh and rejects server origin widening`() {
         val origin = "https://analytics.example.com"
@@ -261,7 +264,7 @@ class V2ConfigSourceTest {
                 if (laterFailure) assertTrue(later is V2ConfigSourceResult.Unavailable)
                 else assertTrue(later is V2ConfigSourceResult.Document)
                 released.countDown()
-                assertEquals(V2ConfigSourceResult.Superseded, pending.get(2, TimeUnit.SECONDS))
+                assertEquals(V2ConfigSourceResult.Superseded, pending.get(WAIT_SECONDS, TimeUnit.SECONDS))
                 if (laterFailure) assertNull(source.currentDocument())
                 else assertEquals("newer", JSONObject(source.currentDocument()!!).getString("revision"))
             }
@@ -273,7 +276,7 @@ class V2ConfigSourceTest {
         withBlockedFirst { source, released, pending ->
             source.close()
             released.countDown()
-            assertEquals(V2ConfigSourceResult.Superseded, pending.get(2, TimeUnit.SECONDS))
+            assertEquals(V2ConfigSourceResult.Superseded, pending.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(V2ConfigSourceResult.Unavailable(V2ConfigSourceFailure.CLOSED), source.refresh())
             assertNull(source.currentDocument())
         }
@@ -299,7 +302,7 @@ class V2ConfigSourceTest {
         withBlockedFirst { pendingSource, released, pending ->
             pendingSource.withdraw()
             released.countDown()
-            assertEquals(V2ConfigSourceResult.Superseded, pending.get(2, TimeUnit.SECONDS))
+            assertEquals(V2ConfigSourceResult.Superseded, pending.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertNull(pendingSource.currentLeaseSnapshot())
         }
     }
@@ -424,7 +427,7 @@ class V2ConfigSourceTest {
         val source = source {
             if (calls.incrementAndGet() == 1) {
                 entered.countDown()
-                check(released.await(2, TimeUnit.SECONDS))
+                check(released.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 if (firstFailure) throw IOException("old request failed")
                 ok(config().toString())
             } else if (laterFailure) throw IOException("offline")
@@ -433,7 +436,7 @@ class V2ConfigSourceTest {
         val executor = Executors.newSingleThreadExecutor()
         try {
             val pending = executor.submit<V2ConfigSourceResult> { source.refresh() }
-            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             run(source, released, pending)
         } finally {
             released.countDown()

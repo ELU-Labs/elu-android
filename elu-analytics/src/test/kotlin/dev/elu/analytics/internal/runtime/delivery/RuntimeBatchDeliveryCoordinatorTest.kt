@@ -37,6 +37,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class RuntimeBatchDeliveryCoordinatorTest {
     private lateinit var executor: ExecutorService
 
@@ -225,7 +228,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 },
             )
         // An oversized body is not the validated error object; the 503 status still retries.
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(listOf(0L), queue.records().map { it.sequence })
         coordinator.close()
     }
@@ -239,18 +242,18 @@ class RuntimeBatchDeliveryCoordinatorTest {
         val transport =
             RecordingTransport { request ->
                 entered.countDown()
-                assertTrue(release.await(5, TimeUnit.SECONDS))
+                assertTrue(release.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 val packed = requestFrom(request, records)
                 BatchHTTPResponse(200, acknowledgement(packed, resolvedCount = records.size))
             }
         val coordinator = coordinator(queue, transport)
 
         val first = coordinator.trigger()
-        assertTrue(entered.await(5, TimeUnit.SECONDS))
-        assertEquals(BatchDeliveryStop.COALESCED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
+        assertEquals(BatchDeliveryStop.COALESCED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         release.countDown()
 
-        val result = first.get(5, TimeUnit.SECONDS)
+        val result = first.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
         assertEquals(1, result.networkRequests)
         assertEquals(2, result.resolvedRecords)
@@ -278,7 +281,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport)
 
-        val result = coordinator.trigger().get(5, TimeUnit.SECONDS)
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
         assertEquals(
             listOf(listOf(0L, 1L, 2L, 3L), listOf(0L, 1L), listOf(0L), listOf(1L), listOf(2L, 3L), listOf(2L), listOf(3L)),
@@ -296,7 +299,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                     BatchHTTPResponse(413, transportError(413, JSONObject(request.bodyBytes().decodeToString()).getString("requestId")))
                 },
             )
-        val singleResult = singleCoordinator.trigger().get(5, TimeUnit.SECONDS)
+        val singleResult = singleCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, singleResult.resolvedRecords)
         assertTrue(singleQueue.records().isEmpty())
         singleCoordinator.close()
@@ -329,7 +332,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport, clock)
 
-        val result = coordinator.trigger().get(5, TimeUnit.SECONDS)
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
         assertEquals(listOf(listOf(0L, 1L, 2L), listOf(0L), listOf(2L)), observed)
         assertEquals(3, result.networkRequests)
@@ -351,7 +354,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport)
 
-        val result = coordinator.trigger().get(5, TimeUnit.SECONDS)
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
 
         assertEquals(BatchDeliveryStop.BOUNDED, result.stop)
         assertEquals(11, result.networkRequests)
@@ -391,7 +394,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport)
 
-        val result = coordinator.trigger().get(5, TimeUnit.SECONDS)
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
 
         assertEquals(BatchDeliveryStop.BOUNDED, result.stop)
         assertEquals(11, result.networkRequests)
@@ -410,9 +413,9 @@ class RuntimeBatchDeliveryCoordinatorTest {
         val transport = RecordingTransport { BatchHTTPResponse(200, "{}".encodeToByteArray()) }
         val coordinator = coordinator(queue, transport)
 
-        assertEquals(BatchDeliveryStop.PROTOCOL_FAILURE, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.PROTOCOL_FAILURE, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, queue.records().size)
-        assertEquals(BatchDeliveryStop.PROTOCOL_FAILURE, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.PROTOCOL_FAILURE, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, transport.requests.size)
         coordinator.close()
     }
@@ -423,7 +426,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
         val beforeQueue = FakeDeliveryQueue(listOf(event(0, START)))
         val beforeTransport = acceptingTransport(beforeQueue)
         val before = coordinator(beforeQueue, beforeTransport, beforeClock)
-        assertEquals(BatchDeliveryStop.DRAINED, before.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.DRAINED, before.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, beforeTransport.requests.size)
         before.close()
 
@@ -431,7 +434,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
         val boundaryQueue = FakeDeliveryQueue(listOf(event(0, START)))
         val boundaryTransport = RecordingTransport { throw AssertionError("aged record must not reach transport") }
         val boundary = coordinator(boundaryQueue, boundaryTransport, boundaryClock)
-        val result = boundary.trigger().get(5, TimeUnit.SECONDS)
+        val result = boundary.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
         assertEquals(1, result.resolvedRecords)
         assertTrue(boundaryTransport.requests.isEmpty())
@@ -457,7 +460,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport, FakeClock(now))
 
-        val result = coordinator.trigger().get(5, TimeUnit.SECONDS)
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
         assertEquals(listOf(listOf(0L), listOf(2L)), observed)
         assertEquals(2, result.networkRequests)
@@ -479,7 +482,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport, clock, scheduler)
 
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1_000L, scheduler.entries.single().delayMillis)
         clock.wallMillis += 1_000L
         clock.monotonicNanos += TimeUnit.SECONDS.toNanos(1)
@@ -511,9 +514,9 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport, clock, scheduler)
 
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(30_000L, scheduler.entries.single().delayMillis)
-        assertEquals(BatchDeliveryStop.COALESCED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.COALESCED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
 
         clock.wallMillis -= 120_000L
         clock.monotonicNanos += TimeUnit.SECONDS.toNanos(29)
@@ -552,7 +555,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport, clock, scheduler)
 
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         queue.append(event(1, plusSeconds(START, 1)))
         clock.monotonicNanos += TimeUnit.SECONDS.toNanos(1)
         scheduler.runNext()
@@ -592,7 +595,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport, clock, scheduler)
 
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(2_000L, scheduler.entries.single().delayMillis)
         clock.wallMillis += 2_000L
         clock.monotonicNanos += TimeUnit.SECONDS.toNanos(2)
@@ -624,7 +627,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             }
         val coordinator = coordinator(queue, transport, clock, scheduler)
 
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(2_000L, scheduler.entries.single().delayMillis)
         clock.monotonicNanos += TimeUnit.SECONDS.toNanos(1)
         scheduler.runNext()
@@ -650,7 +653,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 },
                 scheduler = retryScheduler,
             )
-        val retryResult = retryCoordinator.trigger().get(5, TimeUnit.SECONDS)
+        val retryResult = retryCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, retryResult.stop)
         assertEquals(1, retryResult.resolvedRecords)
         assertEquals(listOf(1L), retryQueue.records().map { it.sequence })
@@ -668,7 +671,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                     BatchHTTPResponse(200, acknowledgement(request, resolvedCount), retryAfter)
                 }
             val coordinator = coordinator(queue, transport)
-            assertEquals(BatchDeliveryStop.PROTOCOL_FAILURE, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+            assertEquals(BatchDeliveryStop.PROTOCOL_FAILURE, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
             assertEquals(listOf(0L, 1L), queue.records().map { it.sequence })
             coordinator.close()
         }
@@ -691,10 +694,10 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 tooLateScheduler,
                 expiresAt = plusSeconds(START, 40),
             )
-        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, tooLate.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, tooLate.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertTrue(tooLateScheduler.entries.isEmpty())
         assertEquals(1, tooLateQueue.records().size)
-        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, tooLate.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, tooLate.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, tooLateQueue.records().size)
         tooLate.close()
 
@@ -714,12 +717,12 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 jumpScheduler,
                 expiresAt = plusSeconds(START, 60),
             )
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, jump.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, jump.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         jumpClock.wallMillis = RuntimeRecordCodec.timestampToEpochMillisFloor(plusSeconds(START, 60))
         jumpScheduler.runNext()
         assertTrue(jumpScheduler.entries.isEmpty())
         assertEquals(1, jumpTransport.requests.size)
-        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, jump.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, jump.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, jumpQueue.records().size)
         jump.close()
     }
@@ -735,7 +738,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 BatchHTTPTransport { throw IOException("offline") },
                 scheduler = networkScheduler,
             )
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, network.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, network.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertTrue(networkScheduler.entries.single().delayMillis in 500..999)
         assertEquals(1, networkQueue.records().size)
         network.close()
@@ -751,7 +754,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 },
                 scheduler = serverScheduler,
             )
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, server.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, server.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(500L, serverScheduler.entries.single().delayMillis)
         assertEquals(1, serverQueue.records().size)
         server.close()
@@ -763,8 +766,8 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 BatchHTTPResponse(403, transportError(403, id))
             }
         val forbidden = coordinator(forbiddenQueue, forbiddenTransport)
-        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, forbidden.trigger().get(5, TimeUnit.SECONDS).stop)
-        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, forbidden.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, forbidden.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, forbidden.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, forbiddenTransport.requests.size)
         assertEquals(1, forbiddenQueue.records().size)
         forbidden.close()
@@ -796,7 +799,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 }
             val coordinator = coordinator(queue, transport, clock, scheduler)
 
-            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
             assertEquals(500L, scheduler.entries.single().delayMillis)
             assertEquals(listOf(0L), queue.records().map { it.sequence })
 
@@ -820,7 +823,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             val scheduler = FakeScheduler()
             val transport = RecordingTransport { BatchHTTPResponse(503, "busy".encodeToByteArray(), retryAfter) }
             val coordinator = coordinator(queue, transport, scheduler = scheduler)
-            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
             assertEquals(retryAfter, expected, scheduler.entries.single().delayMillis)
             coordinator.close()
         }
@@ -834,7 +837,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 BatchHTTPResponse(503, transportError(503, id), retryAfter = "3600")
             }
         val coordinator = coordinator(queue, transport, scheduler = scheduler)
-        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(3_600_000L, scheduler.entries.single().delayMillis)
         coordinator.close()
     }
@@ -846,7 +849,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             val queue = FakeDeliveryQueue(listOf(event(0, START)))
             val transport = RecordingTransport { BatchHTTPResponse(status, "<html>error</html>".encodeToByteArray()) }
             val coordinator = coordinator(queue, transport)
-            assertEquals("HTTP $status", stop, coordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+            assertEquals("HTTP $status", stop, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
             assertEquals(1, queue.records().size)
             assertEquals(1, transport.requests.size)
             coordinator.close()
@@ -863,12 +866,12 @@ class RuntimeBatchDeliveryCoordinatorTest {
         val networkTransport = acceptingTransport(networkQueue)
         val networkCoordinator = coordinator(networkQueue, networkTransport)
 
-        val boundedNetwork = networkCoordinator.trigger().get(5, TimeUnit.SECONDS)
+        val boundedNetwork = networkCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.BOUNDED, boundedNetwork.stop)
         assertEquals(11, boundedNetwork.networkRequests)
         assertEquals(11, boundedNetwork.resolvedRecords)
         assertEquals(listOf(11L), networkQueue.records().map { it.sequence })
-        assertEquals(BatchDeliveryStop.DRAINED, networkCoordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.DRAINED, networkCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(12, networkTransport.requests.size)
         networkCoordinator.close()
 
@@ -880,12 +883,12 @@ class RuntimeBatchDeliveryCoordinatorTest {
         val localTransport = RecordingTransport { throw AssertionError("aged records must not reach transport") }
         val localCoordinator = coordinator(localQueue, localTransport, transitionClock)
 
-        val boundedLocal = localCoordinator.trigger().get(5, TimeUnit.SECONDS)
+        val boundedLocal = localCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.BOUNDED, boundedLocal.stop)
         assertEquals(0, boundedLocal.networkRequests)
         assertEquals(64, boundedLocal.resolvedRecords)
         assertEquals(listOf(64L), localQueue.records().map { it.sequence })
-        assertEquals(BatchDeliveryStop.DRAINED, localCoordinator.trigger().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.DRAINED, localCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertTrue(localQueue.records().isEmpty())
         assertTrue(localTransport.requests.isEmpty())
         localCoordinator.close()
@@ -1093,7 +1096,8 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     private fun awaitCondition(condition: () -> Boolean) {
-        repeat(100) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
+        while (System.nanoTime() < deadline) {
             if (condition()) return
             Thread.sleep(10)
         }

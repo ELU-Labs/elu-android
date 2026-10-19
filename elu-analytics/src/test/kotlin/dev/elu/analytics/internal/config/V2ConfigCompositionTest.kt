@@ -50,6 +50,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class V2ConfigCompositionTest {
     @Test fun `raw configuration cannot activate a composed owner without a source token`() = Rig().use { rig ->
         rig.facade.applyConfiguration(rig.body)
@@ -66,8 +69,8 @@ class V2ConfigCompositionTest {
         assertEquals(1, rig.owner.snapshot().get().queuedCount)
         // Configuration also schedules a delivery pass. Settle that lawful foreground pass
         // before testing withdrawal, instead of racing its first network call.
-        rig.runtime.flush().get(2, TimeUnit.SECONDS)
-        assertTrue(rig.firstNetworkCall.await(2, TimeUnit.SECONDS))
+        rig.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertTrue(rig.firstNetworkCall.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val callsBeforeWithdrawal = rig.networkCalls
         rig.driver.onBackground() // listener updates the gate, deliberately does not drain the facade
         assertTrue(rig.facade.state() is EluFacadeState.Disabled)
@@ -76,7 +79,7 @@ class V2ConfigCompositionTest {
         rig.facade.capture("also-after", null, Date(rig.clock.wall))
         rig.settle()
         assertEquals(1, rig.owner.snapshot().get().queuedCount)
-        rig.runtime.flush().get(2, TimeUnit.SECONDS)
+        rig.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(callsBeforeWithdrawal, rig.networkCalls)
     }
 
@@ -120,9 +123,9 @@ class V2ConfigCompositionTest {
         Rig(withFlags = true, acknowledgeEvents = true).use { rig ->
             rig.enable(); rig.settleFlags()
             rig.facade.capture("before", null, Date(rig.clock.wall)); rig.settle()
-            rig.runtime.flush().get(2, TimeUnit.SECONDS)
+            rig.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
             // trigger() may return COALESCED while the original admitted pass is still running.
-            val initialDrainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            val initialDrainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (rig.owner.snapshot().get().queuedCount != 0 && System.nanoTime() < initialDrainDeadline) Thread.sleep(1)
             assertEquals(0, rig.owner.snapshot().get().queuedCount)
             val original = checkNotNull(rig.gate.snapshot())
@@ -133,7 +136,7 @@ class V2ConfigCompositionTest {
             // Match AndroidStandaloneStack: withdraw the gate and enqueue the fixed event,
             // then completely process the asynchronous null notification before foreground.
             rig.facade.nativeReplayLifecycleChanged(false)
-            checkNotNull(rig.runtime.applicationBackgrounded(rig.driver, backgroundAt)).get(2, TimeUnit.SECONDS)
+            checkNotNull(rig.runtime.applicationBackgrounded(rig.driver, backgroundAt)).get(WAIT_SECONDS, TimeUnit.SECONDS)
             rig.runtime.configurationChanged(); rig.facade.configurationChanged(); rig.settle()
             assertNull(rig.gate.snapshot()?.body)
             assertFalse(original.isCurrent())
@@ -159,7 +162,7 @@ class V2ConfigCompositionTest {
             assertTrue("same valid issuance must resume after transient background suspension",
                 rig.facade.state() is EluFacadeState.Enabled)
             // No new capture, explicit flush, or scheduled timer after installation.
-            val drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            val drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (rig.owner.snapshot().get().queuedCount != 0 && System.nanoTime() < drainDeadline) Thread.sleep(1)
             assertEquals(0, rig.owner.snapshot().get().queuedCount)
             assertEquals(2L, rig.owner.snapshot().get().state.stream.nextSequence)
@@ -394,9 +397,9 @@ class V2ConfigCompositionTest {
                 assertFalse(name, oldCallbacks.isEmpty())
                 val entered = java.util.concurrent.CountDownLatch(1)
                 val release = java.util.concurrent.CountDownLatch(1)
-                rig.onRead = { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) }
+                rig.onRead = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
                 val held = rig.runtime.capture("held-owner")
-                check(entered.await(2, TimeUnit.SECONDS))
+                check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 try {
                     change(rig.facade)
                     assertNull(name, rig.facade.getFeatureFlag("variant"))
@@ -405,7 +408,7 @@ class V2ConfigCompositionTest {
                     oldCallbacks.forEach { it.run() }
                     assertEquals(name, 0, callbacks)
                 } finally { release.countDown() }
-                held.get(2, TimeUnit.SECONDS)
+                held.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 rig.settle(); rig.settleFlags()
                 oldCallbacks.forEach { it.run() }
                 assertEquals(name, 0, callbacks)
@@ -425,15 +428,15 @@ class V2ConfigCompositionTest {
             val release = java.util.concurrent.CountDownLatch(1)
             val completed = java.util.concurrent.CountDownLatch(1)
             var callbacks = 0
-            rig.onRead = { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) }
+            rig.onRead = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             val held = rig.runtime.capture("held-owner")
-            check(entered.await(2, TimeUnit.SECONDS))
+            check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             try {
                 change(rig.facade)
                 rig.facade.reloadFeatureFlags { callbacks++; completed.countDown() }
             } finally { release.countDown() }
-            held.get(2, TimeUnit.SECONDS)
-            check(completed.await(2, TimeUnit.SECONDS))
+            held.get(WAIT_SECONDS, TimeUnit.SECONDS)
+            check(completed.await(WAIT_SECONDS, TimeUnit.SECONDS))
             rig.settleFlags()
             assertEquals(1, callbacks)
         } }
@@ -454,10 +457,10 @@ class V2ConfigCompositionTest {
             })
         }, deliverCallback = { it.run() }, onOpened = { error("subscription unavailable") },
             onCloseRequested = { failed.countDown() })
-        facade.start(); check(failed.await(2, TimeUnit.SECONDS))
+        facade.start(); check(failed.await(WAIT_SECONDS, TimeUnit.SECONDS))
         // Both closures must come from startup cleanup, without the test closing either resource.
-        check(flagsClosed.await(2, TimeUnit.SECONDS))
-        check(rig.databaseClosed.await(2, TimeUnit.SECONDS))
+        check(flagsClosed.await(WAIT_SECONDS, TimeUnit.SECONDS))
+        check(rig.databaseClosed.await(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(1, flagCloses)
         assertTrue(runCatching { rig.owner.snapshot().get(2, TimeUnit.SECONDS) }.isFailure)
         facade.close()
@@ -468,7 +471,7 @@ class V2ConfigCompositionTest {
         val failed = java.util.concurrent.CountDownLatch(1)
         val facade = StandaloneFacade(open = { error("unavailable storage") }, deliverCallback = { it.run() },
             onCloseRequested = { closes++; failed.countDown() })
-        facade.start(); check(failed.await(2, TimeUnit.SECONDS))
+        facade.start(); check(failed.await(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(1, closes)
         assertTrue(facade.state() is EluFacadeState.Disabled)
         facade.close()
@@ -520,9 +523,9 @@ class V2ConfigCompositionTest {
         rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity("2026-08-05T00:01:00.000Z")).get()
         assertTrue(rig.runtime.capture("fresh-needs-reauthorization").get() is RuntimeCaptureResult.Rejected)
         assertTrue(rig.owner.authorizeCurrentDelivery(rig.body) { false }.get())
-        rig.runtime.flush().get(2, TimeUnit.SECONDS)
+        rig.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
         // A coalesced trigger does not await the pass already admitted by configuration.
-        assertTrue(rig.firstNetworkCall.await(2, TimeUnit.SECONDS))
+        assertTrue(rig.firstNetworkCall.await(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(1, rig.networkCalls)
         rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, "2026-08-05T00:01:00.000Z")).get()
         assertFalse(rig.owner.authorizeCurrentDelivery(rig.body) { false }.get())
@@ -636,7 +639,7 @@ class V2ConfigCompositionTest {
                 override fun wallNowEpochMillis() = ownerWall ?: clock.wall
                 override fun elapsedRealtimeNanos() = clock.nanos
             },
-        ).get(2, TimeUnit.SECONDS).also { if (bindGate) it.bindConfigurationGate(gate).get(2, TimeUnit.SECONDS) }
+        ).get(WAIT_SECONDS, TimeUnit.SECONDS).also { if (bindGate) it.bindConfigurationGate(gate).get(WAIT_SECONDS, TimeUnit.SECONDS) }
         val runtime = StandaloneRuntime(owner, KEY, wallClock = { clock.wall },
             deliveryClock = object : BatchDeliveryClock {
                 override fun wallNow() = BatchWallInstant(clock.wall, Instant.ofEpochMilli(clock.wall).toString())
@@ -689,11 +692,12 @@ class V2ConfigCompositionTest {
         ).also { it.start() }
         private fun retainedRefresh(token: V2ConfigLifecycleUpdate) { facade.configurationRefreshed(token) }
         fun enable() { driver.start(); worker.runNext(); facade.configurationChanged(); settle(); assertTrue(facade.state() is EluFacadeState.Enabled) }
-        fun settle() { facade.settled().get(2, TimeUnit.SECONDS) }
+        fun settle() { facade.settled().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         fun settleFlags() {
-            repeat(300) {
-                if (!facade.diagnostics().get(2, TimeUnit.SECONDS).flagReloadInFlight &&
-                    !facade.diagnostics().get(2, TimeUnit.SECONDS).flagReloadInFlight) return
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
+            while (System.nanoTime() < deadline) {
+                if (!facade.diagnostics().get(WAIT_SECONDS, TimeUnit.SECONDS).flagReloadInFlight &&
+                    !facade.diagnostics().get(WAIT_SECONDS, TimeUnit.SECONDS).flagReloadInFlight) return
                 Thread.sleep(1)
             }
             fail("Flag callback did not settle")

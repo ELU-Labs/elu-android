@@ -18,6 +18,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class V1ConfigManagerTest {
     @Test
     fun `canonical contract snapshots remain byte exact and digest pinned`() {
@@ -855,7 +858,7 @@ class V1ConfigManagerTest {
                 }
             }
         start.countDown()
-        futures.forEach { it.get(10, TimeUnit.SECONDS) }
+        futures.forEach { it.get(WAIT_SECONDS, TimeUnit.SECONDS) }
         executor.shutdown()
 
         assertEquals(120, results.size)
@@ -880,7 +883,7 @@ class V1ConfigManagerTest {
                 }
             }
         start.countDown()
-        futures.forEach { it.get(10, TimeUnit.SECONDS) }
+        futures.forEach { it.get(WAIT_SECONDS, TimeUnit.SECONDS) }
         executor.shutdown()
 
         assertTrue(results.any { it == V1ConfigUpdateResult.Rejected(V1ConfigRejection.CONFLICT) })

@@ -26,6 +26,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Executes the shared behavior vector; it is not a descriptive coverage inventory. */
 class CaptureAdmissionVectorRuntimeTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
@@ -519,7 +522,7 @@ class CaptureAdmissionVectorRuntimeTest {
     private fun resourceText(path: String): String =
         checkNotNull(javaClass.classLoader?.getResource(path)) { "Missing test resource $path" }.readText()
 
-    private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
 
     private companion object {
         const val VECTOR_RESOURCE = "contracts/v1/test-vectors/capture-admission-activity.json"

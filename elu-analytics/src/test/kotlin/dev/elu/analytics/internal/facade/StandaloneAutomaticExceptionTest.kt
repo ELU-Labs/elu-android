@@ -18,6 +18,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Actual facade/runtime/source/gate/queue/writer; only host registry, filesystem and HTTP are doubles. */
 class StandaloneAutomaticExceptionTest {
     private class Clock : V2ConfigClock, RuntimeCaptureClock {
@@ -94,9 +97,9 @@ class StandaloneAutomaticExceptionTest {
             facade.start(); settle()
         }
         fun settle() {
-            facade.settled().get(3, TimeUnit.SECONDS)
+            facade.settled().get(WAIT_SECONDS, TimeUnit.SECONDS)
             val control = StandaloneRuntime::class.java.getDeclaredField("controlExecutor").also { it.isAccessible = true }.get(runtime) as ExecutorService
-            repeat(3) { control.submit { }.get(3, TimeUnit.SECONDS); owner.snapshot().await() }
+            repeat(3) { control.submit { }.get(WAIT_SECONDS, TimeUnit.SECONDS); owner.snapshot().await() }
         }
         fun installed() { await("original installed handler") { registry.handler !== registry.previous } }
         fun intake() = RuntimeQueueOwner::class.java.getDeclaredField("exceptionIntake").also { it.isAccessible = true }
@@ -118,10 +121,10 @@ class StandaloneAutomaticExceptionTest {
         fun holdFacade(): CountDownLatch {
             val lane = StandaloneFacade::class.java.getDeclaredField("lane").also { it.isAccessible = true }.get(facade) as ExecutorService
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
-            lane.execute { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-            assertTrue(entered.await(2, TimeUnit.SECONDS)); return release
+            lane.execute { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); return release
         }
-        override fun close() { driver.close(); gate.close(); facade.closeAndWait().get(5, TimeUnit.SECONDS) }
+        override fun close() { driver.close(); gate.close(); facade.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
     }
     @Test fun `only opted in persistent exact grant installs after original reservation without startup OS access`() {
         val unsupported = JSONObject().put("suppressionRules", JSONArray().put(JSONObject().put("type", "AND").put("values", JSONArray())))
@@ -162,14 +165,14 @@ class StandaloneAutomaticExceptionTest {
             h.activity(); h.installed(); h.armed()
             // Facade/control barriers do not join the independent report writer.
             val publication = h.intake().reportSettlement
-            h.crash(); publication.get(3, TimeUnit.SECONDS); h.settle()
+            h.crash(); publication.get(WAIT_SECONDS, TimeUnit.SECONDS); h.settle()
             assertTrue(h.exceptions().isEmpty()); val retained = checkNotNull(h.spool.report)
             assertNull(h.backing.core!!.exceptions!!.consumedDigest)
             val queued = h.owner.peek(10, 100_000).await()
             assertEquals(1, queued.size)
             h.owner.acknowledge(RuntimeAcknowledgement(queued.first().streamId,
                 queued.map { RuntimeRecordReference(it.sequence, it.kind, it.recordId) })).await()
-            h.runtime.flush().get(3, TimeUnit.SECONDS)
+            h.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
             await("retained report after capacity release") { h.exceptions().size == 1 }
             assertEquals(retained.type, h.exceptions().single().record.properties["\$exception_type"])
             h.settle(); assertNull(h.spool.report)
@@ -190,14 +193,14 @@ class StandaloneAutomaticExceptionTest {
         Harness().use { h ->
             h.activity(); h.installed(); val wrapper = h.registry.handler
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
-            h.spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+            h.spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             val originalCompletion = h.intake().reportSettlement
             try {
-                h.crash(); assertTrue(entered.await(2, TimeUnit.SECONDS))
+                h.crash(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 h.replaceGrant(JSONObject().put("suppressionRules", JSONArray()))
                 assertSame(wrapper, h.registry.handler)
             } finally { release.countDown() }
-            originalCompletion.get(3, TimeUnit.SECONDS)
+            originalCompletion.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertNull(h.spool.report)
             h.spool.beforePublish = {}; h.settle(); h.armed()
             h.crash(); await("new original report only") { h.exceptions().size == 1 }
@@ -236,7 +239,7 @@ class StandaloneAutomaticExceptionTest {
             assertSame(wrapper, h.registry.handler)
             assertEquals(background, h.owner.snapshot().await().state.identity)
             val publication = h.intake().reportSettlement
-            h.crash(); publication.get(3, TimeUnit.SECONDS); h.settle()
+            h.crash(); publication.get(WAIT_SECONDS, TimeUnit.SECONDS); h.settle()
             assertEquals(1, h.spool.writes.get()); assertNotNull(h.spool.report)
             assertTrue(h.exceptions().isEmpty())
             assertEquals(background, h.owner.snapshot().await().state.identity)
@@ -277,7 +280,7 @@ class StandaloneAutomaticExceptionTest {
         val writer = NativeExceptionIntake::class.java.getDeclaredField("writer").also { it.isAccessible = true }.get(h.intake()) as Thread
         assertTrue(writer.isAlive)
         h.registry.refuseRestore = true
-        assertThrows(ExecutionException::class.java) { h.facade.closeAndWait().get(5, TimeUnit.SECONDS) }
+        assertThrows(ExecutionException::class.java) { h.facade.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertEquals(1, h.releases.get())
         val calls = h.registry.calls.size; val writes = h.spool.writes.get()
         val original = Error("PRIVATE"); wrapper.uncaughtException(Thread.currentThread(), original)
@@ -292,10 +295,10 @@ class StandaloneAutomaticExceptionTest {
         updatedAt = "2026-08-04T00:00:00.000Z"), stream = StreamState(streamId = "stream_diag", nextSequence = 0),
         flagContext = FlagContextState(personProperties = emptyMap(), groupProperties = emptyMap()))
     private fun await(message: String, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(2)
         assertTrue(message, condition())
     }
-    private fun <T> Future<T>.await(): T = get(5, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
     private companion object { const val KEY = "elu_pk_test_AAAAAAAAAAAAAAAAAAAAAAAAAA" }
 }

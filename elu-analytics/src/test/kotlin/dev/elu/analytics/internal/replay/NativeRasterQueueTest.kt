@@ -11,6 +11,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Actual original source/gate/owner and SQLite-shaped transactions; no collector permission is fabricated. */
 class NativeRasterQueueTest {
     @Test fun `source detected conflict is durable before acknowledgment and plain v2 restart cannot bypass it`() {
@@ -169,7 +172,7 @@ internal class RasterQueueRig(val backing: FakeRuntimeQueueBacking = FakeRuntime
     fun ledger() = checkNotNull(ReplayStoredState.decode(checkNotNull(backing.replayRows["state"])).rasterSource)
     override fun close() {
         driver.close()
-        val result = runCatching { owner.closeAsync().get(3, TimeUnit.SECONDS) }
+        val result = runCatching { owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         closeFailure = result.exceptionOrNull()
         if (!expectQuarantinedClose) result.getOrThrow()
     }

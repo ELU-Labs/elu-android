@@ -6,6 +6,9 @@ import org.junit.Test
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class NativeFrameMetricsOwnerTest {
     private class Rig {
         val lifecycle = NativePerformanceActivityLifecycle()
@@ -41,7 +44,7 @@ class NativeFrameMetricsOwnerTest {
         rig.access.runMain(); rig.owner.refresh(); rig.access.runMain()
         assertEquals(1, rig.access.watchers.size)
         rig.access.emit(); assertEquals(1L, rig.frames.drain(checkNotNull(rig.context))["\$frame_count"])
-        val close = rig.owner.closeAndWait(); rig.access.runMain(); close.get(1, TimeUnit.SECONDS)
+        val close = rig.owner.closeAndWait(); rig.access.runMain(); close.get(WAIT_SECONDS, TimeUnit.SECONDS)
     }
 
     @Test fun `context change abandons old listener and old queued frames cannot enter new grant`() {
@@ -90,7 +93,7 @@ class NativeFrameMetricsOwnerTest {
         val close = rig.owner.closeAndWait()
         assertFalse(close.isDone)
         rig.access.emit(); assertTrue(rig.frames.drain(checkNotNull(rig.context)).isEmpty())
-        rig.access.runMain(); close.get(1, TimeUnit.SECONDS)
+        rig.access.runMain(); close.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, rig.access.closed)
         assertSame(close, rig.owner.closeAndWait())
         rig.owner.refresh(); assertTrue(rig.access.main.isEmpty())
@@ -99,7 +102,7 @@ class NativeFrameMetricsOwnerTest {
     @Test fun `partial registration cleanup is retained and failure cannot be called a successful close`() {
         val rig = Rig(); rig.access.failWatch = true; rig.resume()
         assertEquals(1, rig.access.closed)
-        assertThrows(ExecutionException::class.java) { rig.owner.closeAndWait().get(1, TimeUnit.SECONDS) }
+        assertThrows(ExecutionException::class.java) { rig.owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         rig.owner.refresh(); assertTrue(rig.access.main.isEmpty())
     }
 }

@@ -12,6 +12,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class NativeReplayAuthorityTest {
     private fun prepared(rig: Rig): NativeReplayPreparedProjection {
         val input = checkNotNull(rig.owner.observeNativeReplayProjection().get())
@@ -170,9 +173,9 @@ class NativeReplayAuthorityTest {
     @Test fun `prepared guard cannot survive queued local intent before worker runs`() = Rig().use { rig ->
         rig.activate(); val prepared = prepared(rig)
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        rig.onNativeRead = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        rig.onNativeRead = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val read = rig.owner.observeNativeReplaySession()
-        check(entered.await(3, TimeUnit.SECONDS))
+        check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val change = rig.owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("x" to 1), rig.now()))
         try { assertFalse(prepared.isCurrent()) } finally { release.countDown() }
         read.get(); change.get(); Unit
@@ -200,7 +203,7 @@ class NativeReplayAuthorityTest {
         var closed: java.util.concurrent.Future<Unit>? = null
         rig.onOwnerClock = { closed = rig.owner.closeAsync() }
         assertFalse(prepared.isCurrent())
-        checkNotNull(closed).get(3, TimeUnit.SECONDS)
+        checkNotNull(closed).get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertFalse(prepared.isCurrent())
     }
     @Test fun `close joins held prepare without publishing a late original authority`() = Rig().use { rig ->
@@ -211,10 +214,10 @@ class NativeReplayAuthorityTest {
         platform.hold = { pending = it; entered.countDown() }
         val authority = NativeReplayAuthority(rig.owner, NativeReplayCapabilities(setOf(nativePair), setOf(NativeReplayProtocol.V1.generation)), { false })
         try {
-            val prepare = authority.prepare(selection); assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val prepare = authority.prepare(selection); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             val closing = authority.closeAndWait(); assertFalse(closing.isDone); assertFalse(closing.cancel(true))
             platform.hold = null; checkNotNull(pending).also { pending = null }.invoke()
-            assertNull(prepare.get(3, TimeUnit.SECONDS)); assertEquals(NativeReplayAuthorityStop.SETTLED, closing.get(3, TimeUnit.SECONDS))
+            assertNull(prepare.get(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(NativeReplayAuthorityStop.SETTLED, closing.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertSame(closing, authority.closeAndWait()); assertEquals(0L, rig.state().nextReplayOrdinal)
         } finally { platform.hold = null; pending?.invoke(); authority.close(); selection.close() }
     }

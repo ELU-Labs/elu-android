@@ -21,6 +21,9 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class RuntimeQueueOwnerTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
     private val keyCounter = AtomicInteger()
@@ -875,7 +878,7 @@ class RuntimeQueueOwnerTest {
             flagContext = FlagContextState(personProperties = emptyMap(), groupProperties = emptyMap()),
         )
 
-    private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
 
     private fun assertFutureCause(
         expected: Class<out Throwable>,

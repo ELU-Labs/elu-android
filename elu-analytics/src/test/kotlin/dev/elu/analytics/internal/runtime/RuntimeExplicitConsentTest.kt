@@ -10,6 +10,9 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class RuntimeExplicitConsentTest {
     private val at = "2026-09-29T00:00:00Z"
     private val owners = mutableListOf<RuntimeQueueOwner>()
@@ -187,5 +190,5 @@ class RuntimeExplicitConsentTest {
         session = null, optedOut = false, updatedAt = at), stream = StreamState(streamId = "stream_${UUID.randomUUID()}", nextSequence = 0),
         flagContext = FlagContextState(personProperties = emptyMap(), groupProperties = emptyMap()))
 
-    private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
 }

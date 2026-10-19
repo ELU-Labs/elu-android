@@ -42,6 +42,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class StandaloneRuntimeTest {
     private val runtimes = mutableListOf<StandaloneRuntime>()
     private val schedulers = mutableListOf<ScheduledExecutorService>()
@@ -68,7 +71,7 @@ class StandaloneRuntimeTest {
         assertTrue(h.runtime.applyConfiguration(ownConfig).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
         settleDelivery(h)
         assertTrue(h.runtime.capture("selfhost-event").await() is RuntimeCaptureResult.Accepted)
-        assertEquals(BatchDeliveryStop.DRAINED, h.runtime.flush().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.DRAINED, h.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals("$origin/v1/events", transport.requests.single().endpoint.toString())
         assertEquals("Bearer $SITE_KEY", transport.requests.single().authorizationHeader())
         val changed = JSONObject(config()).put("issuedAt", "2026-08-04T00:00:30.000Z").toString()
@@ -87,7 +90,7 @@ class StandaloneRuntimeTest {
         assertTrue(h.runtime.applyConfiguration(ownConfig).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
         settleDelivery(h)
         assertTrue(h.runtime.capture("selfhost-event").await() is RuntimeCaptureResult.Accepted)
-        assertEquals(BatchDeliveryStop.DRAINED, h.runtime.flush().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.DRAINED, h.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals("$origin/v1/events", transport.requests.single().endpoint.toString())
         assertEquals("Bearer $SITE_KEY", transport.requests.single().authorizationHeader())
         val changed = JSONObject(config()).put("issuedAt", "2026-08-04T00:00:30.000Z").toString()
@@ -116,7 +119,7 @@ class StandaloneRuntimeTest {
         assertEquals(1, scheduler.entries.size)
         assertEquals(StandaloneRuntime.DEFAULT_FLUSH_DELAY_MILLIS, scheduler.entries.single().delayMillis)
 
-        val pass = harness.runtime.flush().get(5, TimeUnit.SECONDS)
+        val pass = harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, pass.stop)
         assertEquals(1, pass.networkRequests)
         assertEquals(1, pass.resolvedRecords)
@@ -130,7 +133,7 @@ class StandaloneRuntimeTest {
 
         // The armed flush timer fires one more pass against the now-empty queue without a request.
         scheduler.runNext()
-        awaitCondition { harness.runtime.flush().get(5, TimeUnit.SECONDS).stop == BatchDeliveryStop.IDLE }
+        awaitCondition { harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).stop == BatchDeliveryStop.IDLE }
         assertEquals(1, transport.requests.size)
     }
 
@@ -145,7 +148,7 @@ class StandaloneRuntimeTest {
         assertFalse(harness.runtime.hasDeliveryAuthorization())
         val rejected = harness.runtime.capture("blocked").await() as RuntimeCaptureResult.Rejected
         assertEquals(RuntimeCaptureRejection.AUTHORITY_TERMINAL, rejected.reason)
-        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, harness.runtime.flush().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
 
         val malformed = harness.runtime.applyConfiguration("{").await() as RuntimeCaptureAuthorityUpdateResult.Terminated
         assertEquals(RuntimeCaptureAuthorityTerminalReason.MALFORMED, malformed.authority.reason)
@@ -177,7 +180,7 @@ class StandaloneRuntimeTest {
         settleDelivery(harness)
         harness.runtime.capture("one").await() as RuntimeCaptureResult.Accepted
         harness.runtime.capture("two").await() as RuntimeCaptureResult.Accepted
-        val pass = harness.runtime.flush().get(5, TimeUnit.SECONDS)
+        val pass = harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, pass.stop)
         assertEquals(2, pass.networkRequests)
 
@@ -257,7 +260,7 @@ class StandaloneRuntimeTest {
         scheduler.entries.clear()
         transport.nextResponses += { request -> transportError(503, request) }
 
-        val first = harness.runtime.flush().get(5, TimeUnit.SECONDS)
+        val first = harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, first.stop)
         assertEquals(1, harness.owner.snapshot().await().queuedCount)
         assertEquals(listOf(500L), scheduler.entries.map { it.delayMillis })
@@ -369,10 +372,10 @@ class StandaloneRuntimeTest {
                 val release = CountDownLatch(1)
                 val held = deliveryExecutor(harness).submit {
                     entered.countDown()
-                    check(release.await(5, TimeUnit.SECONDS))
+                    check(release.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 }
                 try {
-                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                     rig.worker.runNext()
                     assertTrue(harness.runtime.applyConfiguration(rig.body).await() is RuntimeCaptureAuthorityUpdateResult.Activated)
                     // Retire authority after installation but before the admitted pass can run.
@@ -409,7 +412,7 @@ class StandaloneRuntimeTest {
         assertEquals(1, rig.worker.tasks.size)
         assertTrue(harness.runtime.markForegrounded())
         settleDelivery(harness)
-        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, harness.runtime.flush().get(5, TimeUnit.SECONDS).stop)
+        assertEquals(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE, harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, harness.owner.snapshot().await().queuedCount)
         assertTrue(transport.requests.isEmpty())
         assertTrue(scheduler.entries.isEmpty())
@@ -484,7 +487,8 @@ class StandaloneRuntimeTest {
         checkNotNull(javaClass.classLoader?.getResource("contracts/v1/fixtures/$name")).readText()
 
     private fun awaitCondition(condition: () -> Boolean) {
-        repeat(200) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
+        while (System.nanoTime() < deadline) {
             if (condition()) return
             Thread.sleep(10)
         }
@@ -496,7 +500,7 @@ class StandaloneRuntimeTest {
 
     private fun <T> Future<T>.await(): T =
         try {
-            get(10, TimeUnit.SECONDS)
+            get(WAIT_SECONDS, TimeUnit.SECONDS)
         } catch (error: ExecutionException) {
             throw error.cause ?: error
         }

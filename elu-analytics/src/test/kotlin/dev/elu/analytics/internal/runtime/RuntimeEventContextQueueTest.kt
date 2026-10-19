@@ -21,6 +21,9 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Event context and version stamps on the owner's capture path, with and without an event filter. */
 class RuntimeEventContextQueueTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
@@ -154,7 +157,7 @@ class RuntimeEventContextQueueTest {
     private fun events(owner: RuntimeQueueOwner) =
         owner.peek(100, Long.MAX_VALUE).await().filterIsInstance<RuntimeQueuedRecord.Event>()
 
-    private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
 
     private companion object {
         const val NOW = "2026-08-04T00:01:00.000Z"

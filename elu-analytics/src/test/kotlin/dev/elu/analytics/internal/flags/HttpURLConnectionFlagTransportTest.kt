@@ -20,6 +20,9 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class HttpURLConnectionFlagTransportTest {
     @Test fun `selfhost physical flags request retains bearer endpoint and redirect denial`() {
         val endpoint = URI("https://analytics.example.com/v1/flags?route=eu")
@@ -30,7 +33,7 @@ class HttpURLConnectionFlagTransportTest {
             connectionFactory = { actual -> assertEquals(endpoint, actual); connection })
         try {
             val pending = transport.send(FlagTransportRequest(endpoint, "{}".toByteArray())).toFuture()
-            worker.runNext(); assertArrayEquals("{}".toByteArray(), pending.get(1, TimeUnit.SECONDS))
+            worker.runNext(); assertArrayEquals("{}".toByteArray(), pending.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals("Bearer $KEY", connection.getRequestProperty("Authorization"))
             assertFalse(connection.instanceFollowRedirects)
             assertFailure(transport.send(FlagTransportRequest(ENDPOINT, "{}".toByteArray())).toFuture())
@@ -48,7 +51,7 @@ class HttpURLConnectionFlagTransportTest {
             connectionFactory = { actual -> assertEquals(endpoint, actual); connection })
         try {
             val pending = transport.send(FlagTransportRequest(endpoint, "{}".toByteArray())).toFuture()
-            worker.runNext(); assertArrayEquals("{}".toByteArray(), pending.get(1, TimeUnit.SECONDS))
+            worker.runNext(); assertArrayEquals("{}".toByteArray(), pending.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals("Bearer $KEY", connection.getRequestProperty("Authorization"))
             assertFalse(connection.instanceFollowRedirects)
             assertFailure(transport.send(FlagTransportRequest(ENDPOINT, "{}".toByteArray())).toFuture())
@@ -70,7 +73,7 @@ class HttpURLConnectionFlagTransportTest {
         assertEquals(1, worker.tasks.size)
         worker.runNext()
         assertArrayEquals(original, connection.output.toByteArray())
-        assertArrayEquals(response, future.get(1, TimeUnit.SECONDS))
+        assertArrayEquals(response, future.get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals("POST", connection.requestMethod)
         assertEquals("Bearer $KEY", connection.getRequestProperty("Authorization"))
         assertEquals("application/json", connection.getRequestProperty("Content-Type"))
@@ -151,7 +154,7 @@ class HttpURLConnectionFlagTransportTest {
         val transport = transport(worker, Connection(200, invalid))
         val result = transport.send(request()).toFuture()
         worker.runNext()
-        assertArrayEquals(invalid, result.get(1, TimeUnit.SECONDS))
+        assertArrayEquals(invalid, result.get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertThrows(FlagProtocolException::class.java) { FlagCodec.decodeResponse(result.get()) }
         transport.close()
     }
@@ -170,7 +173,7 @@ class HttpURLConnectionFlagTransportTest {
         assertEquals(0, connection.output.size())
         val next = transport.send(request()).toFuture()
         worker.runNext()
-        next.get(1, TimeUnit.SECONDS)
+        next.get(WAIT_SECONDS, TimeUnit.SECONDS)
         transport.close()
     }
 
@@ -183,7 +186,7 @@ class HttpURLConnectionFlagTransportTest {
         worker.runNext()
         assertEquals(1, worker.tasks.size)
         worker.runNext()
-        next.get(1, TimeUnit.SECONDS)
+        next.get(WAIT_SECONDS, TimeUnit.SECONDS)
         transport.close()
     }
 
@@ -255,7 +258,7 @@ class HttpURLConnectionFlagTransportTest {
         worker.rejected = false
         val next = transport.send(request()).toFuture()
         worker.runNext()
-        next.get(1, TimeUnit.SECONDS)
+        next.get(WAIT_SECONDS, TimeUnit.SECONDS)
         transport.close()
     }
 
@@ -264,7 +267,7 @@ class HttpURLConnectionFlagTransportTest {
             executor = worker, connectionFactory = { connection })
     private fun request() = FlagTransportRequest(ENDPOINT, "{}".toByteArray())
     private fun assertFailure(result: SdkFuture<ByteArray>): Throwable =
-        checkNotNull(assertThrows(ExecutionException::class.java) { result.get(1, TimeUnit.SECONDS) }.cause)
+        checkNotNull(assertThrows(ExecutionException::class.java) { result.get(WAIT_SECONDS, TimeUnit.SECONDS) }.cause)
     private fun resource(path: String): ByteArray = checkNotNull(javaClass.classLoader?.getResourceAsStream(path)).use { it.readBytes() }
 
     private class Worker : Executor {

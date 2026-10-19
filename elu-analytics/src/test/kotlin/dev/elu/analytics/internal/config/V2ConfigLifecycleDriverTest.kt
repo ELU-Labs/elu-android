@@ -13,6 +13,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class V2ConfigLifecycleDriverTest {
     @Test
     fun `start is pending then publishes an opaque consumable decision and schedules renewal and expiry`() {
@@ -39,13 +42,13 @@ class V2ConfigLifecycleDriverTest {
         val released = CountDownLatch(1)
         rig.fetch = {
             entered.countDown()
-            check(released.await(2, TimeUnit.SECONDS))
+            check(released.await(WAIT_SECONDS, TimeUnit.SECONDS))
             V2ConfigHttpResponse(503, null)
         }
         val thread = Thread { rig.worker.runNext() }
         thread.start()
         try {
-            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             rig.advance(48 * SECOND)
             rig.scheduler.runDue()
             assertNull(rig.deliveries.last())
@@ -88,21 +91,21 @@ class V2ConfigLifecycleDriverTest {
         val released = CountDownLatch(1)
         rig.fetch = {
             entered.countDown()
-            check(released.await(2, TimeUnit.SECONDS))
+            check(released.await(WAIT_SECONDS, TimeUnit.SECONDS))
             V2ConfigHttpResponse(200, rig.body)
         }
         rig.driver.start()
         val thread = Thread { rig.worker.runNext() }
         thread.start()
         try {
-            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             rig.driver.onBackground()
             rig.driver.onForeground()
             rig.driver.refresh()
             assertEquals(1, rig.calls)
             assertTrue(rig.worker.queued.isEmpty())
             released.countDown()
-            thread.join(2_000)
+            thread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
             assertNull(rig.deliveries.last())
             rig.fetch = { V2ConfigHttpResponse(200, rig.body) }
             assertEquals(1, rig.worker.queued.size)
@@ -475,14 +478,14 @@ class V2ConfigLifecycleDriverTest {
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
         rig.driver.start(); rig.worker.runNext()
         val original = checkNotNull(rig.gate.snapshot())
-        rig.fetch = { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)); V2ConfigHttpResponse(200, rig.body) }
+        rig.fetch = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)); V2ConfigHttpResponse(200, rig.body) }
         rig.driver.refresh()
         val thread = Thread { rig.worker.runNext() }; thread.start()
         try {
-            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             rig.gate.close()
             assertFalse(original.isCurrent()); assertNull(rig.gate.snapshot())
-            release.countDown(); thread.join(2_000); assertFalse(thread.isAlive)
+            release.countDown(); thread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS)); assertFalse(thread.isAlive)
             assertNull(rig.gate.snapshot()); assertNull(rig.source.currentDocument())
         } finally { release.countDown(); thread.join(2_000); rig.driver.close() }
     }

@@ -14,6 +14,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class NativeReplayCaptureQueueTest {
     private class Session(val rig: Rig) : AutoCloseable {
         val facts = NativeReplayLifecycle(TestSelectionAccess())
@@ -78,7 +81,7 @@ class NativeReplayCaptureQueueTest {
                 }))
                 try { assertTrue(mode, checkNotNull(io).invoke()) }
                 finally { physical.settlement.complete(ReplayTransportResponse(403, byteArrayOf())) }
-                operation.settlement.get(3, TimeUnit.SECONDS)
+                operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 delivery.commit(claim, ReplayDeliveryOutcome.Blocked(ReplayBlockKind.FORBIDDEN))
             }
             assertArrayEquals(mode, request.copyBytes(), rig.owner.storedPreparedReplayForTesting().get().single().prepared.copyBytes())
@@ -127,7 +130,7 @@ class NativeReplayCaptureQueueTest {
             session.use.settle()
             assertFalse("Physical completion alone is not durable accounting", closing.isDone)
             assertEquals(NativeReplayAuthorityStop.SETTLED, session.authority.stop().get())
-            assertEquals(NativeReplayAuthorityStop.SETTLED, closing.get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayAuthorityStop.SETTLED, closing.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertNull(rig.state().session!!.activeEpoch)
             assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(session.enrollment).get())
         }
@@ -141,7 +144,7 @@ class NativeReplayCaptureQueueTest {
             assertFalse(closing.isDone)
             session.use.settle()
             assertEquals(NativeReplayAuthorityStop.UNRESOLVED, session.authority.stop().get())
-            assertEquals(NativeReplayAuthorityStop.UNRESOLVED, closing.get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayAuthorityStop.UNRESOLVED, closing.get(WAIT_SECONDS, TimeUnit.SECONDS))
         }
     }
 
@@ -149,7 +152,7 @@ class NativeReplayCaptureQueueTest {
         rig.activate(); Session(rig).use { session ->
             session.begin(); session.use.settle()
             rig.onNativeRead = { throw java.io.IOException("held original accounting failure") }
-            assertEquals(NativeReplayAuthorityStop.UNRESOLVED, session.authority.closeAndWait().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayAuthorityStop.UNRESOLVED, session.authority.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(session.enrollment.isQuarantined())
             assertEquals(NativeReplayCaptureFinish.ACCOUNTING_PENDING, rig.owner.finishNativeReplayCapture(session.enrollment).get())
             failure { rig.openSame().get() }
@@ -244,7 +247,7 @@ class NativeReplayCaptureQueueTest {
             session.use.settle(); assertFalse(closing.isDone)
             assertEquals(NativeReplayAuthorityStop.SETTLED, session.authority.stop().get()); assertFalse(closing.isDone)
             assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(session.enrollment).get())
-            closing.get(2, TimeUnit.SECONDS)
+            closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
             val reopened = rig.openSame().get(); reopened.closeAsync().get(); Unit
         }
     }
@@ -370,7 +373,7 @@ class NativeReplayCaptureQueueTest {
             failure { rig.owner.acknowledge(RuntimeAcknowledgement(record.streamId, listOf(RuntimeRecordReference(record.sequence, record.kind, record.recordId)))).get() }
             session.use.settle(); assertEquals(NativeReplayAuthorityStop.UNRESOLVED, session.authority.stop().get())
             assertEquals(NativeReplayCaptureFinish.ACCOUNTING_PENDING, rig.owner.finishNativeReplayCapture(session.enrollment).get())
-            failure { rig.owner.closeAsync().get(3, TimeUnit.SECONDS) }; failure { rig.openSame().get() }
+            failure { rig.owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS) }; failure { rig.openSame().get() }
             assertTrue(rig.executor().isShutdown)
             assertNotNull(rig.state().session!!.activeEpoch)
         }
@@ -435,11 +438,11 @@ class NativeReplayCaptureQueueTest {
                 rig.onWrite = { rig.backing.ambiguousNextCommit = outcome }
                 val result = runCatching { session.authority.start(session.prepared, session.use).get() }
                 assertNull(result.getOrNull()); assertFalse(session.prepared.isCurrent())
-                if (mode == 1) pending!!.get(2, TimeUnit.SECONDS)
+                if (mode == 1) pending!!.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertEquals("Outcome=$outcome, withdrawal=$mode", if (outcome == FakeAmbiguousOutcome.COMMIT) 1L else 0L, rig.state().nextReplayOrdinal)
                 session.use.settle(); assertEquals(NativeReplayAuthorityStop.SETTLED, session.authority.stop().get())
                 assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(session.enrollment).get())
-                if (mode == 2) pending!!.get(2, TimeUnit.SECONDS)
+                if (mode == 2) pending!!.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertNull(rig.state().session!!.activeEpoch)
             }
         }
@@ -464,7 +467,7 @@ class NativeReplayCaptureQueueTest {
             assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(session.enrollment).get())
             assertFalse(closing.isDone); failure { rig.openSame().get() }
             transport.settlement.complete(ReplayTransportResponse(403, ByteArray(0)))
-            operation.settlement.get(2, TimeUnit.SECONDS); closing.get(2, TimeUnit.SECONDS)
+            operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS); closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
             val reopened = rig.openSame().get(); assertArrayEquals(request.copyBytes(), reopened.storedPreparedReplayForTesting().get().single().prepared.copyBytes())
             reopened.closeAsync().get(); Unit
         }
@@ -472,13 +475,13 @@ class NativeReplayCaptureQueueTest {
     @Test fun `queued duplicate finish cannot quarantine settled resources or a replacement enrollment`() = Rig().use { rig ->
         rig.activate(); val original = checkNotNull(rig.owner.enrollNativeReplayCapture().get()); original.cancelUnused()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        rig.onNativeRead = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        rig.onNativeRead = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val first = rig.owner.finishNativeReplayCapture(original)
-        check(entered.await(3, TimeUnit.SECONDS))
+        check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val duplicate = rig.owner.finishNativeReplayCapture(original)
         release.countDown()
-        assertEquals(NativeReplayCaptureFinish.SETTLED, first.get(3, TimeUnit.SECONDS))
-        assertEquals(NativeReplayCaptureFinish.STALE, duplicate.get(3, TimeUnit.SECONDS))
+        assertEquals(NativeReplayCaptureFinish.SETTLED, first.get(WAIT_SECONDS, TimeUnit.SECONDS))
+        assertEquals(NativeReplayCaptureFinish.STALE, duplicate.get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertFalse(original.isQuarantined())
         val replacement = checkNotNull(rig.owner.enrollNativeReplayCapture().get()); replacement.cancelUnused()
         assertEquals(NativeReplayCaptureFinish.STALE, rig.owner.finishNativeReplayCapture(original).get())
@@ -499,7 +502,7 @@ class NativeReplayCaptureQueueTest {
                 RuntimeQueueOwner::class.java.isAssignableFrom(it.type) || java.util.concurrent.Executor::class.java.isAssignableFrom(it.type) ||
                     it.type.name.contains("Activity") || it.type.name.startsWith("kotlin.jvm.functions.")
             })
-            failure { rig.owner.closeAsync().get(3, TimeUnit.SECONDS) }; failure { rig.openSame().get() }
+            failure { rig.owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS) }; failure { rig.openSame().get() }
             assertTrue(rig.executor().isShutdown)
         }
     }
@@ -529,11 +532,11 @@ class NativeReplayCaptureQueueTest {
     @Test fun `quarantine before final release retains exact enrollment slot`() = Rig().use { rig ->
         rig.activate(); val enrollment = checkNotNull(rig.owner.enrollNativeReplayCapture().get()); enrollment.cancelUnused()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        rig.onNativeRead = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        rig.onNativeRead = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val finish = rig.owner.finishNativeReplayCapture(enrollment)
-        check(entered.await(3, TimeUnit.SECONDS))
+        check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         enrollment.quarantine(); release.countDown()
-        runCatching { finish.get(3, TimeUnit.SECONDS) }
+        runCatching { finish.get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertTrue(enrollment.isQuarantined())
         assertNull("Quarantine must keep the original owner slot", rig.owner.enrollNativeReplayCapture().get())
         assertEquals(NativeReplayCaptureFinish.ACCOUNTING_PENDING, rig.owner.finishNativeReplayCapture(enrollment).get())
@@ -545,8 +548,8 @@ class NativeReplayCaptureQueueTest {
             if (error != null) closing.completeExceptionally(error)
             else { enrollment.quarantine(); closing.complete(rig.owner.closeAsync()) }
         }
-        assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(enrollment).get(3, TimeUnit.SECONDS))
-        closing.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS)
+        assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(enrollment).get(WAIT_SECONDS, TimeUnit.SECONDS))
+        closing.get(WAIT_SECONDS, TimeUnit.SECONDS).get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertFalse("Released resources cannot become quarantined", enrollment.isQuarantined())
         val reopened = rig.openSame().get(); reopened.closeAsync().get(); Unit
     }
@@ -561,14 +564,14 @@ class NativeReplayCaptureQueueTest {
                 val changed = RuntimeRecordCodec.encodeEvent(record.copy(name = "modified"))
                 assertEquals(original.internalPayload.size, changed.size)
                 rig.backing.records[original.sequence] = original.copy(internalPayload = changed)
-                rig.onRecordRead = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+                rig.onRecordRead = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             }
             rig.backing.ambiguousNextCommit = FakeAmbiguousOutcome.COMMIT
             val capture = rig.owner.capture(rig.event())
-            check(entered.await(3, TimeUnit.SECONDS))
+            check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             try { assertFalse("Exact recordsMatch is still unresolved", session.prepared.isCurrent()) }
             finally { release.countDown() }
-            failure { capture.get(3, TimeUnit.SECONDS) }
+            failure { capture.get(WAIT_SECONDS, TimeUnit.SECONDS) }
             assertFalse(session.prepared.isCurrent())
             val stored = rig.owner.peek(1, MAX_RUNTIME_QUEUE_BYTES).get().single() as RuntimeQueuedRecord.Event
             assertEquals("modified", stored.record.name)
@@ -583,10 +586,10 @@ class NativeReplayCaptureQueueTest {
         assertFalse(rig.executor().isShutdown)
         val closes = rig.databaseCloses
         use.settle()
-        failure { closing.get(3, TimeUnit.SECONDS) }
+        failure { closing.get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertTrue(enrollment.settlement.isCompletedExceptionally)
         assertTrue(rig.executor().isShutdown)
-        assertTrue(rig.executor().awaitTermination(3, TimeUnit.SECONDS))
+        assertTrue(rig.executor().awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(closes, rig.databaseCloses)
         failure { rig.openSame().get() }
     }
@@ -610,9 +613,9 @@ class NativeReplayCaptureQueueTest {
             assertFalse(closing.isDone); assertFalse(rig.executor().isShutdown)
             val closes = rig.databaseCloses
             transport.settlement.complete(ReplayTransportResponse(403, ByteArray(0)))
-            assertEquals(403, operation.settlement.get(3, TimeUnit.SECONDS).status)
-            failure { closing.get(3, TimeUnit.SECONDS) }
-            assertTrue(rig.executor().awaitTermination(3, TimeUnit.SECONDS))
+            assertEquals(403, operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS).status)
+            failure { closing.get(WAIT_SECONDS, TimeUnit.SECONDS) }
+            assertTrue(rig.executor().awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(closes, rig.databaseCloses)
             val blocked = rig.backing.replayRows.values.filter { it.key.startsWith("delivery/") }
             assertEquals(1, blocked.size)
@@ -641,7 +644,7 @@ class NativeReplayCaptureQueueTest {
             session.enrollment.settlement.whenComplete { _, error -> callback.complete(error != null && !Thread.holdsLock(lock)) }
             session.use.settle(); rig.backing.failNextKnownCommit = java.io.IOException("Refusal persistence is unresolved")
             transport.settlement.complete(ReplayTransportResponse(403, ByteArray(0)))
-            assertTrue(callback.get(3, TimeUnit.SECONDS))
+            assertTrue(callback.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertFalse(operation.settlement.isDone)
             val closing = rig.owner.closeAsync()
             assertFalse(closing.isDone); assertFalse(rig.executor().isShutdown)
@@ -659,34 +662,34 @@ class NativeReplayCaptureQueueTest {
         val late = Thread { enrollment.quarantine() }
         synchronized(resourceLock) {
             finish = rig.owner.finishNativeReplayCapture(enrollment)
-            check(entered.await(3, TimeUnit.SECONDS))
+            check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             // Force the actual queue release to pause while detaching only local resource refs.
             awaitBlocked(checkNotNull(worker.get()))
             late.start(); awaitBlocked(late)
         }
-        late.join(3_000); assertFalse(late.isAlive)
-        assertEquals(NativeReplayCaptureFinish.SETTLED, finish.get(3, TimeUnit.SECONDS))
+        late.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS)); assertFalse(late.isAlive)
+        assertEquals(NativeReplayCaptureFinish.SETTLED, finish.get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertFalse(enrollment.isQuarantined())
         assertFalse(enrollment.settlement.isCompletedExceptionally)
         assertNull(NativeReplayCaptureResources::class.java.getDeclaredField("database")
             .also { it.isAccessible = true }.get(resourceLock))
-        rig.owner.closeAsync().get(3, TimeUnit.SECONDS)
+        rig.owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
         val reopened = rig.openSame().get(); reopened.closeAsync().get(); Unit
     }
     private val nativePair = V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)
 
     @Test fun `borrowed cleanup uncertainty keeps exact installation resources and terminates closing worker`() = Rig().use { rig ->
         rig.activate(); val before = rig.row().payload.copyOf(); val executor = rig.executor()
-        rig.owner.retainNativeReplayCleanupFailure().get(3, TimeUnit.SECONDS)
+        rig.owner.retainNativeReplayCleanupFailure().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertArrayEquals(before, rig.row().payload)
-        assertNull(rig.owner.enrollNativeReplayCapture().get(3, TimeUnit.SECONDS))
+        assertNull(rig.owner.enrollNativeReplayCapture().get(WAIT_SECONDS, TimeUnit.SECONDS))
         // The one-way native restriction does not replace event authorization or mutate schema.
-        assertTrue(rig.owner.capture(rig.event()).get(3, TimeUnit.SECONDS) is RuntimeCaptureResult.Accepted)
+        assertTrue(rig.owner.capture(rig.event()).get(WAIT_SECONDS, TimeUnit.SECONDS) is RuntimeCaptureResult.Accepted)
         assertArrayEquals(before, rig.row().payload)
-        failure { rig.owner.closeAsync().get(3, TimeUnit.SECONDS) }
-        assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))
+        failure { rig.owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS) }
+        assertTrue(executor.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(0, rig.databaseCloses)
-        failure { rig.openSame().get(3, TimeUnit.SECONDS) }
+        failure { rig.openSame().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertArrayEquals(before, rig.row().payload)
     }
     private class Rig(val protocol: NativeReplayProtocol = NativeReplayProtocol.V1,
@@ -775,7 +778,7 @@ class NativeReplayCaptureQueueTest {
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
         fun reopen() {
-            owner.closeAsync().get(100, TimeUnit.MILLISECONDS)
+            owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
             driver.close()
             // A reopened queue owns a fresh original source/gate; a closed gate stays closed.
             assertNull(gate.snapshot())
@@ -810,7 +813,7 @@ class NativeReplayCaptureQueueTest {
     private companion object {
         const val KEY = "elu_pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAA"
         fun awaitBlocked(thread: Thread) {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (thread.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
             assertEquals("Expected the exact owned thread to block at its held monitor", Thread.State.BLOCKED, thread.state)
         }

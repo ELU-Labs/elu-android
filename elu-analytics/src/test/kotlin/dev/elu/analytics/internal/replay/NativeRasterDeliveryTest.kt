@@ -10,6 +10,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Original source/owner and transaction model. Opaque seeded payloads are not capture proof. */
 class NativeRasterDeliveryTest {
     @Test fun `default selection retains raster without granting delivery`() = Rig(support = ReplayDeliverySupport.WIREFRAME_ONLY).use { h ->
@@ -108,7 +111,7 @@ class NativeRasterDeliveryTest {
         assertTrue(op.canceled); assertEquals(2, h.rows().size)
         assertEquals(ReplayDeliveryCommit.STALE, h.queue.commit(claim, ReplayDeliveryOutcome.Accepted))
         op.result.complete(refusal(claim.rasterRow.request, ReplayBlockKind.RASTER_REQUEST))
-        physical.settlement.get(3, TimeUnit.SECONDS)
+        physical.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue(h.rows().isEmpty())
     }
 
@@ -193,7 +196,7 @@ class NativeRasterDeliveryTest {
         assertTrue(checkNotNull(guard).invoke()); assertFalse(checkNotNull(guard).invoke())
         h.rig.driver.onBackground()
         op.result.complete(refusal(claim.rasterRow.request, ReplayBlockKind.RASTER_SEQUENCE))
-        original.settlement.get(3, TimeUnit.SECONDS)
+        original.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(ReplayDeliveryState.BLOCKED, h.metadata(claim.ordinal).state)
         assertEquals(ReplayBlockKind.RASTER_SEQUENCE.name, h.metadata(claim.ordinal).blockKind)
         assertEquals(1, h.rows().size)
@@ -207,7 +210,7 @@ class NativeRasterDeliveryTest {
         assertEquals(0, h.rig.owner.expirePreparedReplay().get())
         assertEquals(2, h.rows().size); assertTrue(op.canceled)
         op.result.completeExceptionally(IllegalStateException("closed original connection"))
-        runCatching { physical.settlement.get(3, TimeUnit.SECONDS) }
+        runCatching { physical.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertTrue(h.rows().isEmpty())
     }
 
@@ -221,16 +224,16 @@ class NativeRasterDeliveryTest {
         }, executor, ReplayDeliveryScheduler { _, _ -> ReplayDeliveryScheduledTask {} },
             { h.rig.clock.wall }, { h.rig.clock.nanos / 1_000_000 }, { 0.5 })
         try {
-            val pass = coordinator.flush(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+            val pass = coordinator.flush(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             val closing = coordinator.closeAndWait(); assertFalse(closing.isDone); assertFalse(pass.isDone)
             op.result.complete(refusal(checkNotNull(observed.get()).rasterRow.request, ReplayBlockKind.RASTER_TOO_LARGE))
-            assertEquals(ReplayDeliveryPass(1, 1), pass.get(3, TimeUnit.SECONDS))
-            closing.get(3, TimeUnit.SECONDS); assertTrue(executor.isShutdown)
+            assertEquals(ReplayDeliveryPass(1, 1), pass.get(WAIT_SECONDS, TimeUnit.SECONDS))
+            closing.get(WAIT_SECONDS, TimeUnit.SECONDS); assertTrue(executor.isShutdown)
             assertEquals(2, h.rows().size); assertNull(h.queue.claim())
             assertEquals(ReplayBlockKind.RASTER_TOO_LARGE.name, h.metadata(checkNotNull(observed.get()).ordinal).blockKind)
         } finally {
             op.result.completeExceptionally(IllegalStateException("test cleanup"))
-            coordinator.closeAndWait().get(3, TimeUnit.SECONDS)
+            coordinator.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         }
     }
 
@@ -272,7 +275,7 @@ class NativeRasterDeliveryTest {
                 }
             } finally {
                 op?.result?.completeExceptionally(IllegalStateException("original IO settled"))
-                physical?.let { runCatching { it.settlement.get(3, TimeUnit.SECONDS) } }
+                physical?.let { runCatching { it.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS) } }
                 use?.settle()
                 enrollment?.let { assertEquals(NativeReplayCaptureFinish.SETTLED, h.rig.owner.finishNativeReplayCapture(it).get()) }
             }

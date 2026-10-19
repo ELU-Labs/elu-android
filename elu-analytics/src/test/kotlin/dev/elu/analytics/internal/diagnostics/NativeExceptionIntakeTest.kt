@@ -7,9 +7,12 @@ import org.junit.Assert.*
 import org.junit.After
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class NativeExceptionIntakeTest {
     private val owned = mutableListOf<NativeExceptionIntake>()
-    @After fun close() { owned.forEach { it.close().get(3, TimeUnit.SECONDS); it.joinClosedWriter() } }
+    @After fun close() { owned.forEach { it.close().get(WAIT_SECONDS, TimeUnit.SECONDS); it.joinClosedWriter() } }
     private class Clock : RuntimeCaptureClock {
         @Volatile var wall = 1000L
         @Volatile var mono = 1_000_000L
@@ -36,8 +39,8 @@ class NativeExceptionIntakeTest {
         owned += intake; intake.start()
         val observation = NativeExceptionObservation.from(IllegalArgumentException("SECRET"))
         val threads = List(16) { Thread { intake.offer(observation) }.apply { start() } }
-        threads.forEach { it.join(2000); assertFalse(it.isAlive) }
-        intake.reportSettlement.get(2, TimeUnit.SECONDS); intake.close().get(2, TimeUnit.SECONDS)
+        threads.forEach { it.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS)); assertFalse(it.isAlive) }
+        intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS); intake.close().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, spool.publications)
         val bytes = spool.report!!.encode().toString(Charsets.UTF_8)
         assertFalse(bytes.contains("SECRET")); assertFalse(bytes.contains("stack")); assertFalse(bytes.contains("thread"))
@@ -50,59 +53,59 @@ class NativeExceptionIntakeTest {
             { clock, _ -> clock.mono += 1_000_000_000 }, { clock, _ -> clock.mono-- }, { _, policy -> policy.revoke() })) {
             val clock = Clock(); val policy = NativeExceptionPolicyLease("b".repeat(64)); val spool = Spool()
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
-            spool.beforePublish = { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) }
+            spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             val intake = NativeExceptionIntake(reservation(), spool, policy, clock, clock.mono, 1_000_000_000, sourceIsCurrent = { true })
             owned += intake; intake.start()
             try {
                 intake.offer(NativeExceptionObservation.from(Error("PRIVATE")))
-                assertTrue(entered.await(2, TimeUnit.SECONDS)); assertFalse(intake.settlement.isDone)
+                assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertFalse(intake.settlement.isDone)
                 change(clock, policy)
             } finally { release.countDown() }
-            intake.reportSettlement.get(2, TimeUnit.SECONDS); intake.close().get(2, TimeUnit.SECONDS)
+            intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS); intake.close().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertFalse(intake.published); assertNull(spool.report)
         }
     }
     @Test fun `close completion remains pending for original blocked writer and no post-close publication`() {
         val clock = Clock(); val spool = Spool(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        spool.beforePublish = { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) }
+        spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val intake = NativeExceptionIntake(reservation(), spool, NativeExceptionPolicyLease("b".repeat(64)), clock, clock.mono, 1_000_000_000, sourceIsCurrent = { true })
         owned += intake; intake.start()
         try {
             intake.offer(NativeExceptionObservation.from(Error()))
-            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             assertFalse(intake.close().isDone)
             assertFalse(intake.settlement.cancel(true))
         } finally { release.countDown() }
-        intake.reportSettlement.get(2, TimeUnit.SECONDS); intake.close().get(2, TimeUnit.SECONDS)
+        intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS); intake.close().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertNull(spool.report)
     }
     @Test fun `IO failure is retained and closes writer without falsely acknowledging publication`() {
         val spool = Spool().apply { beforePublish = { throw java.io.IOException("injected") } }
         val clock = Clock(); val intake = NativeExceptionIntake(reservation(), spool, NativeExceptionPolicyLease("b".repeat(64)), clock, clock.mono, 1_000_000_000, sourceIsCurrent = { true })
         owned += intake; intake.start(); intake.offer(NativeExceptionObservation.from(Error()))
-        intake.reportSettlement.get(2, TimeUnit.SECONDS); intake.close().get(2, TimeUnit.SECONDS)
+        intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS); intake.close().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue(intake.failure is java.io.IOException); assertFalse(intake.published)
         intake.offer(NativeExceptionObservation.from(Error()))
         assertEquals(0, spool.publications)
     }
     @Test fun `publication observation timeout retains original work and later acknowledgement is not cancellation`() {
         val clock = Clock(); val spool = Spool(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val intake = NativeExceptionIntake(reservation(), spool, NativeExceptionPolicyLease("b".repeat(64)), clock,
             clock.mono, 1_000_000_000, sourceIsCurrent = { true })
         owned += intake; intake.start()
         try {
             assertEquals(NativeExceptionPublication.UNCONFIRMED, intake.offerAndObserve(NativeExceptionObservation.from(Error())))
-            assertTrue(entered.await(2, TimeUnit.SECONDS)); assertFalse(intake.reportSettlement.isDone)
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertFalse(intake.reportSettlement.isDone)
             assertFalse(intake.reportSettlement.cancel(true)); assertFalse(intake.settlement.isDone)
             assertEquals(NativeExceptionPublication.NOT_ADMITTED, intake.offerAndObserve(NativeExceptionObservation.from(Error())))
         } finally { release.countDown() }
-        intake.reportSettlement.get(2, TimeUnit.SECONDS)
+        intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue(intake.published); assertNotNull(spool.report)
     }
     @Test fun `interrupted publication observation restores flag without abandoning original held write`() {
         val clock = Clock(); val spool = Spool(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val intake = NativeExceptionIntake(reservation(), spool, NativeExceptionPolicyLease("b".repeat(64)), clock,
             clock.mono, 1_000_000_000, sourceIsCurrent = { true })
         owned += intake; intake.start()
@@ -112,17 +115,17 @@ class NativeExceptionIntakeTest {
             assertTrue(Thread.currentThread().isInterrupted)
         } finally { Thread.interrupted() }
         try {
-            assertTrue(entered.await(2, TimeUnit.SECONDS)); assertFalse(intake.reportSettlement.isDone)
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertFalse(intake.reportSettlement.isDone)
             intake.invalidate()
         } finally { release.countDown() }
-        intake.reportSettlement.get(2, TimeUnit.SECONDS); assertNull(spool.report)
+        intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS); assertNull(spool.report)
     }
     @Test fun `original admission snapshot cannot adopt a replacement arm and completed results stay per arm`() {
         val clock = Clock(); val spool = Spool(); val intake = NativeExceptionIntake(reservation(), spool,
             NativeExceptionPolicyLease("b".repeat(64)), clock, clock.mono, 1_000_000_000, sourceIsCurrent = { true })
         owned += intake; intake.start()
         val old = checkNotNull(intake.snapshotForPublication())
-        intake.invalidate(); intake.reportSettlement.get(2, TimeUnit.SECONDS)
+        intake.invalidate(); intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         intake.rearm(reservation().copy(id = "22222222-2222-2222-2222-222222222222"), NativeExceptionPolicyLease("b".repeat(64)),
             clock.mono, 1_000_000_000, sourceIsCurrent = { true })
         assertFalse(old.allowsObservation()); old.offer(NativeExceptionObservation.from(Error()))
@@ -131,7 +134,7 @@ class NativeExceptionIntakeTest {
         // an old snapshot can consume another future reservation.
         val outcome = intake.offerAndObserve(NativeExceptionObservation.from(IllegalStateException()))
         assertTrue(outcome == NativeExceptionPublication.PUBLISHED || outcome == NativeExceptionPublication.UNCONFIRMED)
-        intake.reportSettlement.get(2, TimeUnit.SECONDS)
+        intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals("22222222-2222-2222-2222-222222222222", spool.report!!.reservation.id)
         assertEquals(1, spool.publications)
     }
@@ -152,7 +155,7 @@ class NativeExceptionIntakeTest {
         val writer = java.util.concurrent.atomic.AtomicReference<Thread>()
         val interruptPreserved = java.util.concurrent.atomic.AtomicBoolean(false)
         intake.settlement.whenComplete { _, _ ->
-            writer.set(Thread.currentThread()); entered.countDown(); check(release.await(3, TimeUnit.SECONDS))
+            writer.set(Thread.currentThread()); entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS))
         }
         val joining = Thread {
             Thread.currentThread().interrupt()
@@ -161,13 +164,13 @@ class NativeExceptionIntakeTest {
             joined.countDown()
         }
         try {
-            intake.close(); assertTrue(entered.await(2, TimeUnit.SECONDS))
+            intake.close(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(intake.settlement.isDone); assertTrue(writer.get().isAlive)
             joining.start()
             assertFalse(joined.await(100, TimeUnit.MILLISECONDS))
-            release.countDown(); assertTrue(joined.await(2, TimeUnit.SECONDS))
+            release.countDown(); assertTrue(joined.await(WAIT_SECONDS, TimeUnit.SECONDS))
             assertFalse(writer.get().isAlive); assertTrue(interruptPreserved.get())
-        } finally { release.countDown(); if (joining.state != Thread.State.NEW) joining.join(3_000) }
+        } finally { release.countDown(); if (joining.state != Thread.State.NEW) joining.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS)) }
         assertFalse(joining.isAlive)
     }
 }

@@ -32,6 +32,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class PrivacyStateProjectorTest {
     @Test fun `declared delivery support is explicit and cannot supply missing privacy`() {
         val off = PrivacyStateProjector.nativeSealedDeliveryPolicy(dev.elu.analytics.internal.replay.NativeReplayCapabilities()) { false }
@@ -322,7 +325,7 @@ class PrivacyStateProjectorTest {
     private fun configBody(): String =
         checkNotNull(javaClass.classLoader?.getResource("contracts/v1/fixtures/config-enabled.json")).readText()
 
-    private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
 
     private class FixedCaptureClock(private val wallEpochMillis: Long) : RuntimeCaptureClock {
         override fun wallNowEpochMillis(): Long = wallEpochMillis

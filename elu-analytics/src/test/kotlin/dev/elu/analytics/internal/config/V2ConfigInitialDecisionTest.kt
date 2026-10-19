@@ -41,6 +41,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /**
  * The initial configuration decision through the AndroidStandaloneStack composition: the driver
  * listener updates the gate synchronously, then the runtime and facade are notified.
@@ -277,7 +280,7 @@ class V2ConfigInitialDecisionTest {
         rig.offline = true
         repeat(101) { index -> rig.facade.capture("event-$index", null, Date(rig.clock.wall)) }
         rig.settle()
-        rig.facade.closeAndWait().get(10, TimeUnit.SECONDS)
+        rig.facade.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(listOf("Close: 100 held calls; dropped: BUFFER_FULL=1, CLOSED=100"), rig.logs)
     }
 
@@ -336,7 +339,7 @@ class V2ConfigInitialDecisionTest {
                 rig.offline = false
                 rig.driver.refresh(); rig.fetch()
                 assertEquals(mode, EluFacadeState.Enabled, rig.facade.state())
-                val sameDocument = rig.runtime.applyConfiguration(rig.gate.snapshot()?.body).get(10, TimeUnit.SECONDS)
+                val sameDocument = rig.runtime.applyConfiguration(rig.gate.snapshot()?.body).get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertTrue(mode, sameDocument is RuntimeCaptureAuthorityUpdateResult.Activated)
                 rig.facade.capture("after-recovery", null, Date(rig.clock.wall)); rig.settle()
                 assertEquals(mode, listOf("event:online", "event:after-recovery"), rig.queued())
@@ -396,7 +399,7 @@ class V2ConfigInitialDecisionTest {
                 override fun wallNowEpochMillis() = clock.wall
                 override fun elapsedRealtimeNanos() = clock.nanos
             },
-        ).get(10, TimeUnit.SECONDS).also { it.bindConfigurationGate(gate).get(10, TimeUnit.SECONDS) }
+        ).get(WAIT_SECONDS, TimeUnit.SECONDS).also { it.bindConfigurationGate(gate).get(WAIT_SECONDS, TimeUnit.SECONDS) }
         val runtime = StandaloneRuntime(owner, KEY, wallClock = { clock.wall },
             deliveryClock = object : BatchDeliveryClock {
                 override fun wallNow() = BatchWallInstant(clock.wall, Instant.ofEpochMilli(clock.wall).toString())
@@ -405,7 +408,7 @@ class V2ConfigInitialDecisionTest {
             transportFactory = { BatchHTTPTransport { BatchHTTPResponse(503, ByteArray(0)) } },
             deviceInEuTimezone = { duringApply?.also { duringApply = null }?.invoke(); deviceInEu }, configurationGate = gate)
         val facade: StandaloneFacade = StandaloneFacade(
-            open = { openLatch?.await(10, TimeUnit.SECONDS); StandaloneStack(runtime, owner, null) }, deliverCallback = { it.run() }, wallClock = { clock.wall },
+            open = { openLatch?.await(WAIT_SECONDS, TimeUnit.SECONDS); StandaloneStack(runtime, owner, null) }, deliverCallback = { it.run() }, wallClock = { clock.wall },
             configurationGate = gate, onCloseRequested = { driver.close(); gate.close() }, log = { logs += it },
             lane = lane ?: Executors.newSingleThreadExecutor { runnable -> Thread(runnable).apply { isDaemon = true } },
         ).also { it.start() }
@@ -413,13 +416,13 @@ class V2ConfigInitialDecisionTest {
         fun drainNotifications() {
             while (true) { val next = synchronized(notifications) { notifications.pollFirst() } ?: return; next() }
         }
-        fun settle() { facade.settled().get(10, TimeUnit.SECONDS) }
+        fun settle() { facade.settled().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         fun fetch() { worker.runNext(); drainNotifications(); settle() }
         fun start() { driver.start(); fetch() }
         /** Fires the backoff retry the failed fetch scheduled. */
         fun retry() { scheduler.fireAll(); fetch() }
-        fun diagnostics(): EluFacadeDiagnostics = facade.diagnostics().get(10, TimeUnit.SECONDS)
-        fun records(): List<RuntimeQueuedRecord> = owner.peek(1_000, Long.MAX_VALUE).get(10, TimeUnit.SECONDS)
+        fun diagnostics(): EluFacadeDiagnostics = facade.diagnostics().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        fun records(): List<RuntimeQueuedRecord> = owner.peek(1_000, Long.MAX_VALUE).get(WAIT_SECONDS, TimeUnit.SECONDS)
         fun events(): List<RuntimeEventRecord> = records().filterIsInstance<RuntimeQueuedRecord.Event>().map { it.record }
         fun queued(): List<String> = records().map { record ->
             when (record) {

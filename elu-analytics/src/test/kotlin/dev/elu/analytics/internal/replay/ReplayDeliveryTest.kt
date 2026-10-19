@@ -14,6 +14,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class ReplayDeliveryTest {
     @Test fun `legacy metadata canonical schema1 is unchanged by explicit raster support`() {
         val d = ReplayDeliveryMetadata(2, "sha256:" + "a".repeat(64), ReplayDeliveryState.CLAIMED,
@@ -110,7 +113,7 @@ class ReplayDeliveryTest {
         queue.dispatch(claim,ReplayDeliveryTransport { _, authorize -> guard=authorize;op })
         val closing=rig.owner.closeAsync()
         assertFalse(closing.isDone);assertEquals(0,rig.leaseCloses);assertTrue(op.cancelled);assertFalse(checkNotNull(guard).invoke())
-        op.settlement.completeExceptionally(IllegalStateException("settled"));closing.get(3,TimeUnit.SECONDS)
+        op.settlement.completeExceptionally(IllegalStateException("settled"));closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1,rig.leaseCloses);rig.driver.close()
     }
     @Test fun `generation change and masking withdrawal purge before dispatch without resurrecting claimed rows`() {
@@ -132,10 +135,10 @@ class ReplayDeliveryTest {
         rig.activate();rig.append();val q=rig.delivery();val op=Op();val enrolled=CountDownLatch(1)
         val co=ReplayDeliveryCoordinator(q,ReplayDeliveryTransport { _, _ -> enrolled.countDown();op },Executors.newSingleThreadExecutor(),
             ReplayDeliveryScheduler { _, _ -> ReplayDeliveryScheduledTask {} },{rig.clock.wall},{rig.clock.nanos/1_000_000},{0.5})
-        val pass=co.flush();assertTrue(enrolled.await(3,TimeUnit.SECONDS));assertSame(pass,co.flush())
-        rig.owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("plan" to "new"),"2026-08-05T00:01:06Z")).get(3,TimeUnit.SECONDS)
-        co.close();assertTrue(op.cancellation.await(3, TimeUnit.SECONDS));assertTrue(op.cancelled);assertFalse(pass.isDone);assertSame(pass,co.flush())
-        op.settlement.completeExceptionally(IllegalStateException("settled"));pass.get(3,TimeUnit.SECONDS)
+        val pass=co.flush();assertTrue(enrolled.await(WAIT_SECONDS, TimeUnit.SECONDS));assertSame(pass,co.flush())
+        rig.owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("plan" to "new"),"2026-08-05T00:01:06Z")).get(WAIT_SECONDS, TimeUnit.SECONDS)
+        co.close();assertTrue(op.cancellation.await(WAIT_SECONDS, TimeUnit.SECONDS));assertTrue(op.cancelled);assertFalse(pass.isDone);assertSame(pass,co.flush())
+        op.settlement.completeExceptionally(IllegalStateException("settled"));pass.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1,rig.rows().size)
     }
 
@@ -209,17 +212,17 @@ class ReplayDeliveryTest {
         val tasks=java.util.concurrent.CopyOnWriteArrayList<Pair<Long,()->Unit>>()
         val co=ReplayDeliveryCoordinator(rig.delivery(),ReplayDeliveryTransport { _, _ -> fail("not due");Op() },Executors.newSingleThreadExecutor(),
             ReplayDeliveryScheduler { delay, task -> tasks.add(delay to task);ReplayDeliveryScheduledTask {} },{rig.clock.wall},{rig.clock.nanos/1_000_000},{0.5})
-        assertEquals(0,co.flush().get(3,TimeUnit.SECONDS).attempted);assertEquals(2000L,tasks.single().first);co.close()
+        assertEquals(0,co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).attempted);assertEquals(2000L,tasks.single().first);co.close()
     }
     @Test fun `deadline cancellation retains physical occupancy and late ACK cannot delete`() = Rig().use { rig ->
         rig.activate();rig.append();val tasks=java.util.concurrent.CopyOnWriteArrayList<Pair<Long,()->Unit>>();val op=Op()
         val co=ReplayDeliveryCoordinator(rig.delivery(),ReplayDeliveryTransport { _, _ -> op },Executors.newSingleThreadExecutor(),
             ReplayDeliveryScheduler { delay, task -> tasks.add(delay to task);ReplayDeliveryScheduledTask {} },{rig.clock.wall},{rig.clock.nanos/1_000_000},{0.5})
-        val pass=co.flush();val limit=System.nanoTime()+TimeUnit.SECONDS.toNanos(3)
+        val pass=co.flush();val limit=System.nanoTime()+TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
         while(tasks.isEmpty() && System.nanoTime()<limit) Thread.yield()
         assertFalse(tasks.isEmpty());tasks.first().second();assertTrue(op.cancelled);assertFalse(pass.isDone)
         op.settlement.complete(ReplayTransportResponse(200,ack(rig.rows().single().prepared)))
-        pass.get(3,TimeUnit.SECONDS);assertEquals(1,rig.rows().size);co.close()
+        pass.get(WAIT_SECONDS, TimeUnit.SECONDS);assertEquals(1,rig.rows().size);co.close()
     }
 
     @Test fun `429 and 5xx without the ELU error object retry the row only and never pause the endpoint`() {
@@ -294,13 +297,13 @@ class ReplayDeliveryTest {
                     else ReplayTransportResponse(503, "503 Service Unavailable".toByteArray())) } },
             Executors.newSingleThreadExecutor(), ReplayDeliveryScheduler { delay, task -> tasks.add(delay to task); ReplayDeliveryScheduledTask {} },
             { rig.clock.wall }, { rig.clock.nanos / 1_000_000 }, { 0.5 })
-        fun await(condition: () -> Boolean) { val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        fun await(condition: () -> Boolean) { val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (!condition() && System.nanoTime() < limit) Thread.yield(); assertTrue(condition()) }
         // The first pass sends one request although a second recording is queued.
-        assertEquals(1, co.flush().get(3, TimeUnit.SECONDS).attempted)
+        assertEquals(1, co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).attempted)
         assertEquals(1, sent.get()); assertEquals(1, co.transientStreakForTesting()); assertEquals(750L, tasks.last().first)
         // A trigger during the pause sends nothing and rearms the pause wake.
-        assertEquals(0, co.flush().get(3, TimeUnit.SECONDS).attempted); assertEquals(1, sent.get())
+        assertEquals(0, co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).attempted); assertEquals(1, sent.get())
         assertEquals(750L, tasks.last().first)
         // The pause wake takes the next eligible head: the other recording, not the failed row.
         rig.clock.nanos += 750_000_000L; tasks.last().second()
@@ -334,11 +337,11 @@ class ReplayDeliveryTest {
         val executor=Executors.newSingleThreadExecutor { task -> Thread(task).also { thread.set(it) } }
         val co=ReplayDeliveryCoordinator(rig.delivery(),ReplayDeliveryTransport { _, _ -> enrolled.countDown();op },executor,
             ReplayDeliveryScheduler { _, _ -> ReplayDeliveryScheduledTask {} },{rig.clock.wall},{rig.clock.nanos/1_000_000},{0.5})
-        val pass=co.flush();assertTrue(enrolled.await(3,TimeUnit.SECONDS));thread.get().interrupt()
-        val limit=System.nanoTime()+TimeUnit.SECONDS.toNanos(3)
+        val pass=co.flush();assertTrue(enrolled.await(WAIT_SECONDS, TimeUnit.SECONDS));thread.get().interrupt()
+        val limit=System.nanoTime()+TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
         while(!op.cancelled && System.nanoTime()<limit) Thread.yield()
         assertTrue(op.cancelled);assertFalse(pass.isDone)
-        op.settlement.completeExceptionally(IllegalStateException("settled"));pass.get(3,TimeUnit.SECONDS)
+        op.settlement.completeExceptionally(IllegalStateException("settled"));pass.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1,rig.rows().size);co.close()
     }
 
@@ -363,11 +366,11 @@ class ReplayDeliveryTest {
         }
         val co=ReplayDeliveryCoordinator(queue,ReplayDeliveryTransport { _, _ -> fail("no request");Op() },Executors.newSingleThreadExecutor(),
             ReplayDeliveryScheduler { _, task -> tasks.add(task);ReplayDeliveryScheduledTask {} },{0L},{0L},{0.5})
-        co.flush().get(3,TimeUnit.SECONDS);val old=tasks.single();co.withdraw();old();assertEquals(1,claims.get())
-        co.flush().get(3,TimeUnit.SECONDS);val replaced: () -> Unit = tasks[tasks.size-1];delay=500
-        co.flush().get(3,TimeUnit.SECONDS);val current: () -> Unit = tasks[tasks.size-1];assertNotSame(replaced,current)
+        co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS);val old=tasks.single();co.withdraw();old();assertEquals(1,claims.get())
+        co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS);val replaced: () -> Unit = tasks[tasks.size-1];delay=500
+        co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS);val current: () -> Unit = tasks[tasks.size-1];assertNotSame(replaced,current)
         val before=claims.get();replaced.invoke();old();assertEquals(before,claims.get())
-        current.invoke();co.flush().get(3,TimeUnit.SECONDS);assertTrue(claims.get()>before);co.close()
+        current.invoke();co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS);assertTrue(claims.get()>before);co.close()
     }
 
     @Test fun `late physical401 and403 remain permanent after withdrawal or deadline and reopen`() {
@@ -375,12 +378,12 @@ class ReplayDeliveryTest {
             rig.activate();rig.append();val op=Op();val tasks=java.util.concurrent.CopyOnWriteArrayList<()->Unit>()
             val co=ReplayDeliveryCoordinator(rig.delivery(),ReplayDeliveryTransport { _, _ -> op },Executors.newSingleThreadExecutor(),
                 ReplayDeliveryScheduler { _, task -> tasks.add(task);ReplayDeliveryScheduledTask {} },{rig.clock.wall},{rig.clock.nanos/1_000_000},{0.5})
-            val pass=co.flush();val limit=System.nanoTime()+TimeUnit.SECONDS.toNanos(3)
+            val pass=co.flush();val limit=System.nanoTime()+TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while(tasks.isEmpty() && System.nanoTime()<limit) Thread.yield()
             assertFalse(tasks.isEmpty())
             if(deadline) tasks[0].invoke() else { rig.driver.onBackground();co.withdraw() }
             op.settlement.complete(ReplayTransportResponse(status,byteArrayOf(0xff.toByte())))
-            pass.get(3,TimeUnit.SECONDS);co.close();rig.renew {};rig.reopen()
+            pass.get(WAIT_SECONDS, TimeUnit.SECONDS);co.close();rig.renew {};rig.reopen()
             assertNull(rig.delivery().claim());assertEquals(1,rig.rows().size)
             assertEquals(if(status==401) "UNAUTHORIZED" else "FORBIDDEN",ReplayDeliveryMetadata.decode(checkNotNull(rig.backing.replayRows[ReplayDeliveryMetadata.key(0)])).blockKind)
         }
@@ -392,7 +395,7 @@ class ReplayDeliveryTest {
             val closing=rig.owner.closeAsync();assertFalse(closing.isDone);assertEquals(0,rig.leaseCloses)
             rig.backing.ambiguousNextCommit=FakeAmbiguousOutcome.COMMIT
             op.settlement.complete(ReplayTransportResponse(status,byteArrayOf()))
-            closing.get(3,TimeUnit.SECONDS);assertEquals(1,rig.leaseCloses)
+            closing.get(WAIT_SECONDS, TimeUnit.SECONDS);assertEquals(1,rig.leaseCloses)
             assertEquals(ReplayDeliveryState.BLOCKED,ReplayDeliveryMetadata.decode(checkNotNull(rig.backing.replayRows[ReplayDeliveryMetadata.key(0)])).state)
             rig.openAfterClose();assertNull(rig.delivery().claim());assertEquals(1,rig.rows().size)
         }
@@ -404,8 +407,8 @@ class ReplayDeliveryTest {
         val co=ReplayDeliveryCoordinator(rig.delivery(),ReplayDeliveryTransport { claim, _ -> Op().also { it.settlement.complete(ReplayTransportResponse(200,ack(claim.row.prepared))) } },
             Executors.newSingleThreadExecutor(),ReplayDeliveryScheduler { delay,task -> tasks.add(delay to task);ReplayDeliveryScheduledTask {} },
             {rig.clock.wall},{rig.clock.nanos/1_000_000},{0.5},maximumRequests=1)
-        assertEquals(1,co.flush().get(3,TimeUnit.SECONDS).attempted);assertEquals(1,rig.rows().size)
-        tasks.last { it.first==1L }.second();co.flush().get(3,TimeUnit.SECONDS)
+        assertEquals(1,co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).attempted);assertEquals(1,rig.rows().size)
+        tasks.last { it.first==1L }.second();co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue(rig.rows().isEmpty());co.close()
     }
 
@@ -421,16 +424,16 @@ class ReplayDeliveryTest {
             val coordinator = ReplayDeliveryCoordinator(queue, ReplayDeliveryTransport { _, _ ->
                 // Test-only held enrollment proves the owner command has begun before its Future returns.
                 entered.countDown()
-                check(release.await(3, TimeUnit.SECONDS))
+                check(release.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 op
             }, executor, ReplayDeliveryScheduler { _, _ -> ReplayDeliveryScheduledTask {} },
                 { rig.clock.wall }, { rig.clock.nanos / 1_000_000 }, { 0.5 })
             val pass = coordinator.flush()
             try {
-                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 worker.get().interrupt()
                 release.countDown()
-                val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+                val limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
                 while (!op.cancelled && System.nanoTime() < limit) Thread.yield()
                 assertTrue(op.cancelled)
                 assertFalse(pass.isDone)
@@ -438,7 +441,7 @@ class ReplayDeliveryTest {
                 assertEquals(ReplayDeliveryState.ENROLLED,
                     ReplayDeliveryMetadata.decode(checkNotNull(rig.backing.replayRows[ReplayDeliveryMetadata.key(0)])).state)
                 op.settlement.complete(ReplayTransportResponse(status, byteArrayOf()))
-                pass.get(3, TimeUnit.SECONDS)
+                pass.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 rig.renew {}; rig.reopen()
                 assertNull(rig.delivery().claim())
                 assertEquals(if (status == 401) "UNAUTHORIZED" else "FORBIDDEN",
@@ -500,27 +503,27 @@ class ReplayDeliveryTest {
             { rig.clock.wall }, { rig.clock.nanos / 1_000_000 }, { 0.5 }, maximumRequests = 1)
         val closeFromDependent = dev.elu.analytics.internal.concurrent.SdkFuture<dev.elu.analytics.internal.concurrent.SdkFuture<Unit>>()
         try {
-            val pass = co.flush(); assertTrue(enteredFirst.await(3, TimeUnit.SECONDS))
+            val pass = co.flush(); assertTrue(enteredFirst.await(WAIT_SECONDS, TimeUnit.SECONDS))
             pass.whenComplete { _, _ ->
                 try {
-                    co.flush(); check(enteredSecond.await(3, TimeUnit.SECONDS))
+                    co.flush(); check(enteredSecond.await(WAIT_SECONDS, TimeUnit.SECONDS))
                     closeFromDependent.complete(co.closeAndWait())
                 } catch (error: Throwable) { closeFromDependent.completeExceptionally(error) }
             }
             val original = rig.rows().first().prepared
             first.settlement.complete(ReplayTransportResponse(200, ack(original)))
-            val closing = closeFromDependent.get(3, TimeUnit.SECONDS)
+            val closing = closeFromDependent.get(WAIT_SECONDS, TimeUnit.SECONDS)
             // Both pool workers were occupied; this task can run only after pass1 finally ends.
-            executor.submit {}.get(3, TimeUnit.SECONDS)
+            executor.submit {}.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(2, starts.get()); assertFalse("Pass1 completed pass2's close receipt", closing.isDone)
             second.settlement.complete(ReplayTransportResponse(403, byteArrayOf()))
-            closing.get(3, TimeUnit.SECONDS)
+            closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals("FORBIDDEN", ReplayDeliveryMetadata.decode(checkNotNull(rig.backing.replayRows[ReplayDeliveryMetadata.key(1)])).blockKind)
         } finally {
             first.settlement.complete(ReplayTransportResponse(403, byteArrayOf()))
             second.settlement.complete(ReplayTransportResponse(403, byteArrayOf()))
-            co.closeAndWait().get(3, TimeUnit.SECONDS)
-            assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))
+            co.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            assertTrue(executor.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS))
         }
     }
 
@@ -535,7 +538,7 @@ class ReplayDeliveryTest {
         }
         val co = ReplayDeliveryCoordinator(queue, ReplayDeliveryTransport { _, _ -> error("No physical I/O") }, Executors.newSingleThreadExecutor(),
             ReplayDeliveryScheduler { _, task -> tasks.add(task); ReplayDeliveryScheduledTask {} }, { 0 }, { 0 })
-        co.flush().get(3, TimeUnit.SECONDS); val closing = co.closeAndWait(); closing.get(3, TimeUnit.SECONDS)
+        co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS); val closing = co.closeAndWait(); closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
         tasks.single().invoke(); assertEquals(0, co.flush().get().attempted)
         assertEquals(1, claims.get()); assertSame(closing, co.closeAndWait())
     }
@@ -551,13 +554,13 @@ class ReplayDeliveryTest {
                 ReplayDeliveryScheduler { delay, task -> tasks.add(delay to task); ReplayDeliveryScheduledTask {} },
                 { rig.clock.wall }, { rig.clock.nanos / 1_000_000 }, { 0.5 })
             try {
-                assertEquals(0, co.flush().get(3, TimeUnit.SECONDS).attempted)
+                assertEquals(0, co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).attempted)
                 rig.clock.nanos += 1_000_000_000; tasks.single().second.invoke()
-                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 val closing = co.closeAndWait()
                 assertSame(closing, co.closeAndWait()); assertFalse(closing.cancel(true)); assertFalse(closing.isDone)
                 op.settlement.complete(ReplayTransportResponse(status, byteArrayOf()))
-                closing.get(3, TimeUnit.SECONDS)
+                closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertTrue(executor.isShutdown)
                 assertEquals(if (status == 401) "UNAUTHORIZED" else "FORBIDDEN",
                     ReplayDeliveryMetadata.decode(checkNotNull(rig.backing.replayRows[ReplayDeliveryMetadata.key(0)])).blockKind)
@@ -570,7 +573,7 @@ class ReplayDeliveryTest {
         val entered = java.util.concurrent.CountDownLatch(1); val release = java.util.concurrent.CountDownLatch(1)
         val error = java.io.IOException("held queue failure")
         val queue = object : ReplayDeliveryQueue {
-            override fun claim(): ReplayDeliveryClaim? { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)); throw error }
+            override fun claim(): ReplayDeliveryClaim? { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)); throw error }
             override fun nextWakeDelayMillis(): Long? = null
             override fun dispatch(claim: ReplayDeliveryClaim, transport: ReplayDeliveryTransport): ReplayTransportOperation? = null
             override fun commit(claim: ReplayDeliveryClaim, outcome: ReplayDeliveryOutcome) = ReplayDeliveryCommit.STALE
@@ -578,9 +581,9 @@ class ReplayDeliveryTest {
         }
         val co = ReplayDeliveryCoordinator(queue, ReplayDeliveryTransport { _, _ -> error("No I/O") }, Executors.newSingleThreadExecutor(),
             ReplayDeliveryScheduler { _, _ -> ReplayDeliveryScheduledTask {} }, { 0 }, { 0 })
-        val pass = co.flush(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+        val pass = co.flush(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val closing = co.closeAndWait(); assertFalse(closing.isDone); assertFalse(closing.cancel(true)); release.countDown()
-        for (future in listOf(pass, closing)) try { future.get(3, TimeUnit.SECONDS); fail("Failure was swallowed") }
+        for (future in listOf(pass, closing)) try { future.get(WAIT_SECONDS, TimeUnit.SECONDS); fail("Failure was swallowed") }
         catch (caught: java.util.concurrent.ExecutionException) { assertSame(error, caught.cause) }
         assertSame(closing, co.closeAndWait())
     }
