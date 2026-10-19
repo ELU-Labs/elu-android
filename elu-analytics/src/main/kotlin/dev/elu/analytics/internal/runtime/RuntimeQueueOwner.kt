@@ -1811,7 +1811,8 @@ internal class RuntimeQueueOwner private constructor(
         }
         if (claimed != null && !replayPublicationIsCurrent(claimed, witness, policy)) {
             replayTransaction(null, ReplayDeliveryCommit.STALE) { tx ->
-                ReplayQueueStore.commit(tx, claimed, ReplayDeliveryOutcome.Retry(REPLAY_UNKNOWN_ATTEMPT_DELAY_MILLIS), replayElapsedMillis())
+                ReplayQueueStore.commit(tx, claimed, ReplayDeliveryOutcome.Retry(REPLAY_UNKNOWN_ATTEMPT_DELAY_MILLIS), replayElapsedMillis(),
+                    captureClock.wallNowEpochMillis())
             }
             persistReplayDeliveryClockDenial()
             return@submit null
@@ -1826,7 +1827,8 @@ internal class RuntimeQueueOwner private constructor(
         replayTransaction<Long?>(witness, null) { tx ->
             listOfNotNull(resolveReplayDelivery(tx, witness, policy, false),
                 resolveReplayDelivery(tx, witness, policy, false, ReplayDeliveryFormat.RASTER))
-                .mapNotNull { authority -> ReplayQueueStore.nextWakeDelay(tx, replayDeliveryOwner, authority, replayElapsedMillis()) { request ->
+                .mapNotNull { authority -> ReplayQueueStore.nextWakeDelay(tx, replayDeliveryOwner, authority, replayElapsedMillis(),
+                    captureClock.wallNowEpochMillis()) { request ->
                     request.replayId !in pendingRasterRetirement && rasterIdentityMatches(request, requireCurrent(tx).state.identity) &&
                         !request.expiredAt(captureClock.wallNowEpochMillis()) &&
                         request.policyRevision == authority.policyRevision && request.effectivePolicyHash == authority.effectivePolicyHash &&
@@ -1889,7 +1891,7 @@ internal class RuntimeQueueOwner private constructor(
                                 }
                                 if (outcome is ReplayDeliveryOutcome.Blocked) {
                                     replayTransaction(null, ReplayDeliveryCommit.STALE) { tx ->
-                                        ReplayQueueStore.commit(tx, claim, outcome, 0)
+                                        ReplayQueueStore.commit(tx, claim, outcome, 0, captureClock.wallNowEpochMillis())
                                     }
                                     if (claim.format == ReplayDeliveryFormat.RASTER && nativeReceipt?.replayId == claim.replayId) {
                                         nativeScope.invalidate(); nativeCaptureEnrollment?.withdraw()
@@ -1947,7 +1949,7 @@ internal class RuntimeQueueOwner private constructor(
         val witness = if (deletes) claim.originalSource ?: configurationGate?.snapshot() ?: return@submit ReplayDeliveryCommit.STALE else null
         val committed = replayTransaction(witness, ReplayDeliveryCommit.STALE) { tx ->
             if (!replayOwnerIsLive() || (witness != null && !replayClaimIsCurrent(tx, claim, witness, policy))) return@replayTransaction ReplayDeliveryCommit.STALE
-            val result = ReplayQueueStore.commit(tx, claim, outcome, replayElapsedMillis())
+            val result = ReplayQueueStore.commit(tx, claim, outcome, replayElapsedMillis(), captureClock.wallNowEpochMillis())
             if (!replayOwnerIsLive() || (witness != null && !witness.isCurrent())) throw ReplaySourceWithdrawn()
             result
         }

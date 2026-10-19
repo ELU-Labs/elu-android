@@ -308,6 +308,20 @@ the submitted stream and records before local retirement. Lost acknowledgements
 can cause retransmission of the same identities; HTTP 200 alone is not enough
 to delete queued records.
 
+For a `429` or `5xx` response, the SDK retries the unchanged request with
+backoff, whatever the response body. When the body is ELU's error object, its
+`Retry-After` is honoured (up to one day for replay), and a replay `429` pauses
+that upload endpoint. For any other body, a valid `Retry-After` is honoured up to
+five minutes, and a missing or invalid one is ignored. After a temporary failure,
+replay uploads wait up to a minute before the next recording is tried. `401` and
+`403` stop delivery of that request, and a validated replay `409` identity
+conflict stops that chunk permanently. Other unexpected replay responses hold the
+chunk: the same bytes are offered again after one hour to one day, until the chunk
+expires seven days after capture. While the first undelivered chunk of a
+recording is held or refused, new chunks for that recording are not stored, and a
+new recording starts only once the configuration is refreshed, the identity or
+analytics session changes, or the app is opened again.
+
 Process restart reopens the existing owned queue and current schema upgrades
 preserve it. `flush` schedules work; it cannot guarantee network completion
 before Android stops the process. Queue and age limits can prevent admission

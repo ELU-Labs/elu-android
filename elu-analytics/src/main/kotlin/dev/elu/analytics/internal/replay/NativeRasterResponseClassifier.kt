@@ -33,6 +33,16 @@ internal object NativeRasterResponseClassifier {
     private data class Identity(val requestId: String, val replayId: String, val chunkId: String, val sequence: Long)
     private fun classify(response: ReplayTransportResponse, request: Identity, now: Long,
         retryDelayMillis: Long): NativeRasterResponseOutcome {
+        val closed = classifyClosed(response, request, now, retryDelayMillis)
+        // A validated body keeps its exact semantics. Any other 429/5xx retries this row only,
+        // with a bounded hint, and never pauses the endpoint.
+        if (closed != NativeRasterResponseOutcome.ProtocolBlocked || !RetryAfterParser.isRetryableStatus(response.status)) return closed
+        val delay = RetryAfterParser.foreignDelayMillis(response.retryAfter, now)
+        return NativeRasterResponseOutcome.Retry(minOf(REPLAY_MAX_RETRY_MILLIS, maxOf(0L, retryDelayMillis, delay)))
+    }
+
+    private fun classifyClosed(response: ReplayTransportResponse, request: Identity, now: Long,
+        retryDelayMillis: Long): NativeRasterResponseOutcome {
         if (response.status == 401 || response.status == 403) {
             return NativeRasterResponseOutcome.CredentialBlocked(response.status)
         }

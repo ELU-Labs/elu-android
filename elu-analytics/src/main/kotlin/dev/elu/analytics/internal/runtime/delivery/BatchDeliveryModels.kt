@@ -239,24 +239,42 @@ internal class HttpURLConnectionBatchTransport(
         try {
             connection.outputStream.use { output -> output.write(body) }
             val status = connection.responseCode
-            val contentEncoding = connection.getHeaderField("Content-Encoding")
-            if (contentEncoding != null && !contentEncoding.equals("identity", ignoreCase = true)) {
-                throw IllegalStateException("Unsupported batch response content encoding")
+            val retryAfter = connection.getHeaderField("Retry-After")
+            if (RetryAfterParser.isRetryableStatus(status)) {
+                // A 429/5xx stays retryable even when its body cannot be used (encoded or too
+                // large to buffer): only the status and a bounded Retry-After are kept.
+                val responseBody =
+                    try {
+                        readBody(connection, status)
+                    } catch (_: IllegalStateException) {
+                        ByteArray(0)
+                    }
+                return BatchHTTPResponse(status, responseBody, retryAfter?.takeIf { it.length <= 256 })
             }
-            connection.getHeaderField("Content-Length")?.toLongOrNull()?.let { length ->
-                if (length > maximumResponseBytes) throw BatchResponseTooLargeException(maximumResponseBytes)
-            }
-            val stream =
-                if (status >= 400) {
-                    connection.errorStream
-                } else {
-                    connection.inputStream
-                }
-            val responseBody = stream?.use { readBounded(it.readBytesChunked(), maximumResponseBytes) } ?: ByteArray(0)
-            return BatchHTTPResponse(status, responseBody, connection.getHeaderField("Retry-After"))
+            return BatchHTTPResponse(status, readBody(connection, status), retryAfter)
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun readBody(
+        connection: HttpURLConnection,
+        status: Int,
+    ): ByteArray {
+        val contentEncoding = connection.getHeaderField("Content-Encoding")
+        if (contentEncoding != null && !contentEncoding.equals("identity", ignoreCase = true)) {
+            throw IllegalStateException("Unsupported batch response content encoding")
+        }
+        connection.getHeaderField("Content-Length")?.toLongOrNull()?.let { length ->
+            if (length > maximumResponseBytes) throw BatchResponseTooLargeException(maximumResponseBytes)
+        }
+        val stream =
+            if (status >= 400) {
+                connection.errorStream
+            } else {
+                connection.inputStream
+            }
+        return stream?.use { readBounded(it.readBytesChunked(), maximumResponseBytes) } ?: ByteArray(0)
     }
 
     private fun java.io.InputStream.readBytesChunked(): Sequence<ByteArray> = sequence {

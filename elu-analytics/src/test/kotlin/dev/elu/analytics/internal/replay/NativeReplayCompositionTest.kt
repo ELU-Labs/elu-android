@@ -110,6 +110,13 @@ class NativeReplayCompositionTest {
         NativeReplayComposition(rig.owner, lifecycle, capabilities, StandaloneRuntime.defaultVersions(), { false }, allowed,
             platform, transport, worker)
 
+    private fun NativeReplayComposition.hasLiveCapture(): Boolean {
+        val monitor = NativeReplayComposition::class.java.getDeclaredField("monitor").also { it.isAccessible = true }.get(this)
+        return synchronized(monitor) {
+            (NativeReplayComposition::class.java.getDeclaredField("capture").also { it.isAccessible = true }.get(this)
+                as NativeReplayCaptureOwner?)?.finished()?.isDone == false
+        }
+    }
     private fun NativeReplayComposition.observingRoot(): Boolean {
         val monitor = NativeReplayComposition::class.java.getDeclaredField("monitor").also { it.isAccessible = true }.get(this)
         return synchronized(monitor) {
@@ -402,6 +409,43 @@ class NativeReplayCompositionTest {
             assertEquals(1, access.watches.get())
         } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
         assertEquals(access.watches.get(), access.closes.get())
+    } }
+
+    @Test fun `a recording ended behind its held chunk is not replaced until the session changes`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access)
+        // Hold the first durable chunk as if its upload got an unexpected response.
+        rig.afterReplayCommit = { rig.backing.connection().use { db -> db.transaction { tx ->
+            val header = ReplayQueueStore.headers(tx).single()
+            tx.putReplayRow(ReplayDeliveryMetadata(header.ordinal, header.digest, ReplayDeliveryState.BLOCKED,
+                UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1, delayMillis = REPLAY_PROTOCOL_HOLD_MIN_MILLIS,
+                notBeforeMillis = rig.clock.wall + REPLAY_PROTOCOL_HOLD_MIN_MILLIS, blockKind = ReplayBlockKind.PROTOCOL.name,
+                credentialWitness = "sha256:" + "b".repeat(64), scopeWitness = "sha256:" + "c".repeat(64),
+                protocolGeneration = NativeReplayProtocol.V1.generation).row())
+            val state = checkNotNull(ReplayQueueStore.state(tx))
+            tx.putReplayRow(state.copy(deliveryMetadataCount = (state.deliveryMetadataCount ?: 0L) + 1).row())
+        } } }
+        platform.onPause = { withdrawn -> rig.advance(); !withdrawn.await(5, TimeUnit.MILLISECONDS) }
+        val owner = composition(rig, life, platform)
+        try {
+            owner.ready().get(3, TimeUnit.SECONDS)
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
+            awaitCondition("recording ended behind its held chunk") {
+                owner.diagnostic()?.outcome == NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED }
+            assertEquals(1, rig.rows().size); assertEquals(1, platform.factories.get())
+            // A new root under the same source, identity and session starts no new recording. Join
+            // the evaluation the completion queued, then any forced follow-up it coalesced.
+            owner.reevaluate().get(3, TimeUnit.SECONDS)
+            access.root = Any(); owner.reevaluate(force = true).get(3, TimeUnit.SECONDS)
+            owner.reevaluate().get(3, TimeUnit.SECONDS)
+            assertFalse(owner.hasLiveCapture()); assertEquals(1, platform.factories.get())
+            // A new session records again.
+            platform.onPause = null
+            rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish()
+            assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate(force = true).get(3, TimeUnit.SECONDS))
+            awaitCondition("new session recording") { platform.factories.get() == 2 }
+        } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
     } }
 
     @Test fun `unknown collection failure is not retried by an ordinary same identity hint`() = Rig().use { rig -> MainAccess().use { access ->

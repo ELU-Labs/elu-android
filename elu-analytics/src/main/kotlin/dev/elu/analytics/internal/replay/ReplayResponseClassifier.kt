@@ -7,6 +7,19 @@ import dev.elu.analytics.internal.runtime.delivery.V1BatchResponseCodec
 internal object ReplayResponseClassifier {
     fun classify(response: ReplayTransportResponse, request: PreparedReplayRequest, now: Long,
         retryDelayMillis: Long): ReplayDeliveryOutcome {
+        val closed = classifyClosed(response, request, now, retryDelayMillis)
+        // A validated error object keeps its exact semantics. Any other 429/5xx (plain text, HTML,
+        // empty, oversized, or with an unreadable Retry-After) retries this row only and never
+        // pauses the endpoint.
+        if (closed != PROTOCOL_BLOCKED || !RetryAfterParser.isRetryableStatus(response.status)) return closed
+        val delay = RetryAfterParser.foreignDelayMillis(response.retryAfter, now)
+        return ReplayDeliveryOutcome.Retry(minOf(REPLAY_MAX_RETRY_MILLIS, maxOf(retryDelayMillis, delay)))
+    }
+
+    private val PROTOCOL_BLOCKED = ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL)
+
+    private fun classifyClosed(response: ReplayTransportResponse, request: PreparedReplayRequest, now: Long,
+        retryDelayMillis: Long): ReplayDeliveryOutcome {
         if (response.status == 401) return ReplayDeliveryOutcome.Blocked(ReplayBlockKind.UNAUTHORIZED)
         if (response.status == 403) return ReplayDeliveryOutcome.Blocked(ReplayBlockKind.FORBIDDEN)
         return try {

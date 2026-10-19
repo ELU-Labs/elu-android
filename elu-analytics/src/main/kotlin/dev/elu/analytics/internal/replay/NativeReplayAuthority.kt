@@ -74,6 +74,18 @@ internal class NativeReplayPreparedAuthority private constructor(
 ) {
     fun belongsTo(value: Any) = owner === value
     fun isCurrent() = projection.isCurrent() && selection.isCurrent()
+    /**
+     * A recording stopped behind its held or refused chunk stays stopped for the same original
+     * source, identity and session. Only a different context can start a new recording; this
+     * comparison grants no permission.
+     */
+    fun sameCaptureContext(other: NativeReplayPreparedAuthority): Boolean {
+        val mine = projection.input; val theirs = other.projection.input
+        val identity = mine.identity; val otherIdentity = theirs.identity
+        return mine.observation.source.token === theirs.observation.source.token &&
+            mine.observation.session.key == theirs.observation.session.key &&
+            identity.revision == otherIdentity.revision && identity.contextRevision == otherIdentity.contextRevision
+    }
     companion object {
         fun issue(owner: Any, invocation: Any, projection: NativeReplayPreparedProjection, selection: NativeReplaySelection) =
             NativeReplayPreparedAuthority(owner, invocation, projection, selection)

@@ -1430,7 +1430,7 @@ def verify_native_raster_response_boundary(root: pathlib.Path, errors: list[str]
         errors.append("raster response lost original refusal or bounded retry semantics")
     remaining = source
     for owner, method in (("ReplayJson", "parse"), ("V1BatchResponseCodec", "validateTransportError"),
-                          ("RetryAfterParser", "parseDelayMillis")):
+                          ("RetryAfterParser", "(?:parseDelayMillis|foreignDelayMillis|isRetryableStatus)")):
         remaining = re.sub(rf"^import [\w.]+\.{owner}\n", "", remaining, flags=re.MULTILINE)
         remaining = re.sub(rf"\b{owner}\.{method}\s*\(", "(", remaining)
         if re.search(rf"\b{owner}\b", remaining):

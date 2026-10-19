@@ -29,12 +29,31 @@ internal class ReplayDeliveryCoordinator(
     private var wakeAt: Long? = null
     private var flushWanted = false
     private var wakeToken: Any? = null
+    private var transientStreak = 0
+    private var transientUntil: Long? = null
 
     init { require(maximumRequests in 1..100); require(deadlineMillis in 1..600_000) }
 
-    fun flush(): SdkFuture<ReplayDeliveryPass> = synchronized(lock) {
+    fun flush(): SdkFuture<ReplayDeliveryPass> = flush(afterTransientPause = false)
+
+    /** Read-only test observation of consecutive transient failures. */
+    internal fun transientStreakForTesting(): Int = synchronized(lock) { transientStreak }
+
+    private fun flush(afterTransientPause: Boolean): SdkFuture<ReplayDeliveryPass> = synchronized(lock) {
         running?.let { if (!closed) flushWanted = true; return@synchronized it }
         if (closed) return@synchronized SdkFuture.completedFuture(ReplayDeliveryPass(0, 0))
+        // After a transient failure, other triggers fold into the pending pause instead of sending
+        // again. Only the pause wake itself, or an elapsed pause, ends it.
+        val until = transientUntil
+        if (until != null && !afterTransientPause) {
+            val remaining = until - monotonicMillis()
+            if (remaining in 1..MAXIMUM_TRANSIENT_PAUSE_MILLIS) {
+                // Withdrawal may have cancelled the pause wake; the deferred trigger rearms it.
+                scheduleWake(remaining, generation, transientPause = true)
+                return@synchronized SdkFuture.completedFuture(ReplayDeliveryPass(0, 0))
+            }
+        }
+        transientUntil = null
         val result = SdkFuture<ReplayDeliveryPass>()
         running = result
         val intent = generation
@@ -80,6 +99,7 @@ internal class ReplayDeliveryCoordinator(
         var pending: ReplayDeliveryClaim? = null
         var failure: Exception? = null
         var interrupted = false
+        var paused = false
         try {
             while (attempted < maximumRequests && current(intent)) {
                 val claim = queue.claim()
@@ -131,11 +151,19 @@ internal class ReplayDeliveryCoordinator(
                 if (applied == ReplayDeliveryCommit.COMMITTED) committed++
                 else queue.abandon(claim)
                 pending = null
-                if (outcome is ReplayDeliveryOutcome.Retry && current(intent)) scheduleWake(outcome.delayMillis, intent)
-                if (outcome is ReplayDeliveryOutcome.Retry && outcome.endpointCooldown) break
+                if (outcome is ReplayDeliveryOutcome.Retry) {
+                    // A transient failure ends the pass. The next pass waits a jittered, growing
+                    // pause and then takes the next eligible head, so queued recordings take turns
+                    // instead of all being resent.
+                    if (current(intent)) pauseAfterTransientFailure(intent)
+                    paused = true
+                    break
+                }
+                if (outcome == ReplayDeliveryOutcome.Accepted || outcome == ReplayDeliveryOutcome.RejectedTooLarge)
+                    synchronized(lock) { transientStreak = 0 }
                 if (outcome == ReplayDeliveryOutcome.Blocked(ReplayBlockKind.UNAUTHORIZED)) break
             }
-            if (attempted == maximumRequests && current(intent)) scheduleWake(1, intent)
+            if (!paused && attempted == maximumRequests && current(intent)) scheduleWake(1, intent)
         } catch (error: Exception) { failure = error }
         finally {
             // If enrollment threw or authority withdrew, release only the exact logical claim.
@@ -166,6 +194,10 @@ internal class ReplayDeliveryCoordinator(
         }
     }
 
+    private companion object {
+        const val MAXIMUM_TRANSIENT_PAUSE_MILLIS = 60_000L
+    }
+
     private fun backoff(attempt: Int): Long {
         val unit = jitter()
         require(unit.isFinite() && unit >= 0 && unit < 1)
@@ -173,11 +205,23 @@ internal class ReplayDeliveryCoordinator(
         return (base * (0.5 + unit)).toLong().coerceIn(1, REPLAY_MAX_RETRY_MILLIS)
     }
 
-    private fun scheduleWake(delay: Long, intent: Long) {
+    private fun pauseAfterTransientFailure(intent: Long) {
+        val pause = synchronized(lock) {
+            transientStreak = minOf(transientStreak + 1, 7)
+            val base = minOf(MAXIMUM_TRANSIENT_PAUSE_MILLIS, 1_000L shl (transientStreak - 1))
+            val sample = jitter()
+            val unit = if (sample.isFinite()) sample.coerceIn(0.0, 1.0) else 0.5
+            (base * (0.5 + 0.5 * unit)).toLong().coerceAtLeast(1).also { transientUntil = Math.addExact(monotonicMillis(), it) }
+        }
+        scheduleWake(pause, intent, transientPause = true)
+    }
+
+    private fun scheduleWake(delay: Long, intent: Long, transientPause: Boolean = false) {
         synchronized(lock) {
             if (closed || generation != intent) return
             val at = Math.addExact(monotonicMillis(), delay)
-            if (wakeAt?.let { it <= at } == true) return
+            // The pause replaces any earlier wake; otherwise the earliest wake wins.
+            if (!transientPause && wakeAt?.let { it <= at } == true) return
             runCatching { wake?.cancel() }
             wakeAt = at
             val token = Any()
@@ -186,7 +230,8 @@ internal class ReplayDeliveryCoordinator(
                 synchronized(lock) {
                     if (!closed && generation == intent && wakeToken === token) {
                         wake = null; wakeAt = null; wakeToken = null
-                        flush()
+                        // The pause wake itself marks the end of the transient pause.
+                        flush(afterTransientPause = transientPause)
                     }
                 }
             }

@@ -353,20 +353,20 @@ internal class RuntimeBatchDeliveryCoordinator(
             }
             response.status == 429 -> {
                 if (!validTransportError(response, request.requestId) || response.retryAfter == null) {
-                    DeliveryStep.Protocol(request.requestId)
+                    foreignRetry(response, candidate, responseWall, responseMonotonic)
                 } else {
                     val delay =
                         try {
                             RetryAfterParser.parseDelayMillis(response.retryAfter, responseWall.epochMillis)
                         } catch (_: BatchProtocolException) {
-                            return DeliveryStep.Protocol(request.requestId)
+                            return foreignRetry(response, candidate, responseWall, responseMonotonic)
                         }
                     retryStep(candidate, delay, 0, responseMonotonic)
                 }
             }
             response.status in 500..599 -> {
                 if (!validTransportError(response, request.requestId)) {
-                    DeliveryStep.Protocol(request.requestId)
+                    foreignRetry(response, candidate, responseWall, responseMonotonic)
                 } else {
                     val delay =
                         try {
@@ -374,7 +374,7 @@ internal class RuntimeBatchDeliveryCoordinator(
                                 RetryAfterParser.parseDelayMillis(it, responseWall.epochMillis)
                             } ?: 0
                         } catch (_: BatchProtocolException) {
-                            return DeliveryStep.Protocol(request.requestId)
+                            return foreignRetry(response, candidate, responseWall, responseMonotonic)
                         }
                     retryStep(candidate, delay, 0, responseMonotonic)
                 }
@@ -398,6 +398,25 @@ internal class RuntimeBatchDeliveryCoordinator(
         } catch (_: BatchProtocolException) {
             false
         }
+
+    /**
+     * HTTP status is authoritative for 429 and 5xx. When the response is not the validated error
+     * object (for example an intermediary's plain-text, HTML, empty or oversized body, or an
+     * unreadable Retry-After), the same records are retried with backoff instead of blocking the
+     * request. Every other status still fails closed.
+     */
+    private fun foreignRetry(
+        response: BatchHTTPResponse,
+        records: List<RuntimeQueuedRecord>,
+        responseWall: BatchWallInstant,
+        responseMonotonicNanos: Long,
+    ): DeliveryStep.Retry =
+        retryStep(
+            records,
+            RetryAfterParser.foreignDelayMillis(response.retryAfter, responseWall.epochMillis),
+            resolvedRecords = 0,
+            responseMonotonicNanos = responseMonotonicNanos,
+        )
 
     private fun retryStep(
         records: List<RuntimeQueuedRecord>,

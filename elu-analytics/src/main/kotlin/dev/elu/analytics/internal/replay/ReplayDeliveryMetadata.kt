@@ -4,7 +4,12 @@ import dev.elu.analytics.internal.runtime.RuntimeReplayStoredRow
 
 internal enum class ReplayDeliveryState { CLAIMED, ENROLLED, RETRY, BLOCKED }
 
-/** Bounded metadata in the existing generic replay table; never contains request/body credentials. */
+/**
+ * Bounded metadata in the existing generic replay table; never contains request/body credentials.
+ * For RETRY, notBeforeMillis is on the elapsed-realtime clock. For a wireframe PROTOCOL hold,
+ * delayMillis is the hold length and notBeforeMillis is the wall-clock time (epoch milliseconds)
+ * after which the same bytes may be offered again.
+ */
 internal data class ReplayDeliveryMetadata(
     val ordinal: Long,
     val digest: String,
@@ -72,7 +77,9 @@ internal data class ReplayDeliveryMetadata(
                 require(raster || block in setOf(ReplayBlockKind.UNAUTHORIZED, ReplayBlockKind.FORBIDDEN, ReplayBlockKind.PROTOCOL, ReplayBlockKind.CONFLICT))
             }
             else require(value.blockKind.isEmpty())
-            if (value.state != ReplayDeliveryState.RETRY) require(value.delayMillis == 0L && value.notBeforeMillis == 0L && !value.endpointCooldown)
+            if (ReplayQueueStore.isProtocolHold(value)) require(value.delayMillis in REPLAY_PROTOCOL_HOLD_MIN_MILLIS..REPLAY_PROTOCOL_HOLD_MAX_MILLIS &&
+                value.notBeforeMillis >= value.delayMillis && !value.endpointCooldown)
+            else if (value.state != ReplayDeliveryState.RETRY) require(value.delayMillis == 0L && value.notBeforeMillis == 0L && !value.endpointCooldown)
             require(value.key == row.key && value.row().payload.contentEquals(row.payload))
             return value
         }

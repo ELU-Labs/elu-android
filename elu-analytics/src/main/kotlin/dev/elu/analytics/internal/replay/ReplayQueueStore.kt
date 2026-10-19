@@ -12,7 +12,7 @@ import dev.elu.analytics.internal.runtime.RuntimeQueueTransaction
 import dev.elu.analytics.internal.runtime.RuntimeReplayStoredRow
 import java.security.MessageDigest
 
-internal enum class ReplayAppendRejection { AUTHORITY, COUNT_LIMIT, BYTE_LIMIT, CONFLICT, EXPIRED, CLOCK }
+internal enum class ReplayAppendRejection { AUTHORITY, COUNT_LIMIT, BYTE_LIMIT, CONFLICT, EXPIRED, CLOCK, STREAM_BLOCKED }
 internal sealed interface ReplayAppendResult {
     data class Stored(val ordinal: Long, val duplicate: Boolean) : ReplayAppendResult
     data class Rejected(val reason: ReplayAppendRejection) : ReplayAppendResult
@@ -240,6 +240,11 @@ internal object ReplayQueueStore {
             if (request.expiredAt(finalNow)) return ReplayAppendResult.Rejected(ReplayAppendRejection.EXPIRED)
             return ReplayAppendResult.Stored(existing.ordinal, true)
         }
+        // A held or refused chunk stops its recording: never store a suffix behind it. A pending
+        // transient retry does not stop the recording.
+        if (rows.any { !it.raster && it.siteId == siteId && it.replayId == request.replayId &&
+                delivery(tx, it.ordinal)?.state == ReplayDeliveryState.BLOCKED })
+            return ReplayAppendResult.Rejected(ReplayAppendRejection.STREAM_BLOCKED)
         val core = tx.readCore() ?: corrupt("Replay append without core")
         if (core.queueCount + state.count + 1 > maximumCount) return ReplayAppendResult.Rejected(ReplayAppendRejection.COUNT_LIMIT)
         if (request.byteCount > requestMaximum || core.queueBytes + state.bytes + request.byteCount > maximumBytes)
@@ -412,7 +417,9 @@ internal object ReplayQueueStore {
             if (onlyOrdinal != null && header.ordinal != onlyOrdinal) continue
             if (raster && rasterEpochBlocked(tx, header.replayId)) continue
             val d = delivery(tx, header.ordinal)
-            if (d?.state == ReplayDeliveryState.BLOCKED || (d?.state == ReplayDeliveryState.RETRY && elapsedMillis < d.notBeforeMillis)) continue
+            // An ended protocol hold is claimed below; the new claim replaces the hold.
+            if ((d?.state == ReplayDeliveryState.BLOCKED && !protocolHoldEnded(d, now)) ||
+                (d?.state == ReplayDeliveryState.RETRY && elapsedMillis < d.notBeforeMillis)) continue
             val row = if (!raster) read(tx, header) else null
             val rasterRow = if (raster) readRaster(tx, header) else null
             if (rasterRow != null) {
@@ -456,7 +463,7 @@ internal object ReplayQueueStore {
     }
 
     fun nextWakeDelay(tx: RuntimeQueueTransaction, owner: String, authority: ReplayDeliveryAuthorization, elapsedMillis: Long,
-        eligibleRaster: (NativeRasterStoredRequest) -> Boolean = { true }): Long? {
+        now: Long, eligibleRaster: (NativeRasterStoredRequest) -> Boolean = { true }): Long? {
         val raster = authority.format == ReplayDeliveryFormat.RASTER
         val all = headers(tx)
         if (all.any { delivery(tx, it.ordinal)?.let { d -> d.owner == owner &&
@@ -478,12 +485,17 @@ internal object ReplayQueueStore {
             it.endpointCooldown && it.scopeWitness == authority.scopeWitness && it.notBeforeMillis > elapsedMillis }
             .maxOfOrNull { it.notBeforeMillis }
         if (endpointDeadline != null) return endpointDeadline - elapsedMillis
-        return heads.mapNotNull { delivery(tx, it.ordinal) }.filter { it.state == ReplayDeliveryState.RETRY && it.owner == owner }
+        val headMetadata = heads.mapNotNull { delivery(tx, it.ordinal) }
+        val retry = headMetadata.filter { it.state == ReplayDeliveryState.RETRY && it.owner == owner }
             .minOfOrNull { maxOf(1L, it.notBeforeMillis - elapsedMillis) }
+        // An ended hold that claim still skipped is not claimable; waking for it would spin.
+        val hold = headMetadata.filter { isProtocolHold(it) && it.notBeforeMillis > now }
+            .minOfOrNull { minOf(it.notBeforeMillis - now, REPLAY_PROTOCOL_HOLD_MAX_MILLIS) }
+        return listOfNotNull(retry, hold).minOrNull()
     }
 
     fun commit(tx: RuntimeQueueTransaction, claim: ReplayDeliveryClaim, outcome: ReplayDeliveryOutcome,
-        elapsedMillis: Long): ReplayDeliveryCommit {
+        elapsedMillis: Long, now: Long): ReplayDeliveryCommit {
         require(elapsedMillis in 0..MAX_REPLAY_SAFE_INTEGER - REPLAY_MAX_RETRY_MILLIS)
         require(outcome != ReplayDeliveryOutcome.Blocked(ReplayBlockKind.RASTER_RETIRE))
         val retained = delivery(tx, claim.ordinal)
@@ -510,7 +522,11 @@ internal object ReplayQueueStore {
                 tx.putReplayRow(d.copy(state = ReplayDeliveryState.RETRY, delayMillis = outcome.delayMillis,
                     notBeforeMillis = elapsedMillis + outcome.delayMillis, endpointCooldown = outcome.endpointCooldown).row())
             }
-            is ReplayDeliveryOutcome.Blocked -> tx.putReplayRow(d.copy(state = ReplayDeliveryState.BLOCKED,
+            is ReplayDeliveryOutcome.Blocked -> if (outcome.kind == ReplayBlockKind.PROTOCOL && claim.format == ReplayDeliveryFormat.WIREFRAME) {
+                val hold = protocolHoldMillis(claim.row.prepared.startedAtInstant.toEpochMillisFloor(), now)
+                tx.putReplayRow(d.copy(state = ReplayDeliveryState.BLOCKED, blockKind = outcome.kind.name,
+                    delayMillis = hold, notBeforeMillis = Math.addExact(maxOf(0L, now), hold), endpointCooldown = false).row())
+            } else tx.putReplayRow(d.copy(state = ReplayDeliveryState.BLOCKED,
                 blockKind = outcome.kind.name, delayMillis = 0, notBeforeMillis = 0, endpointCooldown = false).row())
         }
         return ReplayDeliveryCommit.COMMITTED
@@ -536,6 +552,23 @@ internal object ReplayQueueStore {
         }
         return state.copy(count = state.count - rows.size, bytes = bytes, deliveryMetadataCount = deliveryCount)
     }
+    /**
+     * A wireframe protocol hold is not final. Once its wall-clock end passes, the same bytes are
+     * offered again until the row expires. Credential refusals and validated conflicts stay final.
+     */
+    internal fun isProtocolHold(d: ReplayDeliveryMetadata) =
+        d.state == ReplayDeliveryState.BLOCKED && !d.raster && d.blockKind == ReplayBlockKind.PROTOCOL.name
+
+    private fun protocolHoldEnded(d: ReplayDeliveryMetadata, now: Long) = isProtocolHold(d) && now >= d.notBeforeMillis
+
+    /**
+     * The hold is the row's age when it was held, bounded to 1..24 hours, so a row that keeps
+     * failing waits longer each time. An age that cannot be measured uses the one-hour bound.
+     */
+    internal fun protocolHoldMillis(startedAtMillis: Long, now: Long): Long =
+        (if (now >= startedAtMillis) now - startedAtMillis else 0L)
+            .coerceIn(REPLAY_PROTOCOL_HOLD_MIN_MILLIS, REPLAY_PROTOCOL_HOLD_MAX_MILLIS)
+
     private fun corrupt(message: String): Nothing = throw RuntimeQueueCorruptionException(message)
     private inline fun <T> checked(action: () -> T): T = try { action() }
         catch (error: RuntimeQueueCorruptionException) { throw error }

@@ -8,6 +8,8 @@ import dev.elu.analytics.internal.concurrent.SdkFuture
 
 internal const val REPLAY_MAX_RESPONSE_BYTES = 65_536
 internal const val REPLAY_MAX_RETRY_MILLIS = 86_400_000L
+internal const val REPLAY_PROTOCOL_HOLD_MIN_MILLIS = 3_600_000L
+internal const val REPLAY_PROTOCOL_HOLD_MAX_MILLIS = 86_400_000L
 internal const val REPLAY_UNKNOWN_ATTEMPT_DELAY_MILLIS = 30_000L
 
 /** Trusted composition supplies actual current privacy facts; this callback grants no authority. */

@@ -637,6 +637,25 @@ class NativeReplayCaptureOwnerTest {
             assertEquals(1, rig.rows().size); assertEquals(1, platform.collections.get())
         }
     }
+    @Test fun `a held earlier chunk ends the recording and reports it without appending a suffix`(): Unit = Rig().use { rig ->
+        rig.minimum(0); rig.activate(); Session(rig).use { session ->
+            val platform = Platform(rig, session.access, 11)
+            // Hold the first durable chunk as if its upload got an unexpected response.
+            rig.afterReplayCommit = { rig.backing.connection().use { db -> db.transaction { tx ->
+                val header = ReplayQueueStore.headers(tx).single()
+                tx.putReplayRow(ReplayDeliveryMetadata(header.ordinal, header.digest, ReplayDeliveryState.BLOCKED,
+                    UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1, delayMillis = REPLAY_PROTOCOL_HOLD_MIN_MILLIS,
+                    notBeforeMillis = rig.clock.wall + REPLAY_PROTOCOL_HOLD_MIN_MILLIS, blockKind = ReplayBlockKind.PROTOCOL.name,
+                    credentialWitness = "sha256:" + "b".repeat(64), scopeWitness = "sha256:" + "c".repeat(64),
+                    protocolGeneration = rig.protocol.generation).row())
+                val state = checkNotNull(ReplayQueueStore.state(tx))
+                tx.putReplayRow(state.copy(deliveryMetadataCount = (state.deliveryMetadataCount ?: 0L) + 1).row())
+            } } }
+            val owner = session.start(checkNotNull(session.prepare()), platform)
+            assertEquals(NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(1, rig.rows().size); assertNull(rig.state().session!!.activeEpoch)
+        }
+    }
     @Test fun `withdrawal below positive minimum never seals initial only`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
         rig.minimum(5); rig.activate(); Session(rig).use { session ->
             val platform = Platform(rig, session.access, 3); val owner = session.start(checkNotNull(session.prepare()), platform)

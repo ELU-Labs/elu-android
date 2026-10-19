@@ -84,7 +84,9 @@ internal class NativeCapturePassProfile {
 internal const val NATIVE_REPLAY_CAPTURE_INTERVAL_MILLIS = 1_000L
 internal const val NATIVE_REPLAY_MAXIMUM_DEADLINE_RETRY_MILLIS = 30_000L
 
-internal enum class NativeReplayCaptureOutcome { SETTLED, SETTLED_PASS_DEADLINE, SETTLED_ROOT_CHANGED, QUARANTINED }
+internal enum class NativeReplayCaptureOutcome { SETTLED, SETTLED_PASS_DEADLINE, SETTLED_ROOT_CHANGED,
+    /** Settled, but the recording ended behind its held or refused chunk. */
+    SETTLED_STREAM_BLOCKED, QUARANTINED }
 
 /** Detached closed values only; no source, error, root, identity, profile or executable capability. */
 internal data class NativeReplayCaptureCompletion(
@@ -366,6 +368,7 @@ private class NativeReplayCaptureRun(
         var passFailure: NativeCaptureFailureKind? = null
         var retryablePassDeadline = false
         var recoverRoot = false
+        var streamBlocked = false
         var originalPermit: NativeReplayPermit? = null
         var completedFailure: NativeCaptureFailureKind? = null
         fun complete(outcome: NativeReplayCaptureOutcome) {
@@ -407,7 +410,7 @@ private class NativeReplayCaptureRun(
             fun appendSealed() {
                 requireCurrent(current(permit, admission))
                 diagnosticStage = NativeCaptureStage.DURABLE_APPEND
-                when (queue.appendNativeReplay(checkNotNull(pendingRequest), admission, physicalUse).awaitExact()) {
+                when (val appended = queue.appendNativeReplay(checkNotNull(pendingRequest), admission, physicalUse).awaitExact()) {
                     is NativeReplayAppendOutcome.Committed -> {
                         pendingRequest = null
                         runCatching { onCommitted() }
@@ -419,6 +422,9 @@ private class NativeReplayCaptureRun(
                     }
                     is NativeReplayAppendOutcome.Rejected -> {
                         pendingRequest = null
+                        // The recording's earlier chunk is held or refused. Report it so the same
+                        // capture context does not start a new recording in its place.
+                        if (appended.reason == ReplayAppendRejection.STREAM_BLOCKED) streamBlocked = true
                         error("Native append rejected")
                     }
                 }
@@ -732,6 +738,7 @@ private class NativeReplayCaptureRun(
                 // Expose the hint only after the original physical and durable accounting settled.
                 complete(if (recoverRoot) NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED
                     else if (retryablePassDeadline) NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE
+                    else if (streamBlocked) NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED
                     else NativeReplayCaptureOutcome.SETTLED)
                 return
             }
