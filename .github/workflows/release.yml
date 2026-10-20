@@ -19,7 +19,7 @@ on:
         required: true
         type: string
       dryRun:
-        description: Run every release gate but skip the Maven Central upload
+        description: Run every release gate and sign locally, but skip the Maven Central upload
         required: false
         type: boolean
         default: true
@@ -174,6 +174,39 @@ jobs:
           python3 scripts/zero-brand-gate.py --mode strict "${scanner_inputs[@]}"
       - name: Verify core-only publication task graph without execution
         run: bash scripts/check-publication-graph.sh
+      # Dry run only; the upload step signs for real. Reads SIGNING_KEY and
+      # SIGNING_KEY_PASSWORD the way the upload does, so a wrong key or passphrase
+      # fails here instead of on the real run. Inline because the scripts come from
+      # the tagged commit.
+      - name: Sign the publication locally without uploading
+        if: ${{ inputs.dryRun }}
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS: ${{ vars.ELU_TRUSTED_RELEASE_SIGNING_FINGERPRINTS }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          marker=$(mktemp)
+          ./gradlew :elu-analytics:signMavenPublication --no-configuration-cache --no-parallel --stacktrace
+          fingerprint=$(sed -n 's/^ARTIFACT_SIGNING_FINGERPRINT = "\([0-9A-F]\{40\}\)"$/\1/p' \
+            scripts/verify-release-publication.py)
+          if [[ -z "$fingerprint" ]]; then
+            echo "::error::scripts/verify-release-publication.py pins no ARTIFACT_SIGNING_FINGERPRINT"
+            exit 1
+          fi
+          mapfile -t signatures < <(find elu-analytics/build -type f -name '*.asc' -newer "$marker")
+          if (( ${#signatures[@]} == 0 )); then
+            echo "::error::signMavenPublication wrote no signatures"
+            exit 1
+          fi
+          for signature in "${signatures[@]}"; do
+            if ! gpg --batch --status-fd 1 --verify "$signature" "${signature%.asc}" 2>/dev/null \
+                | grep '^\[GNUPG:\] VALIDSIG ' | grep -qw "$fingerprint"; then
+              echo "::error::${signature} is not a valid signature by ${fingerprint}"
+              exit 1
+            fi
+          done
+          echo "Signed ${#signatures[@]} publication files with ${fingerprint}; nothing was uploaded"
       - name: Upload to Maven Central for a manual Publish
         if: ${{ !inputs.dryRun }}
         run: ./gradlew stageCentralRelease --no-configuration-cache --no-parallel --stacktrace
