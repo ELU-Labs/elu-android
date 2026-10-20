@@ -39,7 +39,7 @@ class NativeReplayCompositionTest {
             check(Thread.currentThread() === main); watches.incrementAndGet()
             return AutoCloseable { check(Thread.currentThread() === main); closes.incrementAndGet(); onClose?.invoke() }
         }
-        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS)) }
+        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)) }
     }
     private class Platform(val rig: Rig, val access: MainAccess, val single: Boolean = false) : NativeReplayCapturePlatform {
         override val apiLevel = 36
@@ -89,7 +89,7 @@ class NativeReplayCompositionTest {
     }
     private fun proof() = NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(NativeReplayProtocol.V1.generation))
     private fun Rig.minimum() = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", 0) }
-    private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(3, TimeUnit.SECONDS)
+    private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(WAIT_SECONDS, TimeUnit.SECONDS)
     private fun NativeReplayComposition.diagnostic(): NativeReplayCompletedCaptureSnapshot? =
         NativeReplayComposition::class.java.getDeclaredField("latestCompletedCapture").also { it.isAccessible = true }
             .get(this) as NativeReplayCompletedCaptureSnapshot?
@@ -100,7 +100,7 @@ class NativeReplayCompositionTest {
         checkNotNull(NativeReplayComposition::class.java.getDeclaredField("delivery").also { it.isAccessible = true }
             .get(this) as ReplayDeliveryCoordinator?)
     private fun awaitCondition(message: String, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(5)
         assertTrue(message, condition())
     }
@@ -137,7 +137,7 @@ class NativeReplayCompositionTest {
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
         try {
-            owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+            owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
             awaitCondition("first prefix") { rig.rows().size == 1 }
             val first = rig.rows().single().prepared; val ledger = checkNotNull(rig.state().session)
             rig.advance(); access.root = Any(); ticks.release()
@@ -151,7 +151,7 @@ class NativeReplayCompositionTest {
             assertEquals(ledger.maximumDurationSeconds, after.maximumDurationSeconds)
             assertTrue(after.elapsedFloorMicroseconds >= 2_000_000)
             assertEquals(3, access.watches.get()); assertEquals(2, access.closes.get())
-        } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertEquals(access.watches.get(), access.closes.get())
     } }
 
@@ -160,18 +160,18 @@ class NativeReplayCompositionTest {
         val platform = Platform(rig, access); val ticks = platform.manualTicks(); val wire = Transport(hold = true)
         val owner = composition(rig, life, platform, wire)
         try {
-            owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+            owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
             val first = rig.rows().single().prepared
             // Finish the original delivery before measuring root-only observation. Its lawful
             // queue reconciliation also reads native accounting and is not a root polling tick.
-            assertTrue(wire.entered.await(3, TimeUnit.SECONDS))
+            assertTrue(wire.entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             val delivery = owner.flushSealed()
             wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
-            assertEquals(ReplayDeliveryPass(1, 1), delivery.get(3, TimeUnit.SECONDS))
+            assertEquals(ReplayDeliveryPass(1, 1), delivery.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, wire.requests.size)
             // A coalesced flush may already have scheduled another claim after this pass. Join
             // that original delivery owner as well; this test exercises root recovery, not egress.
-            owner.currentDelivery().closeAndWait().get(3, TimeUnit.SECONDS)
+            owner.currentDelivery().closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
             access.rootAvailable = false; ticks.release(); awaitCondition("original root observer") { owner.observingRoot() }
             assertFalse(owner.recordingStarted()); assertNull(rig.state().session?.activeEpoch)
             val reads = access.rootReads.get(); val nativeReads = AtomicInteger()
@@ -186,7 +186,7 @@ class NativeReplayCompositionTest {
             assertFalse(owner.observingRoot())
         } finally {
             rig.onNativeRead = null; wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
-            owner.closeAndWait().get(3, TimeUnit.SECONDS)
+            owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         }
     } }
 
@@ -195,10 +195,10 @@ class NativeReplayCompositionTest {
             rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
             val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
             try {
-                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+                owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
                 access.rootAvailable = false; ticks.release(); awaitCondition("original observer") { owner.observingRoot() }
                 when (mode) {
-                    "local" -> owner.stopRecording().get(3, TimeUnit.SECONDS)
+                    "local" -> owner.stopRecording().get(WAIT_SECONDS, TimeUnit.SECONDS)
                     "source" -> rig.source.withdraw()
                     "consent" -> rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, rig.now())).get()
                     "identity" -> rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get()
@@ -208,7 +208,7 @@ class NativeReplayCompositionTest {
                 val reads = access.rootReads.get(); access.rootAvailable = true
                 assertEquals(1, platform.factories.get()); assertEquals(1, access.watches.get())
                 assertFalse(owner.recordingStarted()); assertEquals(reads, access.rootReads.get())
-            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         } }
     }
 
@@ -218,16 +218,16 @@ class NativeReplayCompositionTest {
             val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             try {
-                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
-                access.onClose = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)); if (unknown) error("Unresolved original watcher") }
-                access.root = Any(); ticks.release(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+                owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+                access.onClose = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)); if (unknown) error("Unresolved original watcher") }
+                access.root = Any(); ticks.release(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertEquals(1, platform.factories.get()); assertEquals(1, access.watches.get()); assertFalse(owner.observingRoot())
                 access.onClose = null; release.countDown()
                 if (unknown) {
-                    failure { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+                    failure { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
                     assertEquals(1, platform.factories.get()); assertFalse(owner.observingRoot())
                 } else awaitCondition("replacement after original watcher close") { platform.factories.get() == 2 }
-            } finally { release.countDown(); runCatching { owner.closeAndWait().get(3, TimeUnit.SECONDS) } }
+            } finally { release.countDown(); runCatching { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) } }
         } }
     }
 
@@ -238,34 +238,34 @@ class NativeReplayCompositionTest {
             val owner = composition(rig, life, platform, wire)
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             try {
-                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+                owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
                 // Isolate accounting uncertainty from a separately unresolved delivery. Poisoning
                 // while a physical response still awaits its durable refusal must keep close pending.
-                assertTrue(wire.entered.await(3, TimeUnit.SECONDS))
+                assertTrue(wire.entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 val delivery = owner.flushSealed()
                 wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
-                assertEquals(ReplayDeliveryPass(1, 1), delivery.get(3, TimeUnit.SECONDS))
+                assertEquals(ReplayDeliveryPass(1, 1), delivery.get(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertEquals(1, wire.requests.size)
                 val original = owner.currentCapture()
                 rig.onWrite = {
-                    entered.countDown(); check(release.await(3, TimeUnit.SECONDS))
+                    entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS))
                     if (unknown) {
                         rig.backing.ambiguousNextCommit = FakeAmbiguousOutcome.COMMIT
                         rig.onConnection = { throw java.io.IOException("Unresolved original stop readback") }
                     }
                 }
-                access.root = Any(); ticks.release(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+                access.root = Any(); ticks.release(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertFalse(original.finished().isDone); assertEquals(1, platform.factories.get())
                 assertEquals(0, access.closes.get()); assertFalse(owner.observingRoot())
                 release.countDown()
                 if (unknown) {
-                    assertEquals(NativeReplayCaptureOutcome.QUARANTINED, original.finished().get(3, TimeUnit.SECONDS))
-                    failure { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+                    assertEquals(NativeReplayCaptureOutcome.QUARANTINED, original.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
+                    failure { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
                     assertEquals(1, platform.factories.get()); assertFalse(owner.observingRoot())
                 } else awaitCondition("fresh capture after durable stop") { platform.factories.get() == 2 }
             } finally {
                 release.countDown(); wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
-                runCatching { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+                runCatching { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
             }
         } }
     }
@@ -275,36 +275,36 @@ class NativeReplayCompositionTest {
         val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
         try {
-            owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+            owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
             access.rootAvailable = false; ticks.release(); awaitCondition("original observer") { owner.observingRoot() }
-            access.onObserve = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }; access.rootAvailable = true
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); val close = owner.closeAndWait()
+            access.onObserve = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }; access.rootAvailable = true
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); val close = owner.closeAndWait()
             assertFalse(close.isDone); assertFalse(close.cancel(true)); assertEquals(1, platform.factories.get())
-            release.countDown(); close.get(3, TimeUnit.SECONDS)
+            release.countDown(); close.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertFalse(owner.observingRoot()); assertEquals(1, access.watches.get()); assertEquals(1, access.closes.get())
-        } finally { release.countDown(); owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally { release.countDown(); owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
     } }
 
     @Test fun `status observes actual collector and stop start waits for original main settlement`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access); val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        platform.onFactory = { if (platform.factories.get() == 1) { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) } }
+        platform.onFactory = { if (platform.factories.get() == 1) { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) } }
         val owner = composition(rig, life, platform)
         try {
             owner.ready().get(); assertFalse(owner.recordingStarted())
-            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate(true).get(3, TimeUnit.SECONDS))
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); assertFalse(owner.recordingStarted())
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertFalse(owner.recordingStarted())
             val stopped = owner.stopRecording(); assertFalse(stopped.isDone); assertFalse(owner.recordingStarted())
             owner.startRecording()
             assertEquals(1, platform.factories.get()); assertFalse(owner.recordingStarted())
-            release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+            release.countDown(); stopped.get(WAIT_SECONDS, TimeUnit.SECONDS)
             awaitCondition("replacement collector actually installed") { owner.recordingStarted() && platform.factories.get() == 2 }
             assertEquals(1, access.closes.get())
-            owner.stopRecording().get(3, TimeUnit.SECONDS); assertFalse(owner.recordingStarted())
+            owner.stopRecording().get(WAIT_SECONDS, TimeUnit.SECONDS); assertFalse(owner.recordingStarted())
             val count = platform.factories.get()
-            owner.reevaluate(true).get(3, TimeUnit.SECONDS)
+            owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(count, platform.factories.get()); assertFalse(owner.recordingStarted())
-        } finally { release.countDown(); owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally { release.countDown(); owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertEquals(access.watches.get(), access.closes.get())
     } }
 
@@ -313,19 +313,19 @@ class NativeReplayCompositionTest {
         val platform = Platform(rig, access); val wire = Transport(hold = true)
         val owner = composition(rig, life, platform, wire)
         try {
-            owner.ready().get(); owner.reevaluate(true).get(3, TimeUnit.SECONDS)
-            assertTrue(wire.entered.await(3, TimeUnit.SECONDS))
-            owner.stopRecording().get(3, TimeUnit.SECONDS)
+            owner.ready().get(); owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS)
+            assertTrue(wire.entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
+            owner.stopRecording().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(0, wire.canceled.get()); assertEquals(1, wire.requests.size)
             assertFalse(owner.recordingStarted())
             owner.withdrawAll(); assertTrue(wire.canceled.get() > 0)
             wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
             rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish()
-            owner.startRecording(); owner.reevaluate(true).get(3, TimeUnit.SECONDS)
+            owner.startRecording(); owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertNull(rig.owner.snapshot().get().state.identity.session); assertFalse(owner.recordingStarted())
         } finally {
             wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
-            owner.closeAndWait().get(3, TimeUnit.SECONDS)
+            owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         }
     } }
 
@@ -333,17 +333,22 @@ class NativeReplayCompositionTest {
         lateinit var old: List<PreparedReplayRequest>
         MainAccess().use { access ->
             rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
-            val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+            val platform = Platform(rig, access); val ticks = platform.manualTicks()
+            // Hold the first upload. A refused chunk stops its recording, which would race the second chunk.
+            val wire = Transport(hold = true); val owner = composition(rig, life, platform, wire)
             try {
-                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 awaitCondition("first prefix") { rig.rows().size == 1 }
                 rig.advance(10); ticks.release()
                 awaitCondition("second chunk") { rig.rows().size == 2 }
                 old = rig.rows().map { it.prepared }
                 assertEquals(1, old.map { it.replayId }.toSet().size); assertEquals(listOf(0L, 1L), old.map { it.sequence })
-                rig.owner.markBackgrounded(rig.now()).get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                rig.owner.markBackgrounded(rig.now()).get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 awaitCondition("background settles capture") { !owner.recordingStarted() && rig.state().session?.activeEpoch == null }
-            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            } finally {
+                wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
+                owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            }
         }
         // The system ends the backgrounded app; it is opened again inside the idle timeout.
         // The closed time counts toward the replay budget.
@@ -353,7 +358,7 @@ class NativeReplayCompositionTest {
             val life = NativeReplayLifecycle(access); life.resumed(access.activity)
             val owner = composition(rig, life, Platform(rig, access))
             try {
-                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 awaitCondition("relaunched recording stored") { rig.rows().size == 3 }
                 val fresh = rig.rows().last().prepared
                 assertTrue(old.none { it.replayId == fresh.replayId })
@@ -363,7 +368,7 @@ class NativeReplayCompositionTest {
                 val ledger = checkNotNull(rig.state().session)
                 assertEquals(old[0].sessionId, ledger.key.sessionId); assertFalse(ledger.interrupted)
                 assertTrue(ledger.elapsedFloorMicroseconds >= 15_000_000)
-            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     }
 
@@ -373,12 +378,12 @@ class NativeReplayCompositionTest {
             rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
             val owner = composition(rig, life, Platform(rig, access))
             try {
-                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 awaitCondition("first prefix") { rig.rows().isNotEmpty() }
                 first = rig.rows().first().prepared
-                owner.stopRecording().get(3, TimeUnit.SECONDS); assertFalse(owner.recordingStarted())
+                owner.stopRecording().get(WAIT_SECONDS, TimeUnit.SECONDS); assertFalse(owner.recordingStarted())
                 assertNull(checkNotNull(rig.state().session).activeEpoch)
-            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
         rig.advance(5); rig.reopen(); rig.publish()
         // No start call: the local stop belonged only to the ended runtime.
@@ -386,12 +391,12 @@ class NativeReplayCompositionTest {
             val life = NativeReplayLifecycle(access); life.resumed(access.activity)
             val owner = composition(rig, life, Platform(rig, access))
             try {
-                owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
+                owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 awaitCondition("relaunched recording stored") { rig.rows().any { it.prepared.replayId != first.replayId } }
                 val fresh = rig.rows().first { it.prepared.replayId != first.replayId }.prepared
                 assertEquals(first.sessionId, fresh.sessionId); assertEquals(0L, fresh.sequence)
                 assertTrue(owner.recordingStarted())
-            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     }
 
@@ -404,12 +409,12 @@ class NativeReplayCompositionTest {
                 setOf(NativeReplayProtocol.V1.generation), rasterSupported = declared)
             val owner = composition(rig, life, platform, wire, capabilities = capabilities)
             try {
-                owner.ready().get(3, TimeUnit.SECONDS)
-                assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate(true).get(3, TimeUnit.SECONDS))
+                owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS)
+                assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertEquals(0, platform.factories.get()); assertEquals(0, platform.collections.get())
                 assertEquals(0, access.watches.get()); assertTrue(rig.rows().isEmpty()); assertTrue(wire.requests.isEmpty())
                 assertEquals(0L, rig.state().nextReplayOrdinal)
-            } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         } }
     }
 
@@ -422,7 +427,7 @@ class NativeReplayCompositionTest {
         }
         val owner = composition(rig, life, noPlatform, wire, capabilities = NativeReplayCapabilities())
         owner.ready().get(); assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate(true).get())
-        owner.closeAndWait().get(3, TimeUnit.SECONDS)
+        owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(0, access.rootReads.get()); assertTrue(wire.requests.isEmpty())
     } }
 
@@ -430,17 +435,17 @@ class NativeReplayCompositionTest {
         rig.minimum(); rig.activate(); rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish()
         val life = NativeReplayLifecycle(access); life.resumed(access.activity); val platform = Platform(rig, access)
         val owner = composition(rig, life, platform); owner.ready().get()
-        assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
+        assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(0, platform.factories.get())
         assertTrue(rig.owner.capture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "first", rig.now(), emptyMap(), StandaloneRuntime.defaultVersions())).get() is RuntimeCaptureResult.Accepted)
-        assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
-        assertTrue(platform.firstFrame.await(3, TimeUnit.SECONDS)); awaitCondition("first durable row") { rig.rows().isNotEmpty() }
+        assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
+        assertTrue(platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS)); awaitCondition("first durable row") { rig.rows().isNotEmpty() }
         repeat(8) {
             assertTrue(rig.owner.capture(RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "activity", rig.now(), emptyMap(), StandaloneRuntime.defaultVersions())).get() is RuntimeCaptureResult.Accepted)
-            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
         }
         assertEquals(1, platform.factories.get()); assertEquals(1, access.watches.get())
-        owner.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(1, access.closes.get())
+        owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); assertEquals(1, access.closes.get())
     } }
 
     @Test fun `same resumed identity retries root discovery after original unavailable observation`() =
@@ -461,19 +466,19 @@ class NativeReplayCompositionTest {
         val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access); val owner = composition(rig, life, platform)
         try {
-            owner.ready().get(3, TimeUnit.SECONDS)
-            assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
+            owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(0, access.watches.get()); assertEquals(0, platform.collections.get())
             assertNull(rig.state().session?.activeEpoch)
             // Original platform facts become usable; no new Activity, identity, source or force token.
             access.rootAvailable = true; access.factsAvailable = true
             assertEquals(originalIdentity, rig.owner.snapshot().get().state.identity)
             assertEquals("A no-root attempt must not suppress a later original observation",
-                NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
-            assertTrue(platform.firstFrame.await(3, TimeUnit.SECONDS))
+                NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
+            assertTrue(platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
             awaitCondition("same-session durable native frame") { rig.rows().isNotEmpty() }
             assertEquals(1, access.watches.get())
-        } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertEquals(access.watches.get(), access.closes.get())
     } }
 
@@ -494,24 +499,28 @@ class NativeReplayCompositionTest {
         platform.onPause = { withdrawn -> rig.advance(); !withdrawn.await(5, TimeUnit.MILLISECONDS) }
         val owner = composition(rig, life, platform)
         try {
-            owner.ready().get(3, TimeUnit.SECONDS)
-            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
+            owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
             awaitCondition("recording ended behind its held chunk") {
                 owner.diagnostic()?.outcome == NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED }
             assertEquals(1, rig.rows().size); assertEquals(1, platform.factories.get())
             // A new root under the same source, identity and session starts no new recording. Join
             // the evaluation the completion queued, then any forced follow-up it coalesced.
-            owner.reevaluate().get(3, TimeUnit.SECONDS)
-            access.root = Any(); owner.reevaluate(force = true).get(3, TimeUnit.SECONDS)
-            owner.reevaluate().get(3, TimeUnit.SECONDS)
+            owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            access.root = Any(); owner.reevaluate(force = true).get(WAIT_SECONDS, TimeUnit.SECONDS)
+            owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertFalse(owner.hasLiveCapture()); assertEquals(1, platform.factories.get())
-            // A new session records again.
+            // A new session records again. The forced request can join an evaluation still queued from
+            // above, which read the old session; its forced follow-up reads the new one. So wait for the
+            // recording, not for the joined evaluation's value.
             platform.onPause = null
             rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(); rig.publish()
             assertTrue(rig.owner.capture(rig.event()).get() is RuntimeCaptureResult.Accepted)
-            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate(force = true).get(3, TimeUnit.SECONDS))
-            awaitCondition("new session recording") { platform.factories.get() == 2 }
-        } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+            owner.reevaluate(force = true).get(WAIT_SECONDS, TimeUnit.SECONDS)
+            awaitCondition("new session recording") { platform.factories.get() == 2 && owner.hasLiveCapture() }
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
+            assertEquals(2, platform.factories.get())
+        } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
     } }
 
     @Test fun `unknown collection failure is not retried by an ordinary same identity hint`() = Rig().use { rig -> MainAccess().use { access ->
@@ -519,14 +528,14 @@ class NativeReplayCompositionTest {
         val platform = Platform(rig, access).also { it.onCollect = { error("Permanent unknown fixture failure") } }
         val owner = composition(rig, life, platform)
         try {
-            owner.ready().get(3, TimeUnit.SECONDS); owner.reevaluate().get(3, TimeUnit.SECONDS)
+            owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
             awaitCondition("original failed collector and watcher settled") { access.closes.get() == 1 }
             assertNull(rig.state().session?.activeEpoch); assertTrue(rig.rows().isEmpty())
-            assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, platform.collections.get()); assertEquals(1, access.watches.get())
             assertEquals(NativeReplayCompletedCaptureSnapshot(1, NativeCaptureStage.COLLECTOR, 0,
                 NativeCaptureFailureKind.OTHER, NativeReplayCaptureOutcome.SETTLED), owner.diagnostic())
-        } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
     } }
 
     @Test fun `retirement publishes once and a late old completion cannot overwrite its replacement`() = Rig().use { rig -> MainAccess().use { access ->
@@ -536,32 +545,32 @@ class NativeReplayCompositionTest {
         val platform = Platform(rig, access)
         platform.onCollect = {
             if (platform.collections.get() == 1) {
-                entered.countDown(); check(releaseCollection.await(3, TimeUnit.SECONDS))
+                entered.countDown(); check(releaseCollection.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 throw NativeCollectionException(NativeCollectionFailure.INVALID_ROOT)
             }
             throw NativeCollectionException(NativeCollectionFailure.UNRESOLVED_BLOCK_RULE)
         }
         val owner = composition(rig, life, platform)
         try {
-            owner.ready().get(3, TimeUnit.SECONDS); owner.reevaluate().get(3, TimeUnit.SECONDS)
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); assertNull(owner.diagnostic())
+            owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertNull(owner.diagnostic())
             val original = owner.currentCapture()
             assertNull(original.completedDiagnostic())
             // This newer SdkFuture dependent holds notification, not the original completion.
             val held = original.finished().whenComplete { _, _ ->
-                callbackEntered.countDown(); check(releaseCallback.await(3, TimeUnit.SECONDS))
+                callbackEntered.countDown(); check(releaseCallback.await(WAIT_SECONDS, TimeUnit.SECONDS))
             }
-            releaseCollection.countDown(); assertTrue(callbackEntered.await(3, TimeUnit.SECONDS))
+            releaseCollection.countDown(); assertTrue(callbackEntered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(original.finished().isDone); assertFalse(held.isDone)
-            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate(true).get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS))
             awaitCondition("replacement completion published") { owner.diagnostic()?.completionCount == 2 }
             val replacement = owner.diagnostic()
             assertEquals(NativeCaptureFailureKind.UNRESOLVED_BLOCK_RULE, replacement?.failure)
-            releaseCallback.countDown(); held.get(3, TimeUnit.SECONDS)
-            owner.reevaluate().get(3, TimeUnit.SECONDS)
+            releaseCallback.countDown(); held.get(WAIT_SECONDS, TimeUnit.SECONDS)
+            owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(replacement, owner.diagnostic()); assertEquals(2, platform.collections.get())
         } finally {
-            releaseCollection.countDown(); releaseCallback.countDown(); owner.closeAndWait().get(3, TimeUnit.SECONDS)
+            releaseCollection.countDown(); releaseCallback.countDown(); owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         }
         assertEquals(2, owner.diagnostic()?.completionCount); assertEquals(2, access.closes.get())
     } }
@@ -570,15 +579,15 @@ class NativeReplayCompositionTest {
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access, single = true); val owner = composition(rig, life, platform)
         try {
-            owner.ready().get(3, TimeUnit.SECONDS)
+            owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS)
             NativeReplayComposition::class.java.getDeclaredField("latestCompletedCapture").also { it.isAccessible = true }
                 .set(owner, NativeReplayCompletedCaptureSnapshot(Int.MAX_VALUE, NativeCaptureStage.BEFORE_LOOP, 0,
                     NativeCaptureFailureKind.OTHER, NativeReplayCaptureOutcome.QUARANTINED))
-            owner.reevaluate().get(3, TimeUnit.SECONDS)
+            owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
             awaitCondition("saturated counter still publishes new completion") { owner.diagnostic()?.outcome == NativeReplayCaptureOutcome.SETTLED }
             assertEquals(Int.MAX_VALUE, owner.diagnostic()?.completionCount)
             assertNull(owner.diagnostic()?.failure); assertEquals(1, owner.diagnostic()?.frames)
-        } finally { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         assertEquals(setOf("completionCount", "stage", "frames", "failure", "outcome"),
             NativeReplayCompletedCaptureSnapshot::class.java.declaredFields.map { it.name }.toSet())
     } }
@@ -586,39 +595,39 @@ class NativeReplayCompositionTest {
     @Test fun `close holds physical main work then exact accounting and watcher before completion`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val entered = CountDownLatch(1); val release = CountDownLatch(1); val platform = Platform(rig, access)
-        platform.onCollect = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        platform.onCollect = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val worker = Executors.newSingleThreadExecutor(); val owner = composition(rig, life, platform, worker = worker)
-        owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS); assertTrue(entered.await(3, TimeUnit.SECONDS))
+        owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val close = owner.closeAndWait(); assertSame(close, owner.closeAndWait()); assertFalse(close.cancel(true)); assertFalse(close.isDone)
-        assertEquals(0, access.closes.get()); assertNull(rig.owner.enrollNativeReplayCapture().get(3, TimeUnit.SECONDS))
-        release.countDown(); close.get(3, TimeUnit.SECONDS)
-        assertEquals(1, access.closes.get()); assertTrue(worker.awaitTermination(3, TimeUnit.SECONDS)); assertTrue(rig.rows().isEmpty())
+        assertEquals(0, access.closes.get()); assertNull(rig.owner.enrollNativeReplayCapture().get(WAIT_SECONDS, TimeUnit.SECONDS))
+        release.countDown(); close.get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertEquals(1, access.closes.get()); assertTrue(worker.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)); assertTrue(rig.rows().isEmpty())
     } }
 
     @Test fun `pending public intent defeats held selection and cannot publish after consent mutation`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val entered = CountDownLatch(1); val release = CountDownLatch(1); val allowed = AtomicBoolean(true)
-        access.onObserve = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        access.onObserve = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val platform = Platform(rig, access); val owner = composition(rig, life, platform, allowed = allowed::get)
-        owner.ready().get(); val evaluating = owner.reevaluate(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+        owner.ready().get(); val evaluating = owner.reevaluate(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         allowed.set(false); owner.withdrawFresh(); rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, rig.now())).get()
-        release.countDown(); assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, evaluating.get(3, TimeUnit.SECONDS))
+        release.countDown(); assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, evaluating.get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(0, platform.factories.get()); assertTrue(rig.rows().isEmpty())
-        allowed.set(true); assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate(true).get(3, TimeUnit.SECONDS))
-        owner.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(0, platform.collections.get())
+        allowed.set(true); assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS))
+        owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); assertEquals(0, platform.collections.get())
     } }
 
     @Test fun `watcher cleanup uncertainty denies replacement retains installation and releases worker`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access); val worker = Executors.newSingleThreadExecutor()
-        val owner = composition(rig, life, platform, worker = worker); owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
-        assertTrue(platform.firstFrame.await(3, TimeUnit.SECONDS)); awaitCondition("durable prefix") { rig.rows().isNotEmpty() }
+        val owner = composition(rig, life, platform, worker = worker); owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertTrue(platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS)); awaitCondition("durable prefix") { rig.rows().isNotEmpty() }
         access.onClose = { throw IllegalStateException("Unproven original listener cleanup") }
-        failure { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
-        assertTrue(worker.awaitTermination(3, TimeUnit.SECONDS)); assertEquals(1, access.watches.get())
-        val queueWorker = rig.executor(); failure { rig.owner.closeAsync().get(3, TimeUnit.SECONDS) }
-        assertTrue(queueWorker.awaitTermination(3, TimeUnit.SECONDS)); assertEquals(0, rig.databaseCloses)
-        failure { rig.openSame().get(3, TimeUnit.SECONDS) }
+        failure { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
+        assertTrue(worker.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(1, access.watches.get())
+        val queueWorker = rig.executor(); failure { rig.owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS) }
+        assertTrue(queueWorker.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(0, rig.databaseCloses)
+        failure { rig.openSame().get(WAIT_SECONDS, TimeUnit.SECONDS) }
     } }
 
     @Test fun `original caller acceptance survives a held worker and cannot retire a newer interval`(): Unit = Rig().use { rig -> MainAccess().use { access ->
@@ -626,16 +635,16 @@ class NativeReplayCompositionTest {
         val platform = Platform(rig, access); val worker = Executors.newSingleThreadExecutor()
         val owner = composition(rig, life, platform, worker = worker); owner.ready().get()
         val entered = CountDownLatch(1); val release = CountDownLatch(1); val accepted = AtomicBoolean(true)
-        worker.execute { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-        assertTrue(entered.await(3, TimeUnit.SECONDS))
+        worker.execute { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+        assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val older = owner.reevaluate(originalAcceptance = accepted::get)
         accepted.set(false); release.countDown()
-        assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, older.get(3, TimeUnit.SECONDS))
+        assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, older.get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(0, access.rootReads.get()); assertEquals(0, platform.factories.get())
-        owner.reevaluate().get(3, TimeUnit.SECONDS); assertTrue(platform.firstFrame.await(3, TimeUnit.SECONDS))
-        assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, owner.reevaluate(true, accepted::get).get(3, TimeUnit.SECONDS))
+        owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); assertTrue(platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
+        assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, owner.reevaluate(true, accepted::get).get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(0, access.closes.get()); assertEquals(1, platform.factories.get())
-        owner.closeAndWait().get(3, TimeUnit.SECONDS)
+        owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
     } }
 
     @Test fun `queued reevaluation cannot adopt an intent accepted after it was submitted`() = Rig().use { rig -> MainAccess().use { access ->
@@ -643,24 +652,24 @@ class NativeReplayCompositionTest {
         val platform = Platform(rig, access); val worker = Executors.newSingleThreadExecutor()
         val owner = composition(rig, life, platform, worker = worker); owner.ready().get()
         val held = CountDownLatch(1); val release = CountDownLatch(1)
-        worker.execute { held.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-        assertTrue(held.await(3, TimeUnit.SECONDS))
+        worker.execute { held.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+        assertTrue(held.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val prior = owner.reevaluate(); owner.withdrawFresh(); release.countDown()
         try {
-            assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, prior.get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCompositionEvaluation.WITHDRAWN, prior.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(0, access.rootReads.get()); assertEquals(0, platform.factories.get())
-        } finally { release.countDown(); owner.closeAndWait().get(3, TimeUnit.SECONDS) }
+        } finally { release.countDown(); owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
     } }
 
     @Test fun `restrictive withdrawal defeats enrolled IO and late capture wake without renewing delivery`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access); val wire = Transport(hold = true)
-        val release = CountDownLatch(1); wire.beforeIo = { check(release.await(3, TimeUnit.SECONDS)) }
-        val owner = composition(rig, life, platform, wire); owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
-        assertTrue(wire.started.await(3, TimeUnit.SECONDS)); owner.withdrawAll(); release.countDown()
-        assertTrue(wire.refused.await(3, TimeUnit.SECONDS))
-        assertEquals(ReplayDeliveryPass(0, 0), owner.flushSealed().get(3, TimeUnit.SECONDS))
-        owner.closeAndWait().get(3, TimeUnit.SECONDS)
+        val release = CountDownLatch(1); wire.beforeIo = { check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+        val owner = composition(rig, life, platform, wire); owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertTrue(wire.started.await(WAIT_SECONDS, TimeUnit.SECONDS)); owner.withdrawAll(); release.countDown()
+        assertTrue(wire.refused.await(WAIT_SECONDS, TimeUnit.SECONDS))
+        assertEquals(ReplayDeliveryPass(0, 0), owner.flushSealed().get(WAIT_SECONDS, TimeUnit.SECONDS))
+        owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue(wire.requests.isEmpty()); assertEquals(1, platform.factories.get()); assertEquals(1, access.watches.get())
         assertEquals(1, rig.rows().size)
     } }
@@ -668,26 +677,26 @@ class NativeReplayCompositionTest {
     @Test fun `fresh only withdrawal preserves original sealed IO and then joins physical close`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access); val wire = Transport(hold = true)
-        val release = CountDownLatch(1); wire.beforeIo = { check(release.await(3, TimeUnit.SECONDS)) }
-        val owner = composition(rig, life, platform, wire); owner.ready().get(); owner.reevaluate().get(3, TimeUnit.SECONDS)
-        assertTrue(wire.started.await(3, TimeUnit.SECONDS)); owner.withdrawFresh(); release.countDown()
-        assertTrue(wire.entered.await(3, TimeUnit.SECONDS)); val close = owner.closeAndWait(); assertFalse(close.isDone)
-        wire.result.complete(ReplayTransportResponse(403, byteArrayOf())); close.get(3, TimeUnit.SECONDS)
+        val release = CountDownLatch(1); wire.beforeIo = { check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+        val owner = composition(rig, life, platform, wire); owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertTrue(wire.started.await(WAIT_SECONDS, TimeUnit.SECONDS)); owner.withdrawFresh(); release.countDown()
+        assertTrue(wire.entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); val close = owner.closeAndWait(); assertFalse(close.isDone)
+        wire.result.complete(ReplayTransportResponse(403, byteArrayOf())); close.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, wire.requests.size); assertEquals(1, rig.rows().size)
     } }
 
     @Test fun `late physical refusal survives composition close while close waits its original settlement`() = Rig().use { rig -> MainAccess().use { access ->
         rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
         val platform = Platform(rig, access); val wire = Transport(hold = true); val owner = composition(rig, life, platform, wire)
-        owner.ready().get(); val active = owner.reevaluate().get(3, TimeUnit.SECONDS)
-        if (!wire.entered.await(3, TimeUnit.SECONDS)) {
+        owner.ready().get(); val active = owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        if (!wire.entered.await(WAIT_SECONDS, TimeUnit.SECONDS)) {
             val count = rig.rows().size
-            val pass = runCatching { owner.flushSealed().get(3, TimeUnit.SECONDS).toString() }.fold({ it }, { it.toString() })
-            owner.closeAndWait().get(3, TimeUnit.SECONDS)
+            val pass = runCatching { owner.flushSealed().get(WAIT_SECONDS, TimeUnit.SECONDS).toString() }.fold({ it }, { it.toString() })
+            owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
             fail("No synthetic transport entry: evaluation=$active rows=$count collections=${platform.collections.get()} explicitPass=$pass")
         }
         val original = wire.requests.single().row.prepared.copyBytes(); val closing = owner.closeAndWait(); assertFalse(closing.isDone)
-        wire.result.complete(ReplayTransportResponse(403, byteArrayOf())); closing.get(3, TimeUnit.SECONDS)
+        wire.result.complete(ReplayTransportResponse(403, byteArrayOf())); closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertArrayEquals(original, rig.rows().single().prepared.copyBytes())
         rig.reopen(); rig.publish()
         val next = rig.owner.openReplayDeliveryQueue(PrivacyStateProjector.nativeSealedDeliveryPolicy(proof()) { false }).get()
@@ -779,7 +788,7 @@ class NativeReplayCompositionTest {
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
         fun reopen() {
-            owner.closeAsync().get(100, TimeUnit.MILLISECONDS)
+            owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
             driver.close()
             // A reopened queue owns a fresh original source/gate; a closed gate stays closed.
             assertNull(gate.snapshot())
@@ -814,8 +823,10 @@ class NativeReplayCompositionTest {
     }
     private companion object {
         const val KEY = "elu_pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAA"
+        /** Bound for a step that can be slow on a loaded runner. A passing run never waits it out. */
+        const val WAIT_SECONDS = 20L
         fun awaitBlocked(thread: Thread) {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (thread.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
             assertEquals("Expected the exact owned thread to block at its held monitor", Thread.State.BLOCKED, thread.state)
         }
