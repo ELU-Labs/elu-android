@@ -84,7 +84,11 @@ default. A dry run passes every gate and uploads nothing. The workflow:
 7. checks the public API snapshot and runs the strict scan over the AARs, POMs,
    sources, Javadoc, resolved dependencies and SBOMs;
 8. checks the Gradle publication graph: only the core module, through
-   `stageCentralRelease`, with no automatic release.
+   `stageCentralRelease`, with no automatic release;
+9. in a dry run only, signs the core publication locally with `SIGNING_KEY` and
+   `SIGNING_KEY_PASSWORD` and requires every signature to verify against the
+   Maven artifact signing key. A wrong key or passphrase fails here, not on the
+   upload.
 
 Then run it again with `dryRun` off. `stageCentralRelease` signs the core
 artifact into a local staging repository, checks that every staged payload

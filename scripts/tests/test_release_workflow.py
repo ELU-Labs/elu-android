@@ -7,6 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 UPLOAD = "./gradlew stageCentralRelease"
+DRY_RUN_SIGN = "Sign the publication locally without uploading"
 
 
 def step(text: str, name: str) -> str:
@@ -86,11 +87,23 @@ class ReleaseWorkflowTest(unittest.TestCase):
                         "android-runtime-network-evidence.json", "--network runtime=", "publishPairedRelease"):
             self.assertNotIn(retired, self.text)
 
-    def test_dry_run_is_the_default_and_skips_only_the_upload(self) -> None:
+    def test_dry_run_is_the_default_signs_locally_and_skips_only_the_upload(self) -> None:
         self.assertRegex(self.text, re.compile(r"dryRun:\n(?:        .*\n)*?        default: true\n"))
         conditions = re.findall(r"^        if: (.*)$", self.text, re.MULTILINE)
-        self.assertEqual(conditions, ["${{ !inputs.dryRun }}"])
+        self.assertEqual(conditions, ["${{ inputs.dryRun }}", "${{ !inputs.dryRun }}"])
+        self.assertIn("if: ${{ inputs.dryRun }}", step(self.text, DRY_RUN_SIGN))
         self.assertIn("if: ${{ !inputs.dryRun }}", step(self.text, "Upload to Maven Central for a manual Publish"))
+
+    def test_dry_run_signs_with_the_pinned_artifact_key_and_uploads_nothing(self) -> None:
+        sign = step(self.text, DRY_RUN_SIGN)
+        self.assertIn("./gradlew :elu-analytics:signMavenPublication --no-configuration-cache --no-parallel", sign)
+        self.assertIn("RELEASE_TAG: ${{ inputs.tag }}", sign)
+        self.assertIn("^ARTIFACT_SIGNING_FINGERPRINT = ", sign)
+        self.assertIn("scripts/verify-release-publication.py", sign)
+        self.assertIn("VALIDSIG", sign)
+        for forbidden in ("stageCentralRelease", "publishToMavenCentral", "MAVEN_CENTRAL"):
+            self.assertNotIn(forbidden, sign)
+        self.assertLess(self.text.index("bash scripts/check-publication-graph.sh"), self.text.index(DRY_RUN_SIGN))
 
     def test_upload_is_core_only_and_never_releases_automatically(self) -> None:
         upload = step(self.text, "Upload to Maven Central for a manual Publish")
@@ -116,10 +129,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_publication_secrets_reach_only_the_upload_step(self) -> None:
         upload = step(self.text, "Upload to Maven Central for a manual Publish")
-        for secret in ("MAVEN_CENTRAL_USERNAME }}", "MAVEN_CENTRAL_PASSWORD }}", "SIGNING_KEY }}",
-                       "SIGNING_KEY_PASSWORD }}"):
+        for secret in ("MAVEN_CENTRAL_USERNAME }}", "MAVEN_CENTRAL_PASSWORD }}"):
             self.assertEqual(self.text.count("secrets." + secret), 1, secret)
             self.assertEqual(upload.count("secrets." + secret), 1, secret)
+
+    def test_signing_secrets_reach_only_steps_that_never_run_together(self) -> None:
+        # The dry-run signing step and the upload are mutually exclusive by their conditions.
+        upload = step(self.text, "Upload to Maven Central for a manual Publish")
+        sign = step(self.text, DRY_RUN_SIGN)
+        for secret in ("SIGNING_KEY }}", "SIGNING_KEY_PASSWORD }}"):
+            self.assertEqual(self.text.count("secrets." + secret), 2, secret)
+            self.assertEqual(upload.count("secrets." + secret), 1, secret)
+            self.assertEqual(sign.count("secrets." + secret), 1, secret)
 
 
 if __name__ == "__main__":
