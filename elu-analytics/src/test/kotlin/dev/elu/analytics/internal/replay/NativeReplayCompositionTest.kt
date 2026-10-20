@@ -24,15 +24,17 @@ class NativeReplayCompositionTest {
         // read. watch() below never reports detachment, so keep replaced roots: a collected original
         // root seen first by the capture's main hop is a withdrawal, not a root boundary.
         private val replacedRoots = CopyOnWriteArrayList<Any>()
+        @Volatile var retainReplacedRoots = retainRootsByDefault // TEMPORARY diagnostic
+        val posts = AtomicInteger() // TEMPORARY diagnostic
         @Volatile var root: Any = Any()
-            set(value) { replacedRoots += field; field = value }
+            set(value) { if (retainReplacedRoots) replacedRoots += field; field = value }
         @Volatile var width = 100; @Volatile var height = 200; @Volatile var apiLevel = 36
         val rootReads = AtomicInteger(); val watches = AtomicInteger(); val closes = AtomicInteger()
         @Volatile var rootAvailable = true
         @Volatile var factsAvailable = true
         @Volatile var onObserve: (() -> Unit)? = null
         @Volatile var onClose: (() -> Unit)? = null
-        override fun onMain(action: () -> Unit) { if (Thread.currentThread() === main) action() else executor.execute(action) }
+        override fun onMain(action: () -> Unit) { if (Thread.currentThread() === main) action() else { posts.incrementAndGet(); executor.execute(action) } }
         override fun currentRoot(activity: Any, current: () -> Boolean): Any? {
             check(Thread.currentThread() === main); rootReads.incrementAndGet()
             return root.takeIf { rootAvailable && activity === this.activity && current() }
@@ -827,7 +829,63 @@ class NativeReplayCompositionTest {
         override fun schedule(delayNanos: Long, task: () -> Unit) = V2ConfigLifecycleTask { }
         override fun close() = Unit
     }
+    // TEMPORARY diagnostics for main CI 39364355234; reverted before merge.
+    private fun mainHopChoreography(retain: Boolean): Pair<NativeReplayCaptureOutcome, Int> = Rig().use { rig -> MainAccess().use { access ->
+        access.retainReplacedRoots = retain
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access); val ticks = platform.manualTicks(); val owner = composition(rig, life, platform)
+        val held = CountDownLatch(1); val release = CountDownLatch(1)
+        try {
+            owner.ready().get(); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); awaitCondition("first prefix") { rig.rows().size == 1 }
+            val original = owner.currentCapture()
+            val strong = AtomicReference<Any?>(access.root); val weak = java.lang.ref.WeakReference(strong.get())
+            access.executor.execute { held.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+            assertTrue(held.await(WAIT_SECONDS, TimeUnit.SECONDS))
+            val posts = access.posts.get()
+            access.root = Any(); ticks.release()
+            awaitCondition("capture main hop queued behind held main") { access.posts.get() > posts }
+            strong.set(null)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (weak.get() != null && System.nanoTime() < deadline) { System.gc(); Thread.sleep(10) }
+            assertEquals("original root collected", !retain, weak.get() == null)
+            release.countDown()
+            val outcome = original.finished().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            if (retain) awaitCondition("replacement") { platform.factories.get() == 2 }
+            else { owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS); owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS) }
+            outcome to platform.factories.get()
+        } finally { release.countDown(); runCatching { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) } }
+    } }
+
+    @Test fun `DIAG collected original root at the capture main hop settles without a root boundary`() {
+        val (outcome, factories) = mainHopChoreography(retain = false)
+        println("DIAG collected root: outcome=$outcome factories=$factories")
+        assertEquals(NativeReplayCaptureOutcome.SETTLED, outcome); assertEquals(1, factories)
+    }
+
+    @Test fun `DIAG retained replaced root at the capture main hop recovers`() {
+        val (outcome, factories) = mainHopChoreography(retain = true)
+        println("DIAG retained root: outcome=$outcome factories=$factories")
+        assertEquals(NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED, outcome); assertEquals(2, factories)
+    }
+
+    @Test fun `DIAG root swap tests under GC pressure`() {
+        val stop = AtomicBoolean(false)
+        val gc = Thread { while (!stop.get()) { System.gc(); Thread.sleep(2) } }.apply { isDaemon = true; start() }
+        try {
+            var control = 0
+            retainRootsByDefault = false
+            try { repeat(20) { try { `replacement joins original watcher and unknown watcher cleanup quarantines`() } catch (_: Throwable) { control++ } } }
+            finally { retainRootsByDefault = true }
+            println("DIAG control without retained roots under GC pressure: $control/20 failed")
+            repeat(20) { `replacement joins original watcher and unknown watcher cleanup quarantines`() }
+            repeat(10) { `root replacement waits for durable stop and unknown accounting cannot recover`() }
+            repeat(10) { `same activity root and viewport changes recover with new stream and original session budget`() }
+            println("DIAG with retained roots under GC pressure: 20 + 10 + 10 passed")
+        } finally { stop.set(true); gc.join() }
+    }
+
     private companion object {
+        @Volatile var retainRootsByDefault = true // TEMPORARY diagnostic
         const val KEY = "elu_pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAA"
         /** Bound for a step that can be slow on a loaded runner. A passing run never waits it out. */
         const val WAIT_SECONDS = 20L
