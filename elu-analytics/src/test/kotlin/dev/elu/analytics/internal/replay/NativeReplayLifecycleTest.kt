@@ -5,6 +5,9 @@ import java.util.concurrent.TimeUnit
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Explicit synthetic platform facts; this suite does not execute Android View methods. */
 internal class TestSelectionAccess : NativeReplaySelectionAccess {
     var window = Any(); var token = Any()
@@ -202,11 +205,11 @@ class NativeReplayLifecycleTest {
         assertNull(lifecycle.selectCurrent().get())
         assertNull(lifecycle.select(first, root).get()); assertNull(lifecycle.select(second, root).get())
         assertEquals(reads, platform.rootReads); assertEquals(observed, platform.observed)
-        original.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
+        original.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
         lifecycle.withdrawing(second)
         val next = checkNotNull(lifecycle.selectCurrent().get())
         assertSame(first, platform.lastActivity); assertFalse(original.isCurrent())
-        next.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(2, platform.watcherClosed)
+        next.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); assertEquals(2, platform.watcherClosed)
     }
 
     @Test fun `equal never-resumed impostor cannot select or withdraw the original activity`() {
@@ -217,7 +220,7 @@ class NativeReplayLifecycleTest {
         assertNull(lifecycle.select(impostor, root).get())
         lifecycle.withdrawing(impostor)
         assertTrue(original.isCurrent())
-        original.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
+        original.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
     }
 
     @Test fun `lifecycle never invokes customer equality or hashing under its lock`() {
@@ -230,7 +233,7 @@ class NativeReplayLifecycleTest {
         val selected = checkNotNull(lifecycle.select(activity, Any()).get())
         assertTrue(selected.isCurrent())
         lifecycle.withdrawing(activity); assertFalse(selected.isCurrent())
-        selected.closeAndWait().get(3, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
+        selected.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); assertEquals(1, platform.watcherClosed)
     }
 
     @Test fun `same resumed Activity can be freshly observed after unavailable root or focus facts`() {
@@ -242,7 +245,7 @@ class NativeReplayLifecycleTest {
         platform.factsAvailable = true
         val selected = checkNotNull(lifecycle.selectCurrent().get())
         assertTrue(selected.isCurrent()); assertEquals(1, platform.watchers)
-        selected.closeAndWait().get(3, TimeUnit.SECONDS)
+        selected.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, platform.watcherClosed)
     }
 
@@ -460,7 +463,7 @@ class NativeReplayLifecycleTest {
             val completed = CountDownLatch(1)
             fun withdrawFromAnotherThread() {
                 val thread = Thread { lifecycle.withdrawing(activity); completed.countDown() }
-                thread.start(); assertTrue("Lifecycle lock spanned callback", completed.await(2, TimeUnit.SECONDS)); thread.join(2000)
+                thread.start(); assertTrue("Lifecycle lock spanned callback", completed.await(WAIT_SECONDS, TimeUnit.SECONDS)); thread.join(2000)
             }
             if (inObservation) platform.onObserve = { withdrawFromAnotherThread() }
             assertNull(selection.consumeOriginalRoot({ true }) { _, _ ->
@@ -475,12 +478,12 @@ class NativeReplayLifecycleTest {
         var pending: (() -> Unit)? = null; platform.hold = { pending = it }
         val entered = CountDownLatch(1); val released = CountDownLatch(1)
         val result = selection.consumeOriginalRoot({ true }) { _, _ ->
-            entered.countDown(); check(released.await(3, TimeUnit.SECONDS)); detached()
+            entered.countDown(); check(released.await(WAIT_SECONDS, TimeUnit.SECONDS)); detached()
         }
         platform.hold = null
-        val main = Thread { pending!!.invoke() }; main.start(); assertTrue(entered.await(2, TimeUnit.SECONDS))
+        val main = Thread { pending!!.invoke() }; main.start(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         selection.close(); assertFalse(selection.isCurrent()); assertFalse(result.cancel(false)); assertFalse(result.isDone)
-        released.countDown(); main.join(2000); assertFalse(main.isAlive); assertNull(result.get())
+        released.countDown(); main.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS)); assertFalse(main.isAlive); assertNull(result.get())
     }
     @Test fun `observation gate callback and dispatch exceptions all terminate selection`() {
         for (where in 0..3) {
@@ -568,7 +571,7 @@ class NativeReplayLifecycleTest {
         val activity = Any(); platform.discoveredRoot = Any(); lifecycle.resumed(activity)
         platform.onRoot = {
             val completed = CountDownLatch(1); val thread = Thread { lifecycle.withdrawing(activity); completed.countDown() }
-            thread.start(); assertTrue("Lifecycle lock spanned root lookup", completed.await(2, TimeUnit.SECONDS)); thread.join(2000)
+            thread.start(); assertTrue("Lifecycle lock spanned root lookup", completed.await(WAIT_SECONDS, TimeUnit.SECONDS)); thread.join(2000)
         }
         assertNull(lifecycle.selectCurrent().get()); assertEquals(0, platform.watchers)
     }
@@ -576,11 +579,11 @@ class NativeReplayLifecycleTest {
     @Test fun `unsubscribed queued change notification cannot retain or reenter a closed subscriber`() {
         val lifecycle = NativeReplayLifecycle(TestSelectionAccess()); val activity = Any()
         val entered = CountDownLatch(1); val release = CountDownLatch(1); var secondCalls = 0
-        val first = lifecycle.observeChanges { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        val first = lifecycle.observeChanges { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val second = lifecycle.observeChanges { secondCalls++ }
-        val dispatch = Thread { lifecycle.resumed(activity) }; dispatch.start(); assertTrue(entered.await(2, TimeUnit.SECONDS))
+        val dispatch = Thread { lifecycle.resumed(activity) }; dispatch.start(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         // Subscription mutation can complete while the first callback is held: no lifecycle lock is borrowed.
-        second.close(); first.close(); release.countDown(); dispatch.join(2000)
+        second.close(); first.close(); release.countDown(); dispatch.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
         assertFalse(dispatch.isAlive); assertEquals(0, secondCalls)
         lifecycle.withdrawing(activity); assertEquals(0, secondCalls)
     }

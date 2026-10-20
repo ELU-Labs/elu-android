@@ -17,6 +17,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Actual owner/authority/sealer/queue; synthetic platform facts and masked collection, fake DB. */
 class NativeReplayCaptureOwnerTest {
     private class MainAccess : NativeReplaySelectionAccess, AutoCloseable {
@@ -34,7 +37,7 @@ class NativeReplayCaptureOwnerTest {
             invalidate = withdrawn
             return AutoCloseable { invalidate = null }
         }
-        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS)) }
+        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)) }
     }
     private class Session(val rig: Rig, proof: NativeReplayCapabilities? = null) : AutoCloseable {
         val access = MainAccess(); val lifecycle = NativeReplayLifecycle(access)
@@ -42,7 +45,7 @@ class NativeReplayCaptureOwnerTest {
         val selection = run { lifecycle.resumed(activity); checkNotNull(lifecycle.select(activity, root).get()) }
         val authority = NativeReplayAuthority(rig.owner, proof ?: NativeReplayCapabilities(setOf(
             rig.protocol.transport), setOf(rig.protocol.generation)), { false })
-        fun prepare() = authority.prepare(selection).get(3, TimeUnit.SECONDS)
+        fun prepare() = authority.prepare(selection).get(WAIT_SECONDS, TimeUnit.SECONDS)
         fun start(prepared: NativeReplayPreparedAuthority, platform: Platform, trace: NativeStartTrace = NativeStartTrace.NONE): NativeReplayCaptureOwner =
             checkNotNull(NativeReplayCaptureOwner.start(rig.owner, authority, prepared, StandaloneRuntime.defaultVersions(), platform, trace))
         override fun close() { authority.close(); selection.close(); access.close() }
@@ -140,7 +143,7 @@ class NativeReplayCaptureOwnerTest {
                 platform.rig.clock.wall, platform.rig.clock.nanos)
         }
     }
-    private fun Platform.main(action: () -> Unit) { access.executor.submit(action).get(3, TimeUnit.SECONDS) }
+    private fun Platform.main(action: () -> Unit) { access.executor.submit(action).get(WAIT_SECONDS, TimeUnit.SECONDS) }
 
     private fun Rig.minimum(seconds: Int) = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", seconds) }
     private fun Rig.rows(): List<ReplayStoredChunk> = owner.storedPreparedReplayForTesting().get()
@@ -149,7 +152,7 @@ class NativeReplayCaptureOwnerTest {
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val platform = Platform(rig, session.access)
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             val touch = checkNotNull(platform.fakeTouch)
             assertEquals(1, touch.installs); assertEquals(listOf(1), touch.armRows)
             assertEquals(1, touch.closes); assertTrue(touch.intakeWithdrawn)
@@ -168,7 +171,7 @@ class NativeReplayCaptureOwnerTest {
                 } else false
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             val touch = checkNotNull(platform.fakeTouch)
             assertEquals(2, touch.arms); assertEquals(listOf(1, 1), touch.armRows)
             assertTrue(wireEvents(rig.rows().single()).none { it.optJSONObject("data")?.optInt("source") == 2 })
@@ -188,12 +191,12 @@ class NativeReplayCaptureOwnerTest {
                 platform.onPause = { withdrawn ->
                     if (platform.collections.get() == 1) { tick(NativeTouchAction.DOWN); tick(NativeTouchAction.MOVE); true }
                     else { if (!removeTarget) { tick(NativeTouchAction.MOVE); tick(NativeTouchAction.UP) }
-                        idle.countDown(); !withdrawn.await(3, TimeUnit.SECONDS) }
+                        idle.countDown(); !withdrawn.await(WAIT_SECONDS, TimeUnit.SECONDS) }
                 }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
                 try {
-                    assertTrue(idle.await(3, TimeUnit.SECONDS))
-                    assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.stopRecording().get(3, TimeUnit.SECONDS))
+                    assertTrue(idle.await(WAIT_SECONDS, TimeUnit.SECONDS))
+                    assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.stopRecording().get(WAIT_SECONDS, TimeUnit.SECONDS))
                     assertEquals(2, platform.collections.get()); assertEquals(1L, rig.state().nextReplayOrdinal)
                     assertEquals(if (removeTarget) 1_000_000_000L else 200_000_000L, platform.touchDelays.last())
                     val rows = rig.rows(); assertEquals(2, rows.size)
@@ -203,7 +206,7 @@ class NativeReplayCaptureOwnerTest {
                     assertEquals(if (removeTarget) 10 else 9, tail.last { it.getJSONObject("data").optInt("source", -1) == 2 }
                         .getJSONObject("data").getInt("type"))
                     assertTrue(rows.all { JSONObject(String(it.prepared.copyBytes())).getJSONObject("chunk").getString("codec") == NativeReplayProtocol.V2.transport.codec })
-                } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+                } finally { owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
             }
         }
     }
@@ -216,13 +219,13 @@ class NativeReplayCaptureOwnerTest {
                 platform.onTouchInstall = { installed.countDown(); error("setter applied then failed") }
                 platform.onTouchClose = { cleanup }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
-                assertTrue(installed.await(3, TimeUnit.SECONDS))
-                val touch = checkNotNull(platform.fakeTouch); assertTrue(touch.closeEntered.await(3, TimeUnit.SECONDS))
+                assertTrue(installed.await(WAIT_SECONDS, TimeUnit.SECONDS))
+                val touch = checkNotNull(platform.fakeTouch); assertTrue(touch.closeEntered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertFalse(owner.finished().isDone); assertNull(rig.owner.enrollNativeReplayCapture().get())
                 assertNotNull(rig.state().session?.activeEpoch); assertEquals(0, touch.arms)
                 if (cleanupFails) cleanup.completeExceptionally(IllegalStateException("restoration unresolved")) else cleanup.complete(Unit)
                 assertEquals(if (cleanupFails) NativeReplayCaptureOutcome.QUARANTINED else NativeReplayCaptureOutcome.SETTLED,
-                    owner.finished().get(3, TimeUnit.SECONDS))
+                    owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertTrue(touch.intakeWithdrawn); assertEquals(1, touch.closes); assertTrue(rig.rows().isEmpty())
                 if (cleanupFails) assertNull(rig.owner.enrollNativeReplayCapture().get()) else assertNull(rig.state().session?.activeEpoch)
             }
@@ -234,7 +237,7 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access)
             rig.afterReplayCommit = { rig.driver.onBackground() }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            owner.finished().get(3, TimeUnit.SECONDS)
+            owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(0, checkNotNull(platform.fakeTouch).arms)
             assertEquals(1, platform.collections.get())
             assertTrue(rig.rows().all { wireEvents(it).none { event -> event.optJSONObject("data")?.optInt("source") in listOf(2, 6) } })
@@ -246,7 +249,7 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access, 2)
             platform.transformFrame = { if (it.ordinal == 1L) NativeMaskedSnapshot(it.ordinal, it.timestamp, NativeViewport(200, 100), it.nodes) else it }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, checkNotNull(platform.fakeTouch).closes); assertEquals(1, rig.rows().size)
             assertEquals(1L, rig.state().nextReplayOrdinal); assertNull(rig.state().session?.activeEpoch)
         }
@@ -265,7 +268,7 @@ class NativeReplayCaptureOwnerTest {
             platform.onCollect = { if (platform.collections.get() == 2) throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY) }
             platform.onPause = { rig.advance(10); platform.collections.get() < 4 }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(listOf(0L, 1L, 1L, 2L), platform.ordinals.toList())
             assertEquals(1, platform.factories.get()); assertEquals(1L, rig.state().nextReplayOrdinal)
             val rows = rig.rows(); assertEquals(3, rows.size)
@@ -280,7 +283,7 @@ class NativeReplayCaptureOwnerTest {
             platform.transformFrame = { if (platform.collections.get() == 2)
                 NativeMaskedSnapshot(it.ordinal, it.timestamp, NativeViewport(200, 100), it.nodes) else it }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(rig.rows().isEmpty()); assertEquals(1, owner.completedDiagnostic()!!.frames)
             assertEquals(1L, rig.state().nextReplayOrdinal); assertNotNull(rig.state().session?.firstStartAt)
             assertNull(rig.state().session?.activeEpoch)
@@ -294,23 +297,23 @@ class NativeReplayCaptureOwnerTest {
                 val platform = Platform(rig, session.access, 4); val blocked = CountDownLatch(1); val release = CountDownLatch(1)
                 platform.onCollect = { if (platform.collections.get() == 2) throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY) }
                 platform.onPause = {
-                    if (platform.collections.get() == 2) { blocked.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+                    if (platform.collections.get() == 2) { blocked.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
                     else rig.advance()
                     true
                 }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
                 try {
-                    assertTrue(blocked.await(3, TimeUnit.SECONDS))
+                    assertTrue(blocked.await(WAIT_SECONDS, TimeUnit.SECONDS))
                     when (mode) {
                         "source" -> rig.source.withdraw()
                         "privacy" -> platform.privacyRevision = Any()
                         else -> owner.stopRecording()
                     }
                     release.countDown()
-                    assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+                    assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
                     assertEquals(2, platform.collections.get()); assertEquals(1, rig.rows().size)
                     assertNull(rig.state().session?.activeEpoch)
-                } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+                } finally { release.countDown(); owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
             }
         }
     }
@@ -326,11 +329,11 @@ class NativeReplayCaptureOwnerTest {
             val entered = CountDownLatch(1); val platform = Platform(rig, session.access)
             platform.onPause = { stopped ->
                 if (platform.collections.get() == 1) { rig.advance(); true }
-                else { entered.countDown(); !stopped.await(3, TimeUnit.SECONDS) }
+                else { entered.countDown(); !stopped.await(WAIT_SECONDS, TimeUnit.SECONDS) }
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
             try {
-                assertTrue(entered.await(3, TimeUnit.SECONDS)); assertTrue(owner.recordingStarted())
+                assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertTrue(owner.recordingStarted())
                 assertEquals(1, rig.rows().size)
                 when (restriction) {
                     "source" -> rig.gate.close()
@@ -339,7 +342,7 @@ class NativeReplayCaptureOwnerTest {
                     "privacy" -> platform.privacyRevision = Any()
                 }
                 val stopped = owner.stopRecording(); assertFalse(owner.recordingStarted())
-                assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(3, TimeUnit.SECONDS))
+                assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(WAIT_SECONDS, TimeUnit.SECONDS))
                 val rows = rig.rows()
                 if (restriction == null) {
                     assertEquals(2, rows.size)
@@ -348,19 +351,19 @@ class NativeReplayCaptureOwnerTest {
                     assertEquals(2, platform.collections.get())
                 } else assertTrue("No new tail after $restriction", rows.size <= 1)
                 assertFalse(owner.recordingStarted())
-            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+            } finally { owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     }
 
     @Test fun `local stop below minimum does not seal and never creates another frame`(): Unit = Rig().use { rig ->
         rig.minimum(5); rig.activate(); Session(rig).use { session ->
             val waiting = CountDownLatch(1); val platform = Platform(rig, session.access)
-            platform.onPause = { stop -> waiting.countDown(); !stop.await(3, TimeUnit.SECONDS) }
+            platform.onPause = { stop -> waiting.countDown(); !stop.await(WAIT_SECONDS, TimeUnit.SECONDS) }
             val owner = session.start(checkNotNull(session.prepare()), platform)
             try {
-                assertTrue(waiting.await(3, TimeUnit.SECONDS)); owner.stopRecording().get(3, TimeUnit.SECONDS)
+                assertTrue(waiting.await(WAIT_SECONDS, TimeUnit.SECONDS)); owner.stopRecording().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertEquals(1, platform.collections.get()); assertTrue(rig.rows().isEmpty())
-            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+            } finally { owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     }
 
@@ -368,15 +371,15 @@ class NativeReplayCaptureOwnerTest {
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             val platform = Platform(rig, session.access)
-            platform.onFactory = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+            platform.onFactory = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             val owner = session.start(checkNotNull(session.prepare()), platform)
             try {
-                assertTrue(entered.await(3, TimeUnit.SECONDS)); assertFalse(owner.recordingStarted())
+                assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertFalse(owner.recordingStarted())
                 val stopped = owner.stopRecording(); assertFalse(stopped.isDone); assertFalse(owner.recordingStarted())
                 assertNull(rig.owner.enrollNativeReplayCapture().get())
-                release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+                release.countDown(); stopped.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertEquals(0, platform.collections.get()); assertTrue(rig.rows().isEmpty())
-            } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+            } finally { release.countDown(); owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     }
 
@@ -385,15 +388,15 @@ class NativeReplayCaptureOwnerTest {
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             val platform = Platform(rig, session.access, maximumSamples = 3)
             platform.onCollect = { if (platform.collections.get() == 3) {
-                entered.countDown(); check(release.await(3, TimeUnit.SECONDS))
+                entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS))
             } }
             val owner = session.start(checkNotNull(session.prepare()), platform)
             try {
-                assertTrue(entered.await(3, TimeUnit.SECONDS)); assertEquals(1, rig.rows().size)
+                assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(1, rig.rows().size)
                 val stopped = owner.stopRecording(); assertFalse(stopped.isDone)
-                release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+                release.countDown(); stopped.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertEquals(1, rig.rows().size); assertEquals(3, platform.collections.get())
-            } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+            } finally { release.countDown(); owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     }
 
@@ -402,14 +405,14 @@ class NativeReplayCaptureOwnerTest {
             rig.minimum(0); rig.activate(); Session(rig).use { session ->
                 val entered = CountDownLatch(1); val release = CountDownLatch(1)
                 val platform = Platform(rig, session.access)
-                rig.onReplayWrite = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+                rig.onReplayWrite = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
                 val originalTime = rig.clock.wall
                 val owner = session.start(checkNotNull(session.prepare()), platform)
                 try {
-                    assertTrue(entered.await(3, TimeUnit.SECONDS))
+                    assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                     val stopped = owner.stopRecording(); assertFalse(stopped.isDone)
                     if (withdrawSource) rig.gate.close()
-                    release.countDown(); stopped.get(3, TimeUnit.SECONDS)
+                    release.countDown(); stopped.get(WAIT_SECONDS, TimeUnit.SECONDS)
                     val rows = rig.rows()
                     if (withdrawSource) assertTrue(rows.isEmpty()) else {
                         val chunk = JSONObject(String(rows.single().prepared.copyBytes())).getJSONObject("chunk")
@@ -417,7 +420,7 @@ class NativeReplayCaptureOwnerTest {
                         assertEquals(RuntimeWallTimestamps.rfc3339(originalTime), chunk.getString("startedAt"))
                         assertEquals(1, platform.collections.get())
                     }
-                } finally { release.countDown(); owner.stop().get(3, TimeUnit.SECONDS) }
+                } finally { release.countDown(); owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
             }
         }
     }
@@ -427,17 +430,17 @@ class NativeReplayCaptureOwnerTest {
             val waiting = CountDownLatch(1); val platform = Platform(rig, session.access)
             val allowed = java.util.concurrent.atomic.AtomicBoolean(true)
             platform.onPause = { stop -> if (platform.collections.get() == 1) { rig.advance(); true }
-                else { waiting.countDown(); !stop.await(3, TimeUnit.SECONDS) } }
+                else { waiting.countDown(); !stop.await(WAIT_SECONDS, TimeUnit.SECONDS) } }
             val owner = checkNotNull(NativeReplayCaptureOwner.start(rig.owner, session.authority,
                 checkNotNull(session.prepare()), StandaloneRuntime.defaultVersions(), platform,
                 intakeCurrent = allowed::get))
             try {
-                assertTrue(waiting.await(3, TimeUnit.SECONDS)); assertEquals(1, rig.rows().size)
+                assertTrue(waiting.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(1, rig.rows().size)
                 allowed.set(false)
                 assertFalse(owner.recordingStarted())
-                owner.stopRecording().get(3, TimeUnit.SECONDS)
+                owner.stopRecording().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertEquals(1, rig.rows().size)
-            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+            } finally { owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     }
 
@@ -452,7 +455,7 @@ class NativeReplayCaptureOwnerTest {
             }) }
             platform.onPause = { platform.privacyRevision = Any(); rig.advance(); true }
             val owner = session.start(prepared, platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, platform.collections.get()); assertTrue(rig.rows().isEmpty())
         }
     }
@@ -461,7 +464,7 @@ class NativeReplayCaptureOwnerTest {
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val prepared = checkNotNull(session.prepare()); val clock = rig.clock.wall; val platform = Platform(rig, session.access)
             val owner = session.start(prepared, platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             val row = rig.rows().single(); val body = row.prepared.copyBytes(); val json = JSONObject(String(body))
             assertEquals(clock, platform.timestamps.single()); assertEquals(listOf(0L), platform.ordinals)
             assertEquals(RuntimeWallTimestamps.rfc3339(clock), json.getJSONObject("chunk").getString("startedAt"))
@@ -481,16 +484,16 @@ class NativeReplayCaptureOwnerTest {
             val tail = CountDownLatch(1); val platform = Platform(rig, session.access)
             // The second frame is collected at once, so it cannot seal: it exists only in memory.
             platform.onPause = { stopped ->
-                if (platform.collections.get() == 1) true else { tail.countDown(); !stopped.await(3, TimeUnit.SECONDS) }
+                if (platform.collections.get() == 1) true else { tail.countDown(); !stopped.await(WAIT_SECONDS, TimeUnit.SECONDS) }
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
             try {
-                assertTrue(tail.await(3, TimeUnit.SECONDS)); assertEquals(2, platform.collections.get())
+                assertTrue(tail.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(2, platform.collections.get())
                 sealed = rig.rows(); assertEquals(1, sealed.size)
                 // Ending the process here keeps exactly the committed store, as a copy of its files does.
                 killed = rig.backing.committedCopy()
                 assertNotNull(NativeReplayAccounting.read(checkNotNull(killed.replayRows[NativeReplayAccounting.KEY])).session!!.activeEpoch)
-            } finally { owner.stop().get(3, TimeUnit.SECONDS) }
+            } finally { owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
         rig.advance(30); rig.relaunch(killed)
         assertEquals(sealed.map { it.prepared.copyBytes().toList() }, rig.rows().map { it.prepared.copyBytes().toList() })
@@ -498,7 +501,7 @@ class NativeReplayCaptureOwnerTest {
         assertNull(settled.activeEpoch); assertFalse(settled.interrupted); assertFalse(settled.clockDenied)
         Session(rig).use { session ->
             val owner = session.start(checkNotNull(session.prepare()), Platform(rig, session.access))
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
         }
         val rows = rig.rows(); assertEquals(2, rows.size)
         assertArrayEquals(sealed.single().prepared.copyBytes(), rows[0].prepared.copyBytes())
@@ -519,7 +522,7 @@ class NativeReplayCaptureOwnerTest {
             val trace = BoundedNativeStartObserver.create { records += it }.begin()
             val platform = Platform(rig, session.access)
             val owner = session.start(checkNotNull(session.prepare()), platform, trace)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, platform.profileFactories.get()); assertEquals(1, platform.collections.get())
             assertEquals(1, rig.rows().size)
             assertTrue(records.any { JSONObject(String(it, Charsets.US_ASCII)).getString("phase") == "CAPTURE_LOOP_READY" })
@@ -529,7 +532,7 @@ class NativeReplayCaptureOwnerTest {
         rig.minimum(3); rig.activate(); Session(rig).use { session ->
             val initial = rig.clock.wall; val platform = Platform(rig, session.access, 14)
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(5, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             val rows = rig.rows(); assertEquals(2, rows.size)
             assertEquals(listOf(0L, 1L, 1L, 1L) + (2L..11L).toList(), platform.ordinals.toList())
             assertEquals(listOf(0L, 1L), rows.map { it.prepared.sequence })
@@ -573,7 +576,7 @@ class NativeReplayCaptureOwnerTest {
             val use = checkNotNull(original.takePhysicalUse()); val platform = Platform(rig, session.access)
             rig.ownerNanos = -1 // A guard would persist denial; occupied enrollment does not consume it.
             val owner = session.start(prepared, platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(use.isCurrent()); assertFalse(rig.state().session!!.clockDenied); assertEquals(0, platform.factories.get())
             rig.ownerNanos = null; use.settle(); assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(original).get())
         }
@@ -582,7 +585,7 @@ class NativeReplayCaptureOwnerTest {
         rig.activate(); Session(rig).use { session ->
             val prepared = checkNotNull(session.prepare()); rig.ownerNanos = -1
             val platform = Platform(rig, session.access); val owner = session.start(prepared, platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(rig.state().session!!.clockDenied); assertEquals(0, platform.collections.get()); rig.ownerNanos = null
             val e = checkNotNull(rig.owner.enrollNativeReplayCapture().get()); e.cancelUnused(); rig.owner.finishNativeReplayCapture(e).get(); Unit
         }
@@ -592,23 +595,23 @@ class NativeReplayCaptureOwnerTest {
             val prepared = checkNotNull(session.prepare()); val e = checkNotNull(rig.owner.enrollNativeReplayCapture().get())
             val use = checkNotNull(e.takePhysicalUse()); var closing: Future<Unit>? = null
             rig.onOwnerClock = { closing = rig.owner.closeAsync() }
-            assertNull(session.authority.start(prepared, use).get(3, TimeUnit.SECONDS))
+            assertNull(session.authority.start(prepared, use).get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertNotNull(closing); assertFalse(closing!!.isDone); use.settle()
-            assertEquals(NativeReplayAuthorityStop.SETTLED, session.authority.stop().get(3, TimeUnit.SECONDS))
-            assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(e).get(3, TimeUnit.SECONDS))
-            closing!!.get(3, TimeUnit.SECONDS)
+            assertEquals(NativeReplayAuthorityStop.SETTLED, session.authority.stop().get(WAIT_SECONDS, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(e).get(WAIT_SECONDS, TimeUnit.SECONDS))
+            closing!!.get(WAIT_SECONDS, TimeUnit.SECONDS)
         }
     }
     @Test fun `held main work prevents stop settlement and replacement until it actually returns`(): Unit = Rig().use { rig ->
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1); val platform = Platform(rig, session.access)
-            platform.onCollect = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-            val owner = session.start(checkNotNull(session.prepare()), platform); check(entered.await(3, TimeUnit.SECONDS))
+            platform.onCollect = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+            val owner = session.start(checkNotNull(session.prepare()), platform); check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             assertNull(owner.completedDiagnostic())
             val stopped = owner.stop(); assertFalse(stopped.cancel(true)); assertFalse(stopped.isDone)
             assertNull(owner.completedDiagnostic())
             assertNull(rig.owner.enrollNativeReplayCapture().get()); assertTrue(rig.rows().isEmpty())
-            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(3, TimeUnit.SECONDS))
+            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(rig.rows().isEmpty()); assertNull(rig.state().session!!.activeEpoch)
             assertNotNull(owner.completedDiagnostic())
         }
@@ -639,7 +642,7 @@ class NativeReplayCaptureOwnerTest {
                     throw failure
                 }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
-                val outcome = owner.finished().get(3, TimeUnit.SECONDS)
+                val outcome = owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertEquals(if (expected == NativeCaptureFailureKind.PASS_DEADLINE)
                     NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE else NativeReplayCaptureOutcome.SETTLED, outcome)
                 assertEquals(NativeReplayCaptureCompletion(NativeCaptureStage.COLLECTOR, 0, expected, outcome), owner.completedDiagnostic())
@@ -652,10 +655,10 @@ class NativeReplayCaptureOwnerTest {
     @Test fun `held append Future preserves physical occupancy and exact committed prefix after stop`(): Unit = Rig().use { rig ->
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
-            rig.onReplayWrite = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+            rig.onReplayWrite = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             val platform = Platform(rig, session.access, 3); val owner = session.start(checkNotNull(session.prepare()), platform)
-            check(entered.await(3, TimeUnit.SECONDS)); val stopped = owner.stop(); assertFalse(stopped.isDone)
-            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(3, TimeUnit.SECONDS))
+            check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); val stopped = owner.stop(); assertFalse(stopped.isDone)
+            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, rig.rows().size); assertEquals(1, platform.collections.get()); assertNull(rig.state().session!!.activeEpoch)
         }
     }
@@ -664,7 +667,7 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access)
             platform.onCollect = { current -> rig.driver.onBackground(); assertFalse(current()) }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS)); assertTrue(rig.rows().isEmpty())
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS)); assertTrue(rig.rows().isEmpty())
         }
     }
     @Test fun `committed then withdrawn keeps original bytes and emits no suffix`(): Unit = Rig().use { rig ->
@@ -672,7 +675,7 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access, 3)
             rig.afterReplayCommit = { rig.driver.onBackground() }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, rig.rows().size); assertEquals(1, platform.collections.get())
         }
     }
@@ -691,14 +694,14 @@ class NativeReplayCaptureOwnerTest {
                 tx.putReplayRow(state.copy(deliveryMetadataCount = (state.deliveryMetadataCount ?: 0L) + 1).row())
             } } }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, rig.rows().size); assertNull(rig.state().session!!.activeEpoch)
         }
     }
     @Test fun `withdrawal below positive minimum never seals initial only`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
         rig.minimum(5); rig.activate(); Session(rig).use { session ->
             val platform = Platform(rig, session.access, 3); val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(listOf(0L, 1L, 1L), platform.ordinals.toList()); assertTrue(rig.rows().isEmpty())
             if (protocol == NativeReplayProtocol.V2) assertEquals(0, checkNotNull(platform.fakeTouch).arms)
         }
@@ -708,17 +711,17 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access)
             platform.onCollect = { current -> rig.clock.nanos += 50_000_001; assertFalse(current()) }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS)); assertTrue(rig.rows().isEmpty())
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS)); assertTrue(rig.rows().isEmpty())
         }
     }
     @Test fun `queue close while collecting waits exact physical and accounting settlement`(): Unit = Rig().use { rig ->
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1); val platform = Platform(rig, session.access)
-            platform.onCollect = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-            val owner = session.start(checkNotNull(session.prepare()), platform); check(entered.await(3, TimeUnit.SECONDS))
+            platform.onCollect = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+            val owner = session.start(checkNotNull(session.prepare()), platform); check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             val closed = rig.owner.closeAsync(); assertFalse(closed.isDone); assertFalse(owner.finished().isDone)
-            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
-            closed.get(3, TimeUnit.SECONDS); assertTrue(rig.backing.replayRows.keys.none { it.startsWith("chunk/") })
+            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
+            closed.get(WAIT_SECONDS, TimeUnit.SECONDS); assertTrue(rig.backing.replayRows.keys.none { it.startsWith("chunk/") })
         }
     }
     @Test fun `unknown committed append retains exact original request in quarantine without suffix`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
@@ -729,7 +732,7 @@ class NativeReplayCaptureOwnerTest {
                 rig.onConnection = { throw java.io.IOException("Unresolved original append reopen") }
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.QUARANTINED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.QUARANTINED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(NativeReplayCaptureOutcome.QUARANTINED, owner.completedDiagnostic()?.outcome)
             if (protocol == NativeReplayProtocol.V2) { assertEquals(0, checkNotNull(platform.fakeTouch).arms); assertEquals(1, checkNotNull(platform.fakeTouch).closes) }
             assertEquals(1, platform.collections.get()); assertEquals(0, platform.pauses.get())
@@ -744,7 +747,7 @@ class NativeReplayCaptureOwnerTest {
             db.close()
             assertArrayEquals(stored.prepared.copyBytes(), retained.copyBytes())
             assertEquals(stored.prepared.requestId, retained.requestId)
-            failure { rig.openSame().get(3, TimeUnit.SECONDS) }
+            failure { rig.openSame().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         }
     } }
     @Test fun `resolved ambiguous commit keeps stable bytes and known prefix may continue`() = NativeReplayProtocol.values().forEach { protocol -> Rig(protocol).use { rig ->
@@ -752,7 +755,7 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access, 11)
             rig.onReplayWrite = { rig.backing.ambiguousNextCommit = FakeAmbiguousOutcome.COMMIT }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(5, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             val rows = rig.rows(); assertEquals(listOf(0L, 1L), rows.map { it.prepared.sequence })
             assertEquals(2, rows.size); assertEquals(11, platform.collections.get())
             assertNull(rig.state().session!!.activeEpoch)
@@ -763,7 +766,7 @@ class NativeReplayCaptureOwnerTest {
         Session(rig).use { session ->
             val platform = Platform(rig, session.access, 3)
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, platform.collections.get()); assertEquals(0, platform.pauses.get()); assertTrue(rig.rows().isEmpty())
             assertNull(rig.state().session!!.activeEpoch)
         }
@@ -774,9 +777,9 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access, 3)
             platform.onPause = { rig.advance(5); true }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, rig.rows().size); assertEquals(1, platform.collections.get())
-            assertTrue(rig.owner.capture(rig.event()).get(3, TimeUnit.SECONDS) is RuntimeCaptureResult.Accepted)
+            assertTrue(rig.owner.capture(rig.event()).get(WAIT_SECONDS, TimeUnit.SECONDS) is RuntimeCaptureResult.Accepted)
         }
     }
     @Test fun `original source expiry stops fresh work and preserves prior sealed bytes`(): Unit = Rig().use { rig ->
@@ -784,7 +787,7 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access, 3)
             platform.onPause = { rig.advance(1000); true }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, rig.rows().size); assertEquals(1, platform.collections.get())
             assertNull(rig.state().session!!.activeEpoch)
         }
@@ -793,24 +796,24 @@ class NativeReplayCaptureOwnerTest {
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val platform = Platform(rig, session.access)
             platform.onCollect = { current ->
-                rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(3, TimeUnit.SECONDS)
-                rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, rig.now())).get(3, TimeUnit.SECONDS)
+                rig.owner.applyLocal(RuntimeLocalStateChange.ResetIdentity(rig.now())).get(WAIT_SECONDS, TimeUnit.SECONDS)
+                rig.owner.applyLocal(RuntimeLocalStateChange.SetOptedOut(true, rig.now())).get(WAIT_SECONDS, TimeUnit.SECONDS)
                 assertFalse(current())
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertTrue(rig.rows().isEmpty()); assertTrue(rig.owner.snapshot().get().state.identity.optedOut)
         }
     }
     @Test fun `worker interruption cannot abandon held original main operation`(): Unit = Rig().use { rig ->
         rig.minimum(0); rig.activate(); Session(rig).use { session ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1); val platform = Platform(rig, session.access, 3)
-            platform.onCollect = { if (platform.collections.get() == 2) { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) } }
-            val owner = session.start(checkNotNull(session.prepare()), platform); check(entered.await(3, TimeUnit.SECONDS))
+            platform.onCollect = { if (platform.collections.get() == 2) { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) } }
+            val owner = session.start(checkNotNull(session.prepare()), platform); check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             val worker = checkNotNull(platform.worker.get()); worker.interrupt()
             val stopped = owner.stop(); assertFalse(stopped.isDone); assertNull(rig.owner.enrollNativeReplayCapture().get())
-            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(3, TimeUnit.SECONDS))
-            worker.join(3000); assertFalse(worker.isAlive)
+            release.countDown(); assertEquals(NativeReplayCaptureOutcome.SETTLED, stopped.get(WAIT_SECONDS, TimeUnit.SECONDS))
+            worker.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS)); assertFalse(worker.isAlive)
             assertEquals(1, rig.rows().size); assertEquals(2, platform.collections.get())
         }
     }
@@ -821,7 +824,7 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access)
             platform.onCollect = { assertEquals(sourceClock.wallNowEpochMillis(), platform.timestamps.last()) }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(RuntimeWallTimestamps.rfc3339(rig.clock.wall), rig.rows().single().prepared.startedAt)
         }
     }
@@ -830,8 +833,8 @@ class NativeReplayCaptureOwnerTest {
             val foreign = checkNotNull(b.prepare()); val platform = Platform(first, a.access)
             second.ownerNanos = -1
             val unexpected = NativeReplayCaptureOwner.start(first.owner, a.authority, foreign, StandaloneRuntime.defaultVersions(), platform)
-            unexpected?.finished()?.get(3, TimeUnit.SECONDS)
-            second.ownerNanos = null; second.owner.flushNativeReplayClockDenial().get(3, TimeUnit.SECONDS)
+            unexpected?.finished()?.get(WAIT_SECONDS, TimeUnit.SECONDS)
+            second.ownerNanos = null; second.owner.flushNativeReplayClockDenial().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertNull(unexpected); assertFalse(second.state().session!!.clockDenied)
             assertEquals(0, platform.factories.get()); assertEquals(0L, first.state().nextReplayOrdinal)
         } }
@@ -841,8 +844,8 @@ class NativeReplayCaptureOwnerTest {
             val stale = checkNotNull(session.prepare()); assertNotNull(session.prepare())
             rig.ownerNanos = -1; val platform = Platform(rig, session.access)
             val unexpected = NativeReplayCaptureOwner.start(rig.owner, session.authority, stale, StandaloneRuntime.defaultVersions(), platform)
-            unexpected?.finished()?.get(3, TimeUnit.SECONDS)
-            rig.ownerNanos = null; rig.owner.flushNativeReplayClockDenial().get(3, TimeUnit.SECONDS)
+            unexpected?.finished()?.get(WAIT_SECONDS, TimeUnit.SECONDS)
+            rig.ownerNanos = null; rig.owner.flushNativeReplayClockDenial().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertNull(unexpected); assertFalse(rig.state().session!!.clockDenied); assertEquals(0, platform.collections.get())
         }
     }
@@ -859,7 +862,7 @@ class NativeReplayCaptureOwnerTest {
                 } catch (error: Throwable) { observedFailure.compareAndSet(null, error) }
                 throw IllegalStateException("Notification consumer failed")
             })
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(5, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             observedFailure.get()?.let { throw it }
             assertEquals(2, calls.get()); assertEquals(2, rig.rows().size); assertEquals(1, platform.factories.get())
         }
@@ -870,7 +873,7 @@ class NativeReplayCaptureOwnerTest {
             rig.afterReplayCommit = { rig.driver.onBackground() }
             val owner = checkNotNull(NativeReplayCaptureOwner.start(rig.owner, session.authority, checkNotNull(session.prepare()),
                 StandaloneRuntime.defaultVersions(), platform) { calls.incrementAndGet(); Unit })
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(1, calls.get()); assertEquals(1, rig.rows().size)
         }
     }
@@ -881,7 +884,7 @@ class NativeReplayCaptureOwnerTest {
                 rig.onConnection = { throw java.io.IOException("Unresolved original append") } }
             val owner = checkNotNull(NativeReplayCaptureOwner.start(rig.owner, session.authority, checkNotNull(session.prepare()),
                 StandaloneRuntime.defaultVersions(), platform) { calls.incrementAndGet(); Unit })
-            assertEquals(NativeReplayCaptureOutcome.QUARANTINED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.QUARANTINED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(0, calls.get()); assertEquals(1, platform.collections.get())
         }
     }
@@ -904,18 +907,18 @@ class NativeReplayCaptureOwnerTest {
             platform.onCollect = { current -> if (platform.collections.get() == 2) expireCollectorPass(rig, current) }
             platform.onPause = { withdrawn ->
                 if (platform.collections.get() == 2) {
-                    waiting.countDown(); check(release.await(3, TimeUnit.SECONDS)); assertEquals(1L, withdrawn.count)
+                    waiting.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(1L, withdrawn.count)
                 }
                 if (platform.collections.get() >= 3) false else { rig.advance(); true }
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
             try {
-                assertTrue(waiting.await(3, TimeUnit.SECONDS)); assertFalse(owner.finished().isDone)
+                assertTrue(waiting.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertFalse(owner.finished().isDone)
                 assertTrue(session.selection.isCurrent()); assertNotNull(rig.state().session!!.activeEpoch)
                 assertEquals(1L, rig.state().nextReplayOrdinal); assertNull(rig.owner.enrollNativeReplayCapture().get())
                 assertTrue(rig.rows().isEmpty())
             } finally { release.countDown() }
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             val row = rig.rows().single()
             assertEquals(listOf(0L, 1L, 1L), platform.ordinals.toList())
             assertEquals(setOf(initial, initial + 2000), wireTimestamps(row))
@@ -935,7 +938,7 @@ class NativeReplayCaptureOwnerTest {
                 expireCollectorPass(rig, current)
             } }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             val rows = rig.rows(); assertEquals(2, rows.size)
             assertArrayEquals(prefix.get(), rows[0].prepared.copyBytes()); assertEquals(request.get(), rows[0].prepared.requestId)
             assertEquals(listOf(0L, 1L), rows.map { it.prepared.sequence })
@@ -956,7 +959,7 @@ class NativeReplayCaptureOwnerTest {
                 if (platform.collections.get() in 2..8) expireCollectorPass(rig, current)
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(listOf(1, 1, 2, 4, 8, 16, 30, 30), pausesAtCollection.zipWithNext { a, b -> b - a })
             assertEquals(setOf(initial, initial + 92_000), wireTimestamps(rig.rows().single()))
             assertEquals(2, owner.completedDiagnostic()!!.frames); assertEquals(1L, rig.state().nextReplayOrdinal)
@@ -971,7 +974,7 @@ class NativeReplayCaptureOwnerTest {
                 if (platform.collections.get() in listOf(2, 4)) expireCollectorPass(rig, current)
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(listOf(1, 1, 1, 2), pauses.zipWithNext { a, b -> b - a })
             assertEquals(1, platform.factories.get()); assertEquals(3, owner.completedDiagnostic()!!.frames)
         }
@@ -982,12 +985,12 @@ class NativeReplayCaptureOwnerTest {
             val platform = Platform(rig, session.access, 3); val waiting = CountDownLatch(1)
             platform.onCollect = { current -> if (platform.collections.get() == 2) expireCollectorPass(rig, current) }
             platform.onPause = { withdrawn -> if (platform.collections.get() == 2) {
-                waiting.countDown(); !withdrawn.await(3, TimeUnit.SECONDS)
+                waiting.countDown(); !withdrawn.await(WAIT_SECONDS, TimeUnit.SECONDS)
             } else { rig.advance(); true } }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertTrue(waiting.await(3, TimeUnit.SECONDS)); val original = rig.rows().single().prepared.copyBytes()
+            assertTrue(waiting.await(WAIT_SECONDS, TimeUnit.SECONDS)); val original = rig.rows().single().prepared.copyBytes()
             assertNull(rig.owner.enrollNativeReplayCapture().get()); assertFalse(owner.finished().isDone)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.stop().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.stop().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertArrayEquals(original, rig.rows().single().prepared.copyBytes()); assertEquals(2, platform.collections.get())
             val replacement = checkNotNull(rig.owner.enrollNativeReplayCapture().get()); replacement.cancelUnused()
             assertEquals(NativeReplayCaptureFinish.SETTLED, rig.owner.finishNativeReplayCapture(replacement).get())
@@ -1011,7 +1014,7 @@ class NativeReplayCaptureOwnerTest {
                     throw NativeCollectionException(NativeCollectionFailure.WITHDRAWN)
                 } }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
-                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertEquals(2, platform.collections.get()); assertEquals(1, platform.pauses.get())
                 assertEquals(1, platform.factories.get()); assertNull(rig.state().session?.activeEpoch)
             }
@@ -1027,7 +1030,7 @@ class NativeReplayCaptureOwnerTest {
                 platform.onCollect = { current -> if (platform.collections.get() == 2) expireCollectorPass(rig, current) }
                 platform.onPause = { rig.advance(if (platform.collections.get() == 2) { if (sessionBudget) 5 else 1000 } else 1); true }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
-                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertEquals(2, platform.collections.get()); assertEquals(1, rig.rows().size)
                 assertEquals(1, platform.factories.get()); assertNull(rig.state().session!!.activeEpoch)
             }
@@ -1042,7 +1045,7 @@ class NativeReplayCaptureOwnerTest {
                 frame // Actual collector returned; its projection state may already have committed.
             }
             val owner = session.start(checkNotNull(session.prepare()), platform)
-            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(2, platform.collections.get()); assertEquals(1, platform.pauses.get())
             assertEquals(1, rig.rows().size); assertEquals(1, owner.completedDiagnostic()!!.frames)
             assertEquals(NativeCaptureFailureKind.OTHER, owner.completedDiagnostic()!!.failure)
@@ -1064,7 +1067,7 @@ class NativeReplayCaptureOwnerTest {
                 } }
                 if (kind == 3) platform.transformFrame = { if (platform.collections.get() == 3) NativeMaskedSnapshot(99, it.timestamp, it.viewport, it.nodes) else it }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
-                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertTrue(rig.rows().isEmpty()); assertEquals(if (kind == 3) 3 else 2, platform.collections.get())
                 assertEquals(1, platform.factories.get()); assertNull(rig.state().session!!.activeEpoch)
             }
@@ -1081,7 +1084,7 @@ class NativeReplayCaptureOwnerTest {
                     throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY)
                 } }
                 val owner = session.start(checkNotNull(session.prepare()), platform)
-                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(3, TimeUnit.SECONDS))
+                assertEquals(NativeReplayCaptureOutcome.SETTLED, owner.finished().get(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertTrue(rig.rows().isEmpty()); assertEquals(2, platform.collections.get())
                 assertEquals(1, platform.factories.get()); assertEquals(1, owner.completedDiagnostic()!!.frames)
                 assertEquals(NativeCaptureFailureKind.UNSUPPORTED_GEOMETRY, owner.completedDiagnostic()!!.failure)
@@ -1177,10 +1180,10 @@ class NativeReplayCaptureOwnerTest {
         fun row() = checkNotNull(backing.replayRows[NativeReplayAccounting.KEY])
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
-        fun reopen() { owner.closeAsync().get(100, TimeUnit.MILLISECONDS); owner = openSame().get().also { it.bindConfigurationGate(gate).get() } }
+        fun reopen() { owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS); owner = openSame().get().also { it.bindConfigurationGate(gate).get() } }
         /** The next process on [store], the committed rows an ended process left, with a new owner, source and gate. */
         fun relaunch(store: FakeRuntimeQueueBacking) {
-            runCatching { owner.closeAsync().get(3, TimeUnit.SECONDS) }; driver.close()
+            runCatching { owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS) }; driver.close()
             backing = store; worker = Worker(); gate = V2ConfigAuthorityGate()
             source = V2ConfigSource("https://elu.dev", KEY, V2ConfigTransport { V2ConfigHttpResponse(200, body) }, clock)
             driver = V2ConfigLifecycleDriver(source, gate::update, clock, Scheduler(), worker)
@@ -1214,7 +1217,7 @@ class NativeReplayCaptureOwnerTest {
     private companion object {
         const val KEY = "elu_pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAA"
         fun awaitBlocked(thread: Thread) {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (thread.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
             assertEquals("Expected the exact owned thread to block at its held monitor", Thread.State.BLOCKED, thread.state)
         }

@@ -11,6 +11,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class AndroidUncaughtExceptionOwnerTest {
     @Test
     fun `construction is inert and verified installation delegates exact original arguments once`() {
@@ -289,7 +292,7 @@ class AndroidUncaughtExceptionOwnerTest {
         val registry = Registry(previous)
         val owner = AndroidUncaughtExceptionOwner(registry) {
             offers.incrementAndGet(); entered.countDown()
-            check(release.await(3, TimeUnit.SECONDS))
+            check(release.await(WAIT_SECONDS, TimeUnit.SECONDS))
         }
         assertTrue(owner.install())
         val wrapper = registry.handler!!
@@ -302,7 +305,7 @@ class AndroidUncaughtExceptionOwnerTest {
         }.apply { isDaemon = true }
         try {
             child.start()
-            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             wrapper.uncaughtException(Thread.currentThread(), Throwable())
             assertEquals(1, delegates.get())
             assertEquals(1, offers.get())
@@ -314,7 +317,7 @@ class AndroidUncaughtExceptionOwnerTest {
             assertEquals(1, offers.get())
         } finally {
             release.countDown()
-            child.join(2_000)
+            child.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
             owner.close()
         }
         assertFalse(child.isAlive)

@@ -27,6 +27,9 @@ import okio.buffer
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class OkHttpReplayTransportTest {
     @Test fun `selfhost physical replay request preserves exact claim bytes and isolated TLS client`() {
         val endpoint = URI("https://analytics.example.com/v2/replay?route=eu")
@@ -41,7 +44,7 @@ class OkHttpReplayTransportTest {
             })
         try {
             val original = claim(endpoint = endpoint)
-            val operation = adapter.start(original) { true }; worker.runNext(); operation.settlement.get(1, TimeUnit.SECONDS)
+            val operation = adapter.start(original) { true }; worker.runNext(); operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertArrayEquals(original.row.prepared.copyBytes(), call.written.readByteArray())
             assertThrows(IllegalArgumentException::class.java) { adapter.start(claim()) { true } }
             assertTrue(worker.tasks.isEmpty())
@@ -62,7 +65,7 @@ class OkHttpReplayTransportTest {
             })
         try {
             val original = claim(endpoint = endpoint)
-            val operation = adapter.start(original) { true }; worker.runNext(); operation.settlement.get(1, TimeUnit.SECONDS)
+            val operation = adapter.start(original) { true }; worker.runNext(); operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertArrayEquals(original.row.prepared.copyBytes(), call.written.readByteArray())
             assertThrows(IllegalArgumentException::class.java) { adapter.start(claim()) { true } }
             assertTrue(worker.tasks.isEmpty())
@@ -90,7 +93,7 @@ class OkHttpReplayTransportTest {
         }
         val operation = adapter.start(claim) { order += "authorize"; true }
         assertTrue(order.isEmpty()); claim.row.prepared.copyBytes().fill(0)
-        worker.runNext(); operation.settlement.get(1, TimeUnit.SECONDS)
+        worker.runNext(); operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(listOf("factory", "authorize", "execute"), order)
         assertArrayEquals(original, calls.single().written.readByteArray())
         assertTrue(calls.single().body.closed); assertTrue(adapter.isIdle()); adapter.close()
@@ -138,7 +141,7 @@ class OkHttpReplayTransportTest {
         assertFalse(operation.settlement.isDone); assertFalse(adapter.isIdle())
         assertThrows(IllegalStateException::class.java) { adapter.start(claim()) { true } }
         worker.runNext(); failure(operation); assertEquals(0, factories); assertTrue(adapter.isIdle())
-        val next = adapter.start(claim()) { true }; worker.runNext(); next.settlement.get(1, TimeUnit.SECONDS); adapter.close()
+        val next = adapter.start(claim()) { true }; worker.runNext(); next.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS); adapter.close()
     }
 
     @Test fun `close keeps queued cleanup runnable and refuses new enrollment`() {
@@ -155,7 +158,7 @@ class OkHttpReplayTransportTest {
             val adapter = adapter(worker) { client, request -> FakeCall(client, request, status, body,
                 mapOf("Content-Length" to "invalid", "Content-Encoding" to "gzip"), onHeaders = { operation.cancel() }) }
             operation = adapter.start(claim()) { true }; worker.runNext()
-            val result = operation.settlement.get(1, TimeUnit.SECONDS)
+            val result = operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(status, result.status); assertTrue(result.copyBody().isEmpty()); assertTrue(body.closed); adapter.close()
         }
     }
@@ -165,7 +168,7 @@ class OkHttpReplayTransportTest {
             val worker = Worker()
             val adapter = adapter(worker) { client, request -> FakeCall(client, request, status, throwAfterHeaders = true) }
             val operation = adapter.start(claim()) { true }; worker.runNext()
-            assertEquals(status, operation.settlement.get(1, TimeUnit.SECONDS).status); adapter.close()
+            assertEquals(status, operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS).status); adapter.close()
         }
     }
 
@@ -177,7 +180,7 @@ class OkHttpReplayTransportTest {
                 scheduleDeadline = { _, _ -> AutoCloseable {} }, executor = worker,
                 callFactory = { client, request -> FakeCall(client, request, body = Body(bytes), headers = headers) })
             val operation = adapter.start(claim()) { true }; worker.runNext()
-            val response = operation.settlement.get(1, TimeUnit.SECONDS)
+            val response = operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(200, response.status); assertTrue(response.copyBody().isEmpty()); adapter.close()
         }
     }
@@ -185,7 +188,7 @@ class OkHttpReplayTransportTest {
     @Test fun `valid operational response preserves exact bytes and bounded retry header without retrying`() {
         val worker = Worker(); val bytes = "{\"status\":503}".toByteArray(); var executes = 0
         val adapter = adapter(worker) { client, request -> FakeCall(client, request, 503, Body(bytes), mapOf("Retry-After" to "12"), { executes++ }) }
-        val operation = adapter.start(claim()) { true }; worker.runNext(); val response = operation.settlement.get(1, TimeUnit.SECONDS)
+        val operation = adapter.start(claim()) { true }; worker.runNext(); val response = operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(503, response.status); assertEquals("12", response.retryAfter); assertArrayEquals(bytes, response.copyBody()); assertEquals(1, executes); adapter.close()
     }
 
@@ -206,7 +209,7 @@ class OkHttpReplayTransportTest {
                 scheduleDeadline = { _, action -> expire = action; AutoCloseable {} }, executor = worker,
                 callFactory = { client, request -> FakeCall(client, request, status, onHeaders = { expire() }) })
             val operation = adapter.start(claim()) { true }; worker.runNext()
-            if (status == 401) assertEquals(401, operation.settlement.get(1, TimeUnit.SECONDS).status)
+            if (status == 401) assertEquals(401, operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS).status)
             else assertTrue(failure(operation) is java.net.SocketTimeoutException)
             adapter.close()
         }
@@ -214,14 +217,14 @@ class OkHttpReplayTransportTest {
 
     @Test fun `cancel and close never settle while physical response cleanup is held`() {
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        val body = Body(byteArrayOf(), onClose = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) })
+        val body = Body(byteArrayOf(), onClose = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) })
         val adapter = adapter(Executors.newSingleThreadExecutor()) { client, request -> FakeCall(client, request, 403, body) }
         val operation = adapter.start(claim()) { true }
         try {
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); operation.cancel(); adapter.close()
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); operation.cancel(); adapter.close()
             assertFalse(operation.settlement.isDone); assertFalse(adapter.isIdle())
         } finally { release.countDown() }
-        assertEquals(403, operation.settlement.get(3, TimeUnit.SECONDS).status); assertTrue(adapter.isIdle())
+        assertEquals(403, operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS).status); assertTrue(adapter.isIdle())
     }
 
     @Test fun `cleanup fault attempts later disposers but quarantines physical occupancy`() {
@@ -257,14 +260,14 @@ class OkHttpReplayTransportTest {
         val worker = Worker(); worker.reject = true; val adapter = adapter(worker)
         failure(adapter.start(claim()) { true }); assertTrue(adapter.isIdle())
         worker.reject = false; val operation = adapter.start(claim()) { true }; worker.runNext()
-        operation.settlement.get(1, TimeUnit.SECONDS); adapter.close()
+        operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS); adapter.close()
     }
 
     @Test fun `completion callback can enroll next request only after cleanup`() {
         val worker = Worker(); val adapter = adapter(worker)
         val first = adapter.start(claim()) { true }
         val next = first.settlement.thenCompose { adapter.start(claim()) { true }.settlement }
-        worker.runNext(); assertEquals(1, worker.tasks.size); worker.runNext(); next.get(1, TimeUnit.SECONDS); adapter.close()
+        worker.runNext(); assertEquals(1, worker.tasks.size); worker.runNext(); next.get(WAIT_SECONDS, TimeUnit.SECONDS); adapter.close()
     }
 
     @Test fun `raster transport writes exact stored schema3 bytes and requires explicit original format`() = RasterQueueRig().use { rig ->
@@ -313,7 +316,7 @@ class OkHttpReplayTransportTest {
             ReplayDeliveryAuthorization(endpoint, key, "site", prepared.transport, ReplayFixtures.GENERATION, "credential", "scope"), 1)
     }
     private fun failure(operation: ReplayTransportOperation): Throwable =
-        checkNotNull(assertThrows(ExecutionException::class.java) { operation.settlement.get(1, TimeUnit.SECONDS) }.cause)
+        checkNotNull(assertThrows(ExecutionException::class.java) { operation.settlement.get(WAIT_SECONDS, TimeUnit.SECONDS) }.cause)
     private class Worker : Executor {
         val tasks = ArrayDeque<Runnable>(); var reject = false
         override fun execute(command: Runnable) { check(!reject); tasks.add(command) }

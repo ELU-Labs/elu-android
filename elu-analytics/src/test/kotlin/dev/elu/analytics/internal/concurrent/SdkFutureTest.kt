@@ -11,6 +11,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class SdkFutureTest {
     @Test
     fun `first result wins and completed null is a value`() {
@@ -79,8 +82,8 @@ class SdkFutureTest {
                 completed.countDown()
             }
             worker.start()
-            assertTrue("completion listener held result lock", completed.await(2, TimeUnit.SECONDS))
-            worker.join(2000)
+            assertTrue("completion listener held result lock", completed.await(WAIT_SECONDS, TimeUnit.SECONDS))
+            worker.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
             assertFalse(worker.isAlive)
         }
         assertTrue(original.complete(7))
@@ -188,23 +191,23 @@ class SdkFutureTest {
                             assertNull(failure)
                             assertNotNull(value)
                             calls.incrementAndGet()
-                        }.get(2, TimeUnit.SECONDS)
+                        }.get(WAIT_SECONDS, TimeUnit.SECONDS)
                         else if (original.complete(index)) successes.incrementAndGet()
                     }
                 }
                 start.countDown()
-                jobs.forEach { it.get(3, TimeUnit.SECONDS) }
+                jobs.forEach { it.get(WAIT_SECONDS, TimeUnit.SECONDS) }
                 assertEquals(1, successes.get())
                 assertEquals(8, calls.get())
             }
         } finally {
             workers.shutdownNow()
-            assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS))
+            assertTrue(workers.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS))
         }
     }
 
     private fun failure(future: SdkFuture<*>): Throwable {
-        try { future.get(2, TimeUnit.SECONDS); fail("failed result succeeded") }
+        try { future.get(WAIT_SECONDS, TimeUnit.SECONDS); fail("failed result succeeded") }
         catch (error: ExecutionException) { return checkNotNull(error.cause) }
         throw AssertionError("unreachable")
     }

@@ -44,6 +44,9 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class FeatureFlagActivityVectorTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
     private val ownerIds = AtomicInteger()
@@ -263,16 +266,16 @@ class FeatureFlagActivityVectorTest {
                 FlagOpaqueIdSource { "store_epoch_1" },
             )
         try {
-            assertTrue(client.applyConfiguration(configAllowed()).get(10, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
+            assertTrue(client.applyConfiguration(configAllowed()).get(WAIT_SECONDS, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
             clock.set(millis("2026-08-04T00:01:01.000Z"), 2_000_000_000L)
             val first = client.reload()
-            assertTrue(entered.await(10, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             val second = client.reload()
             clock.set(millis("2026-08-04T00:01:02.000Z"), 3_000_000_000L)
             response.complete(responseMixed())
 
-            assertTrue(first.get(10, TimeUnit.SECONDS) is FlagReloadResult.Updated)
-            assertTrue(second.get(10, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+            assertTrue(first.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+            assertTrue(second.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
             assertEquals(1, sent.get())
             assertEquals("https://ingest.elu.dev/v1/flags", request.get().endpoint.toString())
             assertEquals(vector.getJSONObject("requestOracle").getString("canonicalSha256"), FlagJson.sha256(request.get().canonicalBody))
@@ -297,7 +300,7 @@ class FeatureFlagActivityVectorTest {
             )
         try {
             assertTrue(
-                client.applyConfiguration(configAllowed()).get(10, TimeUnit.SECONDS) is
+                client.applyConfiguration(configAllowed()).get(WAIT_SECONDS, TimeUnit.SECONDS) is
                     V1FlagAuthorizationResolution.Allowed,
             )
             val rowsBefore =
@@ -314,9 +317,9 @@ class FeatureFlagActivityVectorTest {
             val releaseBlocker = CountDownLatch(1)
             lane.execute {
                 blockerEntered.countDown()
-                assertTrue(releaseBlocker.await(10, TimeUnit.SECONDS))
+                assertTrue(releaseBlocker.await(WAIT_SECONDS, TimeUnit.SECONDS))
             }
-            assertTrue(blockerEntered.await(10, TimeUnit.SECONDS))
+            assertTrue(blockerEntered.await(WAIT_SECONDS, TimeUnit.SECONDS))
 
             // Both close calls and the candidate are accepted while the lane is blocked. FIFO
             // ordering makes the first close latch `closed` before the queued candidate runs.
@@ -327,7 +330,7 @@ class FeatureFlagActivityVectorTest {
 
             assertEquals(
                 V1FlagAuthorizationResolution.Restricted(V1FlagProjectionRejection.STALE),
-                afterClose.get(10, TimeUnit.SECONDS),
+                afterClose.get(WAIT_SECONDS, TimeUnit.SECONDS),
             )
             assertEquals(mutationBefore, backing.committedMutationGeneration)
             assertEquals(rowsBefore.keys, backing.flagRows.keys)
@@ -361,15 +364,15 @@ class FeatureFlagActivityVectorTest {
                 FlagOpaqueIdSource { "store_epoch_expiry" },
             )
         try {
-            assertTrue(client.applyConfiguration(configAllowed()).get(10, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
+            assertTrue(client.applyConfiguration(configAllowed()).get(WAIT_SECONDS, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
             clock.set(millis("2026-08-04T00:01:01.000Z"), 2_000_000_000L)
             val reload = client.reload()
-            assertTrue(transportEntered.await(10, TimeUnit.SECONDS))
+            assertTrue(transportEntered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             assertNotNull(backing.flagRows[RUNTIME_FLAG_CACHE_METADATA_KEY])
 
             // The fixed deadline is apply monotonic time + the exact remaining config lifetime.
             clock.set(millis("2026-08-04T00:05:00.000Z"), 241_000_000_000L)
-            assertTrue(client.read("variant").get(10, TimeUnit.SECONDS) is FlagReadResult.Missing)
+            assertTrue(client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReadResult.Missing)
 
             val authority =
                 JSONObject(
@@ -384,7 +387,7 @@ class FeatureFlagActivityVectorTest {
             assertEquals(millis("2026-08-04T00:05:00.000Z"), authority.getLong("lastObservedWall"))
             assertFalse(backing.flagRows.containsKey(RUNTIME_FLAG_CACHE_METADATA_KEY))
 
-            assertTrue(reload.get(10, TimeUnit.SECONDS) is FlagReloadResult.Stale)
+            assertTrue(reload.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Stale)
         } finally {
             client.close()
         }
@@ -410,18 +413,18 @@ class FeatureFlagActivityVectorTest {
                 FlagOpaqueIdSource { "store_epoch_1" },
             )
         try {
-            assertTrue(client.applyConfiguration(configAllowed()).get(10, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
+            assertTrue(client.applyConfiguration(configAllowed()).get(WAIT_SECONDS, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
             clock.set(millis("2026-08-04T00:01:01.000Z"), 2_000_000_000L)
             val reload = client.reload()
-            assertTrue(entered.await(10, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             clock.set(millis("2026-08-04T00:01:02.000Z"), 3_000_000_000L)
             transportResponse.complete(responseMixed())
-            assertTrue(reload.get(10, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+            assertTrue(reload.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
 
             // The response deadline is 178 seconds after commit. Wall deliberately advances only
             // one second; the monotonic ceiling is still authoritative and must be persisted.
             clock.set(millis("2026-08-04T00:01:03.000Z"), 181_000_000_000L)
-            assertTrue(client.read("variant").get(10, TimeUnit.SECONDS) is FlagReadResult.Missing)
+            assertTrue(client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReadResult.Missing)
 
             val authority =
                 JSONObject(String(backing.flagRows.getValue(RUNTIME_FLAG_AUTHORITY_KEY).payload, StandardCharsets.UTF_8))
@@ -815,7 +818,7 @@ class FeatureFlagActivityVectorTest {
         try {
             assertTrue(client.applyConfiguration(configAllowed()).await() is V1FlagAuthorizationResolution.Allowed)
             val first = client.reload()
-            assertTrue(entered.await(10, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             owner.appendMutations(
                 listOf(
                     RuntimeRecordDraft.Mutation(
@@ -827,7 +830,7 @@ class FeatureFlagActivityVectorTest {
             ).await()
             clock.set(millis("2026-08-04T00:01:01.000Z"), 2_000_000_000L)
             val second = client.reload()
-            assertTrue(first.get(10, TimeUnit.SECONDS) is FlagReloadResult.Stale)
+            assertTrue(first.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Stale)
             assertFalse(second.isDone)
             assertEquals(1, sent.get())
         } finally {
@@ -1584,7 +1587,7 @@ class FeatureFlagActivityVectorTest {
 
     private fun JSONArray.objects(): List<JSONObject> = List(length()) { index -> getJSONObject(index) }
 
-    private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
 
     private class MutableFlagClock(
         @Volatile private var wall: Long,

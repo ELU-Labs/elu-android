@@ -10,12 +10,15 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Production metadata selection; frozen raw wire vectors intentionally remain a separate seam. */
 class RuntimePersonStateTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
     private var nextId = 0
     private val identifiers = CoreIdentifierGenerator { prefix -> prefix + (++nextId) }
-    private fun <T> Future<T>.await(): T = get(5, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
     @After fun close() { owners.asReversed().forEach { runCatching { it.closeAsync().await() } } }
 
     private fun open(backing: FakeRuntimeQueueBacking = FakeRuntimeQueueBacking(),

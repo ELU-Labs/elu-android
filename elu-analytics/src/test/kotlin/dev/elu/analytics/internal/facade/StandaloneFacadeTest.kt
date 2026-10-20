@@ -2441,12 +2441,23 @@ class StandaloneFacadeTest {
         @Volatile var invalidBytes = false
         @Volatile var hold = false
         @Volatile var requestObserved = CountDownLatch(1)
-        private val held = mutableListOf<Pair<SdkFuture<ByteArray>, ByteArray>>()
-        @Synchronized fun releaseHeld(failure: Throwable? = null) {
-            val pending = held.toList(); held.clear(); hold = false
+        private val held = mutableListOf<Pair<HeldResponse, ByteArray>>()
+        fun releaseHeld(failure: Throwable? = null) {
+            val pending = synchronized(this) { held.toList().also { held.clear(); hold = false } }
             pending.forEach { (future, bytes) ->
+                // The client subscribes only after send returns. Completing before that would queue
+                // its commit behind the caller's next client read, which then no longer joins it.
+                check(future.subscribed.await(5, TimeUnit.SECONDS)) { "the client never subscribed to a held response" }
                 if (failure == null) future.complete(bytes) else future.completeExceptionally(failure)
             }
+        }
+
+        /** A held response that knows when the client has subscribed to its completion. */
+        private class HeldResponse : SdkFuture<ByteArray>() {
+            val subscribed = CountDownLatch(1)
+
+            override fun whenComplete(action: (ByteArray?, Throwable?) -> Unit): SdkFuture<ByteArray> =
+                super.whenComplete(action).also { subscribed.countDown() }
         }
 
         @Synchronized
@@ -2473,7 +2484,7 @@ class StandaloneFacadeTest {
                     .put("payloads", JSONObject().put("variant", JSONObject().put("buttonColor", "violet")))
             transform?.invoke(response)
             val bytes = if (invalidBytes) byteArrayOf(0xc3.toByte(), 0x28) else response.toString().toByteArray(StandardCharsets.UTF_8)
-            return if (hold) SdkFuture<ByteArray>().also { held += it to bytes } else SdkFuture.completedFuture(bytes)
+            return if (hold) HeldResponse().also { held += it to bytes } else SdkFuture.completedFuture(bytes)
         }
     }
 

@@ -14,6 +14,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Actual queue, source, authority, sealer and composition; synthetic platform/proof/HTTP, fake DB. */
 class NativeReplayDeadlineRetryTest {
     private class MainAccess : NativeReplaySelectionAccess, AutoCloseable {
@@ -36,7 +39,7 @@ class NativeReplayDeadlineRetryTest {
             check(Thread.currentThread() === main); watches.incrementAndGet()
             return AutoCloseable { check(Thread.currentThread() === main); closes.incrementAndGet(); onClose?.invoke() }
         }
-        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS)) }
+        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)) }
     }
     private class Platform(val rig: Rig, val access: MainAccess, val single: Boolean = false) : NativeReplayCapturePlatform {
         override val apiLevel = 36
@@ -58,7 +61,7 @@ class NativeReplayDeadlineRetryTest {
         override fun awaitNext(withdrawn: CountDownLatch): Boolean {
             onPause?.let { return it() }
             if (single) return false
-            return !withdrawn.await(3, TimeUnit.SECONDS)
+            return !withdrawn.await(WAIT_SECONDS, TimeUnit.SECONDS)
         }
     }
     private class Transport(val hold: Boolean = false) : ReplayDeliveryTransport {
@@ -85,9 +88,9 @@ class NativeReplayDeadlineRetryTest {
     }
     private fun proof() = NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)), setOf(NativeReplayProtocol.V1.generation))
     private fun Rig.minimum() = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", 0) }
-    private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(3, TimeUnit.SECONDS)
+    private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(WAIT_SECONDS, TimeUnit.SECONDS)
     private fun awaitCondition(message: String, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(5)
         assertTrue(message, condition())
     }
@@ -150,12 +153,12 @@ class NativeReplayDeadlineRetryTest {
             owner = NativeReplayComposition(rig.owner, lifecycle, proof(), StandaloneRuntime.defaultVersions(),
                 { false }, { true }, platform, wire, worker, timer,
                 nativeStartObserver = if (diagnostics) BoundedNativeStartObserver.create { trace += JSONObject(String(it, Charsets.US_ASCII)) } else BoundedNativeStartObserver.NONE)
-            owner.ready().get(3, TimeUnit.SECONDS)
+            owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS)
         }
         fun start() { assertEquals(NativeReplayCompositionEvaluation.ACTIVE,
-            owner.reevaluate(originalAcceptance = { acceptedFailure?.let { throw it }; accepted.get() }).get(3, TimeUnit.SECONDS)) }
+            owner.reevaluate(originalAcceptance = { acceptedFailure?.let { throw it }; accepted.get() }).get(WAIT_SECONDS, TimeUnit.SECONDS)) }
         fun timeout() { rig.clock.nanos += 50_000_001L }
-        fun barrier() { worker.submit { }.get(3, TimeUnit.SECONDS) }
+        fun barrier() { worker.submit { }.get(WAIT_SECONDS, TimeUnit.SECONDS) }
         fun pending(delay: Long): Timer.Pending<*> {
             awaitCondition("settled deadline must schedule exactly one delayed retry") { timer.retryPending().size == 1 }
             barrier(); assertEquals(1, timer.retryPending().size)
@@ -164,9 +167,9 @@ class NativeReplayDeadlineRetryTest {
         override fun close() {
             wire.result.complete(ReplayTransportResponse(403, byteArrayOf()))
             try {
-                if (quarantineExpected) failure { owner.closeAndWait().get(3, TimeUnit.SECONDS) }
-                else owner.closeAndWait().get(3, TimeUnit.SECONDS)
-                assertTrue(worker.awaitTermination(3, TimeUnit.SECONDS)); assertTrue(timer.isTerminated)
+                if (quarantineExpected) failure { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
+                else owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
+                assertTrue(worker.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)); assertTrue(timer.isTerminated)
             } finally { timer.shutdownNow(); rig.close(); access.close() }
         }
     }
@@ -175,15 +178,15 @@ class NativeReplayDeadlineRetryTest {
         val originalIdentity = f.rig.owner.snapshot().get().state.identity
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
         f.platform.onCollect = {
-            if (f.platform.collections.get() == 1) { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+            if (f.platform.collections.get() == 1) { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             if (f.platform.collections.get() <= 2) f.timeout()
         }
-        f.start(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+        f.start(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         // This original field and completion API exist on both selected predecessor and successor.
         val originalCapture = NativeReplayComposition::class.java.getDeclaredField("capture")
             .also { it.isAccessible = true }.get(f.owner) as NativeReplayCaptureOwner
         release.countDown()
-        val outcome = originalCapture.finished().get(3, TimeUnit.SECONDS)
+        val outcome = originalCapture.finished().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue("original capture must physically settle", outcome.name in setOf("SETTLED", "SETTLED_PASS_DEADLINE"))
         awaitCondition("original settled watcher must retire before causal timer check") { f.access.closes.get() == 1 }
         val failure = f.trace.filter { it.getString("phase") == "CAPTURE_FAILED" }.single()
@@ -200,7 +203,7 @@ class NativeReplayDeadlineRetryTest {
         awaitCondition("third current same-identity capture must commit") { f.rig.rows().size == 1 }
         f.barrier(); assertEquals(3, f.platform.factories.get()); assertTrue(f.timer.retryPending().isEmpty())
         assertEquals(originalIdentity, f.rig.owner.snapshot().get().state.identity)
-        assertTrue(f.wire.entered.await(3, TimeUnit.SECONDS)); assertEquals(1, f.wire.requests.size)
+        assertTrue(f.wire.entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(1, f.wire.requests.size)
     }
 
     @Test fun `diagnostics disabled quiet session recovers after two settled pass deadlines`() = RetryFixture(diagnostics = false).use { f ->
@@ -216,7 +219,7 @@ class NativeReplayDeadlineRetryTest {
         awaitCondition("untraced third capture commits under unchanged identity") { f.rig.rows().size == 1 }
         f.barrier(); assertEquals(3, f.platform.factories.get()); assertTrue(f.timer.retryPending().isEmpty())
         assertEquals(identity, f.rig.owner.snapshot().get().state.identity)
-        assertTrue(f.wire.entered.await(3, TimeUnit.SECONDS)); assertEquals(1, f.wire.requests.size)
+        assertTrue(f.wire.entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(1, f.wire.requests.size)
         assertTrue(f.trace.isEmpty())
     }
 
@@ -224,7 +227,7 @@ class NativeReplayDeadlineRetryTest {
         f.platform.onCollect = f::timeout; f.start()
         for ((index, delay) in listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 30_000L, 30_000L).withIndex()) {
             f.pending(delay)
-            repeat(3) { f.owner.reevaluate().get(3, TimeUnit.SECONDS) }
+            repeat(3) { f.owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS) }
             assertEquals(1, f.timer.retryPending().size); assertEquals(index + 1, f.platform.collections.get())
             if (index < 6) { f.timer.advance(delay - 1); f.barrier(); assertEquals(index + 1, f.platform.collections.get()); f.timer.advance(1) }
         }
@@ -239,23 +242,23 @@ class NativeReplayDeadlineRetryTest {
 
     @Test fun `close cancels pending timer and late callback cannot restart executor`() = RetryFixture().use { f ->
         f.platform.onCollect = f::timeout; f.start(); val original = f.pending(1_000)
-        f.owner.closeAndWait().get(3, TimeUnit.SECONDS); assertTrue(original.isCancelled); original.forceOriginal()
-        assertTrue(f.worker.awaitTermination(3, TimeUnit.SECONDS)); assertEquals(1, f.platform.factories.get())
+        f.owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); assertTrue(original.isCancelled); original.forceOriginal()
+        assertTrue(f.worker.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)); assertEquals(1, f.platform.factories.get())
     }
 
     @Test fun `forced same key geometry refusal invalidates old timer and late old completion`() = RetryFixture().use { f ->
         val collecting = CountDownLatch(1); val release = CountDownLatch(1)
         f.platform.onCollect = {
-            if (f.platform.collections.get() == 1) { collecting.countDown(); check(release.await(3, TimeUnit.SECONDS)); f.timeout() }
+            if (f.platform.collections.get() == 1) { collecting.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)); f.timeout() }
             else throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY)
         }
-        f.start(); assertTrue(collecting.await(3, TimeUnit.SECONDS))
+        f.start(); assertTrue(collecting.await(WAIT_SECONDS, TimeUnit.SECONDS))
         fun field(name: String): Any = NativeReplayComposition::class.java.getDeclaredField(name)
             .also { it.isAccessible = true }.get(f.owner)
         val oldOwner = field("capture"); val oldKey = field("lastAttempt")
         val oldAttempt = field("captureAttempt"); val oldIntent = field("intent")
         release.countDown(); val oldTimer = f.pending(1_000)
-        f.owner.reevaluate(force = true).get(3, TimeUnit.SECONDS)
+        f.owner.reevaluate(force = true).get(WAIT_SECONDS, TimeUnit.SECONDS)
         awaitCondition("replacement geometry refusal retired") { f.access.closes.get() == 2 }; f.barrier()
         assertTrue(oldTimer.isCancelled); assertEquals(2, f.platform.factories.get())
         // Deliberately deliver the original completion after the replacement is fully retired.
@@ -269,7 +272,7 @@ class NativeReplayDeadlineRetryTest {
     @Test fun `forced same key deadline replaces timer and stale wake cannot cancel the replacement`() = RetryFixture().use { f ->
         f.platform.onCollect = { if (f.platform.collections.get() <= 2) f.timeout() }
         f.start(); val first = f.pending(1_000)
-        f.owner.reevaluate(force = true).get(3, TimeUnit.SECONDS)
+        f.owner.reevaluate(force = true).get(WAIT_SECONDS, TimeUnit.SECONDS)
         val replacement = f.pending(2_000)
         assertTrue(first.isCancelled); assertNotSame(first, replacement); assertEquals(2, f.timer.retryTasks().size)
         first.forceOriginal(); f.barrier(); assertSame(replacement, f.timer.retryPending().single())
@@ -313,7 +316,7 @@ class NativeReplayDeadlineRetryTest {
     @Test fun `unsupported geometry remains a same-identity refusal without timer`() = RetryFixture().use { f ->
         f.platform.onCollect = { throw NativeCollectionException(NativeCollectionFailure.UNSUPPORTED_GEOMETRY) }
         f.start(); awaitCondition("original watcher retired") { f.access.closes.get() == 1 }; f.barrier()
-        f.owner.reevaluate().get(3, TimeUnit.SECONDS)
+        f.owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, f.platform.factories.get()); assertTrue(f.timer.retryTasks().isEmpty()); assertTrue(f.rig.rows().isEmpty())
     }
 
@@ -331,13 +334,13 @@ class NativeReplayDeadlineRetryTest {
         } }
         f.platform.onPause = {
             if (f.platform.collections.get() == 2) {
-                reachedRetry.countDown(); check(releaseRetry.await(3, TimeUnit.SECONDS))
+                reachedRetry.countDown(); check(releaseRetry.await(WAIT_SECONDS, TimeUnit.SECONDS))
             }
             if (f.platform.collections.get() >= 3) false else { f.rig.clock.wall += 10_000; f.rig.clock.nanos += 10_000_000_000; true }
         }
         f.start()
         try {
-            assertTrue(reachedRetry.await(3, TimeUnit.SECONDS)); f.barrier()
+            assertTrue(reachedRetry.await(WAIT_SECONDS, TimeUnit.SECONDS)); f.barrier()
             assertEquals(1, f.access.watches.get()); assertEquals(0, f.access.closes.get())
             assertNull(f.rig.owner.enrollNativeReplayCapture().get()); assertTrue(f.timer.retryTasks().isEmpty())
             assertEquals(1, f.platform.factories.get())
@@ -360,12 +363,12 @@ class NativeReplayDeadlineRetryTest {
 
     @Test fun `retry snapshot failure is retained and permanently quarantines further evaluation`() = RetryFixture().use { f ->
         f.platform.onCollect = f::timeout; f.start(); f.pending(1_000)
-        f.rig.owner.closeAsync().get(3, TimeUnit.SECONDS)
+        f.rig.owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
         f.quarantineExpected = true
         f.timer.advance(1_000); f.barrier()
-        assertEquals(NativeReplayCompositionEvaluation.QUARANTINED, f.owner.reevaluate(true).get(3, TimeUnit.SECONDS))
+        assertEquals(NativeReplayCompositionEvaluation.QUARANTINED, f.owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(1, f.platform.factories.get()); assertTrue(f.timer.retryPending().isEmpty())
-        val error = try { f.owner.closeAndWait().get(3, TimeUnit.SECONDS); error("Expected retained snapshot failure") }
+        val error = try { f.owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); error("Expected retained snapshot failure") }
             catch (error: ExecutionException) { error.cause }
         assertNotNull(error); assertFalse(error!!.message == "Native replay cleanup is quarantined")
     }
@@ -375,9 +378,9 @@ class NativeReplayDeadlineRetryTest {
         val original = IllegalStateException("Original retry acceptance failure")
         f.acceptedFailure = original; f.quarantineExpected = true
         f.timer.advance(1_000); f.barrier()
-        assertEquals(NativeReplayCompositionEvaluation.QUARANTINED, f.owner.reevaluate(true).get(3, TimeUnit.SECONDS))
+        assertEquals(NativeReplayCompositionEvaluation.QUARANTINED, f.owner.reevaluate(true).get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertEquals(1, f.platform.factories.get()); assertTrue(f.timer.retryPending().isEmpty())
-        try { f.owner.closeAndWait().get(3, TimeUnit.SECONDS); fail("Expected original error") }
+        try { f.owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS); fail("Expected original error") }
         catch (error: ExecutionException) { assertSame(original, error.cause) }
     }
 
@@ -471,7 +474,7 @@ class NativeReplayDeadlineRetryTest {
         fun row() = checkNotNull(backing.replayRows[NativeReplayAccounting.KEY])
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
-        fun reopen() { owner.closeAsync().get(100, TimeUnit.MILLISECONDS); owner = openSame().get().also { it.bindConfigurationGate(gate).get() } }
+        fun reopen() { owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS); owner = openSame().get().also { it.bindConfigurationGate(gate).get() } }
         fun now() = RuntimeWallTimestamps.rfc3339(clock.wall)
         fun advance(seconds: Long = 1) { clock.wall += seconds * 1000; clock.nanos += seconds * 1_000_000_000 }
         fun event() = RuntimeCaptureCommand(RuntimeEventKind.CAPTURE, "activity", now(), emptyMap(), StandaloneRuntime.defaultVersions())
@@ -498,7 +501,7 @@ class NativeReplayDeadlineRetryTest {
     private companion object {
         const val KEY = "elu_pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAA"
         fun awaitBlocked(thread: Thread) {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (thread.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
             assertEquals("Expected the exact owned thread to block at its held monitor", Thread.State.BLOCKED, thread.state)
         }

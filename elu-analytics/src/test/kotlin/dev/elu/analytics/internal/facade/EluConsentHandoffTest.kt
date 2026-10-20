@@ -6,6 +6,9 @@ import java.util.concurrent.TimeUnit
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class EluConsentHandoffTest {
     private class Target {
         var denied = false
@@ -48,13 +51,13 @@ class EluConsentHandoffTest {
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
         val denied = CountDownLatch(1)
         handoff.optIn(null, null)
-        val setup = Thread { handoff.install(target.sink) { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) } }
+        val setup = Thread { handoff.install(target.sink) { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) } }
         val withdrawal = Thread { handoff.optOut(); denied.countDown() }
         try {
-            setup.start(); assertTrue(entered.await(5, TimeUnit.SECONDS)); withdrawal.start()
+            setup.start(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); withdrawal.start()
             assertFalse(denied.await(100, TimeUnit.MILLISECONDS))
         } finally { release.countDown() }
-        setup.join(5_000); withdrawal.join(5_000)
+        setup.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS)); withdrawal.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
         assertFalse(setup.isAlive); assertFalse(withdrawal.isAlive)
         assertTrue(handoff.isOptedOut())
         assertEquals(listOf("optIn", "optOut"), target.calls.map { it.first })

@@ -10,6 +10,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class EluFacadeSafetyTest {
     @Test
     fun `every facade call is safe before setup`() {
@@ -145,7 +148,7 @@ class EluFacadeSafetyTest {
         start.countDown()
         pool.shutdown()
 
-        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS))
+        assertTrue(pool.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS))
         assertTrue(failures.toString(), failures.isEmpty())
     }
 }

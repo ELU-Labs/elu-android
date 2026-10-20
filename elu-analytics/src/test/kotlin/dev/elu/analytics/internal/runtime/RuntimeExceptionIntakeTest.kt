@@ -15,6 +15,9 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class RuntimeExceptionIntakeTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
     @After fun close() { owners.forEach { runCatching { it.closeAsync().await() } } }
@@ -56,7 +59,7 @@ class RuntimeExceptionIntakeTest {
         fun crash(): NativeExceptionIntake {
             val intake = checkNotNull(prepare())
             intake.offer(NativeExceptionObservation.from(IllegalStateException("PRIVATE")))
-            intake.reportSettlement.get(3, TimeUnit.SECONDS)
+            intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertTrue(intake.published)
             return intake
         }
@@ -174,7 +177,7 @@ class RuntimeExceptionIntakeTest {
     @Test fun `receipt wall rollback cannot import an observation from the future`() {
         val original = Rig(); original.activate(); original.user()
         val intake = checkNotNull(original.prepare()); original.clock.advance(100)
-        intake.offer(NativeExceptionObservation.from(Error())); intake.reportSettlement.get(3, TimeUnit.SECONDS)
+        intake.offer(NativeExceptionObservation.from(Error())); intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         val copy = original.snapshotDeath(); val next = original.restart(copy)
         next.clock.wall -= 50; next.activate()
         assertNull(next.prepare()); assertEquals(1, next.owner.snapshot().await().queuedCount)
@@ -191,11 +194,11 @@ class RuntimeExceptionIntakeTest {
         var releases = 0
         val rig = Rig(leaseClosed = { releases++ }); rig.activate(); rig.user()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        rig.spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        rig.spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val intake = checkNotNull(rig.prepare())
         try {
             intake.offer(NativeExceptionObservation.from(Error()))
-            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             val closing = rig.owner.closeAsync()
             assertFalse(closing.isDone); assertEquals(0, releases)
             assertThrows(java.util.concurrent.TimeoutException::class.java) { closing.get(10, TimeUnit.MILLISECONDS) }
@@ -213,7 +216,7 @@ class RuntimeExceptionIntakeTest {
         val second = checkNotNull(rig.prepare())
         assertSame(first, second); assertNotEquals(firstId, rig.backing.core!!.exceptions!!.reservation!!.id)
         second.offer(NativeExceptionObservation.from(Error()))
-        second.reportSettlement.get(3, TimeUnit.SECONDS)
+        second.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue(second.published)
         assertEquals(rig.backing.core!!.exceptions!!.reservation, rig.spool.report!!.reservation)
     }
@@ -221,18 +224,18 @@ class RuntimeExceptionIntakeTest {
     @Test fun `late old write cannot publish or rearm while original physical work is outstanding`() {
         val rig = Rig(); rig.activate(); rig.user()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        rig.spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        rig.spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val first = checkNotNull(rig.prepare()); val oldId = rig.backing.core!!.exceptions!!.reservation!!.id
         try {
             first.offer(NativeExceptionObservation.from(Error()))
-            assertTrue(entered.await(2, TimeUnit.SECONDS)); rig.activate()
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); rig.activate()
             assertNull(rig.prepare()); assertEquals(oldId, rig.backing.core!!.exceptions!!.reservation!!.id)
         } finally { release.countDown() }
-        first.reportSettlement.get(3, TimeUnit.SECONDS); assertNull(rig.spool.report)
+        first.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS); assertNull(rig.spool.report)
         rig.spool.beforePublish = {}
         assertSame(first, rig.prepare()); assertNotEquals(oldId, rig.backing.core!!.exceptions!!.reservation!!.id)
         first.offer(NativeExceptionObservation.from(Error()))
-        first.reportSettlement.get(3, TimeUnit.SECONDS)
+        first.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, rig.spool.writerThreads.size); assertTrue(first.published)
     }
 
@@ -273,9 +276,9 @@ class RuntimeExceptionIntakeTest {
                 assertTrue(rig.activate(body) is RuntimeCaptureAuthorityUpdateResult.Activated)
                 rig.user(); val intake = checkNotNull(rig.prepare())
                 if (held) {
-                    rig.spool.beforePublish = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+                    rig.spool.beforePublish = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
                     intake.offer(NativeExceptionObservation.from(Error()))
-                    assertTrue(entered.await(2, TimeUnit.SECONDS))
+                    assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 }
                 // Do not call activate/prepare on the original owner after this source change.
                 driver.onBackground()
@@ -288,7 +291,7 @@ class RuntimeExceptionIntakeTest {
                 assertFalse(original.isCurrent()); assertTrue(rig.policy.isCurrent())
                 if (!held) intake.offer(NativeExceptionObservation.from(Error()))
                 release.countDown()
-                if (held) intake.reportSettlement.get(3, TimeUnit.SECONDS)
+                if (held) intake.reportSettlement.get(WAIT_SECONDS, TimeUnit.SECONDS)
                 else assertEquals(0, rig.spool.writerThreads.size)
                 assertFalse(intake.published); assertNull(rig.spool.report)
                 rig.owner.closeAsync().await()
@@ -308,19 +311,19 @@ class RuntimeExceptionIntakeTest {
             val publishEntered = CountDownLatch(1); val publishRelease = CountDownLatch(1)
             val callbackEntered = CountDownLatch(1); val callbackRelease = CountDownLatch(1)
             val writer = java.util.concurrent.atomic.AtomicReference<Thread>()
-            rig.spool.beforePublish = { publishEntered.countDown(); check(publishRelease.await(3, TimeUnit.SECONDS)) }
+            rig.spool.beforePublish = { publishEntered.countDown(); check(publishRelease.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             val intake = checkNotNull(rig.prepare())
             // SdkFuture notifies in reverse registration order: queue barrier runs first,
             // then this original writer is held inside the earlier synchronous listener.
             intake.settlement.whenComplete { _, _ ->
-                writer.set(Thread.currentThread()); callbackEntered.countDown(); check(callbackRelease.await(3, TimeUnit.SECONDS))
+                writer.set(Thread.currentThread()); callbackEntered.countDown(); check(callbackRelease.await(WAIT_SECONDS, TimeUnit.SECONDS))
             }
             try {
                 intake.offer(NativeExceptionObservation.from(Error()))
-                assertTrue(publishEntered.await(2, TimeUnit.SECONDS))
+                assertTrue(publishEntered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 val clears = rig.spool.clears
                 val closing = rig.owner.closeAsync()
-                publishRelease.countDown(); assertTrue(callbackEntered.await(2, TimeUnit.SECONDS))
+                publishRelease.countDown(); assertTrue(callbackEntered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertTrue(intake.settlement.isDone); assertTrue(writer.get().isAlive)
                 assertThrows(java.util.concurrent.TimeoutException::class.java) { closing.get(100, TimeUnit.MILLISECONDS) }
                 assertEquals(0, releases); assertEquals(clears, rig.spool.clears)
@@ -349,6 +352,6 @@ class RuntimeExceptionIntakeTest {
     private fun resource(name: String) = javaClass.classLoader!!.getResource("contracts/v1/fixtures/$name")!!.readText()
     private fun versions() = RuntimeVersions(platform = RuntimePlatform.ANDROID,
         runtime = RuntimeVersionComponent("elu-android", "0.2.0"), facade = RuntimeVersionComponent("Elu", "0.2.0"))
-    private fun <T> Future<T>.await(): T = get(5, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
     private companion object { const val NOW = "2026-08-04T00:01:00.000Z" }
 }

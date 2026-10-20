@@ -8,6 +8,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class EluEventBufferTest {
     @Test
     fun `drains FIFO and drops oldest at capacity`() {
@@ -51,7 +54,7 @@ class EluEventBufferTest {
         }
         start.countDown()
         pool.shutdown()
-        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS))
+        assertTrue(pool.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS))
 
         val drained = buffer.drain()
         assertEquals(total, drained.size)

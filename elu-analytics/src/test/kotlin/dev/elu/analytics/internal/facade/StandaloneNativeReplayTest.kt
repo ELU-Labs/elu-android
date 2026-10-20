@@ -19,6 +19,9 @@ import org.json.JSONArray
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 /** Actual facade/runtime/native/source/queue with production installed selection; fake DB/platform only. */
 class StandaloneNativeReplayTest {
     /** Counts follow-up work before the original task returns, unlike a queued sentinel. */
@@ -53,7 +56,7 @@ class StandaloneNativeReplayTest {
             onWatch?.invoke()
             return AutoCloseable { check(Thread.currentThread() === main); closes.incrementAndGet(); onClose?.invoke() }
         }
-        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS)) }
+        override fun close() { executor.shutdown(); assertTrue(executor.awaitTermination(WAIT_SECONDS, TimeUnit.SECONDS)) }
     }
     private class Platform(val rig: Rig, val access: MainAccess, val single: Boolean = false,
         override val apiLevel: Int = 36) : NativeReplayCapturePlatform {
@@ -87,7 +90,7 @@ class StandaloneNativeReplayTest {
                         private fun main() = check(Thread.currentThread() === access.main)
                         override fun install() { main() }
                         override fun arm(value: NativeTouchProjection): Boolean {
-                            main(); rowsAtArm += rig.owner.storedPreparedReplayForTesting().get(3, TimeUnit.SECONDS).size
+                            main(); rowsAtArm += rig.owner.storedPreparedReplayForTesting().get(WAIT_SECONDS, TimeUnit.SECONDS).size
                             return core.arm(value).also { if (it) armed.countDown() }
                         }
                         override fun handoff(value: NativeTouchProjection, continuous: Long): List<NativeTouchObservation> {
@@ -121,7 +124,7 @@ class StandaloneNativeReplayTest {
         }
         override fun awaitNext(withdrawn: CountDownLatch): Boolean {
             if (single) return false
-            return !withdrawn.await(3, TimeUnit.SECONDS)
+            return !withdrawn.await(WAIT_SECONDS, TimeUnit.SECONDS)
         }
     }
     private class Transport(val hold: Boolean = false) : ReplayDeliveryTransport {
@@ -150,9 +153,9 @@ class StandaloneNativeReplayTest {
         AndroidStandaloneStack.installedNativeReplayProtocols.map { it.transport }.toSet(),
         AndroidStandaloneStack.installedNativeReplayProtocols.map { it.generation }.toSet())
     private fun Rig.minimum() = configure { it.getJSONObject("privacy").getJSONObject("replay").put("minimumDurationSeconds", 0) }
-    private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(3, TimeUnit.SECONDS)
+    private fun Rig.rows() = owner.storedPreparedReplayForTesting().get(WAIT_SECONDS, TimeUnit.SECONDS)
     private fun awaitCondition(message: String, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(5)
         assertTrue(message, condition())
     }
@@ -184,11 +187,11 @@ class StandaloneNativeReplayTest {
             native = NativeReplayComposition(rig.owner, lifecycle, proof(), StandaloneRuntime.defaultVersions(), { false },
                 { ::facade.isInitialized && facade.nativeReplayIntakeAllowed() }, platform, wire,
                 worker = compositionWorker, nativeStartObserver = nativeObserver)
-            native.ready().get(3, TimeUnit.SECONDS)
+            native.ready().get(WAIT_SECONDS, TimeUnit.SECONDS)
             if (holdComposition) {
                 val entered = CountDownLatch(1)
-                compositionWorker.execute { entered.countDown(); check(releaseComposition.await(3, TimeUnit.SECONDS)) }
-                assertTrue(entered.await(3, TimeUnit.SECONDS))
+                compositionWorker.execute { entered.countDown(); check(releaseComposition.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+                assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
             }
             runtime = StandaloneRuntime(rig.owner, KEY, wallClock = { rig.clock.wall },
                 transportFactory = { BatchHTTPTransport { BatchHTTPResponse(503, byteArrayOf()) } },
@@ -199,7 +202,7 @@ class StandaloneNativeReplayTest {
                 nativeStartTrace = nativeObserver.global, startupObserver = startupObserver)
             facade.start()
         }
-        fun settle() { facade.settled().get(3, TimeUnit.SECONDS) }
+        fun settle() { facade.settled().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         fun settleComposition() {
             settle()
             awaitCondition("all submitted composition evaluations returned") { compositionWorker.pending.get() == 0 }
@@ -208,8 +211,8 @@ class StandaloneNativeReplayTest {
         fun holdLane(): CountDownLatch {
             val lane = StandaloneFacade::class.java.getDeclaredField("lane").also { it.isAccessible = true }.get(facade) as ExecutorService
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
-            lane.execute { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-            assertTrue(entered.await(3, TimeUnit.SECONDS)); return release
+            lane.execute { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); return release
         }
         override fun close() {
             releaseComposition.countDown()
@@ -237,13 +240,13 @@ class StandaloneNativeReplayTest {
     @Test fun `public assembly installed selection reaches both original owners including reopen`(): Unit {
         for (protocol in AndroidStandaloneStack.installedNativeReplayProtocols) for (reopen in listOf(false, true)) {
             Harness(protocol = protocol, reopen = reopen).use { h ->
-                h.settle(); assertTrue(h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+                h.settle(); assertTrue(h.platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 awaitCondition("exact installed protocol durable row") { h.rig.rows().isNotEmpty() }
                 assertEquals(listOf(protocol), h.platform.selected)
                 assertEquals(protocol.codec, JSONObject(String(h.rig.rows().single().prepared.copyBytes()))
                     .getJSONObject("chunk").getString("codec"))
                 if (protocol == NativeReplayProtocol.V2) {
-                    assertTrue(h.platform.armed.await(3, TimeUnit.SECONDS))
+                    assertTrue(h.platform.armed.await(WAIT_SECONDS, TimeUnit.SECONDS))
                     assertEquals(listOf(1), h.platform.rowsAtArm)
                 } else assertTrue(h.platform.rowsAtArm.isEmpty())
             }
@@ -260,7 +263,7 @@ class StandaloneNativeReplayTest {
         for ((generation, advertised) in cases) Harness(protocol = NativeReplayProtocol.V2,
             generation = generation, advertised = advertised).use { h ->
             h.settle(); assertNull(proof().transport(V1ConfigJson.parseConfig(h.rig.body)))
-            h.native.reevaluate(force = true).get(3, TimeUnit.SECONDS)
+            h.native.reevaluate(force = true).get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(0, h.platform.factories.get()); assertTrue(h.rig.rows().isEmpty())
             assertTrue(h.platform.rowsAtArm.isEmpty())
         }
@@ -270,13 +273,13 @@ class StandaloneNativeReplayTest {
         for (expire in listOf(false, true)) Harness(activateEarly = false, protocol = NativeReplayProtocol.V2).use { h ->
             h.settle(); assertEquals(0, h.platform.factories.get())
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
-            h.platform.onCollect = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+            h.platform.onCollect = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             try {
-                h.activate(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+                h.activate(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 if (expire) h.rig.advance(300) else h.rig.gate.close()
                 h.facade.configurationChanged(); h.settle()
             } finally { release.countDown() }
-            h.facade.closeAndWait().get(3, TimeUnit.SECONDS)
+            h.facade.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertTrue(h.rig.backing.replayRows.keys.none { it.startsWith("chunk/") })
             assertTrue(h.platform.rowsAtArm.isEmpty()); assertEquals(1, h.platform.touchCloses.get())
         }
@@ -284,7 +287,7 @@ class StandaloneNativeReplayTest {
 
     @Test fun `installed v2 preserves API29 collector floor`(): Unit =
         Harness(protocol = NativeReplayProtocol.V2, apiLevel = 28).use { h ->
-            h.settle(); h.native.reevaluate(force = true).get(3, TimeUnit.SECONDS)
+            h.settle(); h.native.reevaluate(force = true).get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertEquals(0, h.platform.factories.get()); assertTrue(h.rig.rows().isEmpty())
         }
 
@@ -294,7 +297,7 @@ class StandaloneNativeReplayTest {
                 "watchers=${h.access.watches.get()}, closed=${h.access.closes.get()}\n" + h.nativeTrace.joinToString("")
             h.settleComposition(); assertEquals(diagnostic("before activity"), 0, h.platform.factories.get())
             h.facade.capture("first", null, Date(h.rig.clock.wall)); h.settle()
-            assertTrue(diagnostic("first frame"), h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+            assertTrue(diagnostic("first frame"), h.platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
             awaitCondition("first sealed public row") { h.rig.rows().isNotEmpty() }
             repeat(12) { h.facade.capture("activity-$it", null, Date(h.rig.clock.wall)) }
             h.settleComposition()
@@ -312,7 +315,7 @@ class StandaloneNativeReplayTest {
         val observer = RuntimeStartupObserver {
             if (it.phase == RuntimeStartupPhase.CAPTURE_FIRST) {
                 captured.countDown()
-                if (!releaseCapture.await(3, TimeUnit.SECONDS)) captureWaitTimedOut.set(true)
+                if (!releaseCapture.await(WAIT_SECONDS, TimeUnit.SECONDS)) captureWaitTimedOut.set(true)
             }
         }
         Harness(resetEarly = true, holdComposition = true, startupObserver = observer).use { h ->
@@ -320,18 +323,18 @@ class StandaloneNativeReplayTest {
                 h.settle()
                 h.access.onWatch = {
                     val ordinal = h.access.watches.get(); order += "watch-$ordinal"
-                    if (ordinal == 1) { watched.countDown(); check(releaseWatch.await(3, TimeUnit.SECONDS)) }
+                    if (ordinal == 1) { watched.countDown(); check(releaseWatch.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
                 }
                 h.access.onClose = { order += "close-${h.access.closes.get()}" }
                 h.facade.capture("first", null, Date(h.rig.clock.wall))
-                assertTrue("first event committed before facade identity renewal", captured.await(3, TimeUnit.SECONDS))
+                assertTrue("first event committed before facade identity renewal", captured.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 h.releaseComposition.countDown()
-                assertTrue("old startup evaluation acquired its original watcher", watched.await(3, TimeUnit.SECONDS))
+                assertTrue("old startup evaluation acquired its original watcher", watched.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 assertEquals(0, h.platform.factories.get())
                 releaseCapture.countDown(); h.settle()
                 assertFalse("observer timeout must not silently release the held facade", captureWaitTimedOut.get())
                 releaseWatch.countDown()
-                assertTrue("replacement produced an actual frame", h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+                assertTrue("replacement produced an actual frame", h.platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
                 h.settleComposition()
                 awaitCondition("replacement sealed an actual native row") { h.rig.rows().isNotEmpty() }
                 assertEquals(listOf("watch-1", "close-1", "watch-2"), order.toList())
@@ -347,8 +350,8 @@ class StandaloneNativeReplayTest {
 
     @Test fun `valid context acceptance revokes a held main frame without blocking facade or granting replacement`(): Unit = Harness(activateEarly = false).use { h ->
         h.settle(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        h.platform.onCollect = { h.platform.onCollect = null; entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-        h.activate(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+        h.platform.onCollect = { h.platform.onCollect = null; entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+        h.activate(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         h.facade.identify("joined-owner", mapOf("tier" to "paid")); h.settle()
         assertEquals("joined-owner", h.facade.distinctId())
         assertEquals(1, h.platform.factories.get()); assertTrue(h.rig.rows().isEmpty())
@@ -358,7 +361,7 @@ class StandaloneNativeReplayTest {
     }
 
     @Test fun `set and set once fence native intake from first public acceptance`(): Unit = Harness().use { h ->
-        h.settle(); assertTrue(h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+        h.settle(); assertTrue(h.platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
         for (field in listOf("\$set", "\$set_once")) {
             val release = h.holdLane()
             h.facade.capture("context", mapOf(field to mapOf("plan" to field)), Date(h.rig.clock.wall))
@@ -370,7 +373,7 @@ class StandaloneNativeReplayTest {
     }
 
     @Test fun `new restrictive source epoch prevents held older context from republishing capture`(): Unit = Harness().use { h ->
-        h.settle(); assertTrue(h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+        h.settle(); assertTrue(h.platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val release = h.holdLane()
         h.facade.identify("must-not-restore", null)
         h.rig.gate.close(); h.facade.configurationChanged()
@@ -388,23 +391,23 @@ class StandaloneNativeReplayTest {
         h.activate(); assertTrue(h.facade.nativeReplayIntakeAllowed())
         assertEquals("prefix", h.facade.distinctId())
         assertFalse(h.rig.owner.snapshot().get().state.identity.superProperties.containsKey("dropped"))
-        assertTrue(h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+        assertTrue(h.platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
     }
 
     @Test fun `facade close joins original held physical interval before releasing installation`(): Unit = Harness(activateEarly = false).use { h ->
         h.settle(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        h.platform.onCollect = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
-        h.activate(); assertTrue(entered.await(3, TimeUnit.SECONDS))
+        h.platform.onCollect = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+        h.activate(); assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val close = h.facade.closeAndWait(); assertSame(close, h.facade.closeAndWait())
         assertFalse(close.cancel(true)); assertFalse(close.isDone); assertFalse(h.facade.nativeReplayIntakeAllowed())
-        failure { h.rig.openSame().get(3, TimeUnit.SECONDS) }
-        release.countDown(); close.get(3, TimeUnit.SECONDS)
+        failure { h.rig.openSame().get(WAIT_SECONDS, TimeUnit.SECONDS) }
+        release.countDown(); close.get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(1, h.access.closes.get()); assertEquals(1, h.rig.databaseCloses)
-        h.rig.openSame().get(3, TimeUnit.SECONDS).closeAsync().get(3, TimeUnit.SECONDS)
+        h.rig.openSame().get(WAIT_SECONDS, TimeUnit.SECONDS).closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
     }
 
     @Test fun `lifecycle false true false cannot publish an older queued resume`(): Unit = Harness().use { h ->
-        h.settle(); assertTrue(h.platform.firstFrame.await(3, TimeUnit.SECONDS))
+        h.settle(); assertTrue(h.platform.firstFrame.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val release = h.holdLane()
         h.facade.nativeReplayLifecycleChanged(false)
         h.facade.nativeReplayLifecycleChanged(true)
@@ -510,7 +513,7 @@ class StandaloneNativeReplayTest {
         fun state() = NativeReplayAccounting.read(row())
         fun replace(state: NativeReplaySessionState) { backing.replayRows[NativeReplayAccounting.KEY] = NativeReplayAccounting.row(state) }
         fun reopen() {
-            owner.closeAsync().get(100, TimeUnit.MILLISECONDS)
+            owner.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
             driver.close()
             // A reopened queue owns a fresh original source/gate; a closed gate stays closed.
             assertNull(gate.snapshot())
@@ -545,7 +548,7 @@ class StandaloneNativeReplayTest {
     private companion object {
         const val KEY = "elu_pk_live_AAAAAAAAAAAAAAAAAAAAAAAAAA"
         fun awaitBlocked(thread: Thread) {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (thread.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
             assertEquals("Expected the exact owned thread to block at its held monitor", Thread.State.BLOCKED, thread.state)
         }

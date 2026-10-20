@@ -12,6 +12,9 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class NativeReplaySessionQueueTest {
     @Test fun `explicit native migration preserves flags in either order and event counters`() {
         for (flagsFirst in listOf(false, true)) Rig().use { rig ->
@@ -405,25 +408,25 @@ class NativeReplaySessionQueueTest {
     @Test fun `caller cancellation cannot interrupt or lose accounting handoff`() = Rig().use { rig ->
         rig.activate(); val observation = rig.observe()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        rig.onWrite = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        rig.onWrite = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val future = rig.owner.beginNativeReplayAccounting(observation)
-        check(entered.await(3, TimeUnit.SECONDS))
+        check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         try { assertFalse(future.cancel(true)) } finally { release.countDown() }
-        val receipt = checkNotNull(future.get(3, TimeUnit.SECONDS))
+        val receipt = checkNotNull(future.get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertTrue(rig.owner.stopNativeReplayAccounting(receipt).get())
     }
     @Test fun `native close cannot cancel original settlement or publish start after close intent`() = Rig().use { rig ->
         rig.activate(); val observation = rig.observe()
         val entered = CountDownLatch(1); val release = CountDownLatch(1)
-        rig.onWrite = { entered.countDown(); check(release.await(3, TimeUnit.SECONDS)) }
+        rig.onWrite = { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
         val started = rig.owner.beginNativeReplayAccounting(observation)
-        check(entered.await(3, TimeUnit.SECONDS))
+        check(entered.await(WAIT_SECONDS, TimeUnit.SECONDS))
         val closing = rig.owner.closeAsync()
         try { assertFalse(closing.cancel(true)) } finally { release.countDown() }
-        try { assertNull(started.get(3, TimeUnit.SECONDS)) } catch (_: java.util.concurrent.ExecutionException) { }
-        closing.get(3, TimeUnit.SECONDS)
-        val reopened = rig.openSame().get(3, TimeUnit.SECONDS)
-        reopened.closeAsync().get(3, TimeUnit.SECONDS)
+        try { assertNull(started.get(WAIT_SECONDS, TimeUnit.SECONDS)) } catch (_: java.util.concurrent.ExecutionException) { }
+        closing.get(WAIT_SECONDS, TimeUnit.SECONDS)
+        val reopened = rig.openSame().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        reopened.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertNull(rig.state().session!!.activeEpoch)
     }
     @Test fun `unrelated acknowledgement poison retains outstanding native epoch on close`() = Rig().use { rig ->
@@ -443,8 +446,8 @@ class NativeReplaySessionQueueTest {
             rig.afterWriteCommit = { rig.clock.onRead = { closing = rig.owner.closeAsync() } }
             if (begin) assertNull(rig.owner.beginNativeReplayAccounting(checkNotNull(observation)).get())
             else assertNull(rig.owner.observeNativeReplaySession().get())
-            checkNotNull(closing).get(3, TimeUnit.SECONDS)
-            val reopened = rig.openSame().get(3, TimeUnit.SECONDS); reopened.closeAsync().get(3, TimeUnit.SECONDS)
+            checkNotNull(closing).get(WAIT_SECONDS, TimeUnit.SECONDS)
+            val reopened = rig.openSame().get(WAIT_SECONDS, TimeUnit.SECONDS); reopened.closeAsync().get(WAIT_SECONDS, TimeUnit.SECONDS)
             assertNull(rig.state().session!!.activeEpoch)
         }
     }

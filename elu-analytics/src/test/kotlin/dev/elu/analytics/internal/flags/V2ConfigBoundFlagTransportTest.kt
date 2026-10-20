@@ -33,6 +33,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class V2ConfigBoundFlagTransportTest {
     @Test fun `unbound requests cannot use a live configuration token`() = Rig().use { rig ->
         val result = rig.transport.send(FlagTransportRequest(ENDPOINT, "{}".toByteArray())).toFuture()
@@ -43,17 +46,17 @@ class V2ConfigBoundFlagTransportTest {
     @Test fun `frozen flag client request reaches HTTP and owner validates the returned witness`() = Rig().use { rig ->
         val result = rig.reloadQueued()
         rig.worker.runNext()
-        assertTrue(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertTrue(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         assertTrue(rig.connections.single().output.size() > 0)
-        val read = rig.client.read("variant").get(2, TimeUnit.SECONDS)
+        val read = rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertTrue(read is FlagReadResult.Found)
     }
 
     @Test fun `identity change after send queue admission prevents HTTP body write`() = Rig().use { rig ->
         val result = rig.reloadQueued()
-        rig.owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("tier" to "new"), NOW)).get(2, TimeUnit.SECONDS)
+        rig.owner.applyLocal(RuntimeLocalStateChange.SetFlagPersonProperties(mapOf("tier" to "new"), NOW)).get(WAIT_SECONDS, TimeUnit.SECONDS)
         rig.worker.runNext()
-        assertFalse(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertFalse(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         assertEquals(0, rig.connections.single().output.size())
     }
 
@@ -61,9 +64,9 @@ class V2ConfigBoundFlagTransportTest {
         val result = rig.reloadQueued()
         rig.publish(null)
         rig.worker.runNext()
-        assertFalse(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertFalse(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         assertEquals(0, rig.connections.single().output.size())
-        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(2, TimeUnit.SECONDS))
+        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS))
     }
 
     @Test fun `rotation waits for the canceled physical slot before constructing another delegate`() = Rig().use { rig ->
@@ -72,33 +75,33 @@ class V2ConfigBoundFlagTransportTest {
             .put("expiresAt", "2026-08-05T00:06:00.000Z").toString()
         rig.publish(rig.body)
         rig.transport.retireSuperseded()
-        first.get(2, TimeUnit.SECONDS)
+        first.get(WAIT_SECONDS, TimeUnit.SECONDS)
         rig.apply()
-        assertFalse(rig.client.reload().get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertFalse(rig.client.reload().get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         assertEquals(1, rig.connections.size)
         rig.worker.runNext() // canceled physical request has now settled
         assertEquals(0, rig.connections.first().output.size())
         val second = rig.reloadQueued()
         assertEquals(2, rig.connections.size)
         rig.worker.runNext()
-        assertTrue(second.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertTrue(second.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
     }
 
     @Test fun `withdrawal during response completion cannot commit or expose cache`() = Rig().use { rig ->
         val result = rig.reloadQueued()
         rig.connections.single().onResponse = { rig.publish(null) }
         rig.worker.runNext()
-        assertFalse(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
-        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(2, TimeUnit.SECONDS))
+        assertFalse(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS))
     }
 
     @Test fun `transport close cancels queued work and cannot open another socket`() = Rig().use { rig ->
         val result = rig.reloadQueued()
         rig.transport.close()
         rig.worker.runNext()
-        assertFalse(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertFalse(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         assertEquals(0, rig.connections.single().output.size())
-        assertFalse(rig.client.reload().get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertFalse(rig.client.reload().get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         assertEquals(1, rig.connections.size)
     }
 
@@ -106,25 +109,25 @@ class V2ConfigBoundFlagTransportTest {
         val result = rig.reloadQueued()
         rig.afterFlagWrite = { rig.publish(null) }
         rig.worker.runNext()
-        assertFalse(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertFalse(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         assertTrue(rig.connections.single().output.size() > 0)
         assertTrue(rig.backing.flagRows.keys.any { it.startsWith("cache-body:") })
-        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(2, TimeUnit.SECONDS))
+        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS))
     }
 
     @Test fun `withdrawal after cached row read cannot return its value`() = Rig().use { rig ->
         val result = rig.reloadQueued(); rig.worker.runNext()
-        assertTrue(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertTrue(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
         rig.afterFlagTransaction = { rig.publish(null) }
-        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(2, TimeUnit.SECONDS))
+        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS))
     }
 
     @Test fun `cache expiry during storage read cannot return a value or extend original deadline`() = Rig().use { rig ->
         val result = rig.reloadQueued(); rig.worker.runNext()
-        val updated = result.get(2, TimeUnit.SECONDS) as FlagReloadResult.Updated
+        val updated = result.get(WAIT_SECONDS, TimeUnit.SECONDS) as FlagReloadResult.Updated
         assertTrue(rig.client.isCacheLeaseCurrent(checkNotNull(updated.cacheLeaseToken)))
         rig.afterFlagTransaction = { rig.nanos += 60_000_000_000L }
-        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(2, TimeUnit.SECONDS))
+        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS))
         assertFalse(rig.client.isCacheLeaseCurrent(checkNotNull(updated.cacheLeaseToken)))
     }
 
@@ -132,20 +135,20 @@ class V2ConfigBoundFlagTransportTest {
         val result = rig.reloadQueued()
         rig.afterFlagWrite = { rig.wall += 60_000L }
         rig.worker.runNext()
-        assertFalse(result.get(2, TimeUnit.SECONDS) is FlagReloadResult.Updated)
-        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(2, TimeUnit.SECONDS))
+        assertFalse(result.get(WAIT_SECONDS, TimeUnit.SECONDS) is FlagReloadResult.Updated)
+        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS))
     }
 
     @Test fun `synchronous projection clock observations cannot regress without a client-lane read`() = Rig().use { rig ->
         val result = rig.reloadQueued(); rig.worker.runNext()
-        val token = checkNotNull((result.get(2, TimeUnit.SECONDS) as FlagReloadResult.Updated).cacheLeaseToken)
+        val token = checkNotNull((result.get(WAIT_SECONDS, TimeUnit.SECONDS) as FlagReloadResult.Updated).cacheLeaseToken)
         rig.nanos += 1_000L
         assertTrue(rig.client.isCacheLeaseCurrent(token))
         rig.nanos -= 1L
         assertFalse(rig.client.isCacheLeaseCurrent(token))
         rig.nanos += 2L
         assertFalse(rig.client.isCacheLeaseCurrent(token))
-        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(2, TimeUnit.SECONDS))
+        assertEquals(FlagReadResult.Missing, rig.client.read("variant").get(WAIT_SECONDS, TimeUnit.SECONDS))
     }
 
     private class Rig : AutoCloseable {
@@ -196,7 +199,7 @@ class V2ConfigBoundFlagTransportTest {
                 override fun wallNowEpochMillis() = wall
                 override fun elapsedRealtimeNanos() = 100L
             },
-        ).get(2, TimeUnit.SECONDS).also { it.bindConfigurationGate(gate).get(2, TimeUnit.SECONDS) }
+        ).get(WAIT_SECONDS, TimeUnit.SECONDS).also { it.bindConfigurationGate(gate).get(WAIT_SECONDS, TimeUnit.SECONDS) }
         val client = AndroidFeatureFlagClient(owner, StandaloneRuntime.defaultVersions(), transport,
             object : FlagClock {
                 override fun wallNowEpochMillis() = wall
@@ -210,7 +213,7 @@ class V2ConfigBoundFlagTransportTest {
             })
         }
         fun apply() {
-            assertTrue(client.applyConfiguration(body).get(2, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
+            assertTrue(client.applyConfiguration(body).get(WAIT_SECONDS, TimeUnit.SECONDS) is V1FlagAuthorizationResolution.Allowed)
         }
         fun reloadQueued(): SdkFuture<FlagReloadResult> {
             val result = client.reload()
@@ -227,7 +230,7 @@ class V2ConfigBoundFlagTransportTest {
         val tasks = ConcurrentLinkedQueue<Runnable>()
         override fun execute(command: Runnable) { tasks.add(command) }
         fun awaitQueued() {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
             while (tasks.isEmpty() && System.nanoTime() < deadline) Thread.sleep(1)
             assertFalse("HTTP worker was never queued", tasks.isEmpty())
         }

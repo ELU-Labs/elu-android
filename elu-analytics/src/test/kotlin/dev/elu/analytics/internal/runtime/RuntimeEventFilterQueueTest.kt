@@ -15,6 +15,9 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class RuntimeEventFilterQueueTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
     private val clock = object : RuntimeCaptureClock {
@@ -23,7 +26,7 @@ class RuntimeEventFilterQueueTest {
         var expireNext = false
         override fun elapsedRealtimeNanos(): Long = if (expireNext) { expireNext = false; 1_000_000_000_000L } else 1000L
     }
-    private fun <T> Future<T>.await(): T = get(10, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
     @After fun close() { owners.asReversed().forEach { runCatching { it.closeAsync().await() } } }
     private fun fresh() = PersistedCoreState(
         identity = IdentityState(revision = 2, contextRevision = 5, anonymousId = "anon_capture", userId = "user_capture",

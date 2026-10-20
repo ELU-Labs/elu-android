@@ -12,6 +12,9 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 
+// Real-time bound for waits that must complete. Generous, so a stalled CI runner cannot fail a passing test.
+private const val WAIT_SECONDS = 30L
+
 class RuntimeDiagnosticsTest {
     private val owners = mutableListOf<RuntimeQueueOwner>()
     @After fun close() { owners.forEach { runCatching { it.closeAsync().await() } } }
@@ -277,6 +280,6 @@ class RuntimeDiagnosticsTest {
         runtime = RuntimeVersionComponent("elu-android", "0.2.0"), facade = RuntimeVersionComponent("Elu", "0.2.0"))
     private fun versionProperties() = mapOf("\$elu_contract_version" to "1.0.0", "\$elu_sdk_version" to "0.2.0",
         "\$elu_facade_version" to "0.2.0")
-    private fun <T> Future<T>.await(): T = get(5, TimeUnit.SECONDS)
+    private fun <T> Future<T>.await(): T = get(WAIT_SECONDS, TimeUnit.SECONDS)
     private companion object { const val NOW = "2026-08-04T00:01:00.000Z" }
 }
