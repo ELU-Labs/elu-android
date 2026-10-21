@@ -65,6 +65,7 @@ class StandaloneAutomaticExceptionTest {
             .put("issuedAt", "2026-08-04T00:00:00.000Z").put("expiresAt", "2026-08-04T00:05:00.000Z")
             .also { if (grant != null) it.put("captureExceptions", grant) }.toString()
         val factoryCount = AtomicInteger(); val releases = AtomicInteger(); val registry = Registry()
+        @Volatile var intentProbe: () -> Unit = {}
         val owner = RuntimeQueueOwner.open(key, RuntimeQueueLimits(capacity, 1_000_000), { backing.connection() }, { state() },
             leaseFactory = { RuntimeOwnershipLease { releases.incrementAndGet() } }, trustedSiteKey = KEY,
             captureClock = clock, personProfiles = EluPersonProfilesMode.IDENTIFIED_ONLY, memoryOnly = memory, rateLimiting = EluRateLimitingOptions(),
@@ -89,7 +90,7 @@ class StandaloneAutomaticExceptionTest {
             runtime = StandaloneRuntime(owner, KEY, wallClock = { clock.wall },
                 transportFactory = { BatchHTTPTransport { BatchHTTPResponse(503, byteArrayOf()) } },
                 deviceInEuTimezone = { false }, configurationGate = gate, diagnosticsOptions = options,
-                exceptionRegistry = registry, automaticExceptionAllowed = { ::facade.isInitialized && facade.automaticExceptionIntakeAllowed() },
+                exceptionRegistry = registry, automaticExceptionAllowed = { intentProbe(); ::facade.isInitialized && facade.automaticExceptionIntakeAllowed() },
                 flushDelayMillis = 60_000)
             registry.beforeSet = { assertNotNull(owner.snapshot().await()); assertNotNull(backing.core!!.exceptions!!.reservation) }
             facade = StandaloneFacade({ StandaloneStack(runtime, owner, null) }, { it.run() },
@@ -120,6 +121,12 @@ class StandaloneAutomaticExceptionTest {
         }
         fun holdFacade(): CountDownLatch {
             val lane = StandaloneFacade::class.java.getDeclaredField("lane").also { it.isAccessible = true }.get(facade) as ExecutorService
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            lane.execute { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
+            assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); return release
+        }
+        fun holdOwner(): CountDownLatch {
+            val lane = RuntimeQueueOwner::class.java.getDeclaredField("executor").also { it.isAccessible = true }.get(owner) as ExecutorService
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             lane.execute { entered.countDown(); check(release.await(WAIT_SECONDS, TimeUnit.SECONDS)) }
             assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS)); return release
@@ -158,6 +165,29 @@ class StandaloneAutomaticExceptionTest {
             assertNull(h.owner.snapshot().await().state.identity.session); assertTrue(h.exceptions().isEmpty()); assertNotNull(h.spool.report)
             h.activity(); await("actual-session delayed report") { h.exceptions().size == 1 }
             assertEquals(h.owner.snapshot().await().state.identity.session!!.id, h.exceptions().single().record.sessionId)
+        }
+    }
+    @Test fun `withdrawal landing after the control check only disarms and keeps the retained report`() {
+        Harness().use { h ->
+            h.installed(); h.crash(); h.settle(); val saved = checkNotNull(h.spool.report)
+            // An update passes the control-lane intent check and queues behind owner work; a
+            // non-retiring withdrawal (renewal after a new session, background, close) then lands
+            // before the owner lane re-checks that intent. That lapse must disarm, not retire.
+            val release = h.holdOwner()
+            try {
+                val checked = CountDownLatch(1); var control: Thread? = null
+                h.intentProbe = { control = Thread.currentThread(); checked.countDown() }
+                h.runtime.requestAutomaticExceptions()
+                assertTrue(checked.await(WAIT_SECONDS, TimeUnit.SECONDS)); h.intentProbe = {}
+                val controlThread = checkNotNull(control)
+                await("checked update waiting on the held owner lane") { controlThread.state == Thread.State.WAITING &&
+                    controlThread.stackTrace.any { it.methodName == "updateAutomaticExceptionsOnControl" } }
+                h.runtime.withdrawAutomaticExceptions()
+            } finally { release.countDown() }
+            h.settle(); h.runtime.requestAutomaticExceptions(); h.settle()
+            assertEquals(saved, h.spool.report); assertNotNull(h.backing.core!!.exceptions!!.reservation)
+            h.activity(); await("retained report after the raced withdrawal") { h.exceptions().size == 1 }
+            h.settle(); assertNull(h.spool.report); assertEquals(1, h.spool.writes.get())
         }
     }
     @Test fun `quota refused report stays reserved and retries only after real queue capacity is available`() {
