@@ -62,14 +62,14 @@ class ReplayDeliveryTest {
             assertNull(rig.delivery().claim()); assertEquals(1, rig.rows().size)
         }
     }
-    @Test fun `strict 413 resolves one row while malformed 413 and conflict preserve bytes`() {
+    @Test fun `strict 413 resolves one row while malformed 413 and a validated 409 are protocol holds`() {
         val request = PreparedReplayRequest.parse(ReplayFixtures.bytes(), ReplayFixtures.GENERATION)
         val body = error(413, request.requestId)
         assertEquals(ReplayDeliveryOutcome.RejectedTooLarge, ReplayResponseClassifier.classify(ReplayTransportResponse(413, body), request, 0, 1000))
         assertEquals(ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL), ReplayResponseClassifier.classify(ReplayTransportResponse(413, "{}".toByteArray()), request, 0, 1000))
-        val conflict = JSONObject().put("schemaVersion",2).put("requestId",request.requestId).put("status",409)
-            .put("code","replay-identity-conflict").put("disposition","permanent").put("conflictScope","sequence")
-        assertEquals(ReplayDeliveryOutcome.Blocked(ReplayBlockKind.CONFLICT), ReplayResponseClassifier.classify(ReplayTransportResponse(409, conflict.toString().toByteArray()), request,0,1000))
+        for (scope in listOf("request", "chunk", "sequence"))
+            assertEquals(scope, ReplayDeliveryOutcome.Blocked(ReplayBlockKind.PROTOCOL),
+                ReplayResponseClassifier.classify(ReplayTransportResponse(409, conflict(request.requestId, scope)), request, 0, 1000))
     }
     @Test fun `429 without retry header retries only its row and 503 preserves exact bytes for retry`() = Rig().use { rig ->
         rig.activate(); rig.append(); val claim = checkNotNull(rig.delivery().claim())
@@ -265,15 +265,70 @@ class ReplayDeliveryTest {
             Unit
         } }
     }
-    @Test fun `credential refusal and validated conflict stay final after the protocol hold window`() {
-        for (kind in listOf(ReplayBlockKind.FORBIDDEN, ReplayBlockKind.CONFLICT)) Rig().use { rig ->
-            rig.activate(); rig.append(); val q = rig.delivery(); val claim = checkNotNull(q.claim())
-            q.commit(claim, ReplayDeliveryOutcome.Blocked(kind))
-            rig.backing.connection().use { db -> db.transaction { tx ->
-                assertNull(ReplayQueueStore.claim(tx, UUID.randomUUID().toString(), claim.authorization,
-                    rig.clock.wall + REPLAY_PROTOCOL_HOLD_MAX_MILLIS, 1) { true })
-            } }
-        }
+    @Test fun `credential refusal stays final after the protocol hold window`() = Rig().use { rig ->
+        rig.activate(); rig.append(); val q = rig.delivery(); val claim = checkNotNull(q.claim())
+        q.commit(claim, ReplayDeliveryOutcome.Blocked(ReplayBlockKind.FORBIDDEN))
+        rig.backing.connection().use { db -> db.transaction { tx ->
+            assertNull(ReplayQueueStore.claim(tx, UUID.randomUUID().toString(), claim.authorization,
+                rig.clock.wall + REPLAY_PROTOCOL_HOLD_MAX_MILLIS, 1) { true })
+        } }
+    }
+    @Test fun `a validated 409 holds the chunk and its recording then offers the same bytes again`() = Rig().use { rig ->
+        rig.activate(); rig.append()
+        val tasks = java.util.concurrent.CopyOnWriteArrayList<Pair<Long, () -> Unit>>()
+        val sent = java.util.concurrent.CopyOnWriteArrayList<ReplayDeliveryClaim>()
+        val co = ReplayDeliveryCoordinator(rig.delivery(), ReplayDeliveryTransport { claim, _ -> sent.add(claim); Op().also {
+                it.settlement.complete(ReplayTransportResponse(409, conflict(claim.row.prepared.requestId, "chunk"))) } },
+            Executors.newSingleThreadExecutor(), ReplayDeliveryScheduler { delay, task -> tasks.add(delay to task); ReplayDeliveryScheduledTask {} },
+            { rig.clock.wall }, { rig.clock.nanos / 1_000_000 }, { 0.5 })
+        assertEquals(1, co.flush().get(WAIT_SECONDS, TimeUnit.SECONDS).attempted); co.close()
+        // Held, not refused: the bytes stay, and the coordinator wakes when the hold ends.
+        val first = sent.single()
+        assertArrayEquals(first.row.prepared.copyBytes(), rig.rows().single().prepared.copyBytes())
+        assertEquals(REPLAY_PROTOCOL_HOLD_MIN_MILLIS, tasks.last().first)
+        // No later chunk of the held recording is stored; another recording still is.
+        assertEquals(ReplayAppendResult.Rejected(ReplayAppendRejection.STREAM_BLOCKED),
+            rig.append(rig.request { it.put("chunkId", "a7").put("sequence", 7) }))
+        assertTrue(rig.append(rig.request { it.put("replayId", "replay-b").put("chunkId", "b0").put("sequence", 0) }) is ReplayAppendResult.Stored)
+        rig.backing.connection().use { db -> db.transaction { tx ->
+            val hold = checkNotNull(ReplayQueueStore.delivery(tx, first.ordinal))
+            assertEquals(ReplayBlockKind.PROTOCOL.name, hold.blockKind)
+            assertEquals(rig.clock.wall + REPLAY_PROTOCOL_HOLD_MIN_MILLIS, hold.notBeforeMillis)
+            val owner = UUID.randomUUID().toString()
+            // The other recording's head is still offered during the hold; the held head is not.
+            val other = checkNotNull(ReplayQueueStore.claim(tx, owner, first.authorization, hold.notBeforeMillis - 1, 1) { true })
+            assertEquals("replay-b", other.row.prepared.replayId)
+            assertEquals(ReplayDeliveryCommit.COMMITTED, ReplayQueueStore.commit(tx, other, ReplayDeliveryOutcome.Accepted, 1, hold.notBeforeMillis - 1))
+            assertNull(ReplayQueueStore.claim(tx, owner, first.authorization, hold.notBeforeMillis - 1, 1) { true })
+            val again = checkNotNull(ReplayQueueStore.claim(tx, owner, first.authorization, hold.notBeforeMillis, 1) { true })
+            assertEquals(first.ordinal, again.ordinal)
+            assertArrayEquals(first.row.prepared.copyBytes(), again.row.prepared.copyBytes())
+            assertEquals(2, again.attemptCount)
+            assertEquals(ReplayDeliveryCommit.COMMITTED, ReplayQueueStore.commit(tx, again, ReplayDeliveryOutcome.Accepted, 1, hold.notBeforeMillis))
+            Unit
+        } }
+        assertTrue(rig.rows().isEmpty())
+    }
+    @Test fun `a 409 an earlier version stored as final becomes a hold and is offered again`() = Rig().use { rig ->
+        rig.activate(); rig.append(); val q = rig.delivery(); val claim = checkNotNull(q.claim())
+        // Earlier versions stored a validated wireframe 409 as a final CONFLICT block.
+        assertEquals(ReplayDeliveryCommit.COMMITTED, q.commit(claim, ReplayDeliveryOutcome.Blocked(ReplayBlockKind.CONFLICT)))
+        rig.reopen()
+        val updated = Instant.parse("2026-08-05T03:01:00Z").toEpochMilli()
+        rig.backing.connection().use { db -> db.transaction { tx ->
+            val owner = UUID.randomUUID().toString()
+            // The first look after the update starts a hold of the row's age, bounded to 1..24 hours.
+            assertNull(ReplayQueueStore.claim(tx, owner, claim.authorization, updated, 1) { true })
+            val hold = checkNotNull(ReplayQueueStore.delivery(tx, claim.ordinal))
+            assertEquals(ReplayBlockKind.PROTOCOL.name, hold.blockKind)
+            assertEquals(3 * 3_600_000L, hold.delayMillis)
+            assertEquals(updated + 3 * 3_600_000L, hold.notBeforeMillis)
+            assertEquals(hold, ReplayDeliveryMetadata.decode(hold.row()))
+            assertNull(ReplayQueueStore.claim(tx, owner, claim.authorization, hold.notBeforeMillis - 1, 1) { true })
+            val again = checkNotNull(ReplayQueueStore.claim(tx, owner, claim.authorization, hold.notBeforeMillis, 1) { true })
+            assertArrayEquals(claim.row.prepared.copyBytes(), again.row.prepared.copyBytes())
+            Unit
+        } }
     }
     @Test fun `a held chunk stops its recording while a pending retry does not`() {
         for (held in listOf(true, false)) Rig().use { rig ->
@@ -597,6 +652,9 @@ class ReplayDeliveryTest {
     private fun ack(request: PreparedReplayRequest)=JSONObject().put("schemaVersion",2).put("requestId",request.requestId)
         .put("replayId",request.replayId).put("chunkId",request.chunkId).put("sequence",request.sequence).put("result","accepted").toString().toByteArray()
     private fun classify(body:ByteArray,request:PreparedReplayRequest)=ReplayResponseClassifier.classify(ReplayTransportResponse(200,body),request,0,1000)
+    private fun conflict(requestId: String, scope: String) = JSONObject().put("schemaVersion", 2).put("requestId", requestId)
+        .put("status", 409).put("code", "replay-identity-conflict").put("disposition", "permanent").put("conflictScope", scope)
+        .toString().toByteArray()
     private fun error(status:Int,requestId:String)=JSONObject().put("schemaVersion",1).put("status",status).put("requestId",requestId)
         .put("code","request-refused").put("disposition",if(status==413) "retry-after-reduction" else "retryable").put("message","refused").toString().toByteArray()
     private class Rig(private val proven: Boolean = true, private val countLimit: Int = 100, private val allowProfile: Boolean = true, private val maximumExpiredSession: Boolean = false, private val supported: Set<String> = setOf(ReplayFixtures.GENERATION, "replay-v2-generation-2")) : AutoCloseable {
