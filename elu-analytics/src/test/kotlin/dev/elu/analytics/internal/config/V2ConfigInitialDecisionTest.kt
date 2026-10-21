@@ -45,8 +45,9 @@ import org.junit.Test
 private const val WAIT_SECONDS = 30L
 
 /**
- * The initial configuration decision through the AndroidStandaloneStack composition: the driver
- * listener updates the gate synchronously, then the runtime and facade are notified.
+ * The initial configuration decision, and the foreground re-fetch after the app returns from the
+ * background, through the AndroidStandaloneStack composition: the driver listener updates the gate
+ * synchronously, then the runtime and facade are notified.
  */
 class V2ConfigInitialDecisionTest {
     @Test fun `offline cold start keeps calls held and stores them in call order after recovery`() = Rig().use { rig ->
@@ -366,6 +367,110 @@ class V2ConfigInitialDecisionTest {
         assertEquals(emptyMap<EluFacadeDropReason, Int>(), rig.diagnostics().dropped)
     }
 
+    @Test fun `calls made on resume are held until the foreground re-fetch delivers config`() = Rig().use { rig ->
+        rig.start()
+        rig.facade.capture("before-background", null, Date(rig.clock.wall)); rig.settle()
+        rig.background()
+        rig.clock.advance(60_000)
+        val resumedAt = rig.clock.wall
+        rig.foreground("MainActivity")
+        rig.facade.capture("in-on-resume", null, Date(resumedAt))
+        rig.settle()
+        // The re-fetch is still in flight: nothing is recorded or dropped yet.
+        assertEquals(listOf("event:before-background", "event:Application Backgrounded"), rig.queued())
+        assertEquals(3, rig.diagnostics().buffered)
+        assertEquals(emptyMap<EluFacadeDropReason, Int>(), rig.diagnostics().dropped)
+        assertNull(rig.facade.distinctId())
+
+        rig.fetch()
+        assertEquals(EluFacadeState.Enabled, rig.facade.state())
+        assertEquals(listOf("event:before-background", "event:Application Backgrounded", "event:Application Opened",
+            "event:MainActivity", "event:in-on-resume"), rig.queued())
+        val opened = rig.events().single { it.name == StandaloneRuntime.APPLICATION_OPENED_EVENT }
+        assertEquals(true, opened.properties[StandaloneRuntime.FROM_BACKGROUND_PROPERTY])
+        assertEquals(RuntimeWallTimestamps.rfc3339(resumedAt), opened.occurredAt)
+        assertEquals(0, rig.diagnostics().buffered)
+        assertEquals(emptyMap<EluFacadeDropReason, Int>(), rig.diagnostics().dropped)
+        assertEquals(listOf("Foreground configuration: 3 held calls; dropped: none"), rig.logs)
+    }
+
+    @Test fun `a failed foreground re-fetch keeps resume calls held until a retry succeeds`() = Rig().use { rig ->
+        rig.start()
+        rig.facade.capture("before-background", null, Date(rig.clock.wall)); rig.settle()
+        rig.background()
+        rig.offline = true
+        rig.foreground("MainActivity")
+        rig.fetch()
+        assertEquals(EluFacadeState.Pending, rig.facade.state())
+        assertEquals(2, rig.diagnostics().buffered)
+        assertEquals(listOf("event:before-background", "event:Application Backgrounded"), rig.queued())
+
+        rig.offline = false
+        rig.retry()
+        assertEquals(EluFacadeState.Enabled, rig.facade.state())
+        assertEquals(listOf("event:before-background", "event:Application Backgrounded", "event:Application Opened",
+            "event:MainActivity"), rig.queued())
+        assertEquals(emptyMap<EluFacadeDropReason, Int>(), rig.diagnostics().dropped)
+    }
+
+    @Test fun `a disabled document on the foreground re-fetch discards the resume calls`() = Rig().use { rig ->
+        rig.start()
+        rig.facade.capture("before-background", null, Date(rig.clock.wall)); rig.settle()
+        rig.background()
+        rig.body = JSONObject().put("schemaVersion", 2).put("revision", "disabled").put("status", "disabled")
+            .put("reason", "test").put("issuedAt", "2026-08-05T00:00:30.000Z")
+            .put("expiresAt", "2026-08-05T00:05:00.000Z").toString()
+        rig.foreground("MainActivity")
+        rig.fetch()
+        assertEquals(EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED), rig.facade.state())
+        assertEquals(listOf("event:before-background", "event:Application Backgrounded"), rig.queued())
+        assertEquals(mapOf(EluFacadeDropReason.UNAUTHORIZED to 2), rig.diagnostics().dropped)
+        assertEquals(listOf("Foreground configuration: 2 held calls; dropped: UNAUTHORIZED=2"), rig.logs)
+    }
+
+    @Test fun `consent during the foreground re-fetch follows the launch rules and a held reset still runs`() = Rig().use { rig ->
+        rig.start()
+        rig.facade.identify("user-1", null)
+        rig.facade.capture("before-background", null, Date(rig.clock.wall)); rig.settle()
+        rig.background()
+        rig.foreground("MainActivity")
+        rig.facade.capture("before-opt-out", null, Date(rig.clock.wall))
+        rig.facade.reset()
+        rig.facade.optOut()
+        rig.facade.capture("during-opt-out", null, Date(rig.clock.wall))
+        rig.facade.optIn(null, null)
+        rig.settle() // opt-in lifts the denial once the lane has applied it
+        rig.facade.capture("after-opt-in", null, Date(rig.clock.wall))
+        rig.settle()
+        assertEquals(EluFacadeState.Pending, rig.facade.state())
+        // Opt-out discarded the three calls held before it but kept the held reset.
+        assertEquals(2, rig.diagnostics().buffered)
+
+        rig.fetch()
+        assertEquals(EluFacadeState.Enabled, rig.facade.state())
+        val names = rig.events().map { it.name }
+        assertTrue(names.toString(), "after-opt-in" in names)
+        for (denied in listOf(StandaloneRuntime.APPLICATION_OPENED_EVENT, "MainActivity", "before-opt-out", "during-opt-out"))
+            assertTrue(denied, denied !in names)
+        val event = rig.events().single { it.name == "after-opt-in" }
+        assertNull(event.identity.userId)
+        assertNotEquals("anon_initial", event.identity.anonymousId)
+        assertEquals(mapOf(EluFacadeDropReason.OPTED_OUT to 4), rig.diagnostics().dropped)
+        assertEquals(listOf("Opt-out: 3 held calls; dropped: OPTED_OUT=3",
+            "Foreground configuration: 2 held calls; dropped: none"), rig.logs)
+    }
+
+    @Test fun `a foreground signal while config is still current does not hold calls`() = Rig().use { rig ->
+        rig.start()
+        rig.facade.nativeReplayLifecycleChanged(false)
+        rig.facade.nativeReplayLifecycleChanged(true)
+        rig.facade.capture("current", null, Date(rig.clock.wall))
+        rig.settle()
+        assertEquals(EluFacadeState.Enabled, rig.facade.state())
+        assertEquals(listOf("event:current"), rig.queued())
+        assertTrue(rig.logs.isEmpty())
+    }
+
     private class Rig(
         deviceInEu: Boolean = false,
         optedOutAtStart: Boolean = false,
@@ -419,6 +524,21 @@ class V2ConfigInitialDecisionTest {
         fun settle() { facade.settled().get(WAIT_SECONDS, TimeUnit.SECONDS) }
         fun fetch() { worker.runNext(); drainNotifications(); settle() }
         fun start() { driver.start(); fetch() }
+        /** AndroidStandaloneStack's background callback, in its order, fully processed. */
+        fun background() {
+            facade.nativeReplayLifecycleChanged(false)
+            checkNotNull(runtime.applicationBackgrounded(driver, RuntimeWallTimestamps.rfc3339(clock.wall))).get(WAIT_SECONDS, TimeUnit.SECONDS)
+            drainNotifications(); settle()
+        }
+        /** AndroidStandaloneStack's foreground callback, in its order, before the re-fetch returns. */
+        fun foreground(screen: String) {
+            facade.nativeReplayLifecycleChanged(true)
+            driver.onForeground()
+            runtime.markForegrounded()
+            facade.capture(StandaloneRuntime.APPLICATION_OPENED_EVENT,
+                mapOf(StandaloneRuntime.FROM_BACKGROUND_PROPERTY to true), Date(clock.wall))
+            facade.screen(screen, null, RuntimeWallTimestamps.rfc3339(clock.wall))
+        }
         /** Fires the backoff retry the failed fetch scheduled. */
         fun retry() { scheduler.fireAll(); fetch() }
         fun diagnostics(): EluFacadeDiagnostics = facade.diagnostics().get(WAIT_SECONDS, TimeUnit.SECONDS)

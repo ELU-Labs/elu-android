@@ -105,10 +105,15 @@ super properties set before them; any other validated result discards them.
 not restore them. Operations made while opted out, including under an opt-out
 saved by an earlier launch, are never held. Each release or discard of held
 operations logs one debug line with counts by reason.
-This pre-initialization buffer is not a durable offline queue: a process that
-ends before configuration arrives loses its held operations. Feature-flag
-reload commands are not replayed from that buffer. Invalid or unavailable
-operations return safe facade defaults.
+Moving to the background withdraws the configuration, and returning to the
+foreground fetches it again. Operations made from the return until that fetch
+delivers a validated document are held the same way, with the same limit and
+consent rules. This includes the app-open and screen events the SDK records on
+return. A failed fetch keeps them held while fetches retry.
+This buffer is not a durable offline queue: a process that ends before
+configuration arrives loses its held operations. Feature-flag reload commands
+are not replayed from that buffer. Invalid or unavailable operations return safe
+facade defaults.
 
 ## Identity, properties and consent
 
@@ -325,10 +330,13 @@ backoff, whatever the response body. When the body is ELU's error object, its
 that upload endpoint. For any other body, a valid `Retry-After` is honoured up to
 five minutes, and a missing or invalid one is ignored. After a temporary failure,
 replay uploads wait up to a minute before the next recording is tried. `401` and
-`403` stop delivery of that request, and a validated replay `409` identity
-conflict stops that chunk permanently. Other unexpected replay responses hold the
-chunk: the same bytes are offered again after one hour to one day, until the chunk
-expires seven days after capture. While the first undelivered chunk of a
+`403` stop delivery of that request. In declared-region replay, a validated `409`
+conflict or `413` size refusal stops that recording permanently. Other unexpected
+replay responses, including a `409` in Views replay, even with a validated
+identity-conflict body, hold the chunk: the same bytes are offered again after one
+hour to one day, until the chunk expires seven days after capture. A Views replay
+chunk that an earlier version stopped after a `409` is held the same way from the
+first upload attempt after the update. While the first undelivered chunk of a
 recording is held or refused, new chunks for that recording are not stored, and a
 new recording starts only once the configuration is refreshed, the identity or
 analytics session changes, or the app is opened again.
@@ -438,6 +446,8 @@ does not resolve pending text futures; changed layouts invalidate that frame.
 Inputs stay masked in both profiles; images, WebViews and unsupported content
 are hidden. Text longer than 4096 UTF-8 bytes is not truncated into a partial
 capture. Unsupported rules fail closed through stronger masking or denial.
+A window with `FLAG_SECURE` set is recorded only as one "Content hidden" placeholder,
+with no layout, text or touches; the flag is checked again on every capture.
 
 `maskView(view)` strengthens masking for that view and descendants.
 `blockView(view)` excludes their content and descendants while retaining a

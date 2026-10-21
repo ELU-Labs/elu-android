@@ -170,9 +170,12 @@ or revoked, the held calls are discarded, later event calls are no-ops, and no
 analytics events or replay leave the device. `Elu.optOut()` discards held
 calls; a held `reset()` still applies. Calls made while opted out, including
 under an opt-out saved in an earlier launch, are never held, so a later
-`Elu.optIn()` does not record them. Held calls are not saved to disk: if the
-app process ends before config arrives, they are lost. ELU config fetches
-continue so a re-enabled site can recover.
+`Elu.optIn()` does not record them. The same hold applies each time the app
+returns to the foreground: the SDK fetches config again, and calls made until it
+arrives, including the app-open and screen events the SDK records on return, are
+held under the same rules. Held calls are not saved to disk: if the app process
+ends before config arrives, they are lost. ELU config fetches continue so a
+re-enabled site can recover.
 
 Dev override for the config endpoint:
 
@@ -733,6 +736,8 @@ readable when it is plain, fully visible, and untransformed. Styled, transformed
 clipped, transparent and custom text remain masked. Text is limited to 4096 UTF-8
 bytes per view; larger values become a placeholder. Input values, images,
 WebViews and unsupported/custom views stay hidden. All-text mode masks ordinary text too.
+A window with `FLAG_SECURE` set is recorded only as one "Content hidden" placeholder,
+with no layout, text or touches, for as long as the flag stays set.
 The same checks apply to exact AppCompat `AppCompatTextView`, `AppCompatButton`,
 `AppCompatCheckBox`, `AppCompatRadioButton`, `AppCompatToggleButton` and
 `AppCompatCheckedTextView` classes. Their custom subclasses remain masked. Text

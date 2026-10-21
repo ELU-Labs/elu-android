@@ -488,20 +488,24 @@ class NativeReplayCompositionTest {
         assertEquals(access.watches.get(), access.closes.get())
     } }
 
-    @Test fun `a recording ended behind its held chunk is not replaced until the session changes`() = Rig().use { rig -> MainAccess().use { access ->
-        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
-        val platform = Platform(rig, access)
-        // Hold the first durable chunk as if its upload got an unexpected response.
-        rig.afterReplayCommit = { rig.backing.connection().use { db -> db.transaction { tx ->
+    /** Hold the first durable chunk as if its upload got an unexpected response. */
+    private fun Rig.holdFirstChunk() {
+        afterReplayCommit = { backing.connection().use { db -> db.transaction { tx ->
             val header = ReplayQueueStore.headers(tx).single()
             tx.putReplayRow(ReplayDeliveryMetadata(header.ordinal, header.digest, ReplayDeliveryState.BLOCKED,
                 UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1, delayMillis = REPLAY_PROTOCOL_HOLD_MIN_MILLIS,
-                notBeforeMillis = rig.clock.wall + REPLAY_PROTOCOL_HOLD_MIN_MILLIS, blockKind = ReplayBlockKind.PROTOCOL.name,
+                notBeforeMillis = clock.wall + REPLAY_PROTOCOL_HOLD_MIN_MILLIS, blockKind = ReplayBlockKind.PROTOCOL.name,
                 credentialWitness = "sha256:" + "b".repeat(64), scopeWitness = "sha256:" + "c".repeat(64),
                 protocolGeneration = NativeReplayProtocol.V1.generation).row())
             val state = checkNotNull(ReplayQueueStore.state(tx))
             tx.putReplayRow(state.copy(deliveryMetadataCount = (state.deliveryMetadataCount ?: 0L) + 1).row())
         } } }
+    }
+
+    @Test fun `a recording ended behind its held chunk is not replaced until the session changes`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access)
+        rig.holdFirstChunk()
         platform.onPause = { withdrawn -> rig.advance(); !withdrawn.await(5, TimeUnit.MILLISECONDS) }
         val owner = composition(rig, life, platform)
         try {
@@ -527,6 +531,34 @@ class NativeReplayCompositionTest {
             assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
             assertEquals(2, platform.factories.get())
         } finally { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
+    } }
+
+    @Test fun `a forced reevaluation cannot replace a held chunk recording before its completion callback runs`() = Rig().use { rig -> MainAccess().use { access ->
+        rig.minimum(); rig.activate(); val life = NativeReplayLifecycle(access); life.resumed(access.activity)
+        val platform = Platform(rig, access); val ticks = platform.manualTicks(); rig.holdFirstChunk()
+        val owner = composition(rig, life, platform)
+        val callbackEntered = CountDownLatch(1); val releaseCallback = CountDownLatch(1)
+        try {
+            owner.ready().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            assertEquals(NativeReplayCompositionEvaluation.ACTIVE, owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS))
+            awaitCondition("first chunk held") { rig.rows().size == 1 }
+            val original = owner.currentCapture()
+            // Registered after the composition's own completion callback, so SdkFuture runs it first. The
+            // capture thread then stays in notification: the result is published, its callback has not run.
+            val held = original.finished().whenComplete { _, _ ->
+                callbackEntered.countDown(); check(releaseCallback.await(WAIT_SECONDS, TimeUnit.SECONDS))
+            }
+            rig.advance(10); ticks.release()
+            assertTrue(callbackEntered.await(WAIT_SECONDS, TimeUnit.SECONDS))
+            assertEquals(NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED, original.finished().get())
+            assertNull(owner.diagnostic())
+            // A forced reevaluation (lifecycle change, start) for the same source, identity and session.
+            assertEquals(NativeReplayCompositionEvaluation.INACTIVE, owner.reevaluate(force = true).get(WAIT_SECONDS, TimeUnit.SECONDS))
+            assertFalse(owner.hasLiveCapture()); assertEquals(1, platform.factories.get())
+            releaseCallback.countDown(); held.get(WAIT_SECONDS, TimeUnit.SECONDS)
+            owner.reevaluate().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            assertFalse(owner.hasLiveCapture()); assertEquals(1, platform.factories.get()); assertEquals(1, rig.rows().size)
+        } finally { releaseCallback.countDown(); owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) }
     } }
 
     @Test fun `unknown collection failure is not retried by an ordinary same identity hint`() = Rig().use { rig -> MainAccess().use { access ->
