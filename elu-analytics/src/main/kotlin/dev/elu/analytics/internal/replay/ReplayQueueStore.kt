@@ -397,6 +397,13 @@ internal object ReplayQueueStore {
         var cooldown = false
         rows.forEach { header ->
             var d = delivery(tx, header.ordinal) ?: return@forEach
+            if (!raster && d.state == ReplayDeliveryState.BLOCKED && d.blockKind == ReplayBlockKind.CONFLICT.name) {
+                // An earlier version stored a wireframe 409 as final. It is a protocol hold from now on.
+                val hold = protocolHoldMillis(read(tx, header).prepared.startedAtInstant.toEpochMillisFloor(), now)
+                d = d.copy(blockKind = ReplayBlockKind.PROTOCOL.name, delayMillis = hold,
+                    notBeforeMillis = Math.addExact(maxOf(0L, now), hold))
+                tx.putReplayRow(d.row())
+            }
             if (d.state == ReplayDeliveryState.BLOCKED && (d.blockKind == ReplayBlockKind.UNAUTHORIZED.name ||
                 raster && d.blockKind in setOf(ReplayBlockKind.FORBIDDEN.name, ReplayBlockKind.PROTOCOL.name)) &&
                 d.credentialWitness == authorization.credentialWitness && d.scopeWitness == authorization.scopeWitness &&
@@ -554,7 +561,7 @@ internal object ReplayQueueStore {
     }
     /**
      * A wireframe protocol hold is not final. Once its wall-clock end passes, the same bytes are
-     * offered again until the row expires. Credential refusals and validated conflicts stay final.
+     * offered again until the row expires. This includes a 409. Credential refusals stay final.
      */
     internal fun isProtocolHold(d: ReplayDeliveryMetadata) =
         d.state == ReplayDeliveryState.BLOCKED && !d.raster && d.blockKind == ReplayBlockKind.PROTOCOL.name

@@ -325,10 +325,13 @@ backoff, whatever the response body. When the body is ELU's error object, its
 that upload endpoint. For any other body, a valid `Retry-After` is honoured up to
 five minutes, and a missing or invalid one is ignored. After a temporary failure,
 replay uploads wait up to a minute before the next recording is tried. `401` and
-`403` stop delivery of that request, and a validated replay `409` identity
-conflict stops that chunk permanently. Other unexpected replay responses hold the
-chunk: the same bytes are offered again after one hour to one day, until the chunk
-expires seven days after capture. While the first undelivered chunk of a
+`403` stop delivery of that request. In declared-region replay, a validated `409`
+conflict or `413` size refusal stops that recording permanently. Other unexpected
+replay responses, including a `409` in Views replay, even with a validated
+identity-conflict body, hold the chunk: the same bytes are offered again after one
+hour to one day, until the chunk expires seven days after capture. A Views replay
+chunk that an earlier version stopped after a `409` is held the same way from the
+first upload attempt after the update. While the first undelivered chunk of a
 recording is held or refused, new chunks for that recording are not stored, and a
 new recording starts only once the configuration is refreshed, the identity or
 analytics session changes, or the app is opened again.
