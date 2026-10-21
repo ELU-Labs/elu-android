@@ -170,9 +170,12 @@ or revoked, the held calls are discarded, later event calls are no-ops, and no
 analytics events or replay leave the device. `Elu.optOut()` discards held
 calls; a held `reset()` still applies. Calls made while opted out, including
 under an opt-out saved in an earlier launch, are never held, so a later
-`Elu.optIn()` does not record them. Held calls are not saved to disk: if the
-app process ends before config arrives, they are lost. ELU config fetches
-continue so a re-enabled site can recover.
+`Elu.optIn()` does not record them. The same hold applies each time the app
+returns to the foreground: the SDK fetches config again, and calls made until it
+arrives, including the app-open and screen events the SDK records on return, are
+held under the same rules. Held calls are not saved to disk: if the app process
+ends before config arrives, they are lost. ELU config fetches continue so a
+re-enabled site can recover.
 
 Dev override for the config endpoint:
 

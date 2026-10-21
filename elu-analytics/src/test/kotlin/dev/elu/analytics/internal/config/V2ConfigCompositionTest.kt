@@ -147,11 +147,13 @@ class V2ConfigCompositionTest {
             assertEquals(1L, pending.sequence)
             assertEquals(1, rig.sentEvents.size)
 
-            // The real foreground callback runs before the held HTTP refresh returns.
+            // The real foreground callback runs before the held HTTP refresh returns. Its
+            // Application Opened is held, not recorded, until the re-fetched configuration arrives.
+            val resumedAt = rig.clock.wall
             rig.facade.nativeReplayLifecycleChanged(true)
             rig.driver.onForeground(); rig.runtime.markForegrounded()
             rig.facade.capture(StandaloneRuntime.APPLICATION_OPENED_EVENT,
-                mapOf(StandaloneRuntime.FROM_BACKGROUND_PROPERTY to true), Date(rig.clock.wall))
+                mapOf(StandaloneRuntime.FROM_BACKGROUND_PROPERTY to true), Date(resumedAt))
             rig.settle()
             assertEquals(listOf(pending), rig.owner.peek(10, 100_000).get())
             assertEquals(1, rig.sentEvents.size)
@@ -161,19 +163,28 @@ class V2ConfigCompositionTest {
 
             assertTrue("same valid issuance must resume after transient background suspension",
                 rig.facade.state() is EluFacadeState.Enabled)
-            // No new capture, explicit flush, or scheduled timer after installation.
+            // No customer capture, explicit flush, or scheduled timer after installation.
             val drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
-            while (rig.owner.snapshot().get().queuedCount != 0 && System.nanoTime() < drainDeadline) Thread.sleep(1)
-            assertEquals(0, rig.owner.snapshot().get().queuedCount)
-            assertEquals(2L, rig.owner.snapshot().get().state.stream.nextSequence)
-            val delivered = rig.sentEvents.last()
-            assertEquals(2, rig.sentEvents.size)
+            while (rig.sentEvents.none { it.getString("eventId") == pending.recordId } && System.nanoTime() < drainDeadline) Thread.sleep(1)
+            val delivered = rig.sentEvents.single { it.getString("eventId") == pending.recordId }
             assertEquals(pending.recordId, delivered.getString("eventId"))
             assertEquals(pending.sequence, delivered.getLong("sequence"))
             assertEquals(pending.record.name, delivered.getString("name"))
             assertEquals(pending.record.occurredAt, delivered.getString("occurredAt"))
             assertEquals(pending.record.sessionId, delivered.getString("sessionId"))
             assertEquals(pending.record, RuntimeRecordCodec.decodeEvent(delivered.toString().encodeToByteArray()))
+            // The held Application Opened was recorded after the background event, with its call time.
+            val openedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS)
+            while (rig.owner.snapshot().get().queuedCount != 0 && System.nanoTime() < openedDeadline) {
+                rig.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS); Thread.sleep(10)
+            }
+            assertEquals(0, rig.owner.snapshot().get().queuedCount)
+            assertEquals(3L, rig.owner.snapshot().get().state.stream.nextSequence)
+            assertEquals(3, rig.sentEvents.size)
+            val opened = rig.sentEvents.single { it.getString("name") == StandaloneRuntime.APPLICATION_OPENED_EVENT }
+            assertEquals(2L, opened.getLong("sequence"))
+            assertEquals(Instant.ofEpochMilli(resumedAt), Instant.parse(opened.getString("occurredAt")))
+            assertTrue(opened.getJSONObject("properties").getBoolean(StandaloneRuntime.FROM_BACKGROUND_PROPERTY))
             rig.settleFlags()
             rig.facade.getFeatureFlag("variant"); rig.settle()
             assertEquals("a", rig.facade.getFeatureFlag("variant"))

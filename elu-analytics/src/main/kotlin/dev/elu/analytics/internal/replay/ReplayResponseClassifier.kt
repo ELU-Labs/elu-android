@@ -3,7 +3,7 @@ package dev.elu.analytics.internal.replay
 import dev.elu.analytics.internal.runtime.delivery.RetryAfterParser
 import dev.elu.analytics.internal.runtime.delivery.V1BatchResponseCodec
 
-/** Frozen v2 ACK/conflict plus the existing v1 operational error profile; no partial trust. */
+/** Frozen v2 ACK plus the existing v1 operational error profile; no partial trust. */
 internal object ReplayResponseClassifier {
     fun classify(response: ReplayTransportResponse, request: PreparedReplayRequest, now: Long,
         retryDelayMillis: Long): ReplayDeliveryOutcome {
@@ -22,6 +22,9 @@ internal object ReplayResponseClassifier {
         retryDelayMillis: Long): ReplayDeliveryOutcome {
         if (response.status == 401) return ReplayDeliveryOutcome.Blocked(ReplayBlockKind.UNAUTHORIZED)
         if (response.status == 403) return ReplayDeliveryOutcome.Blocked(ReplayBlockKind.FORBIDDEN)
+        // A wireframe 409, even with a valid identity-conflict body, is a protocol hold: nothing is
+        // deleted, and the queue offers the same bytes again after the hold until the row expires.
+        if (response.status == 409) return PROTOCOL_BLOCKED
         return try {
             val body = response.copyBody()
             if (response.status == 200) {
@@ -31,13 +34,6 @@ internal object ReplayResponseClassifier {
                     ack.string("replayId", 1, 256) == request.replayId && ack.string("chunkId", 1, 256) == request.chunkId &&
                     ack.number("sequence") == request.sequence && ack.string("result", 1, 16) == "accepted")
                 ReplayDeliveryOutcome.Accepted
-            } else if (response.status == 409) {
-                require(response.retryAfter == null)
-                val error = ReplayJson.parse(body).obj(setOf("schemaVersion", "requestId", "status", "code", "disposition", "conflictScope"))
-                require(error.number("schemaVersion") == 2L && error.number("status") == 409L &&
-                    error.string("requestId", 72, 72) == request.requestId && error.string("code", 1, 64) == "replay-identity-conflict" &&
-                    error.string("disposition", 1, 64) == "permanent" && error.string("conflictScope", 1, 16) in setOf("request", "chunk", "sequence"))
-                ReplayDeliveryOutcome.Blocked(ReplayBlockKind.CONFLICT)
             } else {
                 // The existing parser is strict/duplicate-safe and binds optional requestId.
                 V1BatchResponseCodec.validateTransportError(body, response.status, request.requestId)

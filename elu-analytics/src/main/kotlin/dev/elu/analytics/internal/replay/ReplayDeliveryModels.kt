@@ -96,6 +96,7 @@ internal sealed interface ReplayDeliveryOutcome {
     data class Retry(val delayMillis: Long, val endpointCooldown: Boolean = false) : ReplayDeliveryOutcome
     data class Blocked(val kind: ReplayBlockKind) : ReplayDeliveryOutcome
 }
+/** CONFLICT is only read back: an earlier version stored a wireframe 409 as final. */
 internal enum class ReplayBlockKind { UNAUTHORIZED, FORBIDDEN, PROTOCOL, CONFLICT,
     RASTER_REQUEST, RASTER_CHUNK, RASTER_SEQUENCE, RASTER_TOO_LARGE, RASTER_RETIRE }
 internal enum class ReplayDeliveryCommit { COMMITTED, STALE }
