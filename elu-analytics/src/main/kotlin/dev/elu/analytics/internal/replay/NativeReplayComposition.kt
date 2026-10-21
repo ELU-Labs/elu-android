@@ -103,6 +103,7 @@ internal class NativeReplayComposition(
     private var selection: NativeReplaySelection? = null // worker only; contains weak native references
     private var lastAttempt: IdentityKey? = null // a scheduling cache, never authority
     private var blockedWireframe: NativeReplayPreparedAuthority? = null
+    private var captureWireframe: NativeReplayPreparedAuthority? = null // worker only; the wireframe context of capture
     private var deadlineRetry: ScheduledFuture<*>? = null // monitor; at most one pending timer
     private var deadlineRetryToken: Any? = null // monitor; withdrawal defeats already-queued wakes
     private var captureAttempt: Any? = null // worker only; a prior completion cannot schedule for its replacement
@@ -343,15 +344,13 @@ internal class NativeReplayComposition(
                                     run {
                                         if (opened != null) rootRecoveryRequested = false
                                         synchronized(monitor) { capture = opened; captureDiagnosticPublished = false }
+                                        captureWireframe = wireframePrepared.takeIf { opened != null }
                                         if (!recordingEnabled()) opened?.stopRecording()
                                         nativeStartTrace.mark(NativeStartPhase.CAPTURE_OWNER_RESULT, opened != null)
                                         if (opened != null) {
-                                            val blockable = wireframePrepared
                                             opened.finished().whenComplete { outcome, _ ->
                                                 weak.get()?.let {
                                                     it.publishCompletedCapture(opened)
-                                                    if (outcome == NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED && blockable != null)
-                                                        synchronized(it.monitor) { it.blockedWireframe = blockable }
                                                     if (outcome == NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED)
                                                         it.retrySettledRoot(opened, key, attempt, original, acceptance)
                                                     else if (outcome == NativeReplayCaptureOutcome.SETTLED_PASS_DEADLINE)
@@ -396,11 +395,18 @@ internal class NativeReplayComposition(
     private fun retireFresh() {
         val old = synchronized(monitor) { capture }
         if (old != null) {
-            if (old.settleStop().awaitExact() == NativeReplayCaptureOutcome.QUARANTINED) quarantined = true
+            val outcome = old.settleStop().awaitExact()
+            if (outcome == NativeReplayCaptureOutcome.QUARANTINED) quarantined = true
             // An original completion listener may still be executing on another thread. Publish
             // before replacement, so that its late callback cannot lose or overwrite this result.
+            // Record a stop behind a held chunk on this worker, before release: its completion
+            // listener may not have run yet, and the next attempt checks it right after this.
+            val blockable = captureWireframe
+            if (outcome == NativeReplayCaptureOutcome.SETTLED_STREAM_BLOCKED && blockable != null)
+                synchronized(monitor) { blockedWireframe = blockable }
             publishCompletedCapture(old)
             synchronized(monitor) { if (capture === old) capture = null }
+            captureWireframe = null
         }
         authority?.stop()?.awaitExact()?.let { if (it != NativeReplayAuthorityStop.SETTLED) quarantined = true }
         val selected = selection

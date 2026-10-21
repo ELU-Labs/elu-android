@@ -9,6 +9,7 @@ import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.WindowManager
 import android.webkit.WebView
 import android.widget.EditText
 import android.widget.Button
@@ -266,6 +267,8 @@ internal class AndroidViewReplayCollector(
             val token = guardedNativeViewRead(profile, readGuard) { root.windowToken } ?: fail(NativeCollectionFailure.INVALID_ROOT)
             val rootParent = guardedNativeViewRead(profile, readGuard) { root.parent }
             val originalWindowDecor = guardedNativeViewRead(profile, readGuard) { root.rootView }
+            // Read on every pass: apps set and clear FLAG_SECURE while a window stays open.
+            val secureWindow = windowIsSecure(originalWindowDecor, readGuard)
             val density = guardedNativeViewRead(profile, readGuard) { root.resources.displayMetrics.density }.toDouble()
             if (!density.isFinite() || density <= 0) fail(NativeCollectionFailure.INVALID_ROOT)
             val rootWidth = guardedNativeViewRead(profile, readGuard) { root.width }
@@ -280,6 +283,42 @@ internal class AndroidViewReplayCollector(
             guardedNativeViewRead(profile, readGuard) { root.getLocationInWindow(origin) }
             val exactRoot = Bounds(0.0, 0.0, rootWidth.toDouble(), rootHeight.toDouble())
             if (pointQuery != null && pointQuery.projection.snapshot.viewport != viewport) fail(NativeCollectionFailure.TREE_CHANGED)
+            if (secureWindow) {
+                // A secure window is never wireframed. It becomes one blocked placeholder: no ancestor,
+                // descendant, text or touch target of the window is inspected or recorded.
+                if (guardedNativeViewRead(profile, readGuard) { root.rootView } !== originalWindowDecor ||
+                    guardedNativeViewRead(profile, readGuard) { root.width } != rootWidth ||
+                    guardedNativeViewRead(profile, readGuard) { root.height } != rootHeight) fail(NativeCollectionFailure.TREE_CHANGED)
+                if (pointQuery != null) {
+                    profile?.mark(NativeCollectorStage.SNAPSHOT_COMMIT)
+                    check()
+                    return fence.commit(pointQuery.projection.snapshot) { pointQuery.result = pointQuery.locations.map { null } }
+                }
+                val secureIssued = HashSet(issued)
+                val secureId = projections.firstOrNull { it.view.get() === root }?.id ?: run {
+                    profile?.mark(NativeCollectorStage.PROJECTION_ID); profile?.projection()
+                    guardedNativeViewRead(profile, readGuard) { newProjection() }
+                }.also {
+                    if (secureIssued.size >= maximumProjectionIds || !secureIssued.add(it)) fail(NativeCollectionFailure.PROJECTION_LIMIT)
+                }
+                val wireRoot = exactRoot.wire(density)
+                val placeholder = NativeMaskedNode(secureId, NativeMaskedKind.Placeholder, wireRoot,
+                    containedClip(wireRoot, wireRoot, wireRoot), NativeStyle(backgroundColor = NativeSolidColor(255, 255, 255)))
+                if (retainTouchWitnesses && projectionGeneration == Long.MAX_VALUE) fail(NativeCollectionFailure.PROJECTION_LIMIT)
+                val secureSnapshot = NativeMaskedSnapshot(ordinal, timestamp, viewport, listOf(placeholder))
+                profile?.mark(NativeCollectorStage.SNAPSHOT_COMMIT)
+                check()
+                return fence.commit(secureSnapshot) {
+                    projections = listOf(Projection(WeakReference(root), secureId))
+                    issued = secureIssued
+                    if (retainTouchWitnesses) {
+                        projectionGeneration += 1
+                        touchProjection = NativeTouchProjection(projectionGeneration, secureSnapshot)
+                        touchRoot = WeakReference(root)
+                        touchTexts = emptyList()
+                    }
+                }
+            }
             val pointLocations = pointQuery?.locations?.map {
                 if (!it.windowX.isFinite() || !it.windowY.isFinite()) fail(NativeCollectionFailure.UNSUPPORTED_GEOMETRY)
                 (it.windowX - origin[0]) / density to (it.windowY - origin[1]) / density
@@ -636,6 +675,8 @@ internal class AndroidViewReplayCollector(
                     }
                 }
             }
+            // A View callback during this pass may have marked the window secure; discard the frame.
+            if (windowIsSecure(originalWindowDecor, readGuard)) fail(NativeCollectionFailure.TREE_CHANGED)
             // Projection/geometry callbacks may request new text or replace a layout. A frame
             // may publish only the same displayed text that passed the full visibility checks.
             for (observed in textObservations) {
@@ -667,6 +708,16 @@ internal class AndroidViewReplayCollector(
         } finally {
             collecting = false
         }
+    }
+
+    /**
+     * FLAG_SECURE from the window's current WindowManager parameters. Every attached window root
+     * carries them; anything else is an unknown window and refuses collection.
+     */
+    private fun windowIsSecure(windowRoot: View, check: () -> Unit): Boolean {
+        val parameters = guardedNativeViewRead(profile, check) { windowRoot.layoutParams } as? WindowManager.LayoutParams
+            ?: fail(NativeCollectionFailure.INVALID_ROOT)
+        return guardedNativeViewRead(profile, check) { parameters.flags } and WindowManager.LayoutParams.FLAG_SECURE != 0
     }
 
     private fun knownContainer(view: View): Boolean {

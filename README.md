@@ -733,6 +733,8 @@ readable when it is plain, fully visible, and untransformed. Styled, transformed
 clipped, transparent and custom text remain masked. Text is limited to 4096 UTF-8
 bytes per view; larger values become a placeholder. Input values, images,
 WebViews and unsupported/custom views stay hidden. All-text mode masks ordinary text too.
+A window with `FLAG_SECURE` set is recorded only as one "Content hidden" placeholder,
+with no layout, text or touches, for as long as the flag stays set.
 The same checks apply to exact AppCompat `AppCompatTextView`, `AppCompatButton`,
 `AppCompatCheckBox`, `AppCompatRadioButton`, `AppCompatToggleButton` and
 `AppCompatCheckedTextView` classes. Their custom subclasses remain masked. Text
