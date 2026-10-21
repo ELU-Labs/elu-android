@@ -856,17 +856,15 @@ class NativeReplayCompositionTest {
         } finally { release.countDown(); runCatching { owner.closeAndWait().get(WAIT_SECONDS, TimeUnit.SECONDS) } }
     } }
 
-    @Test fun `DIAG collected original root at the capture main hop settles without a root boundary`() {
-        val (outcome, factories) = mainHopChoreography(retain = false)
-        println("DIAG collected root: outcome=$outcome factories=$factories")
-        assertEquals(NativeReplayCaptureOutcome.SETTLED, outcome); assertEquals(1, factories)
+    private fun mainHopRecovers(retain: Boolean) {
+        val outcomes = List(5) { mainHopChoreography(retain) }
+        println("DIAG retainReplacedRoots=$retain outcomes=$outcomes")
+        assertEquals(List(5) { NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED to 2 }, outcomes)
     }
 
-    @Test fun `DIAG retained replaced root at the capture main hop recovers`() {
-        val (outcome, factories) = mainHopChoreography(retain = true)
-        println("DIAG retained root: outcome=$outcome factories=$factories")
-        assertEquals(NativeReplayCaptureOutcome.SETTLED_ROOT_CHANGED, outcome); assertEquals(2, factories)
-    }
+    @Test fun `DIAG pre-fix fixture without retained roots main-hop root swap recovers`() = mainHopRecovers(retain = false)
+
+    @Test fun `DIAG fixed fixture with retained roots main-hop root swap recovers`() = mainHopRecovers(retain = true)
 
     @Test fun `DIAG root swap tests under GC pressure`() {
         val stop = AtomicBoolean(false)
