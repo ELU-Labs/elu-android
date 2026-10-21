@@ -44,7 +44,7 @@ class NativeAppCompatReplayTest {
             activity.setContentView(root)
         }
         try {
-            instrumentation.waitForIdleSync()
+            waitForMainIdle("after setting the AppCompat fixture content")
             var ready = false
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
             while (!ready && System.nanoTime() < deadline) {
@@ -57,7 +57,7 @@ class NativeAppCompatReplayTest {
             failure?.let { throw it }
         } finally {
             instrumentation.runOnMainSync { activity.finish() }
-            instrumentation.waitForIdleSync()
+            waitForMainIdle("after finishing NativeAppCompatTestActivity")
         }
     }
 
