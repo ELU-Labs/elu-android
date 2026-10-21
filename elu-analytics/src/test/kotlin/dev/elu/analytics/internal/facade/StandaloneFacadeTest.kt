@@ -41,6 +41,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
@@ -2300,9 +2301,145 @@ class StandaloneFacadeTest {
         assertTrue(h.records().isEmpty())
     }
 
+    @Test
+    fun `identify-type calls made while opted out with configuration current are discarded and never surface after opt in`() {
+        assertNoFailures(identityCallFailures("opted out", EluFacadeState.Disabled(EluFacadeDisabledReason.OPTED_OUT),
+            flagsStayAuthorized = false, enter = { h, _ -> h.facade.optOut() }, leave = { h, _ -> h.facade.optIn(null, null) }))
+    }
+
+    @Test
+    fun `identify-type calls under a disabled configuration are discarded and never surface once it is enabled again`() {
+        val disabled = reissuedConfig("config-disabled.json", "config-disabled-2", BLOCKED_AT)
+        assertNoFailures(identityCallFailures("disabled", EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED),
+            flagsStayAuthorized = false, enter = { h, _ -> h.facade.applyConfiguration(disabled) }, leave = ::resumeCapture))
+    }
+
+    @Test
+    fun `under a region block identity calls are discarded and person group and flag calls follow flag authorization`() {
+        val blocked = reissuedConfig("config-enabled.json", "config-region-2", BLOCKED_AT)
+        val withoutFlags = reissuedConfig("config-enabled.json", "config-region-3", BLOCKED_AT) { config ->
+            config.getJSONObject("features").put("flags", false)
+        }
+        assertNoFailures(
+            identityCallFailures("region", EluFacadeState.Disabled(EluFacadeDisabledReason.BLOCKED),
+                flagsStayAuthorized = true, enter = { h, inEu -> inEu.set(true); h.facade.applyConfiguration(blocked) },
+                leave = ::resumeCapture) +
+                identityCallFailures("region without flags", EluFacadeState.Disabled(EluFacadeDisabledReason.BLOCKED),
+                    flagsStayAuthorized = false, enter = { h, inEu -> inEu.set(true); h.facade.applyConfiguration(withoutFlags) },
+                    leave = ::resumeCapture),
+        )
+    }
+
+    private class IdentityCall(val name: String, val flagContext: Boolean, val call: (StandaloneFacade) -> Unit)
+
+    /** Every identify-type call, each with an effect on the seeded state. */
+    private fun identityCalls(): List<IdentityCall> = listOf(
+        IdentityCall("identify", false) { it.identify(MARKER, mapOf("marker" to MARKER), mapOf("firstMarker" to MARKER)) },
+        IdentityCall("alias", false) { it.alias(MARKER) },
+        IdentityCall("register", false) { it.register(mapOf("marker" to MARKER)) },
+        IdentityCall("registerOnce", false) { it.registerOnce(mapOf("onceMarker" to MARKER), null) },
+        IdentityCall("unregister", false) { it.unregister("plan") },
+        IdentityCall("setPersonProperties", true) { it.setPersonProperties(mapOf("marker" to MARKER), mapOf("firstMarker" to MARKER)) },
+        IdentityCall("group", true) { it.group("team", MARKER, mapOf("marker" to MARKER)) },
+        IdentityCall("resetGroups", true) { it.resetGroups() },
+        IdentityCall("setPersonPropertiesForFlags", true) { it.setPersonPropertiesForFlags(mapOf("marker" to MARKER)) },
+        IdentityCall("resetPersonPropertiesForFlags", true) { it.resetPersonPropertiesForFlags() },
+        IdentityCall("setGroupPropertiesForFlags", true) { it.setGroupPropertiesForFlags("company", mapOf("marker" to MARKER)) },
+        IdentityCall("resetGroupPropertiesForFlags", true) { it.resetGroupPropertiesForFlags("company") },
+    )
+
+    /**
+     * Seeds identity, super property, group and flag context under current configuration, enters
+     * the condition, makes one identify-type call and checks what it stored. A discarded call
+     * changes nothing, and once collection resumes no event, mutation or flag request carries it.
+     * With [flagsStayAuthorized], person, group and flag-context calls instead change the flag
+     * context and nothing is queued. Returns one message per call that failed.
+     */
+    private fun identityCallFailures(
+        condition: String,
+        expectedState: EluFacadeState,
+        flagsStayAuthorized: Boolean,
+        enter: (Harness, java.util.concurrent.atomic.AtomicBoolean) -> Unit,
+        leave: (Harness, java.util.concurrent.atomic.AtomicBoolean) -> Unit,
+    ): List<String> = identityCalls().mapNotNull { case ->
+        try { assertIdentityCallWhile(case, condition, expectedState, flagsStayAuthorized, enter, leave); null }
+        catch (failure: AssertionError) { failure.message ?: "$condition ${case.name} failed" }
+    }
+
+    private fun assertNoFailures(failures: List<String>) {
+        if (failures.isNotEmpty()) fail(failures.joinToString("\n"))
+    }
+
+    private fun assertIdentityCallWhile(
+        case: IdentityCall,
+        condition: String,
+        expectedState: EluFacadeState,
+        flagsStayAuthorized: Boolean,
+        enter: (Harness, java.util.concurrent.atomic.AtomicBoolean) -> Unit,
+        leave: (Harness, java.util.concurrent.atomic.AtomicBoolean) -> Unit,
+    ) {
+        val name = "$condition ${case.name}"
+        val inEu = java.util.concurrent.atomic.AtomicBoolean(false)
+        val h = harness(deviceInEuTimezone = { inEu.get() })
+        h.facade.applyConfiguration(config())
+        h.facade.identify("member", null)
+        h.facade.register(mapOf("plan" to "free"))
+        h.facade.group("company", "acme", mapOf("tier" to "free"))
+        h.facade.setPersonPropertiesForFlags(mapOf("role" to "admin"))
+        h.facade.setGroupPropertiesForFlags("company", mapOf("seats" to 5))
+        h.settle()
+        enter(h, inEu); h.settle()
+        assertEquals(name, expectedState, h.facade.state())
+        val before = h.owner.snapshot().get().state
+        val queued = h.queued()
+        val dropped = h.diagnostics().dropped.values.sum()
+
+        case.call(h.facade); h.settle()
+        val after = h.owner.snapshot().get().state
+        assertEquals(name, queued, h.queued())
+        if (case.flagContext && flagsStayAuthorized) {
+            assertNotEquals(name, before.flagContext, after.flagContext)
+            assertEquals(name, dropped, h.diagnostics().dropped.values.sum())
+            return
+        }
+        assertEquals(name, before.identity, after.identity)
+        assertEquals(name, before.flagContext, after.flagContext)
+        assertEquals(name, dropped + 1, h.diagnostics().dropped.values.sum())
+
+        val requests = h.flagTransport.requests.size
+        leave(h, inEu); h.settle()
+        assertEquals(name, EluFacadeState.Enabled, h.facade.state())
+        h.facade.capture("after-resume", null, Date(NOW_MS)); h.settle()
+        val resumed = h.owner.snapshot().get().state
+        assertEquals(name, "member", resumed.identity.userId)
+        assertEquals(name, before.identity.superProperties, resumed.identity.superProperties)
+        assertEquals(name, before.identity.groups, resumed.identity.groups)
+        assertEquals(name, before.flagContext, resumed.flagContext)
+        // No identify, alias, person or group mutation reaches the queue, only the new event.
+        assertEquals(name, queued + "event:after-resume", h.queued())
+        val event = (h.records().last() as RuntimeQueuedRecord.Event).record
+        assertEquals(name, "member", event.identity.userId)
+        assertEquals(name, mapOf("company" to "acme"), event.groups)
+        assertEquals(name, "free", event.properties["plan"])
+        assertFalse(name, event.properties.containsKey("marker") || event.properties.containsKey("onceMarker"))
+        val sent = h.flagTransport.requests.drop(requests)
+        assertTrue(name, sent.isNotEmpty())
+        assertFalse(name, sent.any { it.toString().contains(MARKER) })
+    }
+
+    private fun resumeCapture(h: Harness, inEu: java.util.concurrent.atomic.AtomicBoolean) {
+        inEu.set(false)
+        h.facade.applyConfiguration(reissuedConfig("config-enabled.json", "config-resumed-4", RESUMED_AT))
+    }
+
+    /** A fixture issued again later under a new revision, so it supersedes an earlier document. */
+    private fun reissuedConfig(name: String, revision: String, issuedAt: String, change: (JSONObject) -> Unit = {}): String =
+        JSONObject(config(name)).put("revision", revision).put("issuedAt", issuedAt).also(change).toString()
+
     private fun harness(
         bufferLimit: Int = StandaloneFacade.PRE_INIT_BUFFER_LIMIT,
         deviceInEu: Boolean = false,
+        deviceInEuTimezone: () -> Boolean = { deviceInEu },
         wall: () -> Long = { NOW_MS },
         beforeOpen: () -> Unit = {},
         autoStart: Boolean = true,
@@ -2350,7 +2487,7 @@ class StandaloneFacadeTest {
                 siteKey = SITE_KEY,
                 wallClock = wall,
                 transportFactory = { transport },
-                deviceInEuTimezone = { deviceInEu },
+                deviceInEuTimezone = deviceInEuTimezone,
                 configurationGate = configurationGate,
             )
         val flagTransport = suppliedFlagTransport
@@ -2531,6 +2668,9 @@ class StandaloneFacadeTest {
         const val SITE_KEY = "elu_pk_test_facade"
         const val ISSUED = "2026-08-04T00:00:00.000Z"
         const val NOW = "2026-08-04T00:01:00.000Z"
+        const val BLOCKED_AT = "2026-08-04T00:00:30.000Z"
+        const val RESUMED_AT = "2026-08-04T00:00:45.000Z"
+        const val MARKER = "while-blocked"
         val NOW_MS: Long = Instant.parse(NOW).toEpochMilli()
     }
 }
