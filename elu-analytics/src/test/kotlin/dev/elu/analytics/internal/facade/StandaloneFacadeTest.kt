@@ -1856,7 +1856,10 @@ class StandaloneFacadeTest {
     }
 
     @Test fun `original inflight outcome cannot cross identity consent or source replacement`() {
-        for (change in listOf("identity", "consent", "source")) {
+        // An opt-out alone cannot prove the completion's own consent check: while opted out, flag
+        // authority is already gone. Opting back in before the lane runs restores that authority
+        // with the same identity, so only the completion's consent check can refuse it.
+        for (change in listOf("identity", "opt-out", "opt-out then opt-in", "source")) {
             val gate = dev.elu.analytics.internal.config.V2ConfigAuthorityGate()
             val body = config()
             gate.update(dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate(1) { consumer -> consumer(body); true })
@@ -1880,7 +1883,8 @@ class StandaloneFacadeTest {
                 h.facade.capture("quiet-before-restriction", null, Date(NOW_MS))
                 when (change) {
                     "identity" -> h.facade.reset()
-                    "consent" -> h.facade.optOut()
+                    "opt-out" -> h.facade.optOut()
+                    "opt-out then opt-in" -> { h.facade.optOut(); h.facade.optIn(null, null) }
                     else -> {
                         gate.update(dev.elu.analytics.internal.config.V2ConfigLifecycleUpdate(2) { consumer -> consumer(body); true })
                         h.facade.configurationChanged()
