@@ -55,15 +55,16 @@ class AndroidReplayPrivacyCoverageTest {
     }
 
     @After fun finishActivities() {
-        if (opened.isNotEmpty()) instrumentation.runOnMainSync { opened.forEach { it.finish() } }
-        instrumentation.waitForIdleSync()
+        if (opened.isEmpty()) return
+        instrumentation.runOnMainSync { opened.forEach { it.finish() } }
+        waitForMainIdle("after finishing the privacy fixture Activities")
     }
 
     private fun <T : Activity> open(type: Class<T>): T {
         val activity = type.cast(instrumentation.startActivitySync(Intent(instrumentation.context, type)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)))!!
         opened += activity
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after launching ${type.simpleName}")
         return activity
     }
 
@@ -74,7 +75,7 @@ class AndroidReplayPrivacyCoverageTest {
     }
 
     private fun await(message: String, condition: () -> Boolean) {
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("before waiting for: $message")
         var ready = false
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         while (!ready && System.nanoTime() < deadline) {

@@ -111,7 +111,7 @@ class AndroidNativeReplayPipelineTest {
             if (::web.isInitialized) { column.removeView(web); web.destroy() }
             activity.finish()
         }
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after finishing the pipeline fixture Activity")
     }
 
     private fun dp(value: Int) = kotlin.math.ceil(value * activity.resources.displayMetrics.density).toInt()
@@ -123,7 +123,7 @@ class AndroidNativeReplayPipelineTest {
     }
 
     private fun awaitSettled(message: String) {
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("before waiting for: $message")
         var ready = false
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         while (!ready && System.nanoTime() < deadline) {
