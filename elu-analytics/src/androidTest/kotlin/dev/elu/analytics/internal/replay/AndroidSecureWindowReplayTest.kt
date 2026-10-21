@@ -37,7 +37,7 @@ class AndroidSecureWindowReplayTest {
             Build.VERSION.SDK_INT >= 29)
         activity = instrumentation.startActivitySync(Intent(instrumentation.context, NativeCollectorTestActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after launching NativeCollectorTestActivity")
         // This private fixture selects a rectangular window. Production never changes host clipping.
         instrumentation.runOnMainSync { activity.window.decorView.clipToOutline = false }
     }
@@ -47,7 +47,7 @@ class AndroidSecureWindowReplayTest {
             activity.window.clearFlags(SECURE)
             activity.finish()
         }
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after finishing the secure-window fixture Activity")
     }
 
     private fun main(block: () -> Unit) {
@@ -201,7 +201,7 @@ class AndroidSecureWindowReplayTest {
             dialog.show()
         }
         try {
-            instrumentation.waitForIdleSync()
+            waitForMainIdle("after showing the secure Dialog")
             var ready = false
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
             while (!ready && System.nanoTime() < deadline) {

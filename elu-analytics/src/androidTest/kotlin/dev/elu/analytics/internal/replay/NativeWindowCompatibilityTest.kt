@@ -9,6 +9,7 @@ import android.util.Base64
 import java.security.MessageDigest
 import android.view.View
 import android.view.ViewOutlineProvider
+import android.view.ViewTreeObserver
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -20,6 +21,7 @@ import android.widget.TextView
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -35,14 +37,13 @@ class NativeWindowCompatibilityTest {
     private lateinit var activity: Activity
     private lateinit var root: LinearLayout
     private val controls = ArrayList<View>()
+    private val draws = AtomicInteger()
+    private var drawListener: ViewTreeObserver.OnDrawListener? = null
 
-    private fun main(block: () -> Unit) {
-        var failure: Throwable? = null
-        instrumentation.runOnMainSync { try { block() } catch (error: Throwable) { failure = error } }
-        failure?.let { throw it }
-    }
+    private fun main(block: () -> Unit) = runOnMainBounded("a NativeWindowCompatibilityTest step", block = block)
 
     @Before fun openOrdinaryWindow() {
+        // The androidx runner bounds this launch.
         activity = instrumentation.startActivitySync(Intent(instrumentation.context, NativeWindowCompatibilityTestActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         main {
@@ -56,20 +57,31 @@ class NativeWindowCompatibilityTest {
             controls += ProgressBar(activity)
             for (view in controls) root.addView(view, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 80))
             activity.setContentView(root)
+            drawListener = ViewTreeObserver.OnDrawListener { draws.incrementAndGet() }
+                .also { root.viewTreeObserver.addOnDrawListener(it) }
         }
-        instrumentation.waitForIdleSync()
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        // Never wait for an idle main queue while the spinner shows. On API 23 its animation runs on
+        // the main thread and can redraw every frame, so the queue never idles (a 50-minute CI hang).
+        // Wait, with a bound, for the facts the tests need instead.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(MAIN_THREAD_WAIT_SECONDS)
         var ready = false
         while (!ready && System.nanoTime() < deadline) {
-            main { ready = root.isAttachedToWindow && root.hasWindowFocus() && root.width > 0 && root.height > 0 }
+            main { ready = root.isAttachedToWindow && root.hasWindowFocus() && root.width > 0 && root.height > 0 && draws.get() > 0 }
             if (!ready) Thread.sleep(20)
         }
-        assertTrue("Actual default Activity must reach focused, attached and laid-out state", ready)
+        assertTrue("Actual default Activity must reach focused, attached, laid-out and drawn state", ready)
     }
 
     @After fun finishWindow() {
-        if (::activity.isInitialized) main { activity.finish() }
-        instrumentation.waitForIdleSync()
+        if (!::activity.isInitialized) return
+        main {
+            if (::root.isInitialized) drawListener?.let { root.viewTreeObserver.removeOnDrawListener(it) }
+            // Stop the spinner first, so neither this wait nor the next test's launch waits on a
+            // window that redraws every frame.
+            controls.forEach { if (it is ProgressBar) it.visibility = View.GONE }
+            activity.finish()
+        }
+        waitForMainIdle("after finishing NativeWindowCompatibilityTestActivity")
     }
 
     /** Geometry-only fixture diagnostics; sampling provider output is not cached render-outline proof. */
