@@ -118,7 +118,9 @@ internal class NativeWireframeV2Encoder(
     }
 
     private fun lawful(node: NativeMaskedNode): Boolean = maskingProfile.readsText &&
-        (node.kind === NativeMaskedKind.Rectangle || node.kind is NativeMaskedKind.ReadableText && node.kind.text.value != MASK) &&
+        // Mask-shaped text, including "", is indistinguishable from masked text on the wire.
+        (node.kind === NativeMaskedKind.Rectangle || node.kind is NativeMaskedKind.ReadableText && node.kind.text.value != MASK &&
+            !NativeMaskText.isMaskShaped(node.kind.text.value)) &&
         node.geometry == NativeGeometryKind.VISIBLE_CLIP && node.clip.width > 0 && node.clip.height > 0
 
     private fun target(point: NativeReplayTouchPoint, previous: State): LiveNode {
@@ -190,6 +192,14 @@ internal class NativeWireframeV2Encoder(
         val seen = HashSet<UUID>()
         for (node in frame.nodes) {
             nativeRequire(node.kind !is NativeMaskedKind.ReadableText || maskingProfile.readsText, NativeEncodingFailure.INVALID_TEXT)
+            // A masked kind can only ever carry its `*` shape, never content.
+            when (val kind = node.kind) {
+                is NativeMaskedKind.MaskedText -> nativeRequire(NativeMaskText.isMaskShaped(kind.text) &&
+                    NativeMaskText.utf8Bytes(kind.text) <= NativeMaskText.MAXIMUM_BYTES, NativeEncodingFailure.INVALID_TEXT)
+                is NativeMaskedKind.Input -> nativeRequire(NativeMaskText.isInputMask(kind.maskedValue) &&
+                    kind.maskedValue.length <= NativeMaskText.MAXIMUM_BYTES, NativeEncodingFailure.INVALID_TEXT)
+                NativeMaskedKind.Rectangle, is NativeMaskedKind.ReadableText, NativeMaskedKind.Placeholder -> Unit
+            }
             nativeRequire(seen.add(node.identity), NativeEncodingFailure.DUPLICATE_IDENTITY)
             val c = node.clip
             val b = node.bounds
@@ -203,7 +213,7 @@ internal class NativeWireframeV2Encoder(
     }
 
     private fun generatedNodeCost(kind: NativeMaskedKind): Int = when (kind) {
-        NativeMaskedKind.Text, is NativeMaskedKind.ReadableText, NativeMaskedKind.Placeholder -> 1
+        is NativeMaskedKind.MaskedText, is NativeMaskedKind.ReadableText, NativeMaskedKind.Placeholder -> 1
         NativeMaskedKind.Rectangle, is NativeMaskedKind.Input -> 0
     }
 
@@ -221,11 +231,11 @@ internal class NativeWireframeV2Encoder(
         if (n.geometry == NativeGeometryKind.LAYOUT_BOUNDS) fields += "geometry" to string("layout-bounds")
         when (val kind = n.kind) {
             NativeMaskedKind.Rectangle -> fields += "type" to string("rectangle")
-            NativeMaskedKind.Text -> fields.addAll(listOf("type" to string("text"), "text" to string(MASK)))
+            is NativeMaskedKind.MaskedText -> fields.addAll(listOf("type" to string("text"), "text" to string(kind.text)))
             is NativeMaskedKind.ReadableText -> fields.addAll(listOf("type" to string("text"), "text" to string(kind.text.value)))
             is NativeMaskedKind.Input -> fields.addAll(listOf("type" to string("input"),
                 "inputType" to string(if (kind.secure) "password" else "text"), "disabled" to Value.BooleanValue(true),
-                "value" to string(MASK)))
+                "value" to string(kind.maskedValue)))
             NativeMaskedKind.Placeholder -> fields.addAll(listOf("type" to string("placeholder"), "label" to string(PLACEHOLDER)))
         }
         val style = mutableListOf<Pair<String, Value>>()
@@ -292,6 +302,7 @@ internal class NativeWireframeV2Encoder(
         const val CODEC = "elu-native-wireframe-v2"
         const val MINIMUM_NODE_ID: Long = 10_000_000
         const val MAXIMUM_SAFE_INTEGER: Long = 9_007_199_254_740_991
+        /** The fixed word earlier versions sent for masked text. Text equal to it is never a touch target. */
         const val MASK = "[masked]"
         const val PLACEHOLDER = "Content hidden"
     }

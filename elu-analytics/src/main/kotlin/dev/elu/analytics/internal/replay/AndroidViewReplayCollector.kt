@@ -5,6 +5,9 @@ import android.os.Build
 import android.os.Looper
 import android.text.InputType
 import android.text.Layout
+import android.text.SpannableString
+import android.text.SpannableStringBuilder
+import android.text.SpannedString
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -160,6 +163,8 @@ internal data class NativeProjectedTouch(val projection: NativeTouchProjection, 
 /**
  * One-shot geometry collector. Authorized sensitive profiles read bounded text from closed framework/AppCompat
  * widgets after all inherited privacy restrictions; drawable appearance and accessibility data are never read.
+ * Masked text and input values enter snapshots only as their `*` shape: the displayed layout text and the
+ * input length are read transiently and never kept. Blocked content is never read.
  * Unknown rendering is an opaque placeholder. Continuous capture and permission belong to the owner.
  * Public transition-matrix/alpha observation is unavailable before API29; legacy framework transitions
  * remain a separate integration gate. Construction requires the native recorder authority.
@@ -426,51 +431,85 @@ internal class AndroidViewReplayCollector(
             fun masked(view: View) = rules.any { it.restriction == NativeViewRestriction.MASK && it.appliesTo(view) }
             val textObservations = ArrayList<TextObservation>()
             fun textKind(view: TextView, hidden: Boolean, remember: Boolean = true): NativeMaskedKind {
+                // Masked text keeps only its `*` shape: the displayed layout string is read here only to
+                // derive it and is never kept. Exact framework strings keep their whitespace; any other
+                // CharSequence is never called and becomes one `*` per laid-out unit. A point query reads
+                // no text, because a masked leaf is never a touch target whatever its shape.
+                fun maskedShape(): NativeMaskedKind {
+                    if (pointQuery != null) return NativeMaskedKind.MaskedText("")
+                    val layout = guardedNativeViewRead(profile, readGuard) { view.layout } ?: return NativeMaskedKind.MaskedText("")
+                    val text = guardedNativeViewRead(profile, readGuard) { layout.text } ?: return NativeMaskedKind.MaskedText("")
+                    val lines = guardedNativeViewRead(profile, readGuard) { layout.lineCount }
+                    val textType = text.javaClass
+                    if (textType !== String::class.java && textType !== SpannedString::class.java &&
+                        textType !== SpannableString::class.java && textType !== SpannableStringBuilder::class.java) {
+                        val end = if (lines < 1) 0 else guardedNativeViewRead(profile, readGuard) { layout.getLineEnd(lines - 1) }
+                        return NativeMaskedKind.MaskedText(NativeMaskText.maskInput(end))
+                    }
+                    val shape = guardedNativeViewRead(profile, readGuard) { NativeMaskText.maskText(text) }
+                    // An ellipsized layout replaces its hidden characters with an ellipsis and zero-width
+                    // fillers. Star that whole hidden range so its length shows, as with clipped text.
+                    var output: CharArray? = null
+                    var line = 0
+                    while (line < lines) {
+                        val lineStart = guardedNativeViewRead(profile, readGuard) { layout.getLineStart(line) }
+                        if (lineStart >= shape.length) break
+                        val count = guardedNativeViewRead(profile, readGuard) { layout.getEllipsisCount(line) }
+                        if (count > 0) {
+                            val first = lineStart + guardedNativeViewRead(profile, readGuard) { layout.getEllipsisStart(line) }
+                            val chars = output ?: shape.toCharArray().also { output = it }
+                            for (index in max(0, first) until min(chars.size, first + count)) chars[index] = NativeMaskText.STAR
+                        }
+                        line += 1
+                    }
+                    return NativeMaskedKind.MaskedText(output?.let(::String) ?: shape)
+                }
                 val type = view.javaClass
                 val supported = type in setOf(TextView::class.java, Button::class.java,
                     CheckBox::class.java, RadioButton::class.java, Switch::class.java, ToggleButton::class.java) ||
                     NativeAppCompatViewTypes.isText(type.name, type.superclass)
-                if (!maskingProfile.readsText || hidden || !supported) return NativeMaskedKind.Text
-                // Input classification happens before the first text getter, including a password
+                if (!maskingProfile.readsText || hidden || !supported) return maskedShape()
+                // Input classification happens before the first readable-text getter, including a password
                 // transformation installed on an otherwise ordinary framework TextView.
                 if (guardedNativeViewRead(profile, readGuard) { view.inputType } != InputType.TYPE_NULL ||
-                    guardedNativeViewRead(profile, readGuard) { view.transformationMethod } != null) return NativeMaskedKind.Text
+                    guardedNativeViewRead(profile, readGuard) { view.transformationMethod } != null) return maskedShape()
                 // The stock Material theme draws readable secondary text at alpha 0x8a.
                 // Keep transparent/faint strings private while accepting at least half-opacity
                 // text; view/ancestor opacity and full glyph layout remain separately guarded.
                 if (android.graphics.Color.alpha(guardedNativeViewRead(profile, readGuard) { view.currentTextColor }) < 128 ||
                     guardedNativeViewRead(profile, readGuard) { view.textSize } <= 0f ||
                     guardedNativeViewRead(profile, readGuard) { view.scrollX } != 0 ||
-                    guardedNativeViewRead(profile, readGuard) { view.scrollY } != 0) return NativeMaskedKind.Text
-                val layout = guardedNativeViewRead(profile, readGuard) { view.layout } ?: return NativeMaskedKind.Text
+                    guardedNativeViewRead(profile, readGuard) { view.scrollY } != 0) return maskedShape()
+                val layout = guardedNativeViewRead(profile, readGuard) { view.layout } ?: return NativeMaskedKind.MaskedText("")
                 val availableWidth = guardedNativeViewRead(profile, readGuard) { view.width - view.compoundPaddingLeft - view.compoundPaddingRight }
                 val availableHeight = guardedNativeViewRead(profile, readGuard) { view.height - view.compoundPaddingTop - view.compoundPaddingBottom }
-                if (guardedNativeViewRead(profile, readGuard) { layout.height } > availableHeight) return NativeMaskedKind.Text
+                if (guardedNativeViewRead(profile, readGuard) { layout.height } > availableHeight) return maskedShape()
                 val lines = guardedNativeViewRead(profile, readGuard) { layout.lineCount }
-                if (lines !in 1..NativeReplayText.MAXIMUM_UTF8_BYTES) return NativeMaskedKind.Text
+                if (lines !in 1..NativeReplayText.MAXIMUM_UTF8_BYTES) return maskedShape()
                 for (line in 0 until lines) if (guardedNativeViewRead(profile, readGuard) {
                         layout.getEllipsisCount(line) != 0 || layout.getLineWidth(line) > availableWidth
-                    }) return NativeMaskedKind.Text
+                    }) return maskedShape()
                 // Read only the existing displayed layout. AppCompatTextView.getText() can
                 // synchronously wait for a pending setTextFuture; capture must never consume it.
-                val text = guardedNativeViewRead(profile, readGuard) { layout.text } ?: return NativeMaskedKind.Text
+                val text = guardedNativeViewRead(profile, readGuard) { layout.text } ?: return NativeMaskedKind.MaskedText("")
                 if (pointQuery != null) {
-                    val original = priorText[view] ?: return NativeMaskedKind.Text
-                    val originalText = original.text.get() ?: return NativeMaskedKind.Text
+                    val original = priorText[view] ?: return maskedShape()
+                    val originalText = original.text.get() ?: return maskedShape()
                     // Identity-only access to the already-proven String; no methods/content are read.
-                    if (original.layout.get() !== layout || text !== originalText || text.javaClass !== String::class.java) return NativeMaskedKind.Text
+                    if (original.layout.get() !== layout || text !== originalText || text.javaClass !== String::class.java) return maskedShape()
                     if (remember) textObservations.add(TextObservation(view, layout, originalText, original.kind))
                     return original.kind
                 }
                 // Spans may replace or hide their underlying string. Never invoke custom
                 // CharSequence methods, even on an exact framework TextView.
-                if (text.javaClass !== String::class.java) return NativeMaskedKind.Text
+                if (text.javaClass !== String::class.java) return maskedShape()
                 val length = guardedNativeViewRead(profile, readGuard) { text.length }
-                if (length > NativeReplayText.MAXIMUM_UTF8_BYTES) return NativeMaskedKind.Placeholder
-                if (guardedNativeViewRead(profile, readGuard) { layout.getLineEnd(lines - 1) } < length) return NativeMaskedKind.Text
+                // Oversized readable text is masked as one unit rather than sending a prefix.
+                if (length > NativeReplayText.MAXIMUM_UTF8_BYTES) return maskedShape()
+                if (guardedNativeViewRead(profile, readGuard) { layout.getLineEnd(lines - 1) } < length) return maskedShape()
                 val detached = guardedNativeViewRead(profile, readGuard) { text.toString() }
                 val kind = try { NativeMaskedKind.ReadableText(NativeReplayText.read(detached)) }
-                    catch (_: NativeEncodingException) { return NativeMaskedKind.Placeholder }
+                    catch (_: NativeEncodingException) { return NativeMaskedKind.MaskedText(NativeMaskText.maskText(detached)) }
                 if (remember) textObservations.add(TextObservation(view, layout, text as String, kind))
                 return kind
             }
@@ -567,7 +606,9 @@ internal class AndroidViewReplayCollector(
                 val exactClass = view.javaClass
                 val kind = when {
                     localBlocked || view is ImageView || view is WebView -> NativeMaskedKind.Placeholder
-                    view is EditText -> NativeMaskedKind.Input(secureInput(guardedNativeViewRead(profile, readGuard) { view.inputType }))
+                    // Only the value's UTF-16 length is read, to draw one `*` per unit; a point query reads none.
+                    view is EditText -> NativeMaskedKind.Input(secureInput(guardedNativeViewRead(profile, readGuard) { view.inputType }),
+                        if (pointQuery != null) "" else NativeMaskText.maskInput(guardedNativeViewRead(profile, readGuard) { view.length() }))
                     view is TextView -> textKind(view, localMasked || g.bounds != clip.intersect(g.bounds).intersect(exactRoot))
                     exactClass === View::class.java || knownContainer -> NativeMaskedKind.Rectangle
                     else -> NativeMaskedKind.Placeholder
@@ -601,7 +642,7 @@ internal class AndroidViewReplayCollector(
                     // needs the full actual ancestor clip, even away from its layout rectangle.
                     val lawfulLeaf = !localBlocked && !localMasked && maskingProfile.readsText &&
                         (exactClass === View::class.java || kind is NativeMaskedKind.ReadableText &&
-                            kind.text.value != NativeWireframeV2Encoder.MASK) &&
+                            kind.text.value != NativeWireframeV2Encoder.MASK && !NativeMaskText.isMaskShaped(kind.text.value)) &&
                         geometryKind == NativeGeometryKind.VISIBLE_CLIP && encoded != null &&
                         encoded.geometry == NativeGeometryKind.VISIBLE_CLIP && encoded.kind === kind
                     for ((index, location) in pointLocations.withIndex()) {

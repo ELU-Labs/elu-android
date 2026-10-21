@@ -260,6 +260,11 @@ class PrivacyStateProjectorTest {
         val blocked = old.masking.copy(platformRules = old.masking.platformRules +
             V1PlatformMaskingRule(V1PrivacyPlatform.ANDROID, V1PlatformRuleAction.BLOCK, "unknown", "private"))
         assertFalse(policy.retention.mayRetain(profile, parsed.copy(privacy = old.copy(masking = blocked))))
+        // Chunks queued before an upgrade carry the earlier fixed-word profile and still retain by class.
+        val earlier = dev.elu.analytics.internal.replay.ReplayMaskingProfile.parse(
+            dev.elu.analytics.internal.replay.NativeMaskingProfileTest.TOKEN_BLANKET.toByteArray())
+        assertTrue(policy.retention.mayRetain(earlier, parsed))
+        assertFalse(policy.retention.mayRetain(earlier, parsed.copy(privacy = old.copy(masking = blocked))))
     }
 
     private fun input(

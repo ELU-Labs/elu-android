@@ -91,7 +91,9 @@ class AndroidSecureWindowReplayTest {
 
     private fun assertSecureBytes(encoded: String, vararg hidden: String) {
         assertTrue(encoded.contains(NativeWireframeEncoder.PLACEHOLDER))
-        assertFalse("A secure window has no masked text node", encoded.contains(NativeWireframeEncoder.MASK))
+        assertFalse("A secure window has no text node", encoded.contains("\"type\":\"text\""))
+        assertFalse("A secure window has no input node", encoded.contains("\"type\":\"input\""))
+        assertFalse("A secure window has no masked shape", encoded.contains("*"))
         for (value in hidden) assertFalse(value, encoded.contains(value))
     }
 
@@ -234,7 +236,7 @@ class AndroidSecureWindowReplayTest {
                 val (open, _) = capture(1, armed = false)
                 assertEquals(NativeMaskedKind.Rectangle, open.nodes.first().kind)
                 assertTrue("Cleared flag wireframes the Dialog again: ${open.nodes.map { it.kind }}",
-                    open.nodes.drop(1).any { it.kind is NativeMaskedKind.ReadableText || it.kind == NativeMaskedKind.Text })
+                    open.nodes.drop(1).any { it.kind is NativeMaskedKind.ReadableText || it.kind is NativeMaskedKind.MaskedText })
 
                 window.addFlags(SECURE)
                 val (again, againBytes) = capture(2, armed = true)

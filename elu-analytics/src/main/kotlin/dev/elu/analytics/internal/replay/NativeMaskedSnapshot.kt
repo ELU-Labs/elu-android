@@ -15,7 +15,7 @@ internal fun nativeRequire(allowed: Boolean, failure: NativeEncodingFailure) {
     if (!allowed) throw NativeEncodingException(failure)
 }
 
-/** Masked value boundary only: no View, raw text, URL, image, content description or CSS input. */
+/** Masked value boundary only: no View, original masked text or input value, URL, image, content description or CSS input. */
 internal data class NativeRect(val x: Double, val y: Double, val width: Double, val height: Double) {
     init {
         nativeRequire(listOf(x, y, width, height).all { it.isFinite() } && abs(x) <= 1_000_000 &&
@@ -66,13 +66,32 @@ internal class NativeReplayText private constructor(val value: String, val utf8B
     }
 }
 
+/** Masked kinds carry only their `*` shape; there is deliberately no original masked text or input value. */
 internal sealed interface NativeMaskedKind {
     data object Rectangle : NativeMaskedKind
-    data object Text : NativeMaskedKind
+    /** Already masked by [NativeMaskText.maskText]; never original text. */
+    data class MaskedText(val text: String) : NativeMaskedKind
     data class ReadableText(val text: NativeReplayText) : NativeMaskedKind
-    data class Input(val secure: Boolean) : NativeMaskedKind
+    /** Already masked by [NativeMaskText.maskInput]; never the value. */
+    data class Input(val secure: Boolean, val maskedValue: String) : NativeMaskedKind
     data object Placeholder : NativeMaskedKind
 }
+
+/** The exact string a kind puts on the wire, for size accounting. */
+internal val NativeMaskedKind.carriedText: String?
+    get() = when (this) {
+        is NativeMaskedKind.MaskedText -> text
+        is NativeMaskedKind.ReadableText -> text.value
+        is NativeMaskedKind.Input -> maskedValue
+        NativeMaskedKind.Rectangle, NativeMaskedKind.Placeholder -> null
+    }
+
+/** UTF-8 wire bytes of [carriedText], or 0 when the kind carries none. */
+internal val NativeMaskedKind.carriedUtf8Bytes: Int
+    get() = when (this) {
+        is NativeMaskedKind.ReadableText -> text.utf8Bytes
+        else -> carriedText?.let(NativeMaskText::utf8Bytes) ?: 0
+    }
 
 /** Closed descriptive geometry provenance; this is never capture permission. */
 internal enum class NativeGeometryKind { VISIBLE_CLIP, LAYOUT_BOUNDS }

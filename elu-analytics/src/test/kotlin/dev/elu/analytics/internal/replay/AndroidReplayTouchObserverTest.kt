@@ -157,20 +157,31 @@ class AndroidReplayTouchObserverTest {
         fun textFrame(ordinal: Long, timestamp: Long, text: String) = NativeMaskedSnapshot(ordinal, timestamp,
             NativeViewport(100, 100), listOf(NativeMaskedNode(id,
                 NativeMaskedKind.ReadableText(NativeReplayText.read(text)), bounds, bounds)))
-        val old = NativeTouchProjection(1, textFrame(0, 1000, "Ordinary"))
-        val core = NativeTouchObservationCore(); assertTrue(core.arm(old))
-        observe(core, old, NativeTouchAction.DOWN, 1000)
-        observe(core, old, NativeTouchAction.MOVE, 1100)
-        val next = NativeTouchProjection(2, textFrame(1, 1200, NativeWireframeV2Encoder.MASK))
-        val preceding = core.handoff(next, 1_200_000_000)
-        assertEquals(3, preceding.size); assertTrue(preceding.all { it.projection === old })
-        assertEquals(NativeReplayInteraction.Cancel(1200), preceding.last().interaction); assertFalse(core.active())
-        val encoder = NativeWireframeV2Encoder(maskingProfile = NativeMaskingProfile.sensitiveMask())
-        encoder.encode(listOf(NativeReplayV2Geometry(old.snapshot))) // Pure encoder state only, no commit proof.
-        val encoded = encoder.encode(preceding.map { it.interaction } + NativeReplayV2Geometry(next.snapshot))
-        assertEquals(4, encoded.eventCount)
-        observe(core, next, NativeTouchAction.MOVE, 1300); assertTrue(core.drain().isEmpty())
-        assertFalse(core.arm(next)); observe(core, next, NativeTouchAction.UP, 1400); assertTrue(core.arm(next))
+        // The fixed word earlier versions sent, and any mask-shaped text including "", is never a target.
+        for (sentinel in listOf(NativeWireframeV2Encoder.MASK, "********", "** \u3000*", "", " ")) {
+            val old = NativeTouchProjection(1, textFrame(0, 1000, "Ordinary"))
+            val core = NativeTouchObservationCore(); assertTrue(core.arm(old))
+            observe(core, old, NativeTouchAction.DOWN, 1000)
+            observe(core, old, NativeTouchAction.MOVE, 1100)
+            val next = NativeTouchProjection(2, textFrame(1, 1200, sentinel))
+            val preceding = core.handoff(next, 1_200_000_000)
+            assertEquals(sentinel, 3, preceding.size); assertTrue(preceding.all { it.projection === old })
+            assertEquals(NativeReplayInteraction.Cancel(1200), preceding.last().interaction); assertFalse(core.active())
+            val encoder = NativeWireframeV2Encoder(maskingProfile = NativeMaskingProfile.sensitiveMask())
+            encoder.encode(listOf(NativeReplayV2Geometry(old.snapshot))) // Pure encoder state only, no commit proof.
+            val encoded = encoder.encode(preceding.map { it.interaction } + NativeReplayV2Geometry(next.snapshot))
+            assertEquals(4, encoded.eventCount)
+            observe(core, next, NativeTouchAction.MOVE, 1300); assertTrue(core.drain().isEmpty())
+            assertFalse(core.arm(next)); observe(core, next, NativeTouchAction.UP, 1400); assertTrue(core.arm(next))
+        }
+        // Text with any character outside the mask shape stays a target across the handoff.
+        for (text in listOf("*a*", "\u200B", "** \u0085")) {
+            val old = NativeTouchProjection(1, textFrame(0, 1000, "Ordinary"))
+            val core = NativeTouchObservationCore(); assertTrue(core.arm(old))
+            observe(core, old, NativeTouchAction.DOWN, 1000)
+            val preceding = core.handoff(NativeTouchProjection(2, textFrame(1, 1200, text)), 1_200_000_000)
+            assertTrue(text, preceding.none { it.interaction is NativeReplayInteraction.Cancel }); assertTrue(core.active())
+        }
     }
 
     @Test fun `unarmed handoff cannot adopt precommit contact and stop creates only terminal cancel`() {

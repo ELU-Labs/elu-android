@@ -92,10 +92,16 @@ class AndroidViewReplayCollectorTest {
             }
         }
         add(root, transformed)
+        transformed.measure(View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(40, View.MeasureSpec.EXACTLY))
+        transformed.layout(20, 20, 100, 60)
         val snapshot = AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())
             .collect(root, 0, 1000, NativeCollectionFence(), { true }, false)
-        assertTrue(snapshot.nodes.any { it.kind == NativeMaskedKind.Text })
+        // Only the displayed (transformed) string's shape is kept, never the underlying value or its length.
+        assertTrue(snapshot.nodes.map { it.kind }.toString(), snapshot.nodes.any { it.kind == NativeMaskedKind.MaskedText("******") })
         assertFalse(snapshot.nodes.any { it.kind is NativeMaskedKind.ReadableText })
+        val bytes = NativeWireframeEncoder(maskingProfile = NativeMaskingProfile.sensitiveMask()).encode(listOf(snapshot)).bytes
+            .toString(Charsets.UTF_8)
+        assertFalse(bytes.contains("PRIVATE")); assertFalse(bytes.contains("Hidden"))
     }
 
     @Test fun sensitiveTextRemainsReadableWhileInputsAndBlockedDescendantsStayHidden() = main { root ->
@@ -225,15 +231,67 @@ class AndroidViewReplayCollectorTest {
         val label = TrapText(activity).apply { text = "PRIVATE_LABEL_MARKER"; hint = "PRIVATE_HINT_MARKER"; contentDescription = "PRIVATE_A11Y_MARKER" }
         val input = TrapInput(activity).apply { setText("PRIVATE_PASSWORD_MARKER"); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
         add(root, label); add(root, input, y = 80)
+        label.measure(View.MeasureSpec.makeMeasureSpec(80, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(40, View.MeasureSpec.EXACTLY))
+        label.layout(20, 20, 100, 60)
         label.armed = true; input.armed = true
         try {
+            // Masked text and input values carry only their `*` shape; no text getter is called.
             val captured = frame(root)
-            assertEquals(NativeMaskedKind.Text, captured.nodes[1].kind)
-            assertEquals(NativeMaskedKind.Input(true), captured.nodes[2].kind)
+            assertEquals(NativeMaskedKind.MaskedText("*".repeat("PRIVATE_LABEL_MARKER".length)), captured.nodes[1].kind)
+            assertEquals(NativeMaskedKind.Input(true, "*".repeat("PRIVATE_PASSWORD_MARKER".length)), captured.nodes[2].kind)
             val bytes = NativeWireframeEncoder().encode(listOf(captured)).bytes.toString(Charsets.UTF_8)
-            assertFalse(bytes.contains("PRIVATE_")); assertTrue(bytes.contains("[masked]"))
+            assertFalse(bytes.contains("PRIVATE")); assertFalse(bytes.contains("MARKER")); assertFalse(bytes.contains("[masked]"))
+            assertTrue(bytes.contains("\"value\":\"${"*".repeat(23)}\""))
             export("android-views-privacy-0.json", bytes.toByteArray())
         } finally { label.armed = false; input.armed = false }
+    }
+
+    @Test fun blanketMaskKeepsWhitespaceAndCountsUtf16Units() = main { root ->
+        fun laidOut(view: TextView, y: Int, width: Int = 400, height: Int = 40) = view.also {
+            add(root, it, y = y, width = width, height = height)
+            it.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY))
+            it.layout(20, y, 20 + width, y + height)
+        }
+        val label = laidOut(TextView(activity).apply { text = "Hi there\u00A0you\u0085!" }, 20)
+        val spanned = laidOut(TextView(activity).apply {
+            text = android.text.SpannableString("Total:\t42").apply {
+                setSpan(android.text.style.ForegroundColorSpan(Color.TRANSPARENT), 0, length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }, 70)
+        val field = EditText(activity).apply { setText("a\uD83D\uDE00 b") }; add(root, field, y = 120)
+        val empty = EditText(activity); add(root, empty, y = 170)
+        val area = EditText(activity).apply { setText("line one\nline two") }; add(root, area, y = 220)
+        val long = laidOut(TextView(activity).apply { text = "x".repeat(5_000) }, 270, height = 300)
+        val unmeasured = TextView(activity).apply { text = "PRIVATE_NEVER_LAID_OUT" }; add(root, unmeasured, y = 580, height = 10)
+        val snapshot = frame(root)
+        fun kind(view: View) = snapshot.nodes[root.indexOfChild(view) + 1].kind
+        assertEquals(NativeMaskedKind.MaskedText("** *****\u00A0*****"), kind(label))
+        assertEquals(NativeMaskedKind.MaskedText("******\t**"), kind(spanned))
+        assertEquals(NativeMaskedKind.Input(false, "*****"), kind(field))
+        assertEquals(NativeMaskedKind.Input(false, ""), kind(empty))
+        assertEquals(NativeMaskedKind.Input(false, "*".repeat(17)), kind(area))
+        assertEquals(NativeMaskedKind.MaskedText("*".repeat(4_096)), kind(long))
+        // A view that was never laid out draws nothing, so it has no shape.
+        assertEquals(NativeMaskedKind.MaskedText(""), kind(unmeasured))
+        val bytes = NativeWireframeEncoder().encode(listOf(snapshot)).bytes.toString(Charsets.UTF_8)
+        assertFalse(bytes.contains("PRIVATE")); assertFalse(bytes.contains("Total")); assertFalse(bytes.contains("line"))
+    }
+
+    @Test fun overlongReadableTextBecomesCappedStarsNotAPlaceholder() = main { root ->
+        fun laidOut(text: String, y: Int): TextView = TextView(activity).apply {
+            this.text = text; setTextColor(Color.BLACK); setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 1f)
+        }.also {
+            add(root, it, y = y, width = 560, height = 200)
+            it.measure(View.MeasureSpec.makeMeasureSpec(560, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(200, View.MeasureSpec.EXACTLY))
+            it.layout(20, y, 580, y + 200)
+        }
+        val wide = laidOut("\u65E5".repeat(1_400), 20) // 4,200 UTF-8 bytes
+        val long = laidOut("x".repeat(4_097), 240)
+        val snapshot = AndroidViewReplayCollector(maskingProfile = NativeMaskingProfile.sensitiveMask())
+            .collect(root, 0, 1000, NativeCollectionFence(), { true }, false)
+        assertEquals(NativeMaskedKind.MaskedText("*".repeat(1_400)), snapshot.nodes[root.indexOfChild(wide) + 1].kind)
+        assertEquals(NativeMaskedKind.MaskedText("*".repeat(4_096)), snapshot.nodes[root.indexOfChild(long) + 1].kind)
+        assertFalse(snapshot.nodes.any { it.kind === NativeMaskedKind.Placeholder })
     }
 
     @Test fun opaqueAndBlockedContainersDoNotVisitDescendants() = main { root ->
@@ -746,6 +804,25 @@ class AndroidViewReplayCollectorTest {
         }
     }
 
+    @Test fun inputLengthIsReadOnceAtCollectionAndNeverAtPointTime() = main { root ->
+        var lengthReads = 0
+        val field = object : EditText(activity) {
+            override fun length(): Int { lengthReads += 1; return super.length() }
+        }.apply { setText("PRIVATE_VALUE") }
+        add(root, field, width = 200, height = 60)
+        val collector = AndroidViewReplayCollector(retainTouchWitnesses = true, maskingProfile = NativeMaskingProfile.sensitiveMask())
+        val fence = NativeCollectionFence()
+        lengthReads = 0
+        val frame = collector.collect(root, 0, 1000, fence, { true }, false)
+        // Collection reads the value's length once, only for its `*` shape.
+        assertEquals(1, lengthReads)
+        assertEquals(NativeMaskedKind.Input(false, "*".repeat("PRIVATE_VALUE".length)), frame.nodes[1].kind)
+        lengthReads = 0
+        val token = checkNotNull(collector.touchProjection(frame))
+        assertNull(collector.projectTouchPoints(root, token, listOf(touchLocation(field)), fence, { true }, false).single())
+        assertEquals("Point validation must not read input values", 0, lengthReads)
+    }
+
     @Test fun touchProjectionVetoesUnknownOverflowUntilActualParentOrExplicitClipConfinesIt() = main { root ->
         root.clipChildren = false; root.clipToPadding = false
         val leaf = View(activity); add(root, leaf, 20, 20, 40, 40)
@@ -809,13 +886,16 @@ class AndroidViewReplayCollectorTest {
         assertEquals(original, projected())
         label.text = "Changed"; layoutLabel()
         assertNull(projected()) // Identity-only text proof changed; no new string content is read.
-        label.text = NativeWireframeV2Encoder.MASK; layoutLabel()
-        val sentinel = collector.collect(root, 1, 1200, fence, { true }, false)
-        assertEquals(NativeWireframeV2Encoder.MASK,
-            sentinel.nodes.mapNotNull { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value }.single())
-        val sentinelProjection = checkNotNull(collector.touchProjection(sentinel))
-        assertNull(collector.projectTouchPoints(root, sentinelProjection, listOf(touchLocation(label)),
-            fence, { true }, false).single()) // A new DOWN also cannot target the reserved sentinel.
+        // Readable text equal to the earlier fixed word, or shaped like a mask, cannot be told apart from
+        // masked text on the wire. A new DOWN cannot target it either.
+        for ((ordinal, value) in listOf(NativeWireframeV2Encoder.MASK, "*** **").withIndex()) {
+            label.text = value; layoutLabel()
+            val sentinel = collector.collect(root, ordinal + 1L, 1200L + ordinal * 200, fence, { true }, false)
+            assertEquals(value, sentinel.nodes.mapNotNull { (it.kind as? NativeMaskedKind.ReadableText)?.text?.value }.single())
+            val sentinelProjection = checkNotNull(collector.touchProjection(sentinel))
+            assertNull(value, collector.projectTouchPoints(root, sentinelProjection, listOf(touchLocation(label)),
+                fence, { true }, false).single())
+        }
     }
 
     @Test fun touchPrivateOverflowVetoIncludesEmittedQuantizedCoordinate() = main { root ->

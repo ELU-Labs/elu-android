@@ -85,6 +85,17 @@ class NativeReplayV2BufferTest {
         assertEquals(8_000, (nodes.bufferedEntries.single() as NativeReplayV2Geometry).frame.nodes.size)
     }
 
+    @Test fun `star masks and readable text are charged exactly before retention`() {
+        for ((kind, charge) in listOf(NativeMaskedKind.MaskedText("** \u3000*") to 785L,
+            NativeMaskedKind.Input(true, "******") to 786L, NativeMaskedKind.ReadableText(NativeReplayText.read("Hello é")) to 790L,
+            NativeMaskedKind.Rectangle to 768L)) {
+            fun entry() = NativeReplayV2Geometry(NativeMaskedSnapshot(0, time, NativeViewport(100, 100), listOf(
+                NativeMaskedNode(id, kind, NativeRect(0.0, 0.0, 10.0, 10.0), NativeRect(0.0, 0.0, 10.0, 10.0)))))
+            assertEquals(NativeReplayV2Buffer.Offer.ACCEPTED, NativeReplayV2Buffer(0, maximumEstimatedBytes = charge).offer(entry(), 0))
+            fails(NativeReplayBufferFailure.BUFFER_LIMIT) { NativeReplayV2Buffer(0, maximumEstimatedBytes = charge - 1).offer(entry(), 0) }
+        }
+    }
+
     @Test fun `encoded order includes earliest movement sample and clocks never roll back`() {
         val b = NativeReplayV2Buffer(0); commitInitial(b)
         b.offer(NativeReplayInteraction.Start(point(200)), 200_000_000)

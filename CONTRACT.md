@@ -12,7 +12,7 @@ admission paths. It uses the exact `elu-native-wireframe-v2` Meta
 discriminator, primary-pointer start/end and coordinate-free root cancellation,
 and coalesced movement with at most ten samples per second. Samples must join
 live lawful encoded leaf IDs and their positive clips; masked/input/placeholder
-or layout-only targets are refused. Changed existing geometry uses FullSnapshot;
+or layout-only targets, and text made only of `*` and whitespace, are refused. Changed existing geometry uses FullSnapshot;
 removal or masking of an active target requires an earlier real cancellation.
 Movement chunks include the earliest logical sample in their time span and charge
 each position once. Every geometry event retains the decoder's 200 ms wire-clock
@@ -443,13 +443,31 @@ profile can retain plain, fully visible text from supported framework Views and
 the closed exact AppCompat text classes listed in README. AppCompat is optional
 and adds no published runtime dependency. Capture reads the existing layout and
 does not resolve pending text futures; changed layouts invalidate that frame.
-Inputs stay masked in both profiles; images, WebViews and unsupported content
-are hidden. Text longer than 4096 UTF-8 bytes is not truncated into a partial
-capture. Unsupported rules fail closed through stronger masking or denial.
+Inputs, including password fields, stay masked in both profiles; images, WebViews
+and unsupported content are hidden. Readable text longer than 4,096 UTF-8 bytes is
+masked as a whole rather than sent as a prefix. Unsupported rules fail closed
+through stronger masking or denial.
 A window with `FLAG_SECURE` set is recorded only as one "Content hidden" placeholder,
 with no layout, text or touches; the flag is checked again on every capture.
 
-`maskView(view)` strengthens masking for that view and descendants.
+Masking preserves length, with the same rule as web replay. Masked text keeps
+each whitespace character and replaces every other character with `*`. An input
+value becomes one `*` per character, whitespace included, so a password's
+length is visible. Characters are counted in UTF-16 units, so some emoji become
+two `*`. Truncated or clipped text is masked in full: the hidden part's length
+is visible, its content is not. Ellipsized text, and displayed text that is not
+a plain or styled framework string, becomes one `*` per character, whitespace
+included. Masked text stops at 4,096 UTF-8 bytes.
+
+To produce these shapes, the SDK reads the displayed layout text of masked text
+views and the length of input values on the main thread while it records a
+frame, whatever the text profile. It keeps only the `*` version; the original is
+never stored, logged or sent. Blocked views and placeholder content are never
+read. Replay chunks recorded by 0.2.0 keep their `[masked]` form and are still
+delivered.
+
+`maskView(view)` replaces the text of that view and its descendants with `*` of
+the same length.
 `blockView(view)` excludes their content and descendants while retaining a
 placeholder. Both apply for the view's lifetime and invalidate work in progress.
 They cannot weaken the server policy. Previously transmitted frames cannot be

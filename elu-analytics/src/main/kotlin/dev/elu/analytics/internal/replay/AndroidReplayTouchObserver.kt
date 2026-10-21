@@ -166,7 +166,8 @@ internal class NativeTouchObservationCore(private val maximumLogicalEvents: Int 
         val target = active?.identity
         if (target != null && value.snapshot.nodes.none {
             it.identity == target && (it.kind === NativeMaskedKind.Rectangle ||
-                it.kind is NativeMaskedKind.ReadableText && it.kind.text.value != NativeWireframeV2Encoder.MASK) &&
+                it.kind is NativeMaskedKind.ReadableText && it.kind.text.value != NativeWireframeV2Encoder.MASK &&
+                    !NativeMaskText.isMaskShaped(it.kind.text.value)) &&
                 it.geometry == NativeGeometryKind.VISIBLE_CLIP && it.clip.width > 0 && it.clip.height > 0
         }) cancel(value.snapshot.timestamp)
         val old = drain()

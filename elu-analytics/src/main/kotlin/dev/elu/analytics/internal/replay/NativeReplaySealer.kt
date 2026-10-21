@@ -75,6 +75,8 @@ internal class NativeReplaySealer(
             original.effectiveMasking.secureInputsMasked &&
             (profile === NativeMaskingProfile.blanketMask() ||
                 profile === NativeMaskingProfile.select(authorization.privacy.masking, V1PrivacyPlatform.ANDROID)) &&
+            // New chunks carry `*` masks; only a star profile describes them.
+            profile.rule == NativeMaskingProfile.MaskRule.STAR &&
             original.effectiveMasking.text == profile.textMasking &&
             profile.compatibility(authorization.privacy.masking, V1PrivacyPlatform.ANDROID) == NativeMaskingCompatibility.COMPATIBLE)
         this.replayId = checkedString(replayId, 256)
