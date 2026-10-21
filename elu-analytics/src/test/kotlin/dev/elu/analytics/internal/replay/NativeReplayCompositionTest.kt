@@ -20,9 +20,9 @@ class NativeReplayCompositionTest {
         @Volatile var main: Thread? = null
         val executor = Executors.newSingleThreadExecutor { task -> Thread(task, "fixture-composition-main").also { main = it } }
         val window = Any(); val token = Any(); val activity = Any()
-        // A platform root stays reachable until its detach callback, which precedes any later main
-        // read. watch() below never reports detachment, so keep replaced roots: a collected original
-        // root seen first by the capture's main hop is a withdrawal, not a root boundary.
+        // The SDK's Android watch() reports detachment of the selected root as a root change; this
+        // watch() never does, so keep replaced roots: a collected original root seen first by the
+        // capture's main hop is a withdrawal, not a root boundary.
         private val replacedRoots = CopyOnWriteArrayList<Any>()
         @Volatile var root: Any = Any()
             set(value) { replacedRoots += field; field = value }
