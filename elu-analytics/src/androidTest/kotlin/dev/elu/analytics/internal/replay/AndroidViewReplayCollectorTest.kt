@@ -34,7 +34,6 @@ import java.lang.ref.WeakReference
 import java.util.UUID
 import org.junit.After
 import org.junit.Assert.*
-import org.junit.Assume.assumeNotNull
 import org.junit.Before
 import org.junit.Test
 
@@ -247,13 +246,16 @@ class AndroidViewReplayCollectorTest {
     }
 
     @Test fun webViewIsOpaqueWithoutVisitingProviderChildren() = main { root ->
-        if (Build.VERSION.SDK_INT >= 26) assumeNotNull(WebView.getCurrentWebViewPackage())
+        // Every CI emulator image ships a WebView provider: a missing one fails instead of skipping.
+        if (Build.VERSION.SDK_INT >= 26) assertNotNull("WebView provider", WebView.getCurrentWebViewPackage())
         val web = WebView(activity)
         try {
             add(root, web, y = 300)
             val captured = frame(root)
             assertEquals(2, captured.nodes.size)
             assertEquals(NativeMaskedKind.Placeholder, captured.nodes.last().kind)
+            val bytes = NativeWireframeEncoder().encode(listOf(captured)).bytes.toString(Charsets.UTF_8)
+            assertTrue(bytes.contains(NativeWireframeEncoder.PLACEHOLDER))
         } finally { web.destroy() }
     }
 

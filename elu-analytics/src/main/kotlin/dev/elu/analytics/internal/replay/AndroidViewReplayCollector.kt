@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Looper
 import android.text.InputType
 import android.text.Layout
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -351,7 +352,10 @@ internal class AndroidViewReplayCollector(
                 if (!elevation.isFinite() || !translationZ.isFinite() || !(elevation + translationZ).isFinite() ||
                     (Build.VERSION.SDK_INT < 29 && (elevation != 0f || translationZ != 0f)) ||
                     alpha != 1f || !guardedNativeViewRead(profile, readGuard) { view.matrix.isIdentity } ||
-                    guardedNativeViewRead(profile, readGuard) { view.animation } != null || guardedNativeViewRead(profile, readGuard) { view.layerType } != View.LAYER_TYPE_NONE) {
+                    guardedNativeViewRead(profile, readGuard) { view.animation } != null ||
+                    // TextureView always reports a hardware layer. It is a childless leaf whose pixels are never
+                    // read, so it stays an opaque placeholder instead of refusing the whole frame.
+                    view !is TextureView && guardedNativeViewRead(profile, readGuard) { view.layerType } != View.LAYER_TYPE_NONE) {
                     fail(NativeCollectionFailure.UNSUPPORTED_GEOMETRY)
                 }
                 if (Build.VERSION.SDK_INT >= 29 &&
