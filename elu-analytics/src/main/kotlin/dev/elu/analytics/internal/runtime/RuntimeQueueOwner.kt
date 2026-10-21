@@ -227,7 +227,8 @@ internal class RuntimeQueueOwner private constructor(
         val source = captureConfiguration
         val parsed = source?.let { runCatching { V1ConfigJson.parseConfig(it.body) }.getOrNull() }
         val authority = captureAuthority as? RuntimeCaptureAuthorityState.Authorized
-        val allowed = !retire && originalIntent() && configurationGate != null && source?.isCurrent() == true &&
+        val intended = !retire && originalIntent()
+        val allowed = intended && configurationGate != null && source?.isCurrent() == true &&
             parsed?.schemaVersion == 2 && parsed.status == V1ConfigStatus.ENABLED &&
             parsed.captureExceptions?.allowsUncaughtReports == true &&
             authority?.configSemanticHash == parsed.configSemanticHash && captureAuthorityRejection(requireLoaded()) == null
@@ -236,6 +237,13 @@ internal class RuntimeQueueOwner private constructor(
             exceptionIntake?.invalidate()
             val pending = exceptionIntake?.reportSettlement?.takeUnless { it.isDone }
             if (pending != null) return@submit RuntimeExceptionIntakeUpdate(pending = pending)
+            // A withdrawal can land after the control lane checked intent and before this lane
+            // re-checks it. That lapse only disarms; the withdrawer requests again, and only an
+            // explicit retirement may destroy a retained report.
+            if (!retire && !intended) {
+                exceptionProductionSource = null; exceptionProductionPolicy = null
+                return@submit RuntimeExceptionIntakeUpdate()
+            }
             // Do not manufacture a directory/schema for an installation which never opted in.
             if (exceptionSpool != null || requireLoaded().exceptions?.reservation != null) {
                 val spool = exceptionSpool ?: exceptionSpoolFactory.invoke().also { exceptionSpool = it }
