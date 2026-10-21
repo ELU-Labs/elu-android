@@ -98,7 +98,10 @@ internal enum class EluFacadeDisabledReason(val drop: EluFacadeDropReason) {
 }
 
 internal sealed interface EluFacadeState {
-    /** No configuration decision yet: state-changing calls are held, getters return defaults. */
+    /**
+     * No configuration decision yet, at launch or since the app returned to the foreground:
+     * state-changing calls are held, getters return defaults.
+     */
     data object Pending : EluFacadeState
 
     data object Enabled : EluFacadeState
@@ -110,7 +113,7 @@ internal sealed interface EluFacadeState {
 
 internal data class EluFacadeDiagnostics(
     val state: EluFacadeState,
-    /** State-changing calls held for the first configuration decision. */
+    /** State-changing calls held for a configuration decision. */
     val buffered: Int,
     /** Calls discarded since construction, by reason. */
     val dropped: Map<EluFacadeDropReason, Int>,
@@ -129,7 +132,8 @@ internal data class EluFacadeDiagnostics(
  *   getters return their documented defaults. With a configuration gate, the decision is the first
  *   validated document: a failed or unavailable fetch keeps the calls held. Calls made while opted
  *   out are not held, and opt-out, including a stored one found at open, discards every held call
- *   except reset.
+ *   except reset. The same hold applies when the app returns to the foreground without current
+ *   configuration, until the re-fetched document decides the calls made since.
  * - `enabled`: executable capture authority exists and the identity is not opted out. Calls map
  *   onto the runtime through one serialized lane, in call order.
  * - `disabled`: the region policy blocks the device, the identity is opted out, or there is no
@@ -185,6 +189,8 @@ internal class StandaloneFacade(
      * opt-out, or before any choice while the stored identity was opted out. They never run.
      */
     private var heldDeniedBelow = 0L
+    /** The current hold began when the app returned to the foreground, not at launch. */
+    private var foregroundHold = false
     /** Set on the lane thread only while held calls run, so other threads' drops are not counted. */
     private val heldCallDrops = ThreadLocal<EnumMap<EluFacadeDropReason, Int>?>()
     private val listeners = mutableListOf<() -> Unit>()
@@ -349,13 +355,20 @@ internal class StandaloneFacade(
         }
     }
 
-    /** Actual lifecycle facts still come from the sole observer. True is only a reevaluation request. */
+    /**
+     * Actual lifecycle facts still come from the sole observer. True is only a reevaluation request.
+     * The application's foreground callback sends true before it starts the configuration re-fetch
+     * and before its own calls, so the hold below is in place for them.
+     */
     internal fun nativeReplayLifecycleChanged(eligible: Boolean) {
         if (!eligible) stack?.runtime?.withdrawAutomaticExceptions()
         nativeStartTrace.mark(NativeStartPhase.FACADE_LIFECYCLE, eligible)
         val token = acceptNativeChange(restrictive = true, lifecycleEligible = eligible) ?: return
         val accepted = submit {
-            try { if (eligible && nativeEpochIsCurrent(token.epoch)) renewAuthority(token.epoch) }
+            try {
+                if (eligible) holdForForegroundConfiguration()
+                if (eligible && nativeEpochIsCurrent(token.epoch)) renewAuthority(token.epoch)
+            }
             finally { settleNativeChange(token, onLane = true) }
         }
         if (!accepted) settleNativeChange(token, onLane = false)
@@ -1326,6 +1339,12 @@ internal class StandaloneFacade(
         observeLane(RuntimeStartupPhase.TRANSITION)
         if (previous !is EluFacadeState.Pending) return
         if (next is EluFacadeState.Pending || next is EluFacadeState.Closed) return
+        val boundary = when {
+            closeRequested.get() -> "Close"
+            foregroundHold -> "Foreground configuration"
+            else -> "First configuration decision"
+        }
+        foregroundHold = false
         val released = buffer.toList()
         buffer.clear()
         val dropped = heldDrops()
@@ -1333,7 +1352,21 @@ internal class StandaloneFacade(
         // they all run before the initial flag load the caller of this method starts.
         heldCallDrops.set(dropped)
         try { released.forEach { execute(it) } } finally { heldCallDrops.remove() }
-        logHeldCalls(if (closeRequested.get()) "Close" else "First configuration decision", released.size, dropped)
+        logHeldCalls(boundary, released.size, dropped)
+    }
+
+    /**
+     * Returning to the foreground re-fetches configuration: the background withdrew it. Until a
+     * validated document arrives, calls are held exactly as at launch, with the same consent rules
+     * and cap. A failed or unavailable fetch keeps them held. Configuration that is still current
+     * needs no hold.
+     */
+    private fun holdForForegroundConfiguration() {
+        if (configurationGate == null || closed || closeRequested.get() || stack == null) return
+        val current = state
+        if (current is EluFacadeState.Pending || current is EluFacadeState.Closed || hasCurrentConfiguration()) return
+        foregroundHold = true
+        transition(EluFacadeState.Pending)
     }
 
     // ---- runtime mapping -----------------------------------------------------
@@ -1348,9 +1381,9 @@ internal class StandaloneFacade(
         val open = stack ?: return
         if (!hasConfigDecision && (configurationGate == null || configurationGate.snapshot() == null)) return
         val witness = configurationGate?.snapshot()
-        // A failed, unavailable or withdrawn source is not the initial decision. Keep the calls
-        // held until the first validated document decides them; a missing document would disable
-        // capture and discard every one of them.
+        // A failed, unavailable or withdrawn source is not a decision, at launch or after returning
+        // to the foreground. Keep the calls held until a validated document decides them; a
+        // missing document would disable capture and discard every one of them.
         if (state is EluFacadeState.Pending && configurationGate != null && witness?.body == null) return
         if (witness?.isApplicationSuspended == true) {
             // Gate withdrawal already makes every retained source witness unusable. Retire
@@ -1394,8 +1427,8 @@ internal class StandaloneFacade(
                     EluFacadeState.Disabled(disabledReasonFor(result.authority.reason))
             }
         nativeSessionRefreshNeeded = false
-        // A document superseded while it was applied is not the initial decision either. The
-        // newer publication queues its own renewal, which decides the held calls.
+        // A document superseded while it was applied is not a decision either. The newer
+        // publication queues its own renewal, which decides the held calls.
         if (state is EluFacadeState.Pending && configurationGate != null && witness?.isCurrent() != true) return
         transition(next)
         if (flagsAuthorized && !flagsLoaded && pendingFlagOperations == 0) {

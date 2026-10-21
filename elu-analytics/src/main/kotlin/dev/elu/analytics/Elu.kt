@@ -110,8 +110,8 @@ public object Elu {
         event: String,
         properties: Map<String, Any>? = null,
     ) {
-        // Call-time timestamp so ops buffered while `pending` (first launch,
-        // config not yet arrived) are not re-stamped seconds late at drain.
+        // Call-time timestamp so ops buffered while `pending` (first launch or a return to the
+        // foreground, config not yet arrived) are not re-stamped seconds late at drain.
         sink?.capture(event, properties, Date())
     }
 

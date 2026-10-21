@@ -105,10 +105,15 @@ super properties set before them; any other validated result discards them.
 not restore them. Operations made while opted out, including under an opt-out
 saved by an earlier launch, are never held. Each release or discard of held
 operations logs one debug line with counts by reason.
-This pre-initialization buffer is not a durable offline queue: a process that
-ends before configuration arrives loses its held operations. Feature-flag
-reload commands are not replayed from that buffer. Invalid or unavailable
-operations return safe facade defaults.
+Moving to the background withdraws the configuration, and returning to the
+foreground fetches it again. Operations made from the return until that fetch
+delivers a validated document are held the same way, with the same limit and
+consent rules. This includes the app-open and screen events the SDK records on
+return. A failed fetch keeps them held while fetches retry.
+This buffer is not a durable offline queue: a process that ends before
+configuration arrives loses its held operations. Feature-flag reload commands
+are not replayed from that buffer. Invalid or unavailable operations return safe
+facade defaults.
 
 ## Identity, properties and consent
 
