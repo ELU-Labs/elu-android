@@ -206,7 +206,7 @@ jobs:
             if [ -r "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" ]; then awk -F '[[:space:]]*=[[:space:]]*' '$1 ~ /^(hw\.ramSize|vm\.heapSize|hw\.lcd\.width|hw\.lcd\.height|hw\.lcd\.density|hw\.cpu\.ncore)$/ { print }' "${ANDROID_AVD_HOME:-$HOME/.android/avd}/test.avd/config.ini" | tee -a elu-analytics/build/reports/device-memory.txt; else echo 'avd_config_available=0' | tee -a elu-analytics/build/reports/device-memory.txt; fi
             test "$(adb shell wm size | tr -d '\r')" = "Physical size: $AVD_DISPLAY"
             test "$(adb shell wm density | tr -d '\r')" = "Physical density: $AVD_DENSITY"
-            ./gradlew :elu-analytics:connectedDebugAndroidTest --stacktrace
+            ./gradlew :elu-analytics:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.elu.analytics.internal.replay.IdleDiagnosticTest --stacktrace
             bash scripts/run-consumer-smoke.sh fixtures/core-consumers/r8/build/module/outputs/apk/release/r8-release.apk dev.elu.fixture.r8
             bash scripts/run-consumer-smoke.sh fixtures/core-consumers/okhttp5/build/module/outputs/apk/release/okhttp5-release.apk dev.elu.fixture.okhttp5
             bash scripts/run-consumer-smoke.sh fixtures/core-consumers/r8-compile34/build/module/outputs/apk/release/r8-compile34-release.apk dev.elu.fixture.r8compile34
