@@ -48,14 +48,14 @@ class AndroidViewReplayCollectorTest {
     @Before fun start() {
         activity = instrumentation.startActivitySync(Intent(instrumentation.context, NativeCollectorTestActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after launching NativeCollectorTestActivity")
         // This private fixture selects a rectangular window. Production must never change host clipping.
         instrumentation.runOnMainSync { activity.window.decorView.clipToOutline = false }
     }
 
     @After fun finish() {
         if (::activity.isInitialized) instrumentation.runOnMainSync { activity.finish() }
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after finishing NativeCollectorTestActivity")
     }
 
     private fun main(block: (FrameLayout) -> Unit) {
@@ -388,7 +388,7 @@ class AndroidViewReplayCollectorTest {
             val child = View(activity); add(root, child); frame(root, collector)
             weak = WeakReference(child); root.removeView(child)
         }
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after removing the child view")
         // Destroy the private host so Android's rendering/lifecycle queues release their own references.
         instrumentation.runOnMainSync { activity.finish() }
         var destroyed = false
@@ -399,7 +399,7 @@ class AndroidViewReplayCollectorTest {
             }
         }
         assertTrue("Private fixture Activity did not destroy", destroyed)
-        instrumentation.waitForIdleSync()
+        waitForMainIdle("after destroying the fixture Activity")
         // Keep the collector live; never fetch the referent into an ART register during the GC loop.
         synchronized(collector) {
             val before = android.os.Debug.getRuntimeStat("art.gc.gc-count")

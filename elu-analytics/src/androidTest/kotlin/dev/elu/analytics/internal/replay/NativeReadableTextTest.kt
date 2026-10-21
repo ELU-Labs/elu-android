@@ -39,7 +39,7 @@ class NativeReadableTextTest {
             activity.setContentView(root)
         }
         try {
-            instrumentation.waitForIdleSync()
+            waitForMainIdle("after setting the readable-text fixture content")
             var ready = false
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
             while (!ready && System.nanoTime() < deadline) {
@@ -93,7 +93,7 @@ class NativeReadableTextTest {
             assertTrue(checkNotNull(snapshot).nodes.any { it.kind is NativeMaskedKind.Input })
         } finally {
             instrumentation.runOnMainSync { activity.finish() }
-            instrumentation.waitForIdleSync()
+            waitForMainIdle("after finishing the readable-text fixture Activity")
         }
     }
 }
