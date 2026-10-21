@@ -74,6 +74,11 @@ class NativeWindowCompatibilityTest {
 
     @After fun finishWindow() {
         if (!::activity.isInitialized) return
+        // TEMPORARY (revert before merge): record whether this window was in the never-idle regime.
+        val probeBefore = draws.get(); Thread.sleep(500)
+        val probeRate = (draws.get() - probeBefore) * 2
+        val idleWhileSpinning = try { waitForMainIdle("probe", 1); true } catch (e: AssertionError) { false }
+        android.util.Log.i("EluIdleProbe", "api=${Build.VERSION.SDK_INT} drawsPerSec=$probeRate idleWhileSpinning=$idleWhileSpinning")
         main {
             if (::root.isInitialized) drawListener?.let { root.viewTreeObserver.removeOnDrawListener(it) }
             // Stop the spinner first, so neither this wait nor the next test's launch waits on a
