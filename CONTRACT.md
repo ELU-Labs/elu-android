@@ -438,6 +438,8 @@ does not resolve pending text futures; changed layouts invalidate that frame.
 Inputs stay masked in both profiles; images, WebViews and unsupported content
 are hidden. Text longer than 4096 UTF-8 bytes is not truncated into a partial
 capture. Unsupported rules fail closed through stronger masking or denial.
+A window with `FLAG_SECURE` set is recorded only as one "Content hidden" placeholder,
+with no layout, text or touches; the flag is checked again on every capture.
 
 `maskView(view)` strengthens masking for that view and descendants.
 `blockView(view)` excludes their content and descendants while retaining a
