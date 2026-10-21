@@ -19,7 +19,13 @@ class NativeReplayCompositionTest {
     private class MainAccess : NativeReplaySelectionAccess, AutoCloseable {
         @Volatile var main: Thread? = null
         val executor = Executors.newSingleThreadExecutor { task -> Thread(task, "fixture-composition-main").also { main = it } }
-        val window = Any(); val token = Any(); @Volatile var root = Any(); val activity = Any()
+        val window = Any(); val token = Any(); val activity = Any()
+        // The SDK's Android watch() reports detachment of the selected root as a root change; this
+        // watch() never does, so keep replaced roots: a collected original root seen first by the
+        // capture's main hop is a withdrawal, not a root boundary.
+        private val replacedRoots = CopyOnWriteArrayList<Any>()
+        @Volatile var root: Any = Any()
+            set(value) { replacedRoots += field; field = value }
         @Volatile var width = 100; @Volatile var height = 200; @Volatile var apiLevel = 36
         val rootReads = AtomicInteger(); val watches = AtomicInteger(); val closes = AtomicInteger()
         @Volatile var rootAvailable = true
