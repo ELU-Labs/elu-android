@@ -46,12 +46,12 @@ internal class NativeReplayFrameBuffer(minimumDurationSeconds: Int) {
                 checked(snapshot.nodes.size <= MAXIMUM_NODES - nodes, NativeReplayBufferFailure.BUFFER_LIMIT)
                 nodes += snapshot.nodes.size
             }
-            // Charge detached text as UTF-8 wire bytes plus worst-case UTF-16 String storage;
-            // geometry/style/UUID envelopes retain their fixed charge. This is not a heap measurement.
+            // Charge detached text and `*` masks as UTF-8 wire bytes plus worst-case UTF-16 String
+            // storage; geometry/style/UUID envelopes retain their fixed charge. This is not a heap measurement.
             var estimatedBytes = nodes * 512L + candidate.size * 256L
             for (snapshot in candidate) for (node in snapshot.nodes) {
-                (node.kind as? NativeMaskedKind.ReadableText)?.text?.let { text ->
-                    estimatedBytes += text.utf8Bytes + text.value.length * 2L
+                node.kind.carriedText?.let { text ->
+                    estimatedBytes += node.kind.carriedUtf8Bytes + text.length * 2L
                 }
                 checked(estimatedBytes <= MAXIMUM_ESTIMATED_BYTES, NativeReplayBufferFailure.BUFFER_LIMIT)
             }

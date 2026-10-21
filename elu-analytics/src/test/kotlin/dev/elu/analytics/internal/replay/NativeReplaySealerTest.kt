@@ -55,7 +55,8 @@ class NativeReplaySealerTest {
         val gzip = ReplayBase64.decode(chunk(request).getString("payload"))
         assertArrayEquals(byteArrayOf(31, -117, 8, 0, 0, 0, 0, 0, 0, 3), gzip.copyOfRange(0, 10))
         assertArrayEquals(NativeWireframeEncoder().encode(listOf(frame(0, nodes = 3))).bytes, decoded(request))
-        assertTrue(decoded(request).toString(Charsets.UTF_8).contains("[masked]"))
+        assertTrue(decoded(request).toString(Charsets.UTF_8).contains("\"text\":\"***** ****\""))
+        assertFalse(decoded(request).toString(Charsets.UTF_8).contains("[masked]"))
         assertFalse(decoded(request).toString(Charsets.UTF_8).contains("user-sealer"))
         val copy = request.copyBytes(); copy.fill(0)
         assertNotEquals(0.toByte(), request.copyBytes()[0])
@@ -162,6 +163,21 @@ class NativeReplaySealerTest {
         assertNotEquals(first.effectivePolicyHash, next.effectivePolicyHash)
         assertNotEquals(first.requestId, next.requestId)
     }
+    @Test fun `earlier token profiles cannot describe new star chunks`() {
+        for (token in listOf(NativeMaskingProfileTest.TOKEN_BLANKET, NativeMaskingProfileTest.TOKEN_SENSITIVE)) {
+            val profile = NativeMaskingProfile.parse(token.toByteArray())
+            assertEquals(NativeMaskingProfile.MaskRule.TOKEN, profile.rule)
+            for (protocol in NativeReplayProtocol.values()) {
+                assertEquals(NativeReplaySealingFailure.INVALID_BINDING, assertThrows(NativeReplaySealingException::class.java) {
+                    fixture(protocol = protocol, profile = profile).sealer()
+                }.failure)
+            }
+        }
+        val request = fixture().sealer().seal(listOf(frame(0, nodes = 1)))
+        assertEquals(NativeMaskingProfileTest.BLANKET_STAR_HASH, request.maskingProfileHash)
+        assertEquals(NativeMaskingProfileTest.SENSITIVE_STAR_HASH, fixture(profile = NativeMaskingProfile.sensitiveMask()).sealer()
+            .seal(listOf(frame(0, nodes = 1))).maskingProfileHash)
+    }
     @Test fun `v2 sealer preserves earliest movement span exact wrapper and independent sequence domain`() {
         val binding = fixture(protocol = NativeReplayProtocol.V2, profile = NativeMaskingProfile.sensitiveMask())
         val sealer = binding.sealer(); val twin = binding.sealer()
@@ -235,7 +251,7 @@ class NativeReplaySealerTest {
             checkNotNull(parsed.replayCapabilities), identity, false, NOW,
             PrivacyReplayInput(mode != "no-sample", true, true, if (mode == "no-budget") 0 else 60, pair)))
         val privacyJson = JSONObject(PrivacyStateProjector.encode(effective))
-        privacyJson.getJSONObject("effectiveMasking").put("text", if (profile === NativeMaskingProfile.sensitiveMask()) "sensitive" else "all")
+        privacyJson.getJSONObject("effectiveMasking").put("text", if (profile.readsText) "sensitive" else "all")
         privacyJson.remove("effectivePolicyHash")
         privacyJson.put("effectivePolicyHash", ReplayJson.digest(canonical(privacyJson)))
         val privacy = canonical(privacyJson)
@@ -249,7 +265,7 @@ class NativeReplaySealerTest {
     private fun frame(ordinal: Long, timestamp: Long = Instant.parse("2026-08-05T00:01:00.123Z").toEpochMilli() + ordinal, nodes: Int = 0): NativeMaskedSnapshot {
         val items = (0 until nodes).map { index ->
             val bounds = NativeRect((index % 30).toDouble(), (index / 30).toDouble(), 5.0, 5.0)
-            NativeMaskedNode(UUID(0, index + 1L), NativeMaskedKind.Text, bounds, bounds)
+            NativeMaskedNode(UUID(0, index + 1L), NativeMaskedKind.MaskedText("***** ****"), bounds, bounds)
         }
         return NativeMaskedSnapshot(ordinal, timestamp, NativeViewport(320, 480), items)
     }

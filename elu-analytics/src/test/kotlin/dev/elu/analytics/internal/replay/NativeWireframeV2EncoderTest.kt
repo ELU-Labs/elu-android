@@ -75,8 +75,14 @@ class NativeWireframeV2EncoderTest {
     @Test fun `blanket inputs placeholders masks layout bounds absent and out of clip targets refuse`() {
         val blanket = NativeWireframeV2Encoder(); blanket.encode(listOf(frame(0)))
         fail(NativeInteractionFailure.TARGET) { blanket.encode(listOf(NativeReplayInteraction.Start(point()))) }
-        for (n in listOf(node(kind = NativeMaskedKind.Text), node(kind = NativeMaskedKind.Input(false)),
+        // Text that is entirely `*` and whitespace (including empty) is indistinguishable from a
+        // mask on the wire, so it is never a target; nor is the fixed word earlier versions sent.
+        for (n in listOf(node(kind = NativeMaskedKind.MaskedText("******")), node(kind = NativeMaskedKind.MaskedText("")),
+            node(kind = NativeMaskedKind.Input(false, "**")), node(kind = NativeMaskedKind.Input(true, "**")),
             node(kind = NativeMaskedKind.ReadableText(NativeReplayText.read("[masked]"))),
+            node(kind = NativeMaskedKind.ReadableText(NativeReplayText.read("***"))),
+            node(kind = NativeMaskedKind.ReadableText(NativeReplayText.read(""))),
+            node(kind = NativeMaskedKind.ReadableText(NativeReplayText.read(" * \u3000"))),
             node(kind = NativeMaskedKind.Placeholder), node().copy(geometry = NativeGeometryKind.LAYOUT_BOUNDS),
             node().copy(clip = NativeRect(10.0, 10.0, 0.0, 0.0)))) {
             val e = encoder(); e.encode(listOf(frame(0, nodes = listOf(n))))
@@ -90,13 +96,22 @@ class NativeWireframeV2EncoderTest {
         e.encode(listOf(NativeReplayInteraction.Start(point(x = 89))))
     }
 
+    @Test fun `ordinary text with any non-mask character remains a target`() {
+        for (text in listOf("Visible native label", "*a*", "** \u0085", "\u200B", "[masked] ")) {
+            val e = encoder(); e.encode(listOf(frame(0, nodes = listOf(node(kind = NativeMaskedKind.ReadableText(NativeReplayText.read(text)))))))
+            assertEquals(text, 1L, e.encode(listOf(NativeReplayInteraction.Start(point()))).sequence)
+        }
+    }
+
     @Test fun `actual full geometry retains same live leaf but needs cancel before removal or privacy change`() {
         val e = encoder(); e.encode(listOf(frame(0))); e.encode(listOf(NativeReplayInteraction.Start(point())))
         val moved = e.encode(listOf(frame(1, time + 200, listOf(node(x = 100.0)))))
         assertEquals(2, json(moved).getJSONObject(0).getInt("type"))
         fail(NativeInteractionFailure.POINT) { e.encode(listOf(NativeReplayInteraction.Moves(listOf(point(time + 300))))) }
         e.encode(listOf(NativeReplayInteraction.Moves(listOf(point(time + 300, x = 110)))))
-        for (nodes in listOf(emptyList(), listOf(node(kind = NativeMaskedKind.Input(true), x = 100.0)),
+        for (nodes in listOf(emptyList(), listOf(node(kind = NativeMaskedKind.Input(true, "****"), x = 100.0)),
+            listOf(node(kind = NativeMaskedKind.MaskedText("*******"), x = 100.0)),
+            listOf(node(kind = NativeMaskedKind.ReadableText(NativeReplayText.read("** *")), x = 100.0)),
             listOf(node(x = 100.0).copy(clip = NativeRect(100.0, 10.0, 0.0, 0.0)))))
             fail(NativeInteractionFailure.TARGET) { e.encode(listOf(frame(2, time + 400, nodes))) }
         val retired = e.encode(listOf(NativeReplayInteraction.Cancel(time + 400), frame(2, time + 400, emptyList())))

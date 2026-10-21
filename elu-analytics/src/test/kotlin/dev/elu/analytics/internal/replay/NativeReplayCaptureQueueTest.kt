@@ -100,7 +100,7 @@ class NativeReplayCaptureQueueTest {
             val bounds = NativeRect(0.0, 0.0, 100.0, 20.0)
             val frame = NativeMaskedSnapshot(0, rig.clock.wall, NativeViewport(320, 480), listOf(
                 NativeMaskedNode(UUID.randomUUID(), NativeMaskedKind.ReadableText(NativeReplayText.read("Welcome café")), bounds, bounds),
-                NativeMaskedNode(UUID.randomUUID(), NativeMaskedKind.Input(true), bounds, bounds)))
+                NativeMaskedNode(UUID.randomUUID(), NativeMaskedKind.Input(true, "******"), bounds, bounds)))
             val request = NativeReplaySealer(permit.replayId, admission.identity, admission.authorization,
                 admission.privacy, admission.profile, StandaloneRuntime.defaultVersions()).seal(listOf(frame))
             assertTrue(rig.owner.appendNativeReplay(request, admission, session.use).get() is NativeReplayAppendOutcome.Committed)
@@ -108,7 +108,8 @@ class NativeReplayCaptureQueueTest {
             val chunk = envelope.getJSONObject("chunk")
             val payload = java.util.Base64.getDecoder().decode(chunk.getString("payload"))
             val wire = java.util.zip.GZIPInputStream(payload.inputStream()).use { it.readBytes().toString(Charsets.UTF_8) }
-            assertTrue(wire.contains("Welcome café")); assertTrue(wire.contains("[masked]"))
+            assertTrue(wire.contains("Welcome café")); assertTrue(wire.contains("\"value\":\"******\""))
+            assertFalse(wire.contains("[masked]"))
         }
         val delivery = rig.owner.openReplayDeliveryQueue(PrivacyStateProjector.nativeSealedDeliveryPolicy(
             NativeReplayCapabilities(setOf(V1ReplayTransport("elu-native-wireframe-v1", V1ReplayCompression.GZIP)),

@@ -155,21 +155,26 @@ class NativeReplayFrameBufferTest {
         fitting.append(frame(0, nodes = 8191), 0); fitting.append(frame(1, nodes = 8192), 1_000_000_000)
         assertEquals(16_383, fitting.beginSealing().sumOf { it.nodes.size })
     }
-    @Test fun `readable text is charged before retention and overflow clears prior frames`() {
+    @Test fun `readable text and star masks are charged before retention and overflow clears prior frames`() {
         val value = NativeReplayText.read("x".repeat(4096))
-        val perNode = 512L + value.utf8Bytes + value.value.length * 2L
-        val fittingNodes = ((NativeReplayFrameBuffer.MAXIMUM_ESTIMATED_BYTES - 256) / perNode).toInt()
-        fun textFrame(ordinal: Long, count: Int) = frame(ordinal, nodes = count).let { frame ->
-            NativeMaskedSnapshot(frame.ordinal, frame.timestamp, frame.viewport, frame.nodes.map { it.copy(kind = NativeMaskedKind.ReadableText(value)) })
+        for (kind in listOf(NativeMaskedKind.ReadableText(value), NativeMaskedKind.MaskedText("*".repeat(4096)),
+            NativeMaskedKind.Input(true, "*".repeat(4096)), NativeMaskedKind.MaskedText("\u3000".repeat(1365)))) {
+            val text = checkNotNull(kind.carriedText)
+            val perNode = 512L + kind.carriedUtf8Bytes + text.length * 2L
+            assertEquals(text.toByteArray(Charsets.UTF_8).size, kind.carriedUtf8Bytes)
+            val fittingNodes = ((NativeReplayFrameBuffer.MAXIMUM_ESTIMATED_BYTES - 256) / perNode).toInt()
+            fun textFrame(ordinal: Long, count: Int) = frame(ordinal, nodes = count).let { frame ->
+                NativeMaskedSnapshot(frame.ordinal, frame.timestamp, frame.viewport, frame.nodes.map { it.copy(kind = kind) })
+            }
+            val fitting = NativeReplayFrameBuffer(0)
+            fitting.append(textFrame(0, fittingNodes), 0)
+            assertEquals(fittingNodes, fitting.beginSealing().single().nodes.size)
+            val overflowing = NativeReplayFrameBuffer(1)
+            overflowing.append(frame(0), 0)
+            fails(NativeReplayBufferFailure.BUFFER_LIMIT) { overflowing.append(textFrame(1, fittingNodes + 1), 1) }
+            assertTrue(overflowing.bufferedFrames.isEmpty()); assertFalse(overflowing.isReady)
+            fails(NativeReplayBufferFailure.WITHDRAWN) { overflowing.append(frame(1), 2) }
         }
-        val fitting = NativeReplayFrameBuffer(0)
-        fitting.append(textFrame(0, fittingNodes), 0)
-        assertEquals(fittingNodes, fitting.beginSealing().single().nodes.size)
-        val overflowing = NativeReplayFrameBuffer(1)
-        overflowing.append(frame(0), 0)
-        fails(NativeReplayBufferFailure.BUFFER_LIMIT) { overflowing.append(textFrame(1, fittingNodes + 1), 1) }
-        assertTrue(overflowing.bufferedFrames.isEmpty()); assertFalse(overflowing.isReady)
-        fails(NativeReplayBufferFailure.WITHDRAWN) { overflowing.append(frame(1), 2) }
     }
 
     @Test fun `latest replacement releases previous masked values before aggregate charge`() {

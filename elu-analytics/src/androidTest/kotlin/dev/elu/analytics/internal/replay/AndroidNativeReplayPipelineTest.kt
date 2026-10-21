@@ -187,24 +187,29 @@ class AndroidNativeReplayPipelineTest {
                 ?: throw AssertionError("No single wireframe for $name in $first")
         }
         assertEquals("text", at("label").getString("type")); assertEquals(LABEL, at("label").getString("text"))
-        for (name in listOf("typed", "password")) {
-            assertEquals("input", at(name).getString("type")); assertEquals(NativeWireframeEncoder.MASK, at(name).getString("value"))
+        // Input values carry one `*` per character, never the typed text.
+        for ((name, canary) in listOf("typed" to TYPED_CANARY, "password" to PASSWORD_CANARY)) {
+            assertEquals("input", at(name).getString("type")); assertEquals(stars(canary.length), at(name).getString("value"))
         }
         assertEquals("password", at("password").getString("inputType"))
         for (name in listOf("blocked", "image", "web")) {
             assertEquals(name, "placeholder", at(name).getString("type"))
             assertEquals(name, NativeWireframeEncoder.PLACEHOLDER, at(name).getString("label"))
         }
-        assertTrue("maskView text encodes the mask token", first.any {
-            it.optString("type") == "text" && it.optString("text") == NativeWireframeEncoder.MASK
+        assertTrue("maskView text encodes its star shape", first.any {
+            it.optString("type") == "text" && it.optString("text") == stars(MASKED_CANARY.length)
         })
 
         val second = decoded[1]
         assertTrue("Changed label reaches the second chunk", second.contains(UPDATED_LABEL))
         assertTrue("Inserted label reaches the second chunk", second.contains(INSERTED_LABEL))
         assertFalse(second.contains(LABEL))
-        assertTrue(second.contains(NativeWireframeEncoder.MASK)); assertTrue(second.contains(NativeWireframeEncoder.PLACEHOLDER))
+        assertTrue("Typing changes only the star count", second.contains("\"value\":\"${stars(TYPED_CANARY.length + SECOND_TYPED_CANARY.length)}\""))
+        assertTrue(second.contains("\"text\":\"${stars(MASKED_CANARY.length)}\"")); assertTrue(second.contains(NativeWireframeEncoder.PLACEHOLDER))
+        for (events in decoded) assertFalse("The earlier fixed word is gone", events.contains("[masked]"))
     }
+
+    private fun stars(count: Int) = "*".repeat(count)
 
     /** Layout rectangle in the selected content root's logical coordinates, as the collector projects it. */
     private fun rect(view: View): DoubleArray {

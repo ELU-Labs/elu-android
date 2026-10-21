@@ -27,7 +27,18 @@ internal enum class NativeMaskingRetention {
 }
 
 /** Fixed native masking behavior, without arbitrary content, targets or authority fields. */
-internal class NativeMaskingProfile private constructor(val readsText: Boolean, private val bytes: ByteArray) {
+internal class NativeMaskingProfile private constructor(
+    val maskingClass: MaskingClass,
+    val rule: MaskRule,
+    private val bytes: ByteArray,
+) {
+    /** Exact class equality is the only substitution the service accepts. */
+    enum class MaskingClass { BLANKET, SENSITIVE }
+
+    /** STAR describes current capture: length-preserving `*` masks. TOKEN describes chunks sealed by earlier versions; nothing new uses it. */
+    enum class MaskRule { TOKEN, STAR }
+
+    val readsText: Boolean get() = maskingClass == MaskingClass.SENSITIVE
     val canonicalBytes: ByteArray get() = bytes.copyOf()
     val hash: String = V1StrictCanonicalJson.sha256(bytes)
     val textMasking: V1TextMasking get() = if (readsText) V1TextMasking.SENSITIVE else V1TextMasking.ALL
@@ -44,30 +55,35 @@ internal class NativeMaskingProfile private constructor(val readsText: Boolean, 
         if (readsText && (policy.text != V1TextMasking.SENSITIVE || policy.platformRules.any { it.platform == platform })) {
             return NativeMaskingCompatibility.RESTRICTIVE_POLICY
         }
-        // Inputs, images and opaque views remain hidden in both supported profiles.
+        // Inputs stay masked and images and opaque views stay blocked in every profile.
         return NativeMaskingCompatibility.COMPATIBLE
     }
 
     companion object {
         const val MAXIMUM_BYTES: Int = 1_024
-        private val frozenBytes =
-            """{"blockTraversal":"stop","configuredBlockRuleHandling":"deny-unresolved","contentAccess":"none","imageRule":"block","inputRule":"all","maskInheritance":"subtree","maskToken":"[masked]","opaqueViewRule":"block","placeholderToken":"Content hidden","profileKind":"elu-native-blanket-mask-v1","schemaVersion":1,"secureInputsMasked":true,"textRule":"all","webViewRule":"block"}"""
-                .toByteArray(StandardCharsets.UTF_8)
-        private val sensitiveBytes = frozenBytes.toString(StandardCharsets.UTF_8)
-            .replace("\"contentAccess\":\"none\"", "\"contentAccess\":\"native-text\"")
-            .replace("elu-native-blanket-mask-v1", "elu-native-sensitive-mask-v1")
-            .replace("\"textRule\":\"all\"", "\"textRule\":\"sensitive\"")
-            .toByteArray(StandardCharsets.UTF_8)
-        private val blanket = NativeMaskingProfile(false, frozenBytes)
-        private val sensitive = NativeMaskingProfile(true, sensitiveBytes)
+        private fun bytes(value: String) = value.toByteArray(StandardCharsets.UTF_8)
+        private val blanketTokenBytes = bytes(
+            """{"blockTraversal":"stop","configuredBlockRuleHandling":"deny-unresolved","contentAccess":"none","imageRule":"block","inputRule":"all","maskInheritance":"subtree","maskToken":"[masked]","opaqueViewRule":"block","placeholderToken":"Content hidden","profileKind":"elu-native-blanket-mask-v1","schemaVersion":1,"secureInputsMasked":true,"textRule":"all","webViewRule":"block"}""")
+        private val sensitiveTokenBytes = bytes(
+            """{"blockTraversal":"stop","configuredBlockRuleHandling":"deny-unresolved","contentAccess":"native-text","imageRule":"block","inputRule":"all","maskInheritance":"subtree","maskToken":"[masked]","opaqueViewRule":"block","placeholderToken":"Content hidden","profileKind":"elu-native-sensitive-mask-v1","schemaVersion":1,"secureInputsMasked":true,"textRule":"sensitive","webViewRule":"block"}""")
+        private val blanketStarBytes = bytes(
+            """{"blockTraversal":"stop","configuredBlockRuleHandling":"deny-unresolved","contentAccess":"masked-shape","imageRule":"block","inputMask":"star-per-utf16-unit","inputRule":"all","maskInheritance":"subtree","maskedTextMaxBytes":4096,"opaqueViewRule":"block","placeholderToken":"Content hidden","profileKind":"elu-native-blanket-star-mask-v1","schemaVersion":2,"secureInputsMasked":true,"textMask":"star-non-whitespace-utf16","textRule":"all","webViewRule":"block"}""")
+        private val sensitiveStarBytes = bytes(
+            """{"blockTraversal":"stop","configuredBlockRuleHandling":"deny-unresolved","contentAccess":"native-text","imageRule":"block","inputMask":"star-per-utf16-unit","inputRule":"all","maskInheritance":"subtree","maskedTextMaxBytes":4096,"opaqueViewRule":"block","placeholderToken":"Content hidden","profileKind":"elu-native-sensitive-star-mask-v1","schemaVersion":2,"secureInputsMasked":true,"textMask":"star-non-whitespace-utf16","textRule":"sensitive","webViewRule":"block"}""")
+        private val blanket = NativeMaskingProfile(MaskingClass.BLANKET, MaskRule.STAR, blanketStarBytes)
+        private val sensitive = NativeMaskingProfile(MaskingClass.SENSITIVE, MaskRule.STAR, sensitiveStarBytes)
+        private val blanketToken = NativeMaskingProfile(MaskingClass.BLANKET, MaskRule.TOKEN, blanketTokenBytes)
+        private val sensitiveToken = NativeMaskingProfile(MaskingClass.SENSITIVE, MaskRule.TOKEN, sensitiveTokenBytes)
+        private val known = listOf(blanket, sensitive, blanketToken, sensitiveToken)
 
-        /** Description of the implemented subset, never permission to collect it. */
+        /** Description of the implemented subset, never permission to collect it. Both describe current `*` capture. */
         fun blanketMask(): NativeMaskingProfile = blanket
         fun sensitiveMask(): NativeMaskingProfile = sensitive
 
         fun select(policy: V1MaskingPolicy, platform: V1PrivacyPlatform): NativeMaskingProfile =
             if (policy.text == V1TextMasking.SENSITIVE && policy.platformRules.none { it.platform == platform }) sensitive else blanket
 
+        /** Accepts all four closed documents, so chunks sealed before an upgrade keep their original description and remain deliverable. */
         fun parse(bytes: ByteArray): NativeMaskingProfile {
             require(bytes.size in 1..MAXIMUM_BYTES) { "Native masking profile size is invalid" }
             val owned = bytes.copyOf()
@@ -77,10 +93,9 @@ internal class NativeMaskingProfile private constructor(val readsText: Boolean, 
                 .decode(ByteBuffer.wrap(owned)).toString()
             val document = V1StrictCanonicalJson.parse(text)
             require(document is V1StrictCanonicalJson.Value.ObjectValue &&
-                V1StrictCanonicalJson.canonicalBytes(document).contentEquals(owned) &&
-                (owned.contentEquals(frozenBytes) || owned.contentEquals(sensitiveBytes))) { "Native masking profile is unrecognized" }
+                V1StrictCanonicalJson.canonicalBytes(document).contentEquals(owned)) { "Native masking profile is unrecognized" }
             // Neither caller bytes nor parser-owned buffers become retained profile storage.
-            return if (owned.contentEquals(sensitiveBytes)) sensitive else blanket
+            return requireNotNull(known.firstOrNull { it.bytes.contentEquals(owned) }) { "Native masking profile is unrecognized" }
         }
 
         fun retention(

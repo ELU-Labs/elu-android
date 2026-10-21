@@ -733,9 +733,9 @@ Replay captures supported Android Views when the current server configuration
 authorizes replay. In sensitive-text mode, ordinary framework `TextView`,
 `Button`, `CheckBox`, `RadioButton`, `Switch` and `ToggleButton` text remains
 readable when it is plain, fully visible, and untransformed. Styled, transformed,
-clipped, transparent and custom text remain masked. Text is limited to 4096 UTF-8
-bytes per view; larger values become a placeholder. Input values, images,
-WebViews and unsupported/custom views stay hidden. All-text mode masks ordinary text too.
+clipped, transparent and custom text remain masked, as does text over 4,096 UTF-8
+bytes. Input values, including passwords, are always masked. Images, WebViews and
+unsupported/custom views stay hidden. All-text mode masks ordinary text too.
 A window with `FLAG_SECURE` set is recorded only as one "Content hidden" placeholder,
 with no layout, text or touches, for as long as the flag stays set.
 The same checks apply to exact AppCompat `AppCompatTextView`, `AppCompatButton`,
@@ -755,6 +755,23 @@ Opaque native masking rules retain all-text masking; unresolved block rules
 prevent capture. Ordinary display text can contain personal information: mask
 private labels before displaying them and disclose readable replay collection.
 Replay masking does not sanitize customer event properties or exception messages.
+
+Masking keeps the length of the content, the same way web replay does:
+
+- Masked text shows one `*` per character and keeps its spaces and line
+  breaks. Truncated or clipped text is masked in full, so the length of the
+  hidden part shows, but not its content. Ellipsized text and text the SDK
+  cannot read as a plain or styled string show a `*` for every character,
+  spaces included.
+- An input value shows one `*` per character, spaces included. This shows the
+  length of what was typed, including passwords, as the device screen does.
+- Very long masked text and input values are cut off after about 4,000
+  characters.
+
+To draw these shapes, the SDK reads the displayed text of masked views and the
+length of input values on the device while it records a frame, including in
+all-text mode. It keeps only the `*` version: the original text is never stored,
+logged or sent. Blocked views are never read.
 
 The installed runtime supports native replay v1 and v2. The server must grant the
 exact codec, gzip transport and matching protocol generation; a v1 grant continues
@@ -784,7 +801,7 @@ reopen the upgraded schema; downgrading the owned store is unsupported.
 Strengthen privacy before a view is displayed:
 
 ```kotlin
-Elu.maskView(accountDetails)   // Mask this view's and its descendants' text.
+Elu.maskView(accountDetails)   // Replace this view's and its descendants' text with `*`.
 Elu.blockView(paymentPanel)   // Exclude content and descendants; keep a placeholder.
 ```
 
@@ -819,7 +836,7 @@ data practices before you submit the form.
 | Device and app context on events: OS and version, device manufacturer and model, app name, version, build and package name, screen size, locale and time zone | App info and performance: Diagnostics | Always |
 | Exceptions you report with `Elu.captureException` (type, message, stack trace), and opt-in automatic JVM crash reports (exception type only) | App info and performance: Crash logs | Only when you call it or opt in |
 | Opt-in performance samples, launch timing and OkHttp request metrics (method, status code and duration; no URLs) | App info and performance: Diagnostics, Other app performance data | Only when you enable them |
-| Session replay: the layout of supported views, readable on-screen text and single-finger touch movement. Inputs are masked; images, web views and blocked views are left out | App activity: App interactions, plus the categories of any personal info your screens display | Only when ELU's service configuration enables replay for the project whose site key the app uses. ELU does not enable replay for Android projects yet. Use a site key from a project set up for Android: a key from a project with iOS replay enabled can start replay capture in an Android app |
+| Session replay: the layout of supported views, readable on-screen text and single-finger touch movement. Masked text and inputs are sent only as `*` characters of the same length; images, web views and blocked views are left out | App activity: App interactions, plus the categories of any personal info your screens display | Only when ELU's service configuration enables replay for the project whose site key the app uses. ELU does not enable replay for Android projects yet. Use a site key from a project set up for Android: a key from a project with iOS replay enabled can start replay capture in an Android app |
 | Approximate location (country, region and city) that ELU's service derives from the IP address of each request | Location: Approximate location | Always |
 
 ELU's service derives approximate location (country, region and city) from the

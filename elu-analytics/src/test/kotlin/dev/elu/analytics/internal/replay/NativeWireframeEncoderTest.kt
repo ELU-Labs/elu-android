@@ -15,39 +15,70 @@ class NativeWireframeEncoderTest {
     private val second = UUID.fromString("00000000-0000-4000-8000-000000000002")
     private val third = UUID.fromString("00000000-0000-4000-8000-000000000003")
     private val time = 1_788_883_200_000L
+    private val masked = NativeMaskedKind.MaskedText("**** **")
+    private val secret = NativeMaskedKind.Input(true, "******")
 
-    @Test fun `initial wire uses only fixed tokens integer time and no local identities`() {
+    @Test fun `initial wire uses only star masks integer time and no local identities`() {
         val e = NativeWireframeEncoder()
-        val chunk = e.encode(listOf(frame(0, listOf(node(first), node(second, NativeMaskedKind.Input(true)),
+        val chunk = e.encode(listOf(frame(0, listOf(node(first), node(second, secret),
             node(third, NativeMaskedKind.Placeholder)))))
         assertEquals(0L, chunk.sequence); assertEquals(2, chunk.eventCount)
         assertEquals(time, chunk.firstTimestamp); assertEquals(time, chunk.lastTimestamp)
         val events = decode(chunk)
         assertEquals(4, events.getJSONObject(0).getInt("type"))
         val leaves = leaves(events.getJSONObject(1))
-        assertEquals("[masked]", leaves.getJSONObject(0).getString("text"))
-        assertEquals("[masked]", leaves.getJSONObject(1).getString("value"))
+        assertEquals("**** **", leaves.getJSONObject(0).getString("text"))
+        assertEquals("******", leaves.getJSONObject(1).getString("value"))
         assertEquals("password", leaves.getJSONObject(1).getString("inputType"))
         assertEquals(true, leaves.getJSONObject(1).getBoolean("disabled"))
         assertEquals("Content hidden", leaves.getJSONObject(2).getString("label"))
         assertEquals(10_000_001L, leaves.getJSONObject(0).getLong("id"))
         val text = chunk.bytes.toString(Charsets.UTF_8)
-        assertFalse(text.contains(first.toString())); assertFalse(text.contains("ordinal"))
+        assertFalse(text.contains(first.toString())); assertFalse(text.contains("ordinal")); assertFalse(text.contains("[masked]"))
         assertArrayEquals(chunk.bytes, V1StrictCanonicalJson.canonicalBytes(V1StrictCanonicalJson.parse(text)))
+    }
+
+    @Test fun `changed mask shape is a full snapshot carrying only stars`() {
+        val e = NativeWireframeEncoder()
+        e.encode(listOf(frame(0, listOf(node(first, NativeMaskedKind.Input(false, "**")), node(second)))))
+        val event = decode(e.encode(listOf(frame(1, listOf(node(first, NativeMaskedKind.Input(false, "****")), node(second))))))
+            .getJSONObject(0)
+        assertEquals(2, event.getInt("type"))
+        assertEquals("****", leaves(event).getJSONObject(0).getString("value"))
+        assertEquals("**** **", leaves(event).getJSONObject(1).getString("text"))
+        assertEquals(listOf(10_000_001L, 10_000_002L), (0 until 2).map { leaves(event).getJSONObject(it).getLong("id") })
+    }
+
+    @Test fun `masked kinds that carry anything but their star shape are refused atomically`() {
+        for (profile in listOf(NativeMaskingProfile.blanketMask(), NativeMaskingProfile.sensitiveMask())) {
+            val e = NativeWireframeEncoder(maskingProfile = profile)
+            for (kind in listOf(NativeMaskedKind.MaskedText("[masked]"), NativeMaskedKind.MaskedText("PRIVATE"),
+                NativeMaskedKind.MaskedText("*".repeat(4_097)), NativeMaskedKind.MaskedText("\u3000".repeat(1_366)),
+                NativeMaskedKind.Input(false, "** *"), NativeMaskedKind.Input(true, "secret"),
+                NativeMaskedKind.Input(true, "*".repeat(4_097)))) {
+                fails(NativeEncodingFailure.INVALID_TEXT) { e.encode(listOf(frame(0, listOf(node(first, kind))))) }
+            }
+            for (kind in listOf(NativeMaskedKind.MaskedText(""), NativeMaskedKind.MaskedText("\u3000".repeat(1_365) + "*"),
+                NativeMaskedKind.MaskedText("*".repeat(4_096)), NativeMaskedKind.Input(true, ""),
+                NativeMaskedKind.Input(false, "*".repeat(4_096)))) {
+                NativeWireframeEncoder(maskingProfile = profile).encode(listOf(frame(0, listOf(node(first, kind)))))
+            }
+            assertEquals(0L, e.encode(listOf(frame(0, listOf(node(first))))).sequence)
+        }
     }
 
     @Test fun `sensitive profile encodes ordinary initial changed and inserted text while retaining input masks`() {
         val encoder = NativeWireframeEncoder(maskingProfile = NativeMaskingProfile.sensitiveMask())
         fun readable(id: UUID, text: String) = node(id, NativeMaskedKind.ReadableText(NativeReplayText.read(text)))
         val initial = decode(encoder.encode(listOf(frame(0, listOf(readable(first, "Welcome café 👋"),
-            node(second, NativeMaskedKind.Input(true)))))))
+            node(second, secret))))))
         assertEquals("Welcome café 👋", leaves(initial.getJSONObject(1)).getJSONObject(0).getString("text"))
-        assertEquals("[masked]", leaves(initial.getJSONObject(1)).getJSONObject(1).getString("value"))
+        assertEquals("******", leaves(initial.getJSONObject(1)).getJSONObject(1).getString("value"))
         val changed = decode(encoder.encode(listOf(frame(1, listOf(readable(first, "Your order is ready"),
-            node(second, NativeMaskedKind.Input(true)))))))
+            node(second, secret))))))
         assertEquals("Your order is ready", leaves(changed.getJSONObject(0)).getJSONObject(0).getString("text"))
         val inserted = decode(encoder.encode(listOf(frame(2, listOf(readable(first, "Your order is ready"),
-            node(second, NativeMaskedKind.Input(true)), readable(third, "Continue"))))))
+            node(second, secret), readable(third, "Continue"))))))
         assertEquals("Continue", inserted.getJSONObject(0).getJSONObject("data").getJSONArray("adds")
             .getJSONObject(0).getJSONObject("wireframe").getString("text"))
     }
@@ -155,7 +186,7 @@ class NativeWireframeEncoderTest {
     }
 
     @Test fun `exact byte bound and late failure leave first frame retryable`() {
-        val frames=listOf(frame(0,listOf(node(first))),frame(1,listOf(node(second,NativeMaskedKind.Input(false)))))
+        val frames=listOf(frame(0,listOf(node(first))),frame(1,listOf(node(second,NativeMaskedKind.Input(false,"******")))))
         val expected=NativeWireframeEncoder().encode(frames)
         val exact=NativeWireframeEncoder(NativeWireframeEncoder.Limits(decodedBytes=expected.bytes.size))
         assertArrayEquals(expected.bytes,exact.encode(frames).bytes)
@@ -189,7 +220,7 @@ class NativeWireframeEncoderTest {
 
     @Test fun `style is closed numeric and color components only`() {
         val style=NativeStyle(NativeSolidColor(255,0,16),NativeSolidColor(0,20,30,128),12.5,NativeFont.SYSTEM)
-        val n=node(first,NativeMaskedKind.Input(false)).copy(style=style)
+        val n=node(first,NativeMaskedKind.Input(false,"******")).copy(style=style)
         val l=leaves(decode(NativeWireframeEncoder().encode(listOf(frame(0,listOf(n))))).getJSONObject(1)).getJSONObject(0)
         assertEquals("text",l.getString("inputType"));val s=l.getJSONObject("style")
         assertEquals(setOf("color","backgroundColor","fontSize","fontFamily"),s.keys().asSequence().toSet())
@@ -265,7 +296,7 @@ class NativeWireframeEncoderTest {
 
     private fun frame(ordinal:Long,nodes:List<NativeMaskedNode> = emptyList(),timestamp:Long=time)=
         NativeMaskedSnapshot(ordinal,timestamp,NativeViewport(390,844),nodes)
-    private fun node(id:UUID,kind:NativeMaskedKind=NativeMaskedKind.Text,x:Double=10.0):NativeMaskedNode {
+    private fun node(id:UUID,kind:NativeMaskedKind=masked,x:Double=10.0):NativeMaskedNode {
         val r=NativeRect(x,20.0,100.0,30.0);return NativeMaskedNode(id,kind,r,r)
     }
     private fun decode(c:NativeEncodedChunk)=JSONArray(c.bytes.toString(Charsets.UTF_8))

@@ -124,8 +124,8 @@ internal class NativeReplayV2Buffer(
                     frames += 1; nodes += entry.frame.nodes.size
                     events += if (entry.frame.ordinal == 0L) 2 else 1
                     bytes += 256L + entry.frame.nodes.size * 512L
-                    for (node in entry.frame.nodes) (node.kind as? NativeMaskedKind.ReadableText)?.text?.let {
-                        bytes += it.utf8Bytes + it.value.length * 2L
+                    for (node in entry.frame.nodes) node.kind.carriedText?.let {
+                        bytes += node.kind.carriedUtf8Bytes + it.length * 2L
                     }
                 }
                 is NativeReplayInteraction.Moves -> { events += entry.points.size; bytes += 128L + entry.points.size * 128L }

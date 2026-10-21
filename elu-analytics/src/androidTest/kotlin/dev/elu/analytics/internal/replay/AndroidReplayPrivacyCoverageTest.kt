@@ -41,7 +41,7 @@ import org.junit.Test
 
 /**
  * Privacy cases the iOS UIKit replay suite covers, on real framework Views through the Views collector
- * and the v1 encoder bytes. Assertions use the encoder's token constants.
+ * and the v1 encoder bytes. Masked text is asserted as its `*` shape.
  */
 class AndroidReplayPrivacyCoverageTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
@@ -193,12 +193,15 @@ class AndroidReplayPrivacyCoverageTest {
         val fits = TextView(activity).apply { text = "Visible start" }
         place(root, fits, root.dp(8), root.dp(200), root.dp(160), root.dp(40))
         val frame = collect(root)
-        for ((name, view) in listOf("ellipsized" to ellipsized, "maxLines" to limited, "overflowing" to short, "scrolling" to scrolling))
-            assertEquals(name, NativeMaskedKind.Text, node(frame, root, view).kind)
+        // Truncated or clipped text is masked in full: the hidden part's length shows, its content does not.
+        for ((name, view) in listOf("maxLines" to limited, "overflowing" to short, "scrolling" to scrolling))
+            assertEquals(name, NativeMaskedKind.MaskedText(NativeMaskText.maskText(long)), node(frame, root, view).kind)
+        val shape = (node(frame, root, ellipsized).kind as NativeMaskedKind.MaskedText).text
+        assertTrue(shape, NativeMaskText.isMaskShaped(shape)); assertEquals(shape, long.length, shape.length)
         // The same view size keeps text that fits readable, so the masking above is the hidden remainder.
         assertEquals("Visible start", readable(frame, root, fits))
         val bytes = encoded(frame)
-        assertTrue(bytes.contains(NativeWireframeEncoder.MASK))
+        assertTrue(bytes.contains(NativeMaskText.maskText(long))); assertFalse(bytes.contains("[masked]"))
         assertFalse(bytes.contains(suffix)); assertFalse(bytes.contains("keeps going"))
     }
 
@@ -231,14 +234,15 @@ class AndroidReplayPrivacyCoverageTest {
         val frame = collect(root)
         assertEquals("Continue", readable(frame, root, plainButton))
         // The theme's all-caps transformation changes the displayed string, so the title stays masked.
-        assertEquals(NativeMaskedKind.Text, node(frame, root, capsButton).kind)
+        assertEquals(NativeMaskedKind.MaskedText("********"), node(frame, root, capsButton).kind)
         assertEquals("First line\nSecond line", readable(frame, root, multiline))
         assertEquals("Short words wrap here", readable(frame, root, wrapped))
         assertEquals("Large type", readable(frame, root, roomy))
-        assertEquals("Large type that does not fit stays masked", NativeMaskedKind.Text, node(frame, root, cramped).kind)
+        assertEquals("Large type that does not fit stays masked", NativeMaskedKind.MaskedText("***** ****"),
+            node(frame, root, cramped).kind)
         val bytes = encoded(frame)
         assertTrue(bytes.contains("Continue")); assertTrue(bytes.contains("Short words wrap here"))
-        assertTrue(bytes.contains(NativeWireframeEncoder.MASK))
+        assertTrue(bytes.contains("\"text\":\"***** ****\"")); assertFalse(bytes.contains("CONTINUE"))
     }
 
     @Test fun laterMaskCannotWeakenAnEarlierBlock() = fixture { activity, root ->
