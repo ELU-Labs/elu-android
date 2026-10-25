@@ -6,6 +6,7 @@ import dev.elu.analytics.internal.concurrent.SdkFuture
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -129,6 +130,28 @@ class NativeRasterDeliveryTest {
             remove("raster"); getJSONObject("configV2").put("issuedAt", "2026-08-05T00:00:30Z")
         }.toString(); h.rig.refresh(); h.rig.publish()
         assertNull(h.queue.claim()); assertArrayEquals(original.copyBytes(), h.rows().single().request.copyBytes())
+    }
+
+    @Test fun `grant naming only the other platform keeps base configuration and never claims raster`() = Rig().use { h ->
+        val original = h.seed()
+        h.rig.body = JSONObject(h.rig.body).apply {
+            getJSONObject("raster").put("platforms", JSONArray().put("ios"))
+            getJSONObject("configV2").put("issuedAt", "2026-08-05T00:00:30Z")
+        }.toString(); h.rig.refresh(); h.rig.publish()
+        val current = checkNotNull(h.rig.gate.snapshot())
+        assertTrue(current.isCurrent()); assertNull(checkNotNull(current.nativeV3).raster)
+        assertEquals(V1ConfigJson.parseConfig(JSONObject(h.rig.body).getJSONObject("configV2").toString()).configSemanticHash,
+            V1ConfigJson.parseConfig(checkNotNull(current.body)).configSemanticHash)
+        assertNull(h.queue.claim()); assertArrayEquals(original.copyBytes(), h.rows().single().request.copyBytes())
+    }
+
+    @Test fun `first wrapper granting only the other platform keeps base configuration without raster storage`() = RasterQueueRig().use { rig ->
+        rig.body = JSONObject(rig.body).apply { getJSONObject("raster").put("platforms", JSONArray().put("ios")) }.toString()
+        rig.activate()
+        val current = checkNotNull(rig.gate.snapshot())
+        assertTrue(current.isCurrent()); assertNull(checkNotNull(current.nativeV3).raster)
+        assertFalse(rig.owner.ensureNativeRasterStorage().get())
+        assertFalse(rig.backing.connection().use { db -> db.transaction { it.nativeRasterReplaySchemaPresent() } })
     }
 
     @Test fun `valid409 and413 retain and permanently block whole epoch append and reopen`() {
