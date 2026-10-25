@@ -343,6 +343,23 @@ class V2ConfigSourceTest {
         }
     }
 
+    @Test fun `native grant naming only the other platform keeps the base lease with raster off`() {
+        for ((platforms, rasterOn) in listOf(listOf("android") to true, listOf("ios") to false, listOf("android", "ios") to true)) {
+            val wrapper = nativeV3SourceFixture()
+            wrapper.getJSONObject("raster").put("platforms", JSONArray().apply { platforms.forEach { put(it) } })
+            val base = wrapper.getJSONObject("configV2").toString()
+            val wire = wrapper.toString()
+            source(format = V2ConfigFormat.NATIVE_V3) { ok(wire) }.use { source ->
+                assertEquals(platforms.toString(), V2ConfigSourceResult.Document(base, V1ConfigStatus.ENABLED), source.refresh())
+                val lease = checkNotNull(source.currentLeaseSnapshot())
+                assertEquals(base, lease.body); assertEquals(wire, lease.receiptBody)
+                assertEquals(platforms.toString(), rasterOn, checkNotNull(lease.nativeV3).raster != null)
+                assertTrue(lease.validReceiptBinding())
+                assertEquals(base, source.currentDocument())
+            }
+        }
+    }
+
     @Test fun `same issuance raster addition or removal poisons full wrapper across withdrawal`() {
         for (initialRaster in listOf(false, true)) {
             val original = nativeV3SourceFixture().also { if (!initialRaster) it.remove("raster") }.toString()

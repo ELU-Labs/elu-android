@@ -11,6 +11,10 @@ internal object NativeV3ConfigParser {
     const val MAXIMUM_BYTES = 65_536
     const val PROFILE_HASH = "sha256:e374338e6100edcad1d11de079f6bdfc24df043107628b83a559bb3e87206422"
     private const val POLICY_DOMAIN = "elu-native-raster-effective-policy-v1\u0000"
+    private const val OWN_PLATFORM = "android"
+
+    /** The route writer grants exactly one of these canonical, sorted, duplicate-free platform lists. */
+    private val RASTER_PLATFORM_GRANTS = listOf(listOf("android"), listOf("ios"), listOf("android", "ios"))
 
     enum class Rejection { TOO_LARGE, MALFORMED, INCOMPATIBLE_BASE, MISMATCHED_RASTER }
     class ParseException(val reason: Rejection, cause: Exception? = null) :
@@ -90,7 +94,7 @@ internal object NativeV3ConfigParser {
         base: V1ParsedConfig,
         baseValue: Value.ObjectValue,
         events: URI?,
-    ): RasterPolicy {
+    ): RasterPolicy? {
         val privacy = base.privacy ?: reject(Rejection.INCOMPATIBLE_BASE)
         val replay = base.replayCapabilities ?: reject(Rejection.INCOMPATIBLE_BASE)
         val limits = base.limits ?: reject(Rejection.INCOMPATIBLE_BASE)
@@ -121,12 +125,17 @@ internal object NativeV3ConfigParser {
         )
         val hash = V1StrictCanonicalJson.sha256(POLICY_DOMAIN.toByteArray(Charsets.UTF_8) +
             V1StrictCanonicalJson.canonicalBytes(material))
+        // Any other list, including an empty, unsorted, duplicated or unknown one, stays a mismatched branch.
+        val candidatePlatforms = (candidate as? Value.ObjectValue)?.member("platforms")?.let(V1StrictCanonicalJson::canonicalize)
+        val platforms = RASTER_PLATFORM_GRANTS.firstOrNull { grant ->
+            V1StrictCanonicalJson.canonicalize(platformList(grant)) == candidatePlatforms
+        } ?: reject(Rejection.MISMATCHED_RASTER)
         val expected = obj(
             "schemaVersion" to number(1), "endpoint" to string(endpoint.toString()),
             "replayContractVersion" to string("3.0.0"), "replaySchemaVersion" to number(3), "ackSchemaVersion" to number(3),
             "replayProtocolGeneration" to string("native-raster-generation-v1"),
             "codec" to string("elu-native-raster-v1"), "compression" to string("gzip"),
-            "platforms" to Value.ArrayValue(listOf(string("android"), string("ios"))),
+            "platforms" to platformList(platforms),
             "privacy" to obj(
                 "schemaVersion" to number(1), "revision" to string(privacy.revision), "effectivePolicyHash" to string(hash),
                 "maskingProfileHash" to string(PROFILE_HASH), "declaredRegionsAllowed" to Value.BooleanValue(true),
@@ -140,6 +149,9 @@ internal object NativeV3ConfigParser {
         if (V1StrictCanonicalJson.canonicalize(candidate) != V1StrictCanonicalJson.canonicalize(expected)) {
             reject(Rejection.MISMATCHED_RASTER)
         }
+        // A valid grant that names only the other platform keeps the base configuration with raster
+        // replay off, exactly as if the wrapper had no raster branch; the whole wrapper stays hash-bound.
+        if (OWN_PLATFORM !in platforms) return null
         return RasterPolicy(endpoint, privacy.revision, hash, minOf(limits.replayChunkBytes, 5_242_880))
     }
 
@@ -148,6 +160,7 @@ internal object NativeV3ConfigParser {
         "pngBytes" to number(2_097_152), "imageEdgePixels" to number(2_048), "imagePixels" to number(1_048_576),
         "viewportEdge" to number(16_384), "minimumFrameIntervalSeconds" to number(1), "framesPerChunk" to number(1),
     )
+    private fun platformList(platforms: List<String>): Value = Value.ArrayValue(platforms.map(::string))
     private fun obj(vararg members: Pair<String, Value>): Value.ObjectValue = Value.ObjectValue(members.toList())
     private fun string(value: String): Value = Value.StringValue(value)
     private fun number(value: Int): Value = Value.NumberValue(value.toString())

@@ -181,7 +181,7 @@ class NativeV3ConfigParserTest {
             val unknown = envelope(); path.fold(unknown.getJSONObject("raster")) { obj, name -> obj.getJSONObject(name) }.put("unknown", false)
             rejected(unknown)
         }
-        for (platforms in listOf(JSONArray("[\"ios\",\"android\"]"), JSONArray("[\"android\"]"), JSONArray("[\"android\",\"ios\",\"browser\"]"))) {
+        for (platforms in listOf(JSONArray("[\"ios\",\"android\"]"), JSONArray("[\"android\",\"ios\",\"browser\"]"))) {
             rejected(envelope().apply { getJSONObject("raster").put("platforms", platforms) })
         }
         for ((field, value) in listOf("codec" to "elu-native-wireframe-v2", "compression" to "none",
@@ -190,6 +190,80 @@ class NativeV3ConfigParserTest {
         }
         rejected(envelope().apply { getJSONObject("raster").getJSONObject("privacy").put("automaticInputDiscovery", true) })
         rejected(envelope().apply { getJSONObject("raster").getJSONObject("limits").put("framesPerChunk", 2) })
+    }
+
+    @Test
+    fun `raster platform grants are exactly the three canonical route writer lists`() {
+        val golden = requireNotNull(parse(envelope()).raster)
+        for ((platforms, rasterOn) in listOf(listOf("android") to true, listOf("ios") to false, listOf("android", "ios") to true)) {
+            val parsed = parse(envelope().apply { getJSONObject("raster").put("platforms", grant(*platforms.toTypedArray())) })
+            assertEquals(platforms.toString(), if (rasterOn) golden else null, parsed.raster)
+        }
+        val invalid = listOf<Any>(
+            grant(), grant("ios", "android"), grant("web"), grant("browser"), grant("android", "android"), grant("ios", "ios"),
+            grant("android", "android", "ios"), grant("android", "ios", "ios"), grant("android", "ios", "web"), grant("android", "web"),
+            grant("ANDROID"), grant("Android"), grant("android "), JSONArray("[1]"), JSONArray("[[\"android\"]]"), JSONArray("[null]"),
+            "android", "ios", JSONObject().put("android", true), true, 0,
+        )
+        for (platforms in invalid) {
+            val value = envelope().apply { getJSONObject("raster").put("platforms", platforms) }
+            assertEquals(platforms.toString(), NativeV3ConfigParser.Rejection.MISMATCHED_RASTER,
+                rejectedBytes(value.toString().toByteArray()).reason)
+        }
+    }
+
+    @Test
+    fun `own platform only grant enables raster with the unchanged policy and base`() {
+        val both = parse(envelope())
+        val value = envelope().apply { getJSONObject("raster").put("platforms", grant("android")) }
+        val parsed = parse(value)
+        assertEquals(requireNotNull(both.raster), parsed.raster)
+        assertArrayEquals(both.baseCanonicalData, parsed.baseCanonicalData)
+        assertEquals(both.baseSemanticHash, parsed.baseSemanticHash)
+        // The whole wrapper stays hash-bound, so a changed grant is a changed source.
+        assertNotEquals(both.semanticHash, parsed.semanticHash)
+        value.getJSONObject("raster").getJSONObject("privacy").put("effectivePolicyHash", "sha256:" + "0".repeat(64))
+        rejected(value, NativeV3ConfigParser.Rejection.MISMATCHED_RASTER)
+    }
+
+    @Test
+    fun `other platform only grant keeps the base configuration with raster off`() {
+        fun iosOnly() = envelope().apply { getJSONObject("raster").put("platforms", grant("ios")) }
+        val parsed = parse(iosOnly())
+        assertNull(parsed.raster)
+        // Exactly the base an absent branch or a both-platform grant yields: events, flags and base replay settings.
+        val both = parse(envelope())
+        val withoutRaster = parse(envelope().apply { remove("raster") })
+        for (reference in listOf(both, withoutRaster)) {
+            assertArrayEquals(reference.baseCanonicalData, parsed.baseCanonicalData)
+            assertEquals(reference.baseSemanticHash, parsed.baseSemanticHash)
+            assertEquals(reference.basePrivacyHash, parsed.basePrivacyHash)
+        }
+        assertEquals(V1ConfigStatus.ENABLED, parsed.base.status)
+        assertEquals(0.25, requireNotNull(parsed.base.privacy).replay.sampleRate, 0.0)
+        assertEquals(5_242_880, parsed.base.limits?.replayChunkBytes)
+        // The grant is still bound into the wrapper identity.
+        assertNotEquals(both.semanticHash, parsed.semanticHash)
+        assertNotEquals(withoutRaster.semanticHash, parsed.semanticHash)
+        // Naming only the other platform never relaxes any other raster member or base requirement.
+        for ((field, bad) in listOf<Pair<String, Any>>("codec" to "elu-native-wireframe-v2", "compression" to "none",
+            "replayProtocolGeneration" to "protocol-generation-v2", "replayContractVersion" to "2.0.0",
+            "replaySchemaVersion" to 2, "ackSchemaVersion" to 2, "schemaVersion" to 2,
+            "endpoint" to "https://eu.ingest.elu.dev/v3/replay", "unknown" to false)) {
+            rejected(iosOnly().apply { getJSONObject("raster").put(field, bad) }, NativeV3ConfigParser.Rejection.MISMATCHED_RASTER)
+        }
+        for (field in listOf("privacy", "limits", "codec")) {
+            rejected(iosOnly().apply { getJSONObject("raster").remove(field) }, NativeV3ConfigParser.Rejection.MISMATCHED_RASTER)
+        }
+        rejected(iosOnly().apply { getJSONObject("raster").getJSONObject("privacy").put("effectivePolicyHash", "sha256:" + "0".repeat(64)) },
+            NativeV3ConfigParser.Rejection.MISMATCHED_RASTER)
+        rejected(iosOnly().apply { getJSONObject("raster").getJSONObject("privacy").put("automaticInputDiscovery", true) },
+            NativeV3ConfigParser.Rejection.MISMATCHED_RASTER)
+        rejected(iosOnly().apply { getJSONObject("raster").getJSONObject("limits").put("framesPerChunk", 2) },
+            NativeV3ConfigParser.Rejection.MISMATCHED_RASTER)
+        rejected(iosOnly().apply { getJSONObject("configV2").getJSONObject("features").put("replay", false) },
+            NativeV3ConfigParser.Rejection.INCOMPATIBLE_BASE)
+        rejected(iosOnly().put("raster", JSONObject.NULL))
     }
 
     @Test
@@ -262,6 +336,7 @@ class NativeV3ConfigParserTest {
     }
 
     private fun parse(value: JSONObject) = NativeV3ConfigParser.parse(value.toString().toByteArray())
+    private fun grant(vararg platforms: String) = JSONArray().apply { platforms.forEach { put(it) } }
     private fun rejected(value: JSONObject, expected: NativeV3ConfigParser.Rejection? = null) {
         val error = rejectedBytes(value.toString().toByteArray())
         if (expected != null) assertEquals(expected, error.reason)
