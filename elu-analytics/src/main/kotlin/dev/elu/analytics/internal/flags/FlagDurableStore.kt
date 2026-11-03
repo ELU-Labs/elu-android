@@ -327,6 +327,10 @@ internal object FlagDurableStore {
         }
     }
 
+    /** Flags off: no authority to validate, but cache storage from a future format still refuses the change. */
+    fun contextChangeStorageRestriction(transaction: RuntimeQueueTransaction): V1FlagProjectionRejection? =
+        if (hasFutureCacheStorage(transaction)) V1FlagProjectionRejection.TERMINAL else null
+
     fun begin(
         transaction: RuntimeQueueTransaction,
         authorization: V1FlagAuthorizationSnapshot?,

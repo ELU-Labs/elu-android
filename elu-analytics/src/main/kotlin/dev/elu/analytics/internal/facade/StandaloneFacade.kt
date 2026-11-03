@@ -212,6 +212,12 @@ internal class StandaloneFacade(
     @Volatile private var configDocument: String? = null
     private var hasConfigDecision = false
     @Volatile private var appliedConfiguration: V2ConfigAuthorityWitness? = null
+    /**
+     * Lane-confined. Whether the site was capturing under a validated document when the
+     * application suspension arrived. Only then are identity calls made in the background kept;
+     * on a blocked, disabled or capture-off site they are discarded.
+     */
+    private var suspendedWhileCapturing = false
     @Volatile private var flagsAuthorized = false
     @Volatile private var flagConfiguration: V2ConfigAuthorityWitness? = null
     private var appliedFlagConfigBody: String? = null
@@ -425,6 +431,15 @@ internal class StandaloneFacade(
     private fun hasCurrentFlags(): Boolean = !closeRequested.get() && !isOptedOut() && flagsAuthorized &&
         (configurationGate == null || flagConfiguration?.isCurrent() == true)
 
+    /**
+     * Backgrounding suspended a still-valid configuration. As on iOS, identity and context calls
+     * then store their change without a wire record, and the next event after the return to the
+     * foreground carries it. An expired, failed or denied configuration is not a suspension, and
+     * neither is one that arrived while the site was not capturing.
+     */
+    private fun backgroundSuspended(): Boolean = configurationGate != null && !closeRequested.get() &&
+        !isOptedOut() && suspendedWhileCapturing && configurationGate.snapshot()?.isApplicationSuspended == true
+
     /** Completes once every call submitted before it has run. */
     fun settled(): Future<Unit> = lane.submit<Unit> { }
 
@@ -452,6 +467,7 @@ internal class StandaloneFacade(
         try {
             lane.execute {
                 closed = true
+                suspendedWhileCapturing = false
                 val held = buffer.toList(); buffer.clear()
                 held.forEach { discard(it, EluFacadeDropReason.CLOSED) }
                 logHeldCalls("Close", held.size, heldDrops(EluFacadeDropReason.CLOSED, held.size))
@@ -613,7 +629,7 @@ internal class StandaloneFacade(
         val setOnce = projectProperties(userPropertiesOnce)
         val occurredAt = now()
         val projected = projectIdentity(ProjectedIdentity(distinctId))
-        dispatch(OperationKind.ACTIVITY, projected, affectsFlags = true) { identifyOnLane(distinctId, set, occurredAt, setOnce) }
+        dispatch(OperationKind.IDENTITY, projected, affectsFlags = true) { identifyOnLane(distinctId, set, occurredAt, setOnce) }
     }
 
     override fun alias(alias: String) {
@@ -623,7 +639,7 @@ internal class StandaloneFacade(
             return
         }
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
+        dispatch(OperationKind.IDENTITY, affectsFlags = true) {
             // An alias links another id to the identified user. Without one there is nothing to
             // link it to, and the anonymous id must never become the canonical person of a merge.
             val userId = identity?.userId ?: run {
@@ -865,7 +881,7 @@ internal class StandaloneFacade(
             return
         }
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
+        dispatch(OperationKind.IDENTITY, affectsFlags = true) {
             applyLocalChange(RuntimeLocalStateChange.RegisterSuperProperties(superProperties, occurredAt))
         }
     }
@@ -883,7 +899,7 @@ internal class StandaloneFacade(
             return
         }
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
+        dispatch(OperationKind.IDENTITY, affectsFlags = true) {
             applyLocalChange(RuntimeLocalStateChange.RegisterSuperPropertiesOnce(selected, projectedDefault, occurredAt))
         }
     }
@@ -895,7 +911,7 @@ internal class StandaloneFacade(
         }
         if (isReservedPropertyKey(key)) return
         val occurredAt = now()
-        dispatch(OperationKind.ACTIVITY, affectsFlags = true) {
+        dispatch(OperationKind.IDENTITY, affectsFlags = true) {
             // Unregistering an absent key would still advance the context revision.
             if (identity?.superProperties?.containsKey(key) != true) return@dispatch
             applyLocalChange(RuntimeLocalStateChange.UnregisterSuperProperties(listOf(key), occurredAt))
@@ -1101,6 +1117,8 @@ internal class StandaloneFacade(
 
     private enum class OperationKind {
         ACTIVITY,
+        /** identify, alias and super properties: activity, except that they are kept in the background. */
+        IDENTITY,
         CONSENT,
         RESET,
         FLAG_CONTEXT,
@@ -1185,7 +1203,7 @@ internal class StandaloneFacade(
         // older revision, and one accepted after it sees the denial.
         val (consentRevision, optedOutAtCall) = synchronized(projectionLock) { consentIntentRevision to isOptedOut() }
         // A later opt-in must never backfill activity submitted during a denial.
-        val deniedAtCall = kind == OperationKind.ACTIVITY && optedOutAtCall
+        val deniedAtCall = (kind == OperationKind.ACTIVITY || kind == OperationKind.IDENTITY) && optedOutAtCall
         if (affectsFlags) stack?.runtime?.withdrawAutomaticExceptions(retire = true)
         if (affectsFlags) synchronized(projectionLock) {
             pendingFlagOperations += 1
@@ -1236,21 +1254,27 @@ internal class StandaloneFacade(
         val current = state
         val previousNativeEpoch = executingNativeEpoch
         executingNativeEpoch = operation.nativeEpoch
+        // Identity and context calls made in the background are kept, as on iOS; events are not.
+        val activity = operation.kind == OperationKind.ACTIVITY ||
+            (operation.kind == OperationKind.IDENTITY && !backgroundSuspended())
         try {
             when {
                 closeRequested.get() -> discard(operation, EluFacadeDropReason.CLOSED, settle = false)
-                configurationGate != null && !hasCurrentConfiguration() && operation.kind == OperationKind.ACTIVITY ->
+                configurationGate != null && !hasCurrentConfiguration() && activity ->
                     discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
-                operation.kind == OperationKind.FLAG_CONTEXT && !hasCurrentFlags() ->
+                // With capture on, flag context applies while flags are off, so the next flag request carries it.
+                operation.kind == OperationKind.FLAG_CONTEXT && !hasCurrentFlags() &&
+                    !(hasCurrentCapture() && !isOptedOut()) && !backgroundSuspended() ->
                     discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
-                operation.kind == OperationKind.PERSON_GROUP_CONTEXT && !hasCurrentCapture() && !hasCurrentFlags() ->
+                operation.kind == OperationKind.PERSON_GROUP_CONTEXT && !hasCurrentCapture() && !hasCurrentFlags() &&
+                    !backgroundSuspended() ->
                     discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
                 current is EluFacadeState.Closed -> discard(operation, EluFacadeDropReason.CLOSED, settle = false)
                 current is EluFacadeState.Pending && operation.kind != OperationKind.CONSENT ->
                     discard(operation, EluFacadeDropReason.UNAUTHORIZED, settle = false)
-                isOptedOut() && operation.kind == OperationKind.ACTIVITY ->
+                isOptedOut() && (operation.kind == OperationKind.ACTIVITY || operation.kind == OperationKind.IDENTITY) ->
                     discard(operation, EluFacadeDropReason.OPTED_OUT, settle = false)
-                current is EluFacadeState.Disabled && operation.kind == OperationKind.ACTIVITY ->
+                current is EluFacadeState.Disabled && activity ->
                     discard(operation, current.reason.drop, settle = false)
                 else ->
                     try {
@@ -1390,6 +1414,11 @@ internal class StandaloneFacade(
             // scheduling and projections without feeding a nonexistent document to the permanent
             // invalid-config barrier. A new source token must pass full validation to resume.
             open.runtime.configurationChanged()
+            // Record the decision that stood when the suspension arrived. Later renewals in the
+            // background (each kept change renews) find the facade already disabled, so the
+            // recorded decision is kept until a document is decided or the facade closes.
+            suspendedWhileCapturing = suspendedWhileCapturing ||
+                (state is EluFacadeState.Enabled && appliedConfiguration != null)
             appliedConfiguration = null
             appliedFlagConfigBody = null
             flagConfiguration = null
@@ -1399,6 +1428,7 @@ internal class StandaloneFacade(
             transition(EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED))
             return
         }
+        suspendedWhileCapturing = false
         val document = if (configurationGate == null) configDocument else witness?.body
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.AUTHORITY_BEGIN, configPresent = document != null) }
         val result = open.runtime.applyConfiguration(document).await()
@@ -1493,10 +1523,13 @@ internal class StandaloneFacade(
         val drafts = changes.map { change -> RuntimeRecordDraft.Mutation(occurredAt, change, versions) }
         val selectedAdmission = captureAdmission ?: if (eventFilter.enabled) eventFilterAdmission(allowPendingIdentity = true) else null
         val originalAdmission = selectedAdmission?.let { check -> { synchronized(projectionLock) { check() } } }
-        val pending = if (originalAdmission == null) open.owner.appendMutations(drafts) else synchronized(projectionLock) {
+        // A change associated with a capture never falls back; an ordinary one in the background does.
+        val localWhenSuspended = captureAdmission == null && backgroundSuspended()
+        val pending = if (originalAdmission == null) open.owner.appendMutations(drafts, null, false, localWhenSuspended)
+        else synchronized(projectionLock) {
             // Only submission holds the projection lock. Never wait for the queue worker here.
             if (originalAdmission()) open.owner.appendMutations(drafts, originalAdmission,
-                filterMutation = captureAdmission == null && eventFilter.enabled) else null
+                filterMutation = captureAdmission == null && eventFilter.enabled, localWhenSuspended = localWhenSuspended) else null
         }
         if (pending == null) { countDrop(EluFacadeDropReason.UNAUTHORIZED); return false }
         val result = pending.await()
@@ -1523,7 +1556,8 @@ internal class StandaloneFacade(
         // uses the source-bound owner operation and its durable flag authority transaction.
         if (configurationGate == null && !(filterMutation && eventFilter.enabled)) { applyLocalChange(change); return }
         val restriction = if (filterMutation && eventFilter.enabled) eventFilterAdmission(allowPendingIdentity = true) else null
-        when (val result = requireStack().owner.applyFlagContext(change, filterMutation, restriction).await()) {
+        when (val result = requireStack().owner.applyFlagContext(change, filterMutation, restriction,
+            withoutFlags = !hasCurrentFlags(), localWhenSuspended = backgroundSuspended()).await()) {
             is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
             is RuntimeAppendResult.Rejected -> countDrop(mutationDropReason(result.reason))
         }
