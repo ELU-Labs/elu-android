@@ -6,6 +6,7 @@ publication. Each release has a decision record in [decisions/](decisions/)
 that says what was checked for that version and what was deferred:
 
 - [0.2.0](decisions/0.2.0.md)
+- [0.2.1](decisions/0.2.1.md)
 
 Maven Central versions are permanent. A published version can never be deleted
 or replaced, so every step below runs before anything is uploaded, and the
