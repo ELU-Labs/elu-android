@@ -110,10 +110,12 @@ foreground fetches it again. Operations made from the return until that fetch
 delivers a validated document are held the same way, with the same limit and
 consent rules. This includes the app-open and screen events the SDK records on
 return. A failed fetch keeps them held while fetches retry.
-While in the background, events and screens are discarded. `identify`, `alias`,
+While in the background, events and screens are discarded. If the site was
+capturing when the app went to the background, `identify`, `alias`,
 super-property, person, group and flag-context calls still store their change,
 with no record queued for it, so the next event and flag request after the return
-carry it. The opt-out, disabled-configuration and region-block discards still apply.
+carry it. While opted out, or if the site was not capturing (a disabled
+configuration, a region block or capture off), they are discarded and store nothing.
 With capture on and feature flags off, the four `ForFlags` calls store their change,
 and the next flag request once flags are on again carries it.
 This buffer is not a durable offline queue: a process that ends before

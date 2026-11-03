@@ -212,6 +212,12 @@ internal class StandaloneFacade(
     @Volatile private var configDocument: String? = null
     private var hasConfigDecision = false
     @Volatile private var appliedConfiguration: V2ConfigAuthorityWitness? = null
+    /**
+     * Lane-confined. Whether the site was capturing under a validated document when the
+     * application suspension arrived. Only then are identity calls made in the background kept;
+     * on a blocked, disabled or capture-off site they are discarded.
+     */
+    private var suspendedWhileCapturing = false
     @Volatile private var flagsAuthorized = false
     @Volatile private var flagConfiguration: V2ConfigAuthorityWitness? = null
     private var appliedFlagConfigBody: String? = null
@@ -428,10 +434,11 @@ internal class StandaloneFacade(
     /**
      * Backgrounding suspended a still-valid configuration. As on iOS, identity and context calls
      * then store their change without a wire record, and the next event after the return to the
-     * foreground carries it. An expired, failed or denied configuration is not a suspension.
+     * foreground carries it. An expired, failed or denied configuration is not a suspension, and
+     * neither is one that arrived while the site was not capturing.
      */
     private fun backgroundSuspended(): Boolean = configurationGate != null && !closeRequested.get() &&
-        !isOptedOut() && configurationGate.snapshot()?.isApplicationSuspended == true
+        !isOptedOut() && suspendedWhileCapturing && configurationGate.snapshot()?.isApplicationSuspended == true
 
     /** Completes once every call submitted before it has run. */
     fun settled(): Future<Unit> = lane.submit<Unit> { }
@@ -460,6 +467,7 @@ internal class StandaloneFacade(
         try {
             lane.execute {
                 closed = true
+                suspendedWhileCapturing = false
                 val held = buffer.toList(); buffer.clear()
                 held.forEach { discard(it, EluFacadeDropReason.CLOSED) }
                 logHeldCalls("Close", held.size, heldDrops(EluFacadeDropReason.CLOSED, held.size))
@@ -1406,6 +1414,11 @@ internal class StandaloneFacade(
             // scheduling and projections without feeding a nonexistent document to the permanent
             // invalid-config barrier. A new source token must pass full validation to resume.
             open.runtime.configurationChanged()
+            // Record the decision that stood when the suspension arrived. Later renewals in the
+            // background (each kept change renews) find the facade already disabled, so the
+            // recorded decision is kept until a document is decided or the facade closes.
+            suspendedWhileCapturing = suspendedWhileCapturing ||
+                (state is EluFacadeState.Enabled && appliedConfiguration != null)
             appliedConfiguration = null
             appliedFlagConfigBody = null
             flagConfiguration = null
@@ -1415,6 +1428,7 @@ internal class StandaloneFacade(
             transition(EluFacadeState.Disabled(EluFacadeDisabledReason.UNAUTHORIZED))
             return
         }
+        suspendedWhileCapturing = false
         val document = if (configurationGate == null) configDocument else witness?.body
         observeStartup(startupObserver) { RuntimeStartupObservation(RuntimeStartupPhase.AUTHORITY_BEGIN, configPresent = document != null) }
         val result = open.runtime.applyConfiguration(document).await()
@@ -1543,7 +1557,7 @@ internal class StandaloneFacade(
         if (configurationGate == null && !(filterMutation && eventFilter.enabled)) { applyLocalChange(change); return }
         val restriction = if (filterMutation && eventFilter.enabled) eventFilterAdmission(allowPendingIdentity = true) else null
         when (val result = requireStack().owner.applyFlagContext(change, filterMutation, restriction,
-            withoutFlags = !hasCurrentFlags()).await()) {
+            withoutFlags = !hasCurrentFlags(), localWhenSuspended = backgroundSuspended()).await()) {
             is RuntimeAppendResult.Accepted -> syncIdentity(result.snapshot.state.identity)
             is RuntimeAppendResult.Rejected -> countDrop(mutationDropReason(result.reason))
         }

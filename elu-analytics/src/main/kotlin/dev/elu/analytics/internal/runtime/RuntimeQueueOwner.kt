@@ -597,11 +597,12 @@ internal class RuntimeQueueOwner private constructor(
     /**
      * Local flag context only, admitted against transaction-current flag/source authority. With
      * [withoutFlags] (flags not authorized), it is admitted instead against current capture
-     * authority, or while the application suspension stands, so the next flag request carries it.
+     * authority, or, when the caller found the site capturing as the application suspension arrived
+     * ([localWhenSuspended]), while that suspension stands, so the next flag request carries it.
      */
     internal fun applyFlagContext(change: RuntimeLocalStateChange,
         filterMutation: Boolean = false, admission: (() -> Boolean)? = null,
-        withoutFlags: Boolean = false): Future<RuntimeAppendResult> {
+        withoutFlags: Boolean = false, localWhenSuspended: Boolean = false): Future<RuntimeAppendResult> {
         require(change is RuntimeLocalStateChange.SetFlagPersonProperties ||
             change is RuntimeLocalStateChange.SetFlagGroupProperties || change is RuntimeLocalStateChange.SetFlagGroup ||
             change is RuntimeLocalStateChange.ResetGroups || change is RuntimeLocalStateChange.ResetFlagPersonProperties ||
@@ -620,7 +621,7 @@ internal class RuntimeQueueOwner private constructor(
             fun restriction(before: LoadedSnapshot): Boolean = admission?.invoke() != false &&
                 before.state.identity == original.state.identity && before.state.stream == original.state.stream &&
                 (if (withoutFlags) !before.state.identity.optedOut &&
-                    (captureAuthorityRejection(before) == null || applicationSuspended(before))
+                    (captureAuthorityRejection(before) == null || (localWhenSuspended && applicationSuspended(before)))
                 else !featureFlagClockPoisoned && flagConfiguration === witness && witness?.isCurrent() == true &&
                     currentFlagAuthorization() == authorization)
             if (!restriction(original)) return@submit rejected()
