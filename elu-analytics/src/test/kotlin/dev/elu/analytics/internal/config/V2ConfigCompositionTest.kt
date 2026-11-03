@@ -10,6 +10,7 @@ import dev.elu.analytics.internal.core.FlagContextState
 import dev.elu.analytics.internal.core.IdentityState
 import dev.elu.analytics.internal.core.PersistedCoreState
 import dev.elu.analytics.internal.core.StreamState
+import dev.elu.analytics.internal.facade.EluFacadeDisabledReason
 import dev.elu.analytics.internal.facade.EluFacadeDropReason
 import dev.elu.analytics.internal.facade.EluFacadeState
 import dev.elu.analytics.internal.facade.StandaloneFacade
@@ -29,6 +30,9 @@ import dev.elu.analytics.internal.runtime.RuntimeQueueDatabase
 import dev.elu.analytics.internal.runtime.RuntimeQueueLimits
 import dev.elu.analytics.internal.runtime.RuntimeQueueOwner
 import dev.elu.analytics.internal.runtime.RuntimeQueuedRecord
+import dev.elu.analytics.internal.runtime.RuntimeFlagStoredRow
+import dev.elu.analytics.internal.runtime.RUNTIME_FLAG_CACHE_METADATA_KEY
+import dev.elu.analytics.internal.runtime.RuntimeEventRecord
 import dev.elu.analytics.internal.runtime.RuntimeRecordCodec
 import dev.elu.analytics.internal.runtime.RuntimeQueueTransaction
 import dev.elu.analytics.internal.runtime.RuntimeStoredCore
@@ -312,18 +316,41 @@ class V2ConfigCompositionTest {
         } }
     }
 
-    @Test fun `flags-off denies overrides without disabling ordinary capture-on person mutation`() = Rig(withFlags = true).use { rig ->
+    @Test fun `flags-off keeps overrides locally without disabling ordinary capture-on person mutation`() = Rig(withFlags = true).use { rig ->
         rig.body = JSONObject(rig.body).also { it.getJSONObject("features").put("flags", false) }.toString()
         rig.enable()
-        val before = rig.owner.snapshot().get()
-        rig.facade.setPersonPropertiesForFlags(mapOf("role" to "denied"))
-        rig.facade.setGroupPropertiesForFlags("company", mapOf("tier" to "denied"))
+        rig.facade.setPersonPropertiesForFlags(mapOf("role" to "override"))
+        rig.facade.setGroupPropertiesForFlags("company", mapOf("tier" to "override"))
         rig.settle()
-        assertEquals(before, rig.owner.snapshot().get())
+        val local = rig.owner.snapshot().get()
+        assertEquals(0, local.queuedCount)
+        assertEquals("override", local.state.flagContext.personProperties["role"])
+        assertEquals("override", local.state.flagContext.groupProperties["company"]?.get("tier"))
         rig.facade.setPersonProperties(mapOf("role" to "captured")); rig.settle()
         val after = rig.owner.snapshot().get()
         assertEquals(1, after.queuedCount)
         assertEquals("captured", after.state.flagContext.personProperties["role"])
+    }
+
+    /** With flags off, cache storage from a future format still refuses a flag-context change. */
+    @Test fun `flags-off flag context is refused while future flag cache storage is present`() = Rig(withFlags = true).use { rig ->
+        rig.body = JSONObject(rig.body).also { it.getJSONObject("features").put("flags", false) }.toString()
+        rig.enable()
+        rig.backing.flagRows[RUNTIME_FLAG_CACHE_METADATA_KEY] = RuntimeFlagStoredRow(RUNTIME_FLAG_CACHE_METADATA_KEY, 1,
+            "{\"schemaVersion\":2}".encodeToByteArray())
+        val before = rig.owner.snapshot().get()
+        val dropped = allDrops(rig)
+        rig.facade.setPersonPropertiesForFlags(mapOf("role" to "future")); rig.settle()
+        assertEquals(before, rig.owner.snapshot().get())
+        assertEquals(dropped + 1, allDrops(rig))
+        val direct = rig.owner.applyFlagContext(RuntimeLocalStateChange.SetFlagPersonProperties(
+            mapOf("role" to "future"), "2026-08-05T00:01:00.000Z"), withoutFlags = true).get()
+        assertTrue(direct is RuntimeAppendResult.Rejected && direct.reason == RuntimeAppendRejection.AUTHORIZATION_UNAVAILABLE)
+        assertEquals(before, rig.owner.snapshot().get())
+        // Without the future row the same call applies.
+        rig.backing.flagRows.remove(RUNTIME_FLAG_CACHE_METADATA_KEY)
+        rig.facade.setPersonPropertiesForFlags(mapOf("role" to "current")); rig.settle()
+        assertEquals("current", rig.owner.snapshot().get().state.flagContext.personProperties["role"])
     }
 
     @Test fun `flag context source withdrawal during storage rolls back local change`() = Rig(withFlags = true).use { rig ->
@@ -606,49 +633,104 @@ class V2ConfigCompositionTest {
     }
 
     /**
-     * Pins current behaviour. Backgrounding withdraws the configuration, so every identify-type
-     * call made in the background is discarded: nothing is stored or queued, the drop is counted,
-     * and once the app returns to the foreground no event or flag request carries it. iOS
-     * currently keeps these calls instead (EluStandaloneStackTests).
+     * As on iOS (EluStandaloneStackTests), backgrounding suspends the configuration and every
+     * identify-type call made then still stores its change: nothing is queued and nothing is
+     * counted as dropped. After the return to the foreground the next event and flag request
+     * carry the change, and no identify, alias, person or group mutation for it is ever queued.
      */
-    @Test fun `identity calls made in the background are discarded and never surface after the return to foreground`() {
+    @Test fun `identity calls made in the background are kept and reach the next event after the return to foreground`() {
         val failures = identityCalls().mapNotNull { case ->
-            try { Rig(withFlags = true).use { rig -> assertDiscardedInBackground(rig, case) }; null }
+            try { Rig(withFlags = true).use { rig -> assertKeptInBackground(rig, case) }; null }
             catch (failure: AssertionError) { failure.message ?: "background ${case.name} failed" }
         }
         if (failures.isNotEmpty()) fail(failures.joinToString("\n"))
     }
 
+    /** A call made while opted out is discarded in the background too, and never surfaces later. */
+    @Test fun `identity calls made in the background while opted out are discarded`() {
+        val failures = identityCalls().mapNotNull { case ->
+            try { Rig(withFlags = true).use { rig -> assertOptedOutInBackground(rig, case) }; null }
+            catch (failure: AssertionError) { failure.message ?: "opted out ${case.name} failed" }
+        }
+        if (failures.isNotEmpty()) fail(failures.joinToString("\n"))
+    }
+
     /**
-     * Pins current behaviour. With capture on and feature flags off, the four flag-context calls
-     * are discarded and never reach a flag request once flags are turned on again, while person
-     * and group calls follow capture and apply. iOS currently applies the flag-context calls too
-     * (EluStandaloneFacadeRuntimeTests).
+     * Events and screens are not identity calls: made in the background they are discarded, as on
+     * iOS, and never surface after the return to the foreground. Replay intake stays stopped.
      */
-    @Test fun `with flags off flag-context calls are discarded while person and group calls follow capture`() {
-        val failures = identityCalls().filter { it.flagsOff != null }.mapNotNull { case ->
+    @Test fun `events and screens made in the background stay discarded and replay stays stopped`() =
+        Rig(withFlags = true).use { rig ->
+            rig.enable(); rig.settleFlags()
+            rig.facade.capture("before", null, Date(rig.clock.wall)); rig.settle()
+            background(rig)
+            val before = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS)
+            val dropped = unauthorizedDrops(rig)
+            rig.facade.capture("in-background", mapOf("marker" to MARKER), Date(rig.clock.wall))
+            rig.facade.screen("BackgroundScreen", null); rig.settle()
+            assertEquals(before.queuedCount, rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS).queuedCount)
+            assertEquals(dropped + 2, unauthorizedDrops(rig))
+            assertFalse(rig.facade.nativeReplayIntakeAllowed())
+            foreground(rig)
+            rig.facade.capture("after-resume", null, Date(rig.clock.wall)); rig.settle()
+            val names = rig.owner.peek(100, 1_000_000).get(WAIT_SECONDS, TimeUnit.SECONDS)
+                .filterIsInstance<RuntimeQueuedRecord.Event>().map { it.record.name }
+            assertEquals(listOf("before", StandaloneRuntime.APPLICATION_BACKGROUNDED_EVENT, "after-resume"), names)
+        }
+
+    /**
+     * As on iOS (EluStandaloneFacadeRuntimeTests), with capture on and feature flags off the four
+     * flag-context calls still change the stored flag context, with nothing queued or counted as
+     * dropped, and the first flag request once flags are turned on again carries the change.
+     * setPersonProperties, group and resetGroups follow capture and apply.
+     */
+    @Test fun `with flags off flag-context calls still apply and reach the next flag request`() {
+        val failures = identityCalls().filter { it.flagContext }.mapNotNull { case ->
             try { Rig(withFlags = true).use { rig -> assertCallWithFlagsOff(rig, case) }; null }
             catch (failure: AssertionError) { failure.message ?: "flags off ${case.name} failed" }
         }
         if (failures.isNotEmpty()) fail(failures.joinToString("\n"))
     }
 
-    /** [flagsOff] is what the call does with capture on and flags off: true applies, false discards. */
-    private class IdentityCall(val name: String, val flagsOff: Boolean?, val call: (StandaloneFacade) -> Unit)
+    /**
+     * [event] is what the next event after the return to the foreground shows. [flagRequest], for
+     * the four flag-context calls, is what the next flag request shows.
+     */
+    private class IdentityCall(
+        val name: String,
+        val flagContext: Boolean,
+        val event: (RuntimeEventRecord) -> Boolean,
+        val flagRequest: ((String) -> Boolean)?,
+        val call: (StandaloneFacade) -> Unit,
+    )
 
     private fun identityCalls(): List<IdentityCall> = listOf(
-        IdentityCall("identify", null) { it.identify(MARKER, mapOf("marker" to MARKER), mapOf("firstMarker" to MARKER)) },
-        IdentityCall("alias", null) { it.alias(MARKER) },
-        IdentityCall("register", null) { it.register(mapOf("marker" to MARKER)) },
-        IdentityCall("registerOnce", null) { it.registerOnce(mapOf("onceMarker" to MARKER), null) },
-        IdentityCall("unregister", null) { it.unregister("plan") },
-        IdentityCall("setPersonProperties", true) { it.setPersonProperties(mapOf("marker" to MARKER), mapOf("firstMarker" to MARKER)) },
-        IdentityCall("group", true) { it.group("team", MARKER, mapOf("marker" to MARKER)) },
-        IdentityCall("resetGroups", true) { it.resetGroups() },
-        IdentityCall("setPersonPropertiesForFlags", false) { it.setPersonPropertiesForFlags(mapOf("marker" to MARKER)) },
-        IdentityCall("resetPersonPropertiesForFlags", false) { it.resetPersonPropertiesForFlags() },
-        IdentityCall("setGroupPropertiesForFlags", false) { it.setGroupPropertiesForFlags("company", mapOf("marker" to MARKER)) },
-        IdentityCall("resetGroupPropertiesForFlags", false) { it.resetGroupPropertiesForFlags("company") },
+        IdentityCall("identify", false, { it.identity.userId == MARKER }, null) {
+            it.identify(MARKER, mapOf("marker" to MARKER), mapOf("firstMarker" to MARKER))
+        },
+        IdentityCall("alias", false, { it.identity.userId == "member" }, null) { it.alias(MARKER) },
+        IdentityCall("register", false, { it.properties["marker"] == MARKER }, null) { it.register(mapOf("marker" to MARKER)) },
+        IdentityCall("registerOnce", false, { it.properties["onceMarker"] == MARKER }, null) {
+            it.registerOnce(mapOf("onceMarker" to MARKER), null)
+        },
+        IdentityCall("unregister", false, { !it.properties.containsKey("plan") }, null) { it.unregister("plan") },
+        IdentityCall("setPersonProperties", true, { true }, null) {
+            it.setPersonProperties(mapOf("marker" to MARKER), mapOf("firstMarker" to MARKER))
+        },
+        IdentityCall("group", true, { it.groups["team"] == MARKER }, null) { it.group("team", MARKER, mapOf("marker" to MARKER)) },
+        IdentityCall("resetGroups", true, { it.groups.isEmpty() }, null) { it.resetGroups() },
+        IdentityCall("setPersonPropertiesForFlags", true, { true }, { it.contains(MARKER) }) {
+            it.setPersonPropertiesForFlags(mapOf("marker" to MARKER))
+        },
+        IdentityCall("resetPersonPropertiesForFlags", true, { true }, { !it.contains("admin") }) {
+            it.resetPersonPropertiesForFlags()
+        },
+        IdentityCall("setGroupPropertiesForFlags", true, { true }, { it.contains(MARKER) }) {
+            it.setGroupPropertiesForFlags("company", mapOf("marker" to MARKER))
+        },
+        IdentityCall("resetGroupPropertiesForFlags", true, { true }, { !it.contains("seats") }) {
+            it.resetGroupPropertiesForFlags("company")
+        },
     )
 
     /** Identity, a super property, a group and flag context each call above changes. */
@@ -664,45 +746,87 @@ class V2ConfigCompositionTest {
     private fun unauthorizedDrops(rig: Rig): Int =
         rig.facade.diagnostics().get(WAIT_SECONDS, TimeUnit.SECONDS).dropped[EluFacadeDropReason.UNAUTHORIZED] ?: 0
 
-    private fun assertDiscardedInBackground(rig: Rig, case: IdentityCall) {
+    private fun allDrops(rig: Rig): Int = rig.facade.diagnostics().get(WAIT_SECONDS, TimeUnit.SECONDS).dropped.values.sum()
+
+    /**
+     * The order AndroidStandaloneStack's lifecycle sink uses, then the gate notification it posts.
+     * An opted-out runtime records no Application Backgrounded event, so only the gate is suspended.
+     */
+    private fun background(rig: Rig, boundary: Boolean = true) {
+        rig.clock.wall += 1_000; rig.clock.nanos += 1_000_000_000
+        rig.facade.nativeReplayLifecycleChanged(false)
+        if (!boundary) rig.driver.onBackground()
+        else rig.runtime.applicationBackgrounded(rig.driver, Instant.ofEpochMilli(rig.clock.wall).toString())
+            ?.get(WAIT_SECONDS, TimeUnit.SECONDS)
+        rig.runtime.configurationChanged(); rig.facade.configurationChanged(); rig.settle()
+        assertTrue(checkNotNull(rig.gate.snapshot()).isApplicationSuspended)
+    }
+
+    /** Return to the foreground; the re-fetch returns the same issuance. */
+    private fun foreground(rig: Rig) {
+        rig.facade.nativeReplayLifecycleChanged(true)
+        rig.driver.onForeground(); rig.runtime.markForegrounded()
+        rig.worker.runNext()
+        rig.runtime.configurationChanged(); rig.facade.configurationChanged(); rig.settle(); rig.settleFlags()
+        assertTrue(rig.facade.state() is EluFacadeState.Enabled)
+    }
+
+    private fun assertKeptInBackground(rig: Rig, case: IdentityCall) {
         val name = "background ${case.name}"
         rig.enable(); rig.settleFlags()
         seed(rig)
         rig.facade.capture("before", null, Date(rig.clock.wall)); rig.settle()
-        // The order AndroidStandaloneStack's lifecycle sink uses, then the gate notification it posts.
-        rig.clock.wall += 1_000; rig.clock.nanos += 1_000_000_000
-        rig.facade.nativeReplayLifecycleChanged(false)
-        rig.runtime.applicationBackgrounded(rig.driver, Instant.ofEpochMilli(rig.clock.wall).toString())
-            ?.get(WAIT_SECONDS, TimeUnit.SECONDS)
-        rig.runtime.configurationChanged(); rig.facade.configurationChanged(); rig.settle()
+        background(rig)
         assertTrue(name, rig.facade.state() is EluFacadeState.Disabled)
         val before = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS)
-        val dropped = unauthorizedDrops(rig)
+        val dropped = allDrops(rig)
+
+        case.call(rig.facade); rig.settle()
+        val after = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertEquals(name, before.queuedCount, after.queuedCount)
+        assertTrue(name, before.state.identity != after.state.identity || before.state.flagContext != after.state.flagContext)
+        assertEquals(name, dropped, allDrops(rig))
+        assertFalse(name, rig.facade.nativeReplayIntakeAllowed())
+
+        val flagCalls = rig.flagCalls.get()
+        foreground(rig)
+        // The background change survives the return to the foreground.
+        val resumed = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS).state
+        assertEquals(name, after.state.identity.userId, resumed.identity.userId)
+        assertEquals(name, after.state.identity.superProperties, resumed.identity.superProperties)
+        assertEquals(name, after.state.identity.groups, resumed.identity.groups)
+        assertEquals(name, after.state.flagContext, resumed.flagContext)
+        rig.facade.capture("after-resume", null, Date(rig.clock.wall)); rig.settle()
+        val records = rig.owner.peek(100, 1_000_000).get(WAIT_SECONDS, TimeUnit.SECONDS)
+        val event = records.filterIsInstance<RuntimeQueuedRecord.Event>().last().record
+        assertEquals(name, "after-resume", event.name)
+        assertTrue("$name: $event", case.event(event))
+        // No identify, alias, person or group mutation for it is ever queued.
+        assertFalse(name, records.filterIsInstance<RuntimeQueuedRecord.Mutation>().any { it.toString().contains(MARKER) })
+        assertTrue(name, rig.flagCalls.get() > flagCalls)
+        case.flagRequest?.let { check ->
+            val sent = checkNotNull(rig.lastFlagRequest).toString()
+            assertTrue("$name: $sent", check(sent))
+        }
+    }
+
+    private fun assertOptedOutInBackground(rig: Rig, case: IdentityCall) {
+        val name = "opted out ${case.name}"
+        rig.enable(); rig.settleFlags()
+        seed(rig)
+        rig.facade.optOut(); rig.settle()
+        background(rig, boundary = false)
+        assertEquals(name, EluFacadeState.Disabled(EluFacadeDisabledReason.OPTED_OUT),
+            rig.facade.state())
+        val before = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        val dropped = allDrops(rig)
 
         case.call(rig.facade); rig.settle()
         val after = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(name, before.queuedCount, after.queuedCount)
         assertEquals(name, before.state.identity, after.state.identity)
         assertEquals(name, before.state.flagContext, after.state.flagContext)
-        assertEquals(name, dropped + 1, unauthorizedDrops(rig))
-
-        // Return to the foreground; the re-fetch returns the same issuance.
-        val flagCalls = rig.flagCalls.get()
-        rig.facade.nativeReplayLifecycleChanged(true)
-        rig.driver.onForeground(); rig.runtime.markForegrounded()
-        rig.worker.runNext()
-        rig.runtime.configurationChanged(); rig.facade.configurationChanged(); rig.settle(); rig.settleFlags()
-        assertTrue(name, rig.facade.state() is EluFacadeState.Enabled)
-        rig.facade.capture("after-resume", null, Date(rig.clock.wall)); rig.settle()
-        val event = rig.owner.peek(100, 1_000_000).get(WAIT_SECONDS, TimeUnit.SECONDS)
-            .filterIsInstance<RuntimeQueuedRecord.Event>().last().record
-        assertEquals(name, "after-resume", event.name)
-        assertEquals(name, "member", event.identity.userId)
-        assertEquals(name, mapOf("company" to "acme"), event.groups)
-        assertEquals(name, "free", event.properties["plan"])
-        assertFalse(name, event.properties.containsKey("marker") || event.properties.containsKey("onceMarker"))
-        assertTrue(name, rig.flagCalls.get() > flagCalls)
-        assertFalse(name, checkNotNull(rig.lastFlagRequest).toString().contains(MARKER))
+        assertEquals(name, dropped + 1, allDrops(rig))
     }
 
     private fun assertCallWithFlagsOff(rig: Rig, case: IdentityCall) {
@@ -715,30 +839,24 @@ class V2ConfigCompositionTest {
         assertTrue(name, rig.facade.state() is EluFacadeState.Enabled)
         assertNull(name, rig.facade.getFeatureFlag("variant"))
         val before = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS)
-        val dropped = unauthorizedDrops(rig)
+        val dropped = allDrops(rig)
 
         case.call(rig.facade); rig.settle()
         val after = rig.owner.snapshot().get(WAIT_SECONDS, TimeUnit.SECONDS)
-        if (case.flagsOff == true) {
-            assertTrue(name, before.state.identity != after.state.identity || before.state.flagContext != after.state.flagContext)
-            assertEquals(name, dropped, unauthorizedDrops(rig))
-            return
-        }
+        assertTrue(name, before.state.identity != after.state.identity || before.state.flagContext != after.state.flagContext)
+        assertEquals(name, dropped, allDrops(rig))
+        val request = case.flagRequest ?: return
         assertEquals(name, before.queuedCount, after.queuedCount)
-        assertEquals(name, before.state.identity, after.state.identity)
-        assertEquals(name, before.state.flagContext, after.state.flagContext)
-        assertEquals(name, dropped + 1, unauthorizedDrops(rig))
+        assertTrue(name, before.state.flagContext != after.state.flagContext)
 
-        // Flags on again: the first evaluation still carries the context seeded before flags were off.
+        // Flags on again: the first evaluation carries the change made while they were off.
         val flagCalls = rig.flagCalls.get()
         rig.body = JSONObject(rig.body).put("revision", "flags-on-3").put("issuedAt", "2026-08-05T00:00:45.000Z")
             .also { it.getJSONObject("features").put("flags", true) }.toString()
         rig.driver.refresh(); rig.worker.runNext(); rig.facade.configurationChanged(); rig.settle(); rig.settleFlags()
         assertTrue(name, rig.flagCalls.get() > flagCalls)
-        val sent = checkNotNull(rig.lastFlagRequest)
-        assertFalse(name, sent.toString().contains(MARKER))
-        assertEquals(name, "admin", sent.getJSONObject("personProperties").getString("role"))
-        assertEquals(name, 5, sent.getJSONObject("groupProperties").getJSONObject("company").getInt("seats"))
+        val sent = checkNotNull(rig.lastFlagRequest).toString()
+        assertTrue("$name: $sent", request(sent))
     }
 
     private class Rig(bindGate: Boolean = true, withFlags: Boolean = false, queueCallbacks: Boolean = false, acknowledgeEvents: Boolean = false) : AutoCloseable {
