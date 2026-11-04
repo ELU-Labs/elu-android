@@ -12,16 +12,18 @@ is managed from your ELU dashboard and delivered as remote config. See
 - Android 6 or later (API 23+) for events, identity and feature flags. Native session replay
   requires Android 10 or later (API 29+) and current server authorization.
 
-Version 0.2.0 uses the ELU-owned analytics runtime and replaces 0.1.0, which used
-the previous runtime. Application code continues to use `Elu.*`. It covers events,
-screens, identity, sessions, durable delivery and feature flags. Session replay is
-switched on by ELU's service configuration, not by the SDK version, and is not yet
-enabled for Android. The checks this release requires, and the ones it defers, are
-listed in [release/decisions/0.2.0.md](release/decisions/0.2.0.md).
+Version 0.2.1 covers events, screens, identity, sessions, durable delivery,
+feature flags and native session replay. Application code uses `Elu.*`. ELU turns
+session replay on per project through the service configuration; the SDK version
+alone does not enable it. Recordings follow the project's masking policy: masked
+text and input values appear as one `*` per character, so a replay shows their
+length but never their content. Images, WebViews, Compose content and other
+unsupported views appear as "Content hidden" placeholders. See
+[Native replay privacy and supported UI](#native-replay-privacy-and-supported-ui).
 
-Replay, once enabled, requires Android 10 or later (API 29+). Replay is unavailable
-on API 23–28: the SDK records no replay frames there, and events, identity and
-feature flags remain available.
+Replay requires Android 10 or later (API 29+). Replay is unavailable on API 23–28:
+the SDK records no replay frames there, and events, identity and feature flags
+remain available.
 
 ## Install
 
@@ -29,12 +31,12 @@ Add the SDK to your app module:
 
 ```kotlin
 dependencies {
-    implementation("dev.elu:elu-analytics:0.2.0")
+    implementation("dev.elu:elu-analytics:0.2.1")
 }
 ```
 
 Only the core artifact `dev.elu:elu-analytics` is published. The optional
-`elu-analytics-compose` module in this repository is not published in 0.2.0.
+`elu-analytics-compose` module in this repository is not published.
 
 In the app's `settings.gradle.kts`, ensure the existing dependency repositories
 include Google Maven (desugaring) and Maven Central (the SDK and its dependencies):
@@ -65,11 +67,14 @@ The substitution builds the local `:elu-analytics` module instead of the Maven
 artifact. Source builds use this checkout's toolchain and installed Android SDK
 requirements listed under [Build notes](#build-notes).
 
-Upgrading from 0.1.0: 0.2.0 does not import data stored by 0.1.0. Setup creates
-a fresh installation and leaves the 0.1.0 files untouched. It does not transfer
-prior identity, consent, events or replay. Apply the user's current consent before
-capturing any data. A 0.2.0 installation keeps its identity, consent and pending
-queue across app restarts, app updates and supported storage schema upgrades.
+Upgrading from 0.2.0: update the version; no code changes are needed. An
+installation of 0.2.0 or later keeps its identity, consent and pending queue
+across app restarts, app updates and supported storage schema upgrades.
+
+Upgrading from 0.1.0: 0.2.0 and later do not import data stored by 0.1.0. Setup
+creates a fresh installation and leaves the 0.1.0 files untouched. It does not
+transfer prior identity, consent, events or replay. Apply the user's current
+consent before capturing any data.
 
 Enable core library desugaring in your **app module** so the SDK's Java time and
 arithmetic APIs work on Android API 23. Consumer apps are tested with Android
@@ -149,8 +154,9 @@ Register that class in `AndroidManifest.xml`. Keep the app's existing
 If the app already has an `Application` subclass, add `Elu.setup(...)` to its
 existing `onCreate`; do not create or register a second subclass.
 
-Use the site key of an ELU project set up for Android. A key from a project with
-iOS replay enabled can start replay capture in an Android app.
+Use the site key of the ELU project for this Android app. Replay and masking
+follow that project's settings, so a key from a project with replay on records
+replay in the app.
 
 Multi-process apps: call `Elu.setup` from `Application.onCreate`; secondary
 processes are ignored. Android runs `onCreate` in every process of the app, but
@@ -227,8 +233,7 @@ Changing the host or prefix therefore starts a separate installation; it does no
 move or delete the old store. Equivalent case/trailing-slash spellings normalize
 to the same base. Existing root-based self-hosted stores retain their namespace.
 Customer request telemetry excludes the entire selected SDK host, including paths
-outside its API prefix. The owned self-hosted delivery path still requires fresh
-exact-package and end-to-end release qualification.
+outside its API prefix.
 
 An `http://` loopback origin also needs the app to permit cleartext traffic,
 which Android 9 and later block by default: add
@@ -338,8 +343,7 @@ and an invalidated observation is not retried for a later identity.
 The monitor adds no stacks or UI text, but these analytics events
 are linked to the current anonymous or identified user, session and applicable
 event properties. Include linked performance diagnostics in your app's privacy
-disclosures. Resource overhead, actual frame delivery and customer artifact
-behavior still require release qualification.
+disclosures.
 
 ## Observed OS startup timing
 
@@ -387,8 +391,7 @@ storage-write failure followed by process death cannot be made durable.
 
 Launch timing alone does not install automatic exception collection.
 Manual `captureException` remains available. The linked startup event requires
-privacy disclosure. Current OS delivery, upgraded SQLite behavior and overhead
-remain exact-artifact emulator and Lab release gates.
+privacy disclosure.
 
 ### Optional automatic JVM exception reports
 
@@ -416,8 +419,7 @@ grant after an actual foreground session exists. It neither reconstructs a histo
 crash session nor guarantees delivery before the OS terminates the process. Consent,
 identity and permission changes can discard it. Returning custom handlers allow the
 same writer to import and rearm; no queue, main-thread task or network completion is
-awaited on the crash callback. Rich exception detail parity and exact-artifact crash/
-restart qualification are still pending.
+awaited on the crash callback.
 
 ## Identity
 
@@ -734,8 +736,9 @@ authorizes replay. In sensitive-text mode, ordinary framework `TextView`,
 `Button`, `CheckBox`, `RadioButton`, `Switch` and `ToggleButton` text remains
 readable when it is plain, fully visible, and untransformed. Styled, transformed,
 clipped, transparent and custom text remain masked, as does text over 4,096 UTF-8
-bytes. Input values, including passwords, are always masked. Images, WebViews and
-unsupported/custom views stay hidden. All-text mode masks ordinary text too.
+bytes. Input values, including passwords, are always masked. Images, WebViews,
+Compose content and unsupported/custom views appear as "Content hidden"
+placeholders; their content is not captured. All-text mode masks ordinary text too.
 A window with `FLAG_SECURE` set is recorded only as one "Content hidden" placeholder,
 with no layout, text or touches, for as long as the flag stays set.
 The same checks apply to exact AppCompat `AppCompatTextView`, `AppCompatButton`,
@@ -745,8 +748,7 @@ comes from the current displayed layout; capture never waits for a pending
 `setTextFuture`. Emoji/all-caps transformations and styled text remain masked.
 The SDK adds no AppCompat runtime dependency. Its optional recognition uses
 closed class names and framework superclasses, with consumer shrinker rules.
-AppCompat 1.8.0 instrumentation and an optimized consumer remain qualification
-gates for this source change; other AppCompat versions are not yet qualified.
+Recognition is tested with AppCompat 1.8.0.
 Standard content, fit-windows and `LinearLayoutCompat` containers are supported.
 Action-bar decoration is observed only as an ancestor with uncertain layout
 bounds; its toolbar siblings are not captured. Material widgets, `SwitchCompat`,
@@ -781,8 +783,7 @@ Private or unsupported content cancels the gesture without coordinates. These ar
 visual pointer observations, not click-recipient or gesture-handler attribution.
 The SDK forwards the original Window.Callback dispatch once and withdraws touch
 collection if another component replaces its callback. Installing the SDK does not
-enable replay or change server release policy. Exact-artifact engine/player and
-interaction-overhead qualification remain pending for this source candidate.
+enable replay; the project's settings in ELU do.
 
 Configuration v2 can restrict replay to `replayAudience: "new-devices"`.
 This records only the installation's first successfully captured analytics session,
@@ -811,11 +812,11 @@ other SDKs are not interpreted. A bounded registry retains up to 128 live view
 restrictions. If that bound is exceeded, replay fails closed for the process;
 requested restrictions are never discarded to continue recording.
 
-Compose semantics replay and readable text from custom view subclasses
-are not yet supported; keep manual `Elu.screen()` navigation events. Analytics
-works on Android 6+ (API 23+), while first-release replay requires Android 10+
-(API 29+). Exact-artifact Compose qualification remains pending. No Web Vitals or browser long-task metrics are
-reported as native performance data.
+Compose content appears in replay as a "Content hidden" placeholder, and text in
+custom view subclasses stays masked. Compose apps keep manual `Elu.screen()`
+navigation events. Analytics works on Android 6+ (API 23+), while replay requires
+Android 10+ (API 29+). No Web Vitals or browser long-task metrics are reported as
+native performance data.
 API 26–28 lack the public transition-alpha and animation-matrix observations
 used to exclude text hidden by framework transitions; ordinary view alpha and
 matrix are insufficient substitutes.
@@ -836,7 +837,7 @@ data practices before you submit the form.
 | Device and app context on events: OS and version, device manufacturer and model, app name, version, build and package name, screen size, locale and time zone | App info and performance: Diagnostics | Always |
 | Exceptions you report with `Elu.captureException` (type, message, stack trace), and opt-in automatic JVM crash reports (exception type only) | App info and performance: Crash logs | Only when you call it or opt in |
 | Opt-in performance samples, launch timing and OkHttp request metrics (method, status code and duration; no URLs) | App info and performance: Diagnostics, Other app performance data | Only when you enable them |
-| Session replay: the layout of supported views, readable on-screen text and single-finger touch movement. Masked text and inputs are sent only as `*` characters of the same length; images, web views and blocked views are left out | App activity: App interactions, plus the categories of any personal info your screens display | Only when ELU's service configuration enables replay for the project whose site key the app uses. ELU does not enable replay for Android projects yet. Use a site key from a project set up for Android: a key from a project with iOS replay enabled can start replay capture in an Android app |
+| Session replay: the layout of supported views, readable on-screen text and single-finger touch movement. Masked text and inputs are sent only as `*` characters of the same length; images, web views, Compose content and blocked views are sent only as "Content hidden" placeholders | App activity: App interactions, plus the categories of any personal info your screens display | Only when replay is on for the project whose site key the app uses, on Android 10 or later |
 | Approximate location (country, region and city) that ELU's service derives from the IP address of each request | Location: Approximate location | Always |
 
 ELU's service derives approximate location (country, region and city) from the
@@ -874,14 +875,14 @@ code.
 
 | Measure | Without SDK | With SDK | Added by SDK |
 | --- | ---: | ---: | ---: |
-| Release APK (signed, universal) | 22,432 B | 806,783 B | +784,351 B (about 766 KiB) |
-| Release AAB, without the R8 mapping file | 20,301 B | 804,330 B | +784,029 B |
-| DEX method references | 12 | 10,947 | +10,935 |
-| DEX defined methods | 4 | 9,272 | +9,268 |
+| Release APK (signed, universal) | 22,432 B | 815,057 B | +792,625 B (about 774 KiB) |
+| Release AAB, without the R8 mapping file | 20,301 B | 812,611 B | +792,310 B |
+| DEX method references | 12 | 11,003 | +10,991 |
+| DEX defined methods | 4 | 9,319 | +9,315 |
 
-Of the added methods, 3,456 are SDK code, 4,375 are the desugared Java library
+Of the added methods, 3,517 are SDK code, 4,375 are the desugared Java library
 the SDK needs to run on API 23 (an app that already desugars the same APIs shares
-them), 892 are OkHttp and Okio, and 545 are the Kotlin standard library.
+them), 869 are OkHttp and Okio, and 554 are the Kotlin standard library.
 `scripts/measure-consumer-size.py` reproduces these figures from the optimized
 consumer fixture in `fixtures/core-consumers`.
 
@@ -916,8 +917,7 @@ changes. Memory mode loses it with the original memory connection. A backwards w
 clock creates debt rather than free capacity. Optional storage I/O failures may use
 the held process bucket; the next successful durable read takes precedence. Unknown
 transaction outcomes stop the original owner. This adds a small separate SQLite
-metadata transaction per attempted event; current overhead and exact-artifact
-qualification remain pending. Android does not install a console rate-limit logger. Bounded caller-value
+metadata transaction per attempted event. Android does not install a console rate-limit logger. Bounded caller-value
 conversion precedes serialized capture admission; the event filter runs after
 rate admission and before the event transaction.
 
@@ -945,8 +945,8 @@ consent, sampling, audience, privacy or remote permission. Reset and configurati
 changes do not undo a local stop. Calls before setup do nothing and status is false.
 Status becomes true only after the original collector is installed with live
 guards. It is false during stop/drain or after withdrawal and is not delivery or
-player proof. API 29+ Views/AppCompat support and opaque Compose/custom content
-limitations remain unchanged; these methods do not add full-tree Compose capture.
+player proof. These methods do not change what is captured: Compose and custom
+content still appear as placeholders.
 
 Visible root replacement and viewport changes recover automatically after the
 original recorder and watcher finish. The replacement has a new replay ID and
@@ -955,9 +955,7 @@ Boundary frames and unsealed tails are discarded. Temporarily unsupported
 geometry can be retried under the same live permission; failed frames are never
 serialized. A missing root is checked without reading content or renewing remote
 permission. Local stop, consent/privacy restrictions, source expiry and uncertain
-cleanup prevent automatic recovery. Hosted component tests cover continuity and
-native-v2 touch capture; exact-artifact emulator, canonical engine and customer-player
-qualification remains pending. Compose content remains opaque.
+cleanup prevent automatic recovery.
 
 If the app is closed, ended by the system or updated and then opened again while
 its analytics session is still active, replay continues under a new replay ID in
@@ -979,4 +977,4 @@ On API29+, retain each private-region identity independently of its conditional 
 
 Only validated redacted output is encoded or retained. A main-thread post-check that rejects a drawn candidate clears and closes that candidate. Root viewport/rebinding changes retire the original source; restoring an earlier size cannot revive it. The first retained prefix requires actual lawful samples spanning the configured minimum duration. Stopping or advancing time without a second sample does not establish that duration. Existing wireframe behavior, original physical cleanup, immutable request retries and durable refusal semantics remain in force.
 
-Core analytics (events, identity and feature flags) and annotation registration support Android 6+ (API23+). Both Views replay and annotated capture require Android 10+ (API29+); replay is unavailable on API23–28 in the first release. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. The optional `elu-analytics-compose` module is not published to Maven Central in 0.2.0; use it only from a source checkout. Its device, engine and player validation is not complete.
+Core analytics (events, identity and feature flags) and annotation registration support Android 6+ (API23+). Both Views replay and annotated capture require Android 10+ (API29+); replay is unavailable on API23–28. The collector relies on public transition-alpha and animation-matrix observations; Views interaction checks also rely on API29 drawing-order and partial-obscuration APIs. The optional `elu-analytics-compose` module is not published to Maven Central; use it only from a source checkout.
