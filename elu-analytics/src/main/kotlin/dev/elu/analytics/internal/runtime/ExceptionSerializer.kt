@@ -17,6 +17,9 @@ internal object ExceptionSerializer {
     const val MAX_FRAMES_PER_THROWABLE: Int = 64
     const val MAX_CHAIN_LENGTH: Int = 8
 
+    /** The frame platform the server's exception processing parses JVM frames as. */
+    const val FRAME_PLATFORM: String = "java"
+
     fun properties(throwable: Throwable): Map<String, Any?> {
         val chain = causeChain(throwable)
         val entries =
@@ -126,6 +129,7 @@ internal object ExceptionSerializer {
         return Collections.unmodifiableList(
             trace.take(MAX_FRAMES_PER_THROWABLE).map { element ->
                 val frame = LinkedHashMap<String, Any?>()
+                frame["platform"] = FRAME_PLATFORM
                 frame["module"] = sanitize(element.className, MAX_MESSAGE_CODE_POINTS)
                 frame["function"] = sanitize(element.methodName, MAX_MESSAGE_CODE_POINTS)
                 frame["filename"] = element.fileName?.let { sanitize(it, MAX_MESSAGE_CODE_POINTS) }
