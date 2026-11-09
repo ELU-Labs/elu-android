@@ -30,6 +30,7 @@ class ExceptionSerializerTest {
         val frames = stacktrace["frames"] as List<*>
         assertTrue(frames.isNotEmpty())
         val top = frames.first() as Map<*, *>
+        assertTrue(frames.all { (it as Map<*, *>)["platform"] == "java" })
         assertEquals(javaClass.name, top["module"])
         assertTrue((top["function"] as String).isNotEmpty())
         assertEquals(false, top["native"])
