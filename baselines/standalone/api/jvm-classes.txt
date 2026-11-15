@@ -915,7 +915,15 @@ dev.elu.analytics.internal.runtime.delivery.DeliveryQueueAcknowledgement
 dev.elu.analytics.internal.runtime.delivery.DeliveryQueueAcknowledgement$AlreadyApplied
 dev.elu.analytics.internal.runtime.delivery.DeliveryQueueAcknowledgement$Deleted
 dev.elu.analytics.internal.runtime.delivery.DeliveryQueueAcknowledgement$Empty
+dev.elu.analytics.internal.runtime.delivery.DeliveryStreamGap
+dev.elu.analytics.internal.runtime.delivery.DeliveryStreamState
+dev.elu.analytics.internal.runtime.delivery.DeliveryStreamStore
+dev.elu.analytics.internal.runtime.delivery.DeliveryStreams
+dev.elu.analytics.internal.runtime.delivery.DeliveryStreams$Companion
+dev.elu.analytics.internal.runtime.delivery.FileDeliveryStreamStore
+dev.elu.analytics.internal.runtime.delivery.FileDeliveryStreamStore$Companion
 dev.elu.analytics.internal.runtime.delivery.HttpURLConnectionBatchTransport
+dev.elu.analytics.internal.runtime.delivery.MemoryDeliveryStreamStore
 dev.elu.analytics.internal.runtime.delivery.RetryAfterParser
 dev.elu.analytics.internal.runtime.delivery.RuntimeBatchDeliveryCoordinator
 dev.elu.analytics.internal.runtime.delivery.RuntimeBatchDeliveryCoordinator$DeliveryStep$AuthorizationUnavailable

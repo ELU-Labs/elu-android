@@ -33,9 +33,15 @@ internal class BatchProtocolException(
     cause: Throwable? = null,
 ) : IllegalArgumentException(message, cause)
 
+/**
+ * [streamId] is the stream the request is sent on. It is the records' own [sourceStreamId] until
+ * the delivery stream has been replaced (see [DeliveryStreams]); the records keep their sequence
+ * and record identities either way.
+ */
 internal class BatchPackedRequest private constructor(
     val requestId: String,
     val streamId: String,
+    val sourceStreamId: String,
     val sentAt: BatchWallInstant,
     val versions: RuntimeVersions,
     records: List<RuntimeQueuedRecord>,
@@ -56,11 +62,12 @@ internal class BatchPackedRequest private constructor(
         fun create(
             requestId: String,
             streamId: String,
+            sourceStreamId: String,
             sentAt: BatchWallInstant,
             versions: RuntimeVersions,
             records: List<RuntimeQueuedRecord>,
             body: ByteArray,
-        ): BatchPackedRequest = BatchPackedRequest(requestId, streamId, sentAt, versions, records, body)
+        ): BatchPackedRequest = BatchPackedRequest(requestId, streamId, sourceStreamId, sentAt, versions, records, body)
     }
 }
 
@@ -72,21 +79,23 @@ internal sealed interface BatchPackingResult {
 
 /** Canonical v1 request packing and deterministic request identity. */
 internal object V1BatchRequestCodec {
+    /** [streamId] is the stream to send on; it defaults to the records' own stream. */
     fun packLargest(
         queued: List<RuntimeQueuedRecord>,
         sentAt: BatchWallInstant,
         maximumCount: Int,
         maximumBytes: Int,
+        streamId: String = queued.first().streamId,
     ): BatchPackingResult {
         require(queued.isNotEmpty()) { "queued must not be empty" }
         require(maximumCount in 1..1_000)
         require(maximumBytes in 1_024..10_485_760)
         val head = queued.first()
         val versions = versionsOf(head)
-        val streamId = head.streamId
+        val sourceStreamId = head.streamId
         val eligible = ArrayList<RuntimeQueuedRecord>(minOf(queued.size, maximumCount))
         for (record in queued.take(maximumCount)) {
-            if (record.streamId != streamId || versionsOf(record) != versions) break
+            if (record.streamId != sourceStreamId || versionsOf(record) != versions) break
             eligible += record
         }
         if (eligible.isEmpty()) throw BatchProtocolException("Queue head could not be selected")
@@ -97,10 +106,7 @@ internal object V1BatchRequestCodec {
         var recordsBytes = 0L
         var selectedCount = 0
         eligible.forEachIndexed { index, record ->
-            val encoded = RuntimeRecordCodec.encodeBatchRecord(record)
-            if (encoded.size != record.accountedBytes) {
-                throw BatchProtocolException("Queued record byte accounting changed before delivery")
-            }
+            val encoded = sendBytes(record, streamId)
             recordsBytes = Math.addExact(recordsBytes, encoded.size.toLong())
             val completeBytes =
                 Math.addExact(
@@ -110,20 +116,22 @@ internal object V1BatchRequestCodec {
             if (completeBytes <= maximumBytes) selectedCount = index + 1 else return@forEachIndexed
         }
         if (selectedCount == 0) return BatchPackingResult.OversizedHead(referenceOf(head))
-        return BatchPackingResult.Packed(encodeExact(eligible.take(selectedCount), sentAt))
+        return BatchPackingResult.Packed(encodeExact(eligible.take(selectedCount), sentAt, streamId))
     }
 
+    /** [streamId] is the stream to send on; it defaults to the records' own stream. */
     fun encodeExact(
         records: List<RuntimeQueuedRecord>,
         sentAt: BatchWallInstant,
+        streamId: String = records.first().streamId,
     ): BatchPackedRequest {
         require(records.size in 1..1_000)
         val head = records.first()
         val versions = versionsOf(head)
-        val streamId = head.streamId
+        val sourceStreamId = head.streamId
         var previousSequence: Long? = null
         records.forEach { record ->
-            require(record.streamId == streamId) { "Batch records must share one stream" }
+            require(record.streamId == sourceStreamId) { "Batch records must share one stream" }
             require(versionsOf(record) == versions) { "Batch records must share capture-time versions" }
             previousSequence?.let { previous ->
                 require(record.sequence == Math.addExact(previous, 1L)) { "Batch records must be contiguous and ordered" }
@@ -136,14 +144,27 @@ internal object V1BatchRequestCodec {
         output.write(prefix)
         records.forEachIndexed { index, record ->
             if (index > 0) output.write(','.code)
-            val bytes = RuntimeRecordCodec.encodeBatchRecord(record)
-            if (bytes.size != record.accountedBytes) {
-                throw BatchProtocolException("Queued record byte accounting changed before delivery")
-            }
-            output.write(bytes)
+            output.write(sendBytes(record, streamId))
         }
         output.write(BATCH_SUFFIX)
-        return BatchPackedRequest.create(requestId, streamId, sentAt, versions, records, output.toByteArray())
+        return BatchPackedRequest.create(requestId, streamId, sourceStreamId, sentAt, versions, records, output.toByteArray())
+    }
+
+    /**
+     * The canonical V1BatchRecord bytes for [record] sent on [streamId]. The stored bytes are
+     * checked against the queue's accounting first. An event names its stream in its body, so on
+     * a replacement stream only that field changes; a mutation record carries no stream.
+     */
+    private fun sendBytes(
+        record: RuntimeQueuedRecord,
+        streamId: String,
+    ): ByteArray {
+        val stored = RuntimeRecordCodec.encodeBatchRecord(record)
+        if (stored.size != record.accountedBytes) {
+            throw BatchProtocolException("Queued record byte accounting changed before delivery")
+        }
+        if (streamId == record.streamId || record !is RuntimeQueuedRecord.Event) return stored
+        return RuntimeRecordCodec.encodeBatchRecord(record.record.copy(streamId = streamId))
     }
 
     fun requestId(
@@ -213,9 +234,14 @@ internal object V1BatchRequestCodec {
     private const val MUTATION_KIND_BYTE = 4
 }
 
+/**
+ * [acknowledgement] names the records' own stream, the one the local queue knows. When
+ * [hasRetryableRecords], [retryableCode] is the code the server gave the first unresolved record.
+ */
 internal data class BatchAcknowledgementResolution(
     val acknowledgement: RuntimeAcknowledgement,
     val hasRetryableRecords: Boolean,
+    val retryableCode: String? = null,
 )
 
 internal object V1BatchResponseCodec {
@@ -245,6 +271,7 @@ internal object V1BatchResponseCodec {
 
         val resolved = ArrayList<RuntimeRecordReference>()
         var retryFrom: Long? = null
+        var retryableCode: String? = null
         repeat(outcomes.length()) { index ->
             val record = request.records[index]
             val outcome = outcomes.opt(index) as? JSONObject ?: protocol("acknowledgement.outcomes[$index] must be an object")
@@ -267,11 +294,12 @@ internal object V1BatchResponseCodec {
                     resolved += referenceOf(record)
                 }
                 "retryable" -> {
-                    requireCode(outcome, "outcome")
+                    val code = requireCode(outcome, "outcome")
                     if (retryFrom != null || index != outcomes.length() - 1) {
                         protocol("Retryable outcome must be the single final reported outcome")
                     }
                     retryFrom = sequence
+                    retryableCode = code
                 }
                 else -> protocol("Unsupported acknowledgement outcome result")
             }
@@ -287,8 +315,9 @@ internal object V1BatchResponseCodec {
         val responseRetryFrom = optionalRequiredLong(root, "retryFromSequence", "acknowledgement")
         if (responseRetryFrom != retryFrom) protocol("retryFromSequence does not match the retryable head")
         return BatchAcknowledgementResolution(
-            RuntimeAcknowledgement(request.streamId, Collections.unmodifiableList(resolved)),
+            RuntimeAcknowledgement(request.sourceStreamId, Collections.unmodifiableList(resolved)),
             retryFrom != null,
+            retryableCode,
         )
     }
 
@@ -326,9 +355,10 @@ internal object V1BatchResponseCodec {
     private fun requireCode(
         json: JSONObject,
         path: String,
-    ) {
+    ): String {
         val code = requireString(json, "code", path, 1, 64)
         if (!codePattern.matches(code)) protocol("$path.code is malformed")
+        return code
     }
 }
 
@@ -416,12 +446,6 @@ internal fun versionsOf(record: RuntimeQueuedRecord): RuntimeVersions =
     when (record) {
         is RuntimeQueuedRecord.Event -> record.record.versions
         is RuntimeQueuedRecord.Mutation -> record.envelope.versions
-    }
-
-internal fun occurredAtOf(record: RuntimeQueuedRecord): String =
-    when (record) {
-        is RuntimeQueuedRecord.Event -> record.record.occurredAt
-        is RuntimeQueuedRecord.Mutation -> record.envelope.mutation.occurredAt
     }
 
 private object StrictJson {

@@ -26,6 +26,9 @@ import dev.elu.analytics.internal.runtime.AndroidRuntimeQueue
 import dev.elu.analytics.internal.runtime.RuntimeLifecycleSink
 import dev.elu.analytics.internal.runtime.RuntimeQueueLimits
 import dev.elu.analytics.internal.runtime.StandaloneRuntime
+import dev.elu.analytics.internal.runtime.delivery.DeliveryStreams
+import dev.elu.analytics.internal.runtime.delivery.FileDeliveryStreamStore
+import dev.elu.analytics.internal.runtime.delivery.MemoryDeliveryStreamStore
 import java.util.Date
 import java.util.Collections
 import java.util.UUID
@@ -134,8 +137,16 @@ internal object AndroidStandaloneStack {
                     // Preparation concerns storage only and must finish before runtime publication.
                     // Private component capability; current source, privacy, session and physical guards still apply.
                     native.ready().get()
+                    // The delivery stream sidecar lives next to the queue, under the same namespace lease.
+                    val deliveryStreamStore =
+                        if (persistence == dev.elu.analytics.EluPersistenceMode.PERSISTENT) {
+                            FileDeliveryStreamStore(java.io.File(
+                                AndroidRuntimeQueue.databaseFileFor(appContext, siteKey, endpointPolicy).canonicalFile.parentFile,
+                                FileDeliveryStreamStore.FILE_NAME))
+                        } else MemoryDeliveryStreamStore()
                     val runtime = StandaloneRuntime(owner = owner, siteKey = siteKey, configurationGate = gate, nativeReplay = native,
-                        diagnosticsOptions = diagnosticsOptions, automaticExceptionAllowed = facade::automaticExceptionIntakeAllowed)
+                        diagnosticsOptions = diagnosticsOptions, automaticExceptionAllowed = facade::automaticExceptionIntakeAllowed,
+                        deliveryStreams = DeliveryStreams(deliveryStreamStore))
                     runtimeRef.set(runtime)
                     val flags = AndroidFeatureFlagClient(
                         owner, StandaloneRuntime.defaultVersions(), flagTransport,

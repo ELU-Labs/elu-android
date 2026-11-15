@@ -332,6 +332,21 @@ the submitted stream and records before local retirement. Lost acknowledgements
 can cause retransmission of the same identities; HTTP 200 alone is not enough
 to delete queued records.
 
+Every queued record is sent, however old: the server stores a record that is
+seven days old or more as rejected (`record-too-old`) and moves on. The server
+accepts a stream's records only in sequence order, so a record the SDK deletes
+without sending would hold back every later one. Only a record that can never
+be sent is deleted that way: one larger than the configured batch size, or one
+the server refuses with `413` when it is sent alone. Before deleting it, the SDK
+moves delivery to a new stream ID, which the server starts at the next record.
+If the server keeps answering `stream-gap` for the same first record, for at
+least 45 minutes and five answers (for example after an earlier version deleted
+a record), the SDK moves delivery to a new stream and sends that record again
+there. Records keep their sequence and record identity on the new stream; only
+the stream named in the request and in each event changes. The delivery stream
+is kept in `delivery-stream-v1.json` next to the queue, so a restart resumes on
+it.
+
 For a `429` or `5xx` response, the SDK retries the unchanged request with
 backoff, whatever the response body. When the body is ELU's error object, its
 `Retry-After` is honoured (up to one day for replay), and a replay `429` pauses

@@ -15,8 +15,10 @@ import dev.elu.analytics.internal.runtime.RuntimeRecordKind
 import dev.elu.analytics.internal.runtime.RuntimeRecordReference
 import dev.elu.analytics.internal.runtime.RuntimeVersionComponent
 import dev.elu.analytics.internal.runtime.RuntimeVersions
+import java.io.File
 import java.io.IOException
 import java.net.URI
+import java.nio.file.Files
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -32,6 +34,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -306,7 +309,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     @Test
-    fun `recursive 413 stops before a row that expires between parent and child requests`() {
+    fun `recursive 413 still sends a row that reaches seven days between parent and child requests`() {
         val initialNow = plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong() - 1)
         val records =
             listOf(
@@ -327,14 +330,15 @@ class RuntimeBatchDeliveryCoordinatorTest {
                     clock.wallMillis += 2_000L
                     BatchHTTPResponse(413, transportError(413, request.requestId))
                 } else {
-                    BatchHTTPResponse(200, acknowledgement(request, request.records.size))
+                    val results = request.records.map { if (it.sequence == 1L) RECORD_TOO_OLD else ACCEPTED }
+                    BatchHTTPResponse(200, outcomes(request, *results.toTypedArray()))
                 }
             }
         val coordinator = coordinator(queue, transport, clock)
 
         val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
-        assertEquals(listOf(listOf(0L, 1L, 2L), listOf(0L), listOf(2L)), observed)
+        assertEquals(listOf(listOf(0L, 1L, 2L), listOf(0L, 1L), listOf(2L)), observed)
         assertEquals(3, result.networkRequests)
         assertEquals(3, result.resolvedRecords)
         assertTrue(queue.records().isEmpty())
@@ -421,7 +425,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     @Test
-    fun `record becomes terminal exactly at seven-day boundary without network`() {
+    fun `a record at the seven-day boundary is sent and the server's record-too-old outcome deletes it`() {
         val beforeClock = FakeClock(plusMillis(plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong()), -1))
         val beforeQueue = FakeDeliveryQueue(listOf(event(0, START)))
         val beforeTransport = acceptingTransport(beforeQueue)
@@ -432,17 +436,25 @@ class RuntimeBatchDeliveryCoordinatorTest {
 
         val boundaryClock = FakeClock(plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong()))
         val boundaryQueue = FakeDeliveryQueue(listOf(event(0, START)))
-        val boundaryTransport = RecordingTransport { throw AssertionError("aged record must not reach transport") }
-        val boundary = coordinator(boundaryQueue, boundaryTransport, boundaryClock)
+        val store = MemoryDeliveryStreamStore()
+        val boundaryTransport =
+            RecordingTransport { raw ->
+                BatchHTTPResponse(200, outcomes(requestFrom(raw, boundaryQueue.records()), RECORD_TOO_OLD))
+            }
+        val boundary = coordinator(boundaryQueue, boundaryTransport, boundaryClock, streams = DeliveryStreams(store))
         val result = boundary.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
+        assertEquals(1, result.networkRequests)
         assertEquals(1, result.resolvedRecords)
-        assertTrue(boundaryTransport.requests.isEmpty())
+        assertEquals(listOf(STREAM_ID), boundaryTransport.requests.map { streamOf(it) })
+        assertTrue(boundaryQueue.records().isEmpty())
+        // The server has the record's outcome, so its stream stays as it is.
+        assertNull(store.read())
         boundary.close()
     }
 
     @Test
-    fun `fresh expired fresh queue sends only safe prefixes and resumes after exact head deletion`() {
+    fun `fresh aged and fresh records go out together and every one gets the server's outcome`() {
         val now = plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong())
         val records =
             listOf(
@@ -456,40 +468,49 @@ class RuntimeBatchDeliveryCoordinatorTest {
             RecordingTransport { raw ->
                 observed += JSONObject(raw.bodyBytes().decodeToString()).getJSONArray("records").sequences()
                 val request = requestFrom(raw, queue.records())
-                BatchHTTPResponse(200, acknowledgement(request, request.records.size))
+                BatchHTTPResponse(200, outcomes(request, ACCEPTED, RECORD_TOO_OLD, ACCEPTED))
             }
         val coordinator = coordinator(queue, transport, FakeClock(now))
 
         val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.DRAINED, result.stop)
-        assertEquals(listOf(listOf(0L), listOf(2L)), observed)
-        assertEquals(2, result.networkRequests)
+        assertEquals(listOf(listOf(0L, 1L, 2L)), observed)
+        assertEquals(1, result.networkRequests)
         assertEquals(3, result.resolvedRecords)
         assertTrue(queue.records().isEmpty())
         coordinator.close()
     }
 
     @Test
-    fun `retry wait wakes at the seven-day boundary without another network request`() {
+    fun `a retry wait is not cut short when the head reaches seven days`() {
         val record = event(0, START)
         val queue = FakeDeliveryQueue(listOf(record))
         val clock = FakeClock(plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong() - 1))
         val scheduler = FakeScheduler()
+        var calls = 0
         val transport =
             RecordingTransport { raw ->
                 val request = requestFrom(raw, queue.records())
-                BatchHTTPResponse(429, transportError(429, request.requestId), retryAfter = "30")
+                calls += 1
+                if (calls == 1) {
+                    BatchHTTPResponse(429, transportError(429, request.requestId), retryAfter = "30")
+                } else {
+                    BatchHTTPResponse(200, outcomes(request, RECORD_TOO_OLD))
+                }
             }
         val coordinator = coordinator(queue, transport, clock, scheduler)
 
         assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
-        assertEquals(1_000L, scheduler.entries.single().delayMillis)
+        assertEquals(30_000L, scheduler.entries.single().delayMillis)
         clock.wallMillis += 1_000L
-        clock.monotonicNanos += TimeUnit.SECONDS.toNanos(1)
-        scheduler.runNext()
-
-        awaitCondition { queue.records().isEmpty() }
+        assertEquals(BatchDeliveryStop.COALESCED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertEquals(1, transport.requests.size)
+
+        clock.wallMillis += 29_000L
+        clock.monotonicNanos += TimeUnit.SECONDS.toNanos(30)
+        scheduler.runNext()
+        awaitCondition { queue.records().isEmpty() }
+        assertEquals(2, transport.requests.size)
         coordinator.close()
     }
 
@@ -568,7 +589,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     @Test
-    fun `retry cuts at a newly expired middle row then resumes with the later fresh row`() {
+    fun `a retry resends the same request after a middle row reaches seven days`() {
         val initialNow = plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong() - 1)
         val records =
             listOf(
@@ -590,7 +611,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                 if (calls == 1) {
                     BatchHTTPResponse(429, transportError(429, request.requestId), retryAfter = "2")
                 } else {
-                    BatchHTTPResponse(200, acknowledgement(request, request.records.size))
+                    BatchHTTPResponse(200, outcomes(request, ACCEPTED, RECORD_TOO_OLD, ACCEPTED))
                 }
             }
         val coordinator = coordinator(queue, transport, clock, scheduler)
@@ -601,8 +622,9 @@ class RuntimeBatchDeliveryCoordinatorTest {
         clock.monotonicNanos += TimeUnit.SECONDS.toNanos(2)
         scheduler.runNext()
 
-        awaitCondition { calls == 3 && queue.records().isEmpty() }
-        assertEquals(listOf(listOf(0L, 1L, 2L), listOf(0L), listOf(2L)), observed)
+        awaitCondition { calls == 2 && queue.records().isEmpty() }
+        assertEquals(listOf(listOf(0L, 1L, 2L), listOf(0L, 1L, 2L)), observed)
+        assertEquals(1, transport.requests.map { JSONObject(it.bodyBytes().decodeToString()).getString("requestId") }.toSet().size)
         coordinator.close()
     }
 
@@ -875,13 +897,13 @@ class RuntimeBatchDeliveryCoordinatorTest {
         assertEquals(12, networkTransport.requests.size)
         networkCoordinator.close()
 
-        val agedRecords = (0L..64L).map { sequence -> event(sequence, START) }
-        val localQueue = FakeDeliveryQueue(agedRecords)
-        val beforeBoundary = plusMillis(plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong()), -1)
-        val atBoundary = plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong())
-        val transitionClock = ScriptedClock(listOf(instant(beforeBoundary), instant(atBoundary)))
-        val localTransport = RecordingTransport { throw AssertionError("aged records must not reach transport") }
-        val localCoordinator = coordinator(localQueue, localTransport, transitionClock)
+        // Heads larger than the authorized request size are the records resolved locally.
+        val oversizedRecords = (0L..64L).map { sequence -> oversizedEvent(sequence) }
+        val localQueue = FakeDeliveryQueue(oversizedRecords)
+        val localStore = MemoryDeliveryStreamStore()
+        val localTransport = RecordingTransport { throw AssertionError("oversized records must not reach transport") }
+        val localCoordinator =
+            coordinator(localQueue, localTransport, streams = DeliveryStreams(localStore), eventBatchBytes = SMALL_BATCH_BYTES)
 
         val boundedLocal = localCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
         assertEquals(BatchDeliveryStop.BOUNDED, boundedLocal.stop)
@@ -891,7 +913,314 @@ class RuntimeBatchDeliveryCoordinatorTest {
         assertEquals(BatchDeliveryStop.DRAINED, localCoordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
         assertTrue(localQueue.records().isEmpty())
         assertTrue(localTransport.requests.isEmpty())
+        assertNotEquals(STREAM_ID, checkNotNull(localStore.read()).wireStreamId)
         localCoordinator.close()
+    }
+
+    @Test
+    fun `a request on another stream renames only the stream and binds its acknowledgement to the queued stream`() {
+        val records = listOf(event(0, START, properties = mapOf("blob" to "x".repeat(1_000))), mutation(1, plusSeconds(START, 1)))
+        val sentAt = instant(plusSeconds(START, 2))
+        val original = V1BatchRequestCodec.encodeExact(records, sentAt)
+        val moved = V1BatchRequestCodec.encodeExact(records, sentAt, ROTATED_STREAM_ID)
+
+        assertEquals(STREAM_ID, original.streamId)
+        assertEquals(STREAM_ID, moved.sourceStreamId)
+        assertEquals(ROTATED_STREAM_ID, moved.streamId)
+        assertEquals(original.references, moved.references)
+        assertNotEquals(original.requestId, moved.requestId)
+        assertEquals(V1BatchRequestCodec.requestId(ROTATED_STREAM_ID, versions(), records), moved.requestId)
+        // The envelope and the event name the new stream; nothing else changes, and the
+        // mutation record, which names no stream, keeps its exact bytes.
+        assertEquals(
+            original.bodyBytes().decodeToString().replace(original.requestId, moved.requestId).replace(STREAM_ID, ROTATED_STREAM_ID),
+            moved.bodyBytes().decodeToString(),
+        )
+        val movedRecords = JSONObject(moved.bodyBytes().decodeToString()).getJSONArray("records")
+        assertEquals(ROTATED_STREAM_ID, movedRecords.getJSONObject(0).getJSONObject("event").getString("streamId"))
+        assertEquals(records[0].recordId, movedRecords.getJSONObject(0).getJSONObject("event").getString("eventId"))
+        assertEquals(
+            JSONObject(original.bodyBytes().decodeToString()).getJSONArray("records").getJSONObject(1).toString(),
+            movedRecords.getJSONObject(1).toString(),
+        )
+
+        // Packing measures the bytes actually sent: the longer stream name costs room.
+        assertEquals(2, (V1BatchRequestCodec.packLargest(records, sentAt, 100, original.bodySize) as BatchPackingResult.Packed).request.records.size)
+        assertEquals(
+            1,
+            (V1BatchRequestCodec.packLargest(records, sentAt, 100, original.bodySize, ROTATED_STREAM_ID) as BatchPackingResult.Packed)
+                .request.records.size,
+        )
+        val packedMoved = V1BatchRequestCodec.packLargest(records, sentAt, 100, moved.bodySize, ROTATED_STREAM_ID) as BatchPackingResult.Packed
+        assertArrayEquals(moved.bodyBytes(), packedMoved.request.bodyBytes())
+
+        val parsed = V1BatchResponseCodec.parseAcknowledgement(acknowledgement(moved, 1, STREAM_GAP), moved)
+        assertEquals(STREAM_ID, parsed.acknowledgement.streamId)
+        assertEquals(listOf(referenceOf(records[0])), parsed.acknowledgement.references)
+        assertTrue(parsed.hasRetryableRecords)
+        assertEquals(STREAM_GAP, parsed.retryableCode)
+        assertNull(V1BatchResponseCodec.parseAcknowledgement(acknowledgement(moved, 2), moved).retryableCode)
+        val namesQueuedStream =
+            JSONObject(acknowledgement(moved, 2).decodeToString()).put("streamId", STREAM_ID).toString().encodeToByteArray()
+        assertThrows(BatchProtocolException::class.java) { V1BatchResponseCodec.parseAcknowledgement(namesQueuedStream, moved) }
+    }
+
+    @Test
+    fun `a one-record 413 records a new stream before deleting the head and the rest goes there`() {
+        val records = (0L..2L).map { sequence -> event(sequence, plusSeconds(START, sequence)) }
+        val queue = FakeDeliveryQueue(records)
+        val store = QueueWitnessStore(queue)
+        val observed = mutableListOf<Pair<String, List<Long>>>()
+        val transport =
+            RecordingTransport { raw ->
+                val body = JSONObject(raw.bodyBytes().decodeToString())
+                val sequences = body.getJSONArray("records").sequences()
+                observed += body.getString("streamId") to sequences
+                if (0L in sequences) {
+                    BatchHTTPResponse(413, transportError(413, body.getString("requestId")))
+                } else {
+                    val request = requestFrom(raw, queue.records())
+                    BatchHTTPResponse(200, acknowledgement(request, request.records.size))
+                }
+            }
+        val coordinator = coordinator(queue, transport, streams = DeliveryStreams(store, newStreamId = { ROTATED_STREAM_ID }))
+
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertEquals(BatchDeliveryStop.DRAINED, result.stop)
+        assertEquals(3, result.resolvedRecords)
+        assertTrue(queue.records().isEmpty())
+        assertEquals(
+            listOf(
+                STREAM_ID to listOf(0L, 1L, 2L),
+                STREAM_ID to listOf(0L, 1L),
+                STREAM_ID to listOf(0L),
+                ROTATED_STREAM_ID to listOf(1L),
+                ROTATED_STREAM_ID to listOf(2L),
+            ),
+            observed,
+        )
+        // The new stream was stored while the refused head was still queued.
+        assertEquals(listOf(listOf(0L, 1L, 2L)), store.queuedAtWrites)
+        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), store.read())
+        // A moved record keeps its sequence and identity; only the stream it names changes.
+        val moved = JSONObject(transport.requests[3].bodyBytes().decodeToString()).getJSONArray("records").getJSONObject(0)
+        assertEquals(ROTATED_STREAM_ID, moved.getJSONObject("event").getString("streamId"))
+        assertEquals(RuntimeRecordIdentity.recordId(STREAM_ID, 1, RuntimeRecordKind.EVENT), moved.getJSONObject("event").getString("eventId"))
+        coordinator.close()
+    }
+
+    @Test
+    fun `an oversized head records a new stream before it is deleted, without a request`() {
+        val records = listOf(oversizedEvent(0), event(1, plusSeconds(START, 1)), event(2, plusSeconds(START, 2)))
+        val queue = FakeDeliveryQueue(records)
+        val store = QueueWitnessStore(queue)
+        val transport = acceptingTransport(queue)
+        val coordinator =
+            coordinator(
+                queue,
+                transport,
+                streams = DeliveryStreams(store, newStreamId = { ROTATED_STREAM_ID }),
+                eventBatchBytes = SMALL_BATCH_BYTES,
+            )
+
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertEquals(BatchDeliveryStop.DRAINED, result.stop)
+        assertEquals(1, result.networkRequests)
+        assertEquals(3, result.resolvedRecords)
+        assertTrue(queue.records().isEmpty())
+        assertEquals(listOf(ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
+        assertEquals(
+            listOf(1L, 2L),
+            JSONObject(transport.requests.single().bodyBytes().decodeToString()).getJSONArray("records").sequences(),
+        )
+        assertEquals(listOf(listOf(0L, 1L, 2L)), store.queuedAtWrites)
+        coordinator.close()
+    }
+
+    @Test
+    fun `stream-gap answers on the same head move delivery to a new stream only after forty-five minutes and five answers`() {
+        val records = listOf(event(0, START), event(1, plusSeconds(START, 1)))
+        val queue = FakeDeliveryQueue(records)
+        val clock = FakeClock(plusSeconds(START, 60))
+        val firstAnswer = clock.wallMillis
+        val store = MemoryDeliveryStreamStore()
+        val streams = DeliveryStreams(store, newStreamId = { ROTATED_STREAM_ID })
+        val transport = gapOnStreamTransport(queue, STREAM_ID)
+
+        fun attemptAt(epochMillis: Long): BatchDeliveryPassResult {
+            clock.wallMillis = epochMillis
+            val coordinator = coordinator(queue, transport, clock, streams = streams)
+            return coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).also { coordinator.close() }
+        }
+
+        // Five answers inside forty-five minutes keep the stream.
+        listOf(0L, 1L, 2L, 3L, 44L).forEach { minute ->
+            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, attemptAt(firstAnswer + TimeUnit.MINUTES.toMillis(minute)).stop)
+        }
+        assertEquals(DeliveryStreamGap(0, records[0].recordId, firstAnswer, 5), checkNotNull(store.read()).gap)
+        // So does a sixth a millisecond short of forty-five minutes.
+        assertEquals(
+            BatchDeliveryStop.RETRY_SCHEDULED,
+            attemptAt(firstAnswer + TimeUnit.MINUTES.toMillis(45) - 1).stop,
+        )
+        assertEquals(6, checkNotNull(store.read()?.gap).answers)
+        assertTrue(transport.requests.all { streamOf(it) == STREAM_ID })
+        assertEquals(records, queue.records())
+
+        // The next one moves delivery, and the same pass sends the head on the new stream.
+        val moved = attemptAt(firstAnswer + TimeUnit.MINUTES.toMillis(45))
+        assertEquals(BatchDeliveryStop.DRAINED, moved.stop)
+        assertEquals(2, moved.networkRequests)
+        assertEquals(2, moved.resolvedRecords)
+        assertTrue(queue.records().isEmpty())
+        assertEquals(listOf(STREAM_ID, ROTATED_STREAM_ID), transport.requests.takeLast(2).map { streamOf(it) })
+        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), store.read())
+        val stuck = JSONObject(transport.requests[transport.requests.size - 2].bodyBytes().decodeToString())
+        val resent = JSONObject(transport.requests.last().bodyBytes().decodeToString())
+        assertEquals(listOf(0L, 1L), resent.getJSONArray("records").sequences())
+        assertEquals(stuck.getJSONArray("records").sequences(), resent.getJSONArray("records").sequences())
+        assertNotEquals(stuck.getString("requestId"), resent.getString("requestId"))
+    }
+
+    @Test
+    fun `the retry loop itself moves a stuck head to a new stream`() {
+        val queue = FakeDeliveryQueue(listOf(event(0, START)))
+        val clock = FakeClock(plusSeconds(START, 60))
+        val scheduler = FakeScheduler()
+        val streams =
+            DeliveryStreams(
+                MemoryDeliveryStreamStore(),
+                newStreamId = { ROTATED_STREAM_ID },
+                rotateAfterMillis = 2_000L,
+                rotateAfterAnswers = 3,
+            )
+        val transport = gapOnStreamTransport(queue, STREAM_ID)
+        val coordinator = coordinator(queue, transport, clock, scheduler, streams = streams)
+
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
+        assertEquals(500L, scheduler.entries.single().delayMillis)
+        clock.wallMillis += 1_000L
+        clock.monotonicNanos += TimeUnit.SECONDS.toNanos(1)
+        scheduler.runNext()
+        awaitCondition { transport.requests.size == 2 && scheduler.pending() == 1 }
+
+        clock.wallMillis += 1_000L
+        clock.monotonicNanos += TimeUnit.SECONDS.toNanos(2)
+        scheduler.runNext()
+        awaitCondition { queue.records().isEmpty() }
+        assertEquals(listOf(STREAM_ID, STREAM_ID, STREAM_ID, ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
+        coordinator.close()
+    }
+
+    @Test
+    fun `a stuck head is recovered across process restarts through the state file`() {
+        val directory = Files.createTempDirectory("elu-delivery-streams").toFile()
+        try {
+            val file = File(directory, FileDeliveryStreamStore.FILE_NAME)
+            val queue = FakeDeliveryQueue(listOf(event(0, START)))
+            val clock = FakeClock(plusSeconds(START, 60))
+            val firstAnswer = clock.wallMillis
+            val transport = gapOnStreamTransport(queue, STREAM_ID)
+
+            // Each call is a new process: only the file carries over.
+            fun processAt(minute: Long): BatchDeliveryPassResult {
+                clock.wallMillis = firstAnswer + TimeUnit.MINUTES.toMillis(minute)
+                val streams = DeliveryStreams(FileDeliveryStreamStore(file), newStreamId = { ROTATED_STREAM_ID })
+                val coordinator = coordinator(queue, transport, clock, streams = streams)
+                return coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).also { coordinator.close() }
+            }
+
+            listOf(0L, 10L, 20L, 30L, 40L).forEach { minute ->
+                assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, processAt(minute).stop)
+            }
+            assertEquals(5, checkNotNull(FileDeliveryStreamStore(file).read()?.gap).answers)
+            assertEquals(BatchDeliveryStop.DRAINED, processAt(50).stop)
+            assertTrue(queue.records().isEmpty())
+            assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), FileDeliveryStreamStore(file).read())
+
+            // A later process sends new records straight to the new stream.
+            queue.append(event(1, plusSeconds(START, 1)))
+            assertEquals(BatchDeliveryStop.DRAINED, processAt(51).stop)
+            assertEquals(
+                List(6) { STREAM_ID } + listOf(ROTATED_STREAM_ID, ROTATED_STREAM_ID),
+                transport.requests.map { streamOf(it) },
+            )
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a new head after progress starts the stuck-head count again`() {
+        val records = listOf(event(0, START), event(1, plusSeconds(START, 1)))
+        val queue = FakeDeliveryQueue(records)
+        val store = MemoryDeliveryStreamStore()
+        val streams =
+            DeliveryStreams(store, newStreamId = { ROTATED_STREAM_ID }, rotateAfterMillis = 0L, rotateAfterAnswers = 2)
+        val observed = mutableListOf<Pair<String, List<Long>>>()
+        val answers =
+            ArrayDeque(
+                listOf<(BatchPackedRequest) -> ByteArray>(
+                    { request -> outcomes(request, STREAM_GAP) },
+                    { request -> outcomes(request, ACCEPTED, STREAM_GAP) },
+                    { request -> outcomes(request, STREAM_GAP) },
+                ),
+            )
+        val transport =
+            RecordingTransport { raw ->
+                val request = requestFrom(raw, queue.records())
+                observed += request.streamId to request.records.map { it.sequence }
+                val body =
+                    if (request.streamId == STREAM_ID) {
+                        answers.removeFirst().invoke(request)
+                    } else {
+                        acknowledgement(request, request.records.size)
+                    }
+                BatchHTTPResponse(200, body)
+            }
+
+        fun attempt(): BatchDeliveryPassResult {
+            val coordinator = coordinator(queue, transport, streams = streams)
+            return coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).also { coordinator.close() }
+        }
+
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, attempt().stop)
+        assertEquals(1, checkNotNull(store.read()?.gap).answers)
+        // Record 0 is accepted and record 1 is now the head the server waits before.
+        val progressed = attempt()
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, progressed.stop)
+        assertEquals(1, progressed.resolvedRecords)
+        assertEquals(DeliveryStreamGap(1, records[1].recordId, checkNotNull(store.read()?.gap).firstAnsweredAtEpochMillis, 1), store.read()?.gap)
+        assertEquals(BatchDeliveryStop.DRAINED, attempt().stop)
+        assertEquals(
+            listOf(
+                STREAM_ID to listOf(0L, 1L),
+                STREAM_ID to listOf(0L, 1L),
+                STREAM_ID to listOf(1L),
+                ROTATED_STREAM_ID to listOf(1L),
+            ),
+            observed,
+        )
+        assertTrue(queue.records().isEmpty())
+    }
+
+    @Test
+    fun `retryable answers other than stream-gap never move the stream`() {
+        val queue = FakeDeliveryQueue(listOf(event(0, START)))
+        val store = MemoryDeliveryStreamStore()
+        val streams =
+            DeliveryStreams(store, newStreamId = { ROTATED_STREAM_ID }, rotateAfterMillis = 0L, rotateAfterAnswers = 1)
+        val transport =
+            RecordingTransport { raw -> BatchHTTPResponse(200, outcomes(requestFrom(raw, queue.records()), "temporarily-unavailable")) }
+
+        repeat(3) {
+            val coordinator = coordinator(queue, transport, streams = streams)
+            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
+            coordinator.close()
+        }
+        assertEquals(List(3) { STREAM_ID }, transport.requests.map { streamOf(it) })
+        assertNull(store.read())
+        assertEquals(1, queue.records().size)
     }
 
     @Test
@@ -935,6 +1264,8 @@ class RuntimeBatchDeliveryCoordinatorTest {
         clock: BatchDeliveryClock = FakeClock(plusSeconds(START, 60)),
         scheduler: FakeScheduler = FakeScheduler(),
         expiresAt: String = plusSeconds(START, 2_000_000),
+        streams: DeliveryStreams = DeliveryStreams(MemoryDeliveryStreamStore()),
+        eventBatchBytes: Int = 10_485_760,
     ): RuntimeBatchDeliveryCoordinator =
         RuntimeBatchDeliveryCoordinator(
             authorization =
@@ -943,7 +1274,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                     URI("https://ingest.elu.dev/v1/events"),
                     expiresAt,
                     1_000,
-                    10_485_760,
+                    eventBatchBytes,
                 ),
             queue = queue,
             transport = transport,
@@ -951,6 +1282,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             scheduler = scheduler,
             jitter = BatchJitterSource { 0.0 },
             executor = executor,
+            streams = streams,
         )
 
     private fun acceptingTransport(queue: FakeDeliveryQueue): RecordingTransport =
@@ -966,14 +1298,62 @@ class RuntimeBatchDeliveryCoordinatorTest {
         val json = JSONObject(request.bodyBytes().decodeToString())
         val sequences = json.getJSONArray("records").sequences()
         val selected = sequences.map { sequence -> available.single { it.sequence == sequence } }
-        return V1BatchRequestCodec.encodeExact(selected, instant(json.getString("sentAt"))).also {
+        return V1BatchRequestCodec.encodeExact(selected, instant(json.getString("sentAt")), json.getString("streamId")).also {
             assertEquals(json.getString("requestId"), it.requestId)
         }
+    }
+
+    private fun streamOf(request: BatchHTTPRequest): String = JSONObject(request.bodyBytes().decodeToString()).getString("streamId")
+
+    /**
+     * A 200 acknowledgement with one outcome per entry of [results], in request order: [ACCEPTED],
+     * [RECORD_TOO_OLD] (terminal) or any other code, which makes that record the retryable head.
+     */
+    private fun outcomes(
+        request: BatchPackedRequest,
+        vararg results: String,
+    ): ByteArray {
+        val outcomes = JSONArray()
+        var resolvedThrough: Long? = null
+        var retryFrom: Long? = null
+        results.forEachIndexed { index, result ->
+            val record = request.records[index]
+            val outcome =
+                JSONObject()
+                    .put("sequence", record.sequence)
+                    .put("recordId", record.recordId)
+                    .put("kind", record.kind.wireValue)
+            when (result) {
+                ACCEPTED -> {
+                    outcome.put("result", "accepted")
+                    resolvedThrough = record.sequence
+                }
+                RECORD_TOO_OLD -> {
+                    outcome.put("result", "terminally-rejected").put("code", result)
+                    resolvedThrough = record.sequence
+                }
+                else -> {
+                    outcome.put("result", "retryable").put("code", result)
+                    retryFrom = record.sequence
+                }
+            }
+            outcomes.put(outcome)
+        }
+        return JSONObject()
+            .put("schemaVersion", 1)
+            .put("requestId", request.requestId)
+            .put("streamId", request.streamId)
+            .put("resolvedThroughSequence", resolvedThrough ?: JSONObject.NULL)
+            .put("retryFromSequence", retryFrom ?: JSONObject.NULL)
+            .put("outcomes", outcomes)
+            .toString()
+            .encodeToByteArray()
     }
 
     private fun acknowledgement(
         request: BatchPackedRequest,
         resolvedCount: Int,
+        retryableCode: String = "temporarily-unavailable",
     ): ByteArray {
         val outcomes = JSONArray()
         val reportedCount = if (resolvedCount < request.records.size) resolvedCount + 1 else request.records.size
@@ -985,7 +1365,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
                     .put("recordId", record.recordId)
                     .put("kind", record.kind.wireValue)
                     .put("result", if (resolved) "accepted" else "retryable")
-                    .apply { if (!resolved) put("code", "temporarily-unavailable") },
+                    .apply { if (!resolved) put("code", retryableCode) },
             )
         }
         return JSONObject()
@@ -1047,6 +1427,10 @@ class RuntimeBatchDeliveryCoordinatorTest {
             )
         return RuntimeQueuedRecord.Event(record, RuntimeRecordCodec.encodeBatchRecord(record).size)
     }
+
+    /** Larger than a [SMALL_BATCH_BYTES] request on its own. */
+    private fun oversizedEvent(sequence: Long): RuntimeQueuedRecord.Event =
+        event(sequence, plusSeconds(START, sequence), properties = mapOf("blob" to "x".repeat(SMALL_BATCH_BYTES + 1)))
 
     private fun mutation(
         sequence: Long,
@@ -1145,6 +1529,37 @@ class RuntimeBatchDeliveryCoordinatorTest {
         }
     }
 
+    /** Answers `stream-gap` at the head for any request on [stuckStreamId] and accepts the rest. */
+    private fun gapOnStreamTransport(
+        queue: FakeDeliveryQueue,
+        stuckStreamId: String,
+    ): RecordingTransport =
+        RecordingTransport { raw ->
+            val request = requestFrom(raw, queue.records())
+            if (request.streamId == stuckStreamId) {
+                BatchHTTPResponse(200, outcomes(request, STREAM_GAP))
+            } else {
+                BatchHTTPResponse(200, acknowledgement(request, request.records.size))
+            }
+        }
+
+    /** Remembers which records were still queued each time a state was written. */
+    private class QueueWitnessStore(
+        private val queue: FakeDeliveryQueue,
+    ) : DeliveryStreamStore {
+        private var state: DeliveryStreamState? = null
+        val queuedAtWrites = mutableListOf<List<Long>>()
+
+        @Synchronized
+        override fun read(): DeliveryStreamState? = state
+
+        @Synchronized
+        override fun write(state: DeliveryStreamState) {
+            queuedAtWrites += queue.records().map { it.sequence }
+            this.state = state
+        }
+    }
+
     private class RecordingTransport(
         private val handler: (BatchHTTPRequest) -> BatchHTTPResponse,
     ) : BatchHTTPTransport {
@@ -1170,21 +1585,6 @@ class RuntimeBatchDeliveryCoordinatorTest {
         override fun monotonicNowNanos(): Long = monotonicNanos
     }
 
-    private class ScriptedClock(
-        private val wallInstants: List<BatchWallInstant>,
-    ) : BatchDeliveryClock {
-        private var index = 0
-
-        init {
-            require(wallInstants.isNotEmpty())
-        }
-
-        override fun wallNow(): BatchWallInstant =
-            wallInstants[minOf(index++, wallInstants.lastIndex)]
-
-        override fun monotonicNowNanos(): Long = 0
-    }
-
     private class FakeScheduler : BatchRetryScheduler {
         data class Entry(
             val delayMillis: Long,
@@ -1208,6 +1608,9 @@ class RuntimeBatchDeliveryCoordinatorTest {
             val entry = synchronized(this) { entries.removeAt(0) }
             if (!entry.cancelled) entry.task.run()
         }
+
+        @Synchronized
+        fun pending(): Int = entries.size
     }
 
     private fun JSONArray.sequences(): List<Long> =
@@ -1219,6 +1622,12 @@ class RuntimeBatchDeliveryCoordinatorTest {
 
     private companion object {
         const val STREAM_ID = "stream_test"
+        const val ROTATED_STREAM_ID = "stream_rotated"
         const val START = "2030-01-01T00:00:00.000Z"
+        const val ACCEPTED = "accepted"
+        const val RECORD_TOO_OLD = "record-too-old"
+        const val STREAM_GAP = "stream-gap"
+        // Small enough that one blob event cannot fit, large enough for a few ordinary ones.
+        const val SMALL_BATCH_BYTES = 4_096
     }
 }
