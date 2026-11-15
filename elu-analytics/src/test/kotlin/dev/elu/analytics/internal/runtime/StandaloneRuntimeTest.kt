@@ -309,7 +309,7 @@ class StandaloneRuntimeTest {
             RuntimeRecordIdentity.recordId("stream_runtime", second.record.record.sequence, RuntimeRecordKind.EVENT),
             moved.getString("eventId"),
         )
-        assertEquals(DeliveryStreamState("stream_runtime", "stream_moved_1"), store.read())
+        assertEquals(DeliveryStreamState("stream_runtime", "stream_moved_1", NOW_MS), store.read())
 
         // The server then holds a gap on the new stream: the head goes again on another one.
         val third = harness.runtime.capture("third").await() as RuntimeCaptureResult.Accepted
@@ -325,7 +325,7 @@ class StandaloneRuntimeTest {
             JSONObject(transport.requests.last().bodyBytes().decodeToString()).getJSONArray("records").getJSONObject(0)
                 .getJSONObject("event").getString("eventId"),
         )
-        assertEquals(DeliveryStreamState("stream_runtime", "stream_moved_2"), store.read())
+        assertEquals(DeliveryStreamState("stream_runtime", "stream_moved_2", NOW_MS), store.read())
     }
 
     @Test

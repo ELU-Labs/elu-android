@@ -1,5 +1,6 @@
 package dev.elu.analytics.internal.runtime.delivery
 
+import dev.elu.analytics.EluPersistenceMode
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
@@ -11,16 +12,22 @@ import org.json.JSONObject
 
 /**
  * The stream a queued record stream is sent on, and the head the server is holding a stream gap
- * at. [wireStreamId] equals [sourceStreamId] until the first replacement.
+ * at. [wireStreamId] equals [sourceStreamId] until the first move; [movedAtEpochMillis] is when
+ * delivery moved to [wireStreamId] (wall clock), and null until then.
  */
 internal data class DeliveryStreamState(
     val sourceStreamId: String,
     val wireStreamId: String,
+    val movedAtEpochMillis: Long? = null,
     val gap: DeliveryStreamGap? = null,
 ) {
     init {
         require(sourceStreamId.length in 1..DeliveryStreams.MAXIMUM_ID_LENGTH) { "sourceStreamId length is invalid" }
         require(wireStreamId.length in 1..DeliveryStreams.MAXIMUM_ID_LENGTH) { "wireStreamId length is invalid" }
+        require((wireStreamId == sourceStreamId) == (movedAtEpochMillis == null)) {
+            "movedAtEpochMillis is set exactly when delivery has moved"
+        }
+        require(movedAtEpochMillis == null || movedAtEpochMillis >= 0) { "movedAtEpochMillis must be non-negative" }
     }
 }
 
@@ -107,7 +114,7 @@ internal class FileDeliveryStreamStore(
     internal companion object {
         const val FILE_NAME = "delivery-stream-v1.json"
         private const val MAXIMUM_BYTES = 2_048
-        private val stateFields = setOf("schemaVersion", "sourceStreamId", "wireStreamId", "gap")
+        private val stateFields = setOf("schemaVersion", "sourceStreamId", "wireStreamId", "movedAt", "gap")
         private val gapFields = setOf("sequence", "recordId", "firstAnsweredAt", "answers")
 
         fun encode(state: DeliveryStreamState): ByteArray =
@@ -116,6 +123,8 @@ internal class FileDeliveryStreamStore(
                 append(JSONObject.quote(state.sourceStreamId))
                 append(",\"wireStreamId\":")
                 append(JSONObject.quote(state.wireStreamId))
+                append(",\"movedAt\":")
+                append(state.movedAtEpochMillis?.toString() ?: "null")
                 append(",\"gap\":")
                 val gap = state.gap
                 if (gap == null) {
@@ -159,6 +168,7 @@ internal class FileDeliveryStreamStore(
                     DeliveryStreamState(
                         sourceStreamId = root.get("sourceStreamId") as? String ?: return null,
                         wireStreamId = root.get("wireStreamId") as? String ?: return null,
+                        movedAtEpochMillis = if (root.isNull("movedAt")) null else exactLong(root.get("movedAt")) ?: return null,
                         gap = gap,
                     )
                 } catch (_: JSONException) {
@@ -200,12 +210,15 @@ internal class FileDeliveryStreamStore(
  *   lost to a crash) is recovered by [streamGapAnswered]: when the same head has been answered
  *   `stream-gap` at least [rotateAfterAnswers] times over at least [rotateAfterMillis], delivery
  *   moves to a new stream and the head is sent again there.
- * - A record whose acceptance row the server may already have swept (eight days old) is never
- *   resent on the stream that may have stored it: [rotateForAge] moves delivery first.
+ * - A head close to the server's idempotency retention is never resent on a stream the server may
+ *   have stored it on that long ago, since its acceptance row may be gone: [rotateForAge] moves
+ *   delivery first, unless delivery moved recently.
  *
  * Records keep their sequence and record identity on the new stream; only the stream named in the
- * request and in each event changes. The state is written before it is used, so after a process
- * death the SDK resumes on the same stream. A write that fails still takes effect for this
+ * request and in each event changes. The server's idempotency is per stream, so a record it
+ * already stored on the old stream, whose acknowledgement was lost, can be stored again on the
+ * new one. The state, with the time of the last move, is written before it is used, so after a
+ * process death the SDK resumes on the same stream. A write that fails still takes effect for this
  * process; a later process at worst goes back to the stuck stream and recovers it again.
  */
 internal class DeliveryStreams(
@@ -218,10 +231,6 @@ internal class DeliveryStreams(
     private var loaded = false
     private var state: DeliveryStreamState? = null
 
-    // Kept in memory only: the wire stream a past-retention head was last moved to, and when.
-    private var agedWireStreamId: String? = null
-    private var agedAtEpochMillis: Long = 0L
-
     init {
         require(rotateAfterMillis >= 0) { "rotateAfterMillis must be non-negative" }
         require(rotateAfterAnswers >= 1) { "rotateAfterAnswers must be positive" }
@@ -232,36 +241,35 @@ internal class DeliveryStreams(
         synchronized(lock) { stateFor(sourceStreamId)?.wireStreamId ?: sourceStreamId }
 
     /** Call before a record of [sourceStreamId] is resolved without the server's outcome. */
-    fun rotate(sourceStreamId: String): String =
-        synchronized(lock) {
-            val replacement = freshStreamId(sourceStreamId, wireStreamIdLocked(sourceStreamId))
-            save(DeliveryStreamState(sourceStreamId, replacement, gap = null))
-            replacement
-        }
+    fun rotate(
+        sourceStreamId: String,
+        nowEpochMillis: Long,
+    ): String = synchronized(lock) { moveLocked(sourceStreamId, nowEpochMillis) }
 
     /**
-     * Call before a head that is [IDEMPOTENCY_RETENTION_SECONDS] old or older is sent. The server
-     * may have swept the acceptance row of a record it stored that long ago, and would then answer
-     * a resend of it `record-identity-conflict`, a permanent answer that blocks the whole queue.
-     * On a stream the server has never seen the record is simply stored as `record-too-old`.
-     * Returns true when delivery has moved to a new stream, so the head should be packed again.
+     * Call before a head that is [RESEND_AGE_LIMIT_SECONDS] old or older is sent. The server may
+     * have swept the acceptance row of a record it stored about [IDEMPOTENCY_RETENTION_SECONDS]
+     * ago, and would then answer a resend of it `record-identity-conflict`, a permanent answer that
+     * blocks the whole queue. On a stream the server has never seen the record is simply stored as
+     * `record-too-old`. Returns true when delivery has moved to a new stream, so the head should be
+     * packed again.
      *
-     * The records behind it are as old or older, and every one first sent on the new stream has its
-     * acceptance row from that moment on, so the move is made once per [AGED_REUSE_MILLIS] and not
-     * once per record. The marker is kept in memory; a restart costs at most one more move.
+     * Every record first sent on a stream delivery moved to was sent after the move, so the server
+     * keeps its acceptance row until at least [IDEMPOTENCY_RETENTION_SECONDS] after it. A stream
+     * moved to less than [AGED_REUSE_MILLIS] ago (for any reason, and also in an earlier process) is
+     * therefore kept, and the aged records behind the head share one move.
      */
     fun rotateForAge(
         sourceStreamId: String,
         nowEpochMillis: Long,
     ): Boolean =
         synchronized(lock) {
-            val current = wireStreamIdLocked(sourceStreamId)
-            val since = nowEpochMillis - agedAtEpochMillis
-            if (agedWireStreamId == current && since in 0 until AGED_REUSE_MILLIS) return false
-            val replacement = freshStreamId(sourceStreamId, current)
-            save(DeliveryStreamState(sourceStreamId, replacement, gap = null))
-            agedWireStreamId = replacement
-            agedAtEpochMillis = nowEpochMillis
+            val movedAt = stateFor(sourceStreamId)?.movedAtEpochMillis
+            // A clock that went back cannot tell how old the stream is: move again.
+            if (movedAt != null && nowEpochMillis >= movedAt && nowEpochMillis - movedAt < AGED_REUSE_MILLIS) {
+                return false
+            }
+            moveLocked(sourceStreamId, nowEpochMillis)
             true
         }
 
@@ -278,9 +286,10 @@ internal class DeliveryStreams(
         nowEpochMillis: Long,
     ): Boolean =
         synchronized(lock) {
-            val current = wireStreamIdLocked(sourceStreamId)
+            val stored = stateFor(sourceStreamId)
+            val current = stored?.wireStreamId ?: sourceStreamId
             if (wireStreamId != current) return false
-            val previous = stateFor(sourceStreamId)?.gap?.takeIf { it.sequence == sequence && it.recordId == recordId }
+            val previous = stored?.gap?.takeIf { it.sequence == sequence && it.recordId == recordId }
             val gap =
                 when {
                     previous == null -> DeliveryStreamGap(sequence, recordId, maxOf(nowEpochMillis, 0L), 1)
@@ -290,10 +299,10 @@ internal class DeliveryStreams(
                     else -> previous.copy(answers = previous.answers.next())
                 }
             if (gap.answers >= rotateAfterAnswers && nowEpochMillis - gap.firstAnsweredAtEpochMillis >= rotateAfterMillis) {
-                save(DeliveryStreamState(sourceStreamId, freshStreamId(sourceStreamId, current), gap = null))
+                moveLocked(sourceStreamId, nowEpochMillis)
                 return true
             }
-            save(DeliveryStreamState(sourceStreamId, current, gap))
+            save(DeliveryStreamState(sourceStreamId, current, stored?.movedAtEpochMillis, gap))
             false
         }
 
@@ -310,6 +319,15 @@ internal class DeliveryStreams(
     }
 
     private fun wireStreamIdLocked(sourceStreamId: String): String = stateFor(sourceStreamId)?.wireStreamId ?: sourceStreamId
+
+    private fun moveLocked(
+        sourceStreamId: String,
+        nowEpochMillis: Long,
+    ): String {
+        val replacement = freshStreamId(sourceStreamId, wireStreamIdLocked(sourceStreamId))
+        save(DeliveryStreamState(sourceStreamId, replacement, maxOf(nowEpochMillis, 0L), gap = null))
+        return replacement
+    }
 
     private fun stateFor(sourceStreamId: String): DeliveryStreamState? {
         if (!loaded) {
@@ -344,8 +362,9 @@ internal class DeliveryStreams(
         repeat(MAXIMUM_GENERATION_ATTEMPTS) {
             // Never longer than the record stream's own ID: an event names its stream in its body,
             // so a longer one could push a record that fits a batch on one stream past the limit.
-            // Real IDs are "stream_" plus 32 hex digits, so the cut keeps enough entropy; a very
-            // short source ID would make a clash likely and end in the exception below.
+            // Real IDs are "stream_" plus 32 hex digits, so the cut keeps all 32 random digits. A
+            // much shorter source ID would leave few random characters: other installations could
+            // then share a replacement, and a clash with this one's own IDs ends in the exception.
             val candidate = newStreamId().take(sourceStreamId.length)
             if (candidate.length in 1..MAXIMUM_ID_LENGTH && candidate != sourceStreamId && candidate != currentWireStreamId) {
                 return candidate
@@ -368,10 +387,23 @@ internal class DeliveryStreams(
         /** And at least this many such answers, so one stale answer after a long pause never rotates. */
         const val STREAM_GAP_ROTATE_AFTER_ANSWERS = 5
 
-        /** How long the server keeps the acceptance row of a record it resolved (8 days). */
+        /**
+         * How long the server keeps the acceptance row of a record, counted from its first answer
+         * to it (8 days).
+         */
         const val IDEMPOTENCY_RETENTION_SECONDS = 691_200
 
-        /** A stream a past-retention head was moved to stays good for later such heads this long. */
+        /**
+         * A head this old or older is resent only on a stream delivery moved to recently (see
+         * [rotateForAge]). Twelve hours inside [IDEMPOTENCY_RETENTION_SECONDS] for a clock that
+         * changed since the record occurred, the margin the browser SDK keeps too.
+         */
+        const val RESEND_AGE_LIMIT_SECONDS = 648_000
+
+        /**
+         * A stream delivery moved to less than this long ago is kept for a head past
+         * [RESEND_AGE_LIMIT_SECONDS]: a day inside [IDEMPOTENCY_RETENTION_SECONDS].
+         */
         const val AGED_REUSE_MILLIS = 7L * 24L * 60L * 60L * 1_000L
 
         /** The server's limit for a stream or record ID. */
@@ -380,5 +412,22 @@ internal class DeliveryStreams(
         private const val MAXIMUM_GENERATION_ATTEMPTS = 8
 
         fun randomStreamId(): String = "stream_" + UUID.randomUUID().toString().replace("-", "")
+
+        /**
+         * The delivery streams of a runtime whose queue is [queueDatabaseFile]: kept in
+         * [FileDeliveryStreamStore.FILE_NAME] next to a persistent queue, under the same namespace
+         * lease, so a restart resumes on the same stream, and in memory for a memory queue.
+         */
+        fun forQueue(
+            persistence: EluPersistenceMode,
+            queueDatabaseFile: File,
+        ): DeliveryStreams =
+            DeliveryStreams(
+                if (persistence == EluPersistenceMode.PERSISTENT) {
+                    FileDeliveryStreamStore(File(queueDatabaseFile.canonicalFile.parentFile, FileDeliveryStreamStore.FILE_NAME))
+                } else {
+                    MemoryDeliveryStreamStore()
+                },
+            )
     }
 }

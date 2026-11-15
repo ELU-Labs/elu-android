@@ -191,7 +191,7 @@ internal class RuntimeBatchDeliveryCoordinator(
                 )
             }
             val head = queued.first()
-            if (isPastIdempotencyRetention(head, now) && streams.rotateForAge(head.streamId, now.epochMillis)) {
+            if (isPastResendAgeLimit(head, now) && streams.rotateForAge(head.streamId, now.epochMillis)) {
                 // The server may no longer hold this head's acceptance row: send it on a stream it
                 // has never seen, where it is stored as record-too-old, not refused for good.
                 retryAttempt = 0
@@ -215,7 +215,7 @@ internal class RuntimeBatchDeliveryCoordinator(
                 }
             if (packed is BatchPackingResult.OversizedHead) {
                 // Larger than any request this authorization allows: it can never be sent.
-                resolvedRecords += discardHead(head)
+                resolvedRecords += discardHead(head, now)
                 localResolutions += 1
                 retryAttempt = 0
                 blockedRequestId = null
@@ -348,7 +348,7 @@ internal class RuntimeBatchDeliveryCoordinator(
                 if (candidate.size == 1) {
                     // Refused on its own: no smaller request can carry it.
                     if (!localBudget.take()) return DeliveryStep.Bounded()
-                    DeliveryStep.Success(discardHead(candidate.single()))
+                    DeliveryStep.Success(discardHead(candidate.single(), responseWall))
                 } else {
                     val firstSize = (candidate.size + 1) / 2
                     when (val first = deliver(candidate.take(firstSize), networkBudget, localBudget)) {
@@ -544,8 +544,11 @@ internal class RuntimeBatchDeliveryCoordinator(
      * Deletes a head that can never be sent. The new stream is recorded first: if the process
      * dies before the delete, the head is offered again on the new stream and refused again.
      */
-    private fun discardHead(record: RuntimeQueuedRecord): Int {
-        streams.rotate(record.streamId)
+    private fun discardHead(
+        record: RuntimeQueuedRecord,
+        now: BatchWallInstant,
+    ): Int {
+        streams.rotate(record.streamId, now.epochMillis)
         return acknowledgeReferences(listOf(referenceOf(record)), record.streamId)
     }
 
@@ -559,14 +562,14 @@ internal class RuntimeBatchDeliveryCoordinator(
             DeliveryQueueAcknowledgement.Empty -> 0
         }
 
-    private fun isPastIdempotencyRetention(
+    private fun isPastResendAgeLimit(
         record: RuntimeQueuedRecord,
         now: BatchWallInstant,
     ): Boolean =
         dev.elu.analytics.internal.runtime.RuntimeRecordCodec.compareElapsedSeconds(
             now.rfc3339,
             occurredAtOf(record),
-            DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS,
+            DeliveryStreams.RESEND_AGE_LIMIT_SECONDS,
         ) >= 0
 
     private fun isAuthorizationExpired(now: BatchWallInstant): Boolean =

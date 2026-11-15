@@ -342,16 +342,24 @@ moves delivery to a new stream ID, which the server starts at the next record.
 If the server keeps answering `stream-gap` for the same first record, for at
 least 45 minutes and five answers (for example after an earlier version deleted
 a record), the SDK moves delivery to a new stream and sends that record again
-there. A record at least eight days old (the server's idempotency retention) is
-never sent on the stream that may have stored it: the SDK moves delivery to a
-new stream first, where the server stores it as `record-too-old`, so a resend of
-a record whose acknowledgement was lost is not refused as a changed identity.
-The shared transport policy names this boundary `clientRetryBoundary`
-`before-idempotency-retention`. Records keep their sequence and record identity
-on the new stream; only the stream named in the request and in each event
-changes. The delivery stream
-is kept in `delivery-stream-v1.json` next to the queue, so a restart resumes on
-it.
+there. A server that closes such a gap itself does so after 30 minutes, so this
+move is only the fallback.
+
+The server keeps a record's outcome for eight days after it first answers it
+(its idempotency retention). After that it could refuse a resend of a record
+whose acknowledgement was lost as a changed identity. So a record seven and a
+half days old or more (12 hours kept back for a clock that changed) is sent
+only on a stream that delivery moved to less than seven days ago. Otherwise the
+SDK first moves delivery to a new stream, where the server stores the record as
+`record-too-old`. The shared transport policy names this boundary
+`clientRetryBoundary` `before-idempotency-retention`.
+
+Records keep their sequence and record identity on the new stream; only the
+stream named in the request and in each event changes. The server's
+idempotency is per stream: a record it already stored on the old stream, whose
+acknowledgement was lost, can be stored again on the new one. The delivery
+stream and the time delivery moved to it are kept in `delivery-stream-v1.json`
+next to the queue, so a restart resumes on that stream.
 
 For a `429` or `5xx` response, the SDK retries the unchanged request with
 backoff, whatever the response body. When the body is ELU's error object, its

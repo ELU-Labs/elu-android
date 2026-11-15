@@ -310,7 +310,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
 
     @Test
     fun `recursive 413 still sends a row that reaches seven days between parent and child requests`() {
-        val initialNow = plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong() - 1)
+        val initialNow = plusSeconds(START, MAX_RECORD_AGE_SECONDS.toLong() - 1)
         val records =
             listOf(
                 event(0, plusSeconds(START, 10)),
@@ -426,7 +426,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
 
     @Test
     fun `a record at the seven-day boundary is sent and the server's record-too-old outcome deletes it`() {
-        val beforeClock = FakeClock(plusMillis(plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong()), -1))
+        val beforeClock = FakeClock(plusMillis(plusSeconds(START, MAX_RECORD_AGE_SECONDS.toLong()), -1))
         val beforeQueue = FakeDeliveryQueue(listOf(event(0, START)))
         val beforeTransport = acceptingTransport(beforeQueue)
         val before = coordinator(beforeQueue, beforeTransport, beforeClock)
@@ -434,7 +434,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
         assertEquals(1, beforeTransport.requests.size)
         before.close()
 
-        val boundaryClock = FakeClock(plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong()))
+        val boundaryClock = FakeClock(plusSeconds(START, MAX_RECORD_AGE_SECONDS.toLong()))
         val boundaryQueue = FakeDeliveryQueue(listOf(event(0, START)))
         val store = MemoryDeliveryStreamStore()
         val boundaryTransport =
@@ -455,7 +455,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
 
     @Test
     fun `fresh aged and fresh records go out together and every one gets the server's outcome`() {
-        val now = plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong())
+        val now = plusSeconds(START, MAX_RECORD_AGE_SECONDS.toLong())
         val records =
             listOf(
                 event(0, plusSeconds(START, 1)),
@@ -485,7 +485,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
     fun `a retry wait is not cut short when the head reaches seven days`() {
         val record = event(0, START)
         val queue = FakeDeliveryQueue(listOf(record))
-        val clock = FakeClock(plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong() - 1))
+        val clock = FakeClock(plusSeconds(START, MAX_RECORD_AGE_SECONDS.toLong() - 1))
         val scheduler = FakeScheduler()
         var calls = 0
         val transport =
@@ -590,7 +590,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
 
     @Test
     fun `a retry resends the same request after a middle row reaches seven days`() {
-        val initialNow = plusSeconds(START, MAX_RUNTIME_RECORD_AGE_SECONDS.toLong() - 1)
+        val initialNow = plusSeconds(START, MAX_RECORD_AGE_SECONDS.toLong() - 1)
         val records =
             listOf(
                 event(0, plusSeconds(START, 10)),
@@ -1002,7 +1002,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
         )
         // The new stream was stored while the refused head was still queued.
         assertEquals(listOf(listOf(0L, 1L, 2L)), store.queuedAtWrites)
-        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), store.read())
+        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID, millisOf(plusSeconds(START, 60))), store.read())
         // A moved record keeps its sequence and identity; only the stream it names changes.
         val moved = JSONObject(transport.requests[3].bodyBytes().decodeToString()).getJSONArray("records").getJSONObject(0)
         assertEquals(ROTATED_STREAM_ID, moved.getJSONObject("event").getString("streamId"))
@@ -1075,7 +1075,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
         assertEquals(2, moved.resolvedRecords)
         assertTrue(queue.records().isEmpty())
         assertEquals(listOf(STREAM_ID, ROTATED_STREAM_ID), transport.requests.takeLast(2).map { streamOf(it) })
-        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), store.read())
+        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID, firstAnswer + TimeUnit.MINUTES.toMillis(45)), store.read())
         val stuck = JSONObject(transport.requests[transport.requests.size - 2].bodyBytes().decodeToString())
         val resent = JSONObject(transport.requests.last().bodyBytes().decodeToString())
         assertEquals(listOf(0L, 1L), resent.getJSONArray("records").sequences())
@@ -1137,7 +1137,10 @@ class RuntimeBatchDeliveryCoordinatorTest {
             assertEquals(5, checkNotNull(FileDeliveryStreamStore(file).read()?.gap).answers)
             assertEquals(BatchDeliveryStop.DRAINED, processAt(50).stop)
             assertTrue(queue.records().isEmpty())
-            assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), FileDeliveryStreamStore(file).read())
+            assertEquals(
+                DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID, firstAnswer + TimeUnit.MINUTES.toMillis(50)),
+                FileDeliveryStreamStore(file).read(),
+            )
 
             // A later process sends new records straight to the new stream.
             queue.append(event(1, plusSeconds(START, 1)))
@@ -1206,8 +1209,8 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     @Test
-    fun `a head past the idempotency retention is sent on a new stream, once for the aged records behind it`() {
-        val retention = DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS.toLong()
+    fun `a head at the resend age limit is sent on a new stream, once for the aged records behind it`() {
+        val limit = DeliveryStreams.RESEND_AGE_LIMIT_SECONDS.toLong()
         val records = (0L..2L).map { sequence -> event(sequence, START) }
         val queue = FakeDeliveryQueue(records)
         val store = MemoryDeliveryStreamStore()
@@ -1216,11 +1219,12 @@ class RuntimeBatchDeliveryCoordinatorTest {
             RecordingTransport { raw ->
                 BatchHTTPResponse(200, outcomes(requestFrom(raw, queue.records()), RECORD_TOO_OLD, RECORD_TOO_OLD, RECORD_TOO_OLD))
             }
+        val clock = FakeClock(plusSeconds(START, limit))
         val coordinator =
             coordinator(
                 queue,
                 transport,
-                FakeClock(plusSeconds(START, retention)),
+                clock,
                 streams = DeliveryStreams(store, newStreamId = { generated += 1; ROTATED_STREAM_ID }),
             )
 
@@ -1231,13 +1235,13 @@ class RuntimeBatchDeliveryCoordinatorTest {
         // Never sent on the stream that may have stored it: the first request already names the new one.
         assertEquals(listOf(ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
         assertEquals(1, generated)
-        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), store.read())
+        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID, clock.wallMillis), store.read())
         coordinator.close()
     }
 
     @Test
-    fun `a head one millisecond short of the idempotency retention stays on its stream`() {
-        val retention = DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS.toLong()
+    fun `a head one millisecond short of the resend age limit stays on its stream`() {
+        val limit = DeliveryStreams.RESEND_AGE_LIMIT_SECONDS.toLong()
         val queue = FakeDeliveryQueue(listOf(event(0, START)))
         val store = MemoryDeliveryStreamStore()
         val transport =
@@ -1248,7 +1252,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
             coordinator(
                 queue,
                 transport,
-                FakeClock(plusMillis(plusSeconds(START, retention), -1)),
+                FakeClock(plusMillis(plusSeconds(START, limit), -1)),
                 streams = DeliveryStreams(store, newStreamId = { ROTATED_STREAM_ID }),
             )
 
@@ -1259,10 +1263,10 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     @Test
-    fun `a retry that waits past the idempotency retention is packed again on a new stream`() {
-        val retention = DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS.toLong()
+    fun `a retry that waits past the resend age limit is packed again on a new stream`() {
+        val limit = DeliveryStreams.RESEND_AGE_LIMIT_SECONDS.toLong()
         val queue = FakeDeliveryQueue(listOf(event(0, START)))
-        val clock = FakeClock(plusSeconds(START, retention - 10))
+        val clock = FakeClock(plusSeconds(START, limit - 10))
         val scheduler = FakeScheduler()
         var calls = 0
         val transport =
@@ -1284,6 +1288,79 @@ class RuntimeBatchDeliveryCoordinatorTest {
         scheduler.runNext()
         awaitCondition { queue.records().isEmpty() }
         assertEquals(listOf(STREAM_ID, ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
+        coordinator.close()
+    }
+
+    @Test
+    fun `after a restart an aged head whose acknowledgement was lost goes again to the stream it was moved to`() {
+        val directory = Files.createTempDirectory("elu-delivery-streams").toFile()
+        try {
+            val file = File(directory, FileDeliveryStreamStore.FILE_NAME)
+            val limit = DeliveryStreams.RESEND_AGE_LIMIT_SECONDS.toLong()
+            // An aged head and a fresh record behind it.
+            val queue = FakeDeliveryQueue(listOf(event(0, START), event(1, plusSeconds(START, limit))))
+            val clock = FakeClock(plusSeconds(START, limit))
+            val generated = ArrayDeque(listOf(ROTATED_STREAM_ID, "stream_rot2"))
+            var calls = 0
+            val transport =
+                RecordingTransport { raw ->
+                    val request = requestFrom(raw, queue.records())
+                    calls += 1
+                    // The server stores both outcomes, but the first answer never arrives.
+                    if (calls == 1) throw IOException("connection reset")
+                    BatchHTTPResponse(200, outcomes(request, RECORD_TOO_OLD, ACCEPTED))
+                }
+
+            // Each call is a new process: only the file carries over.
+            fun process(): BatchDeliveryPassResult {
+                val streams = DeliveryStreams(FileDeliveryStreamStore(file), newStreamId = { generated.removeFirst() })
+                val coordinator = coordinator(queue, transport, clock, streams = streams)
+                return coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).also { coordinator.close() }
+            }
+
+            assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, process().stop)
+            clock.wallMillis += 60_000L
+            assertEquals(BatchDeliveryStop.DRAINED, process().stop)
+            assertTrue(queue.records().isEmpty())
+            // Both requests went to the one new stream, where the server answers the resend from
+            // what it stored; a second move would have stored the fresh record twice.
+            assertEquals(listOf(ROTATED_STREAM_ID, ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
+            assertEquals(listOf("stream_rot2"), generated.toList())
+            assertEquals(
+                DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID, clock.wallMillis - 60_000L),
+                FileDeliveryStreamStore(file).read(),
+            )
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `an aged head right after a discard stays on the stream the discard moved to`() {
+        val limit = DeliveryStreams.RESEND_AGE_LIMIT_SECONDS.toLong()
+        val now = plusSeconds(START, limit)
+        // A fresh head too large to send, then two aged records.
+        val oversized = event(0, now, properties = mapOf("blob" to "x".repeat(SMALL_BATCH_BYTES + 1)))
+        val records = listOf(oversized, event(1, START), event(2, START))
+        val queue = FakeDeliveryQueue(records)
+        val generated = ArrayDeque(listOf(ROTATED_STREAM_ID, "stream_rot2"))
+        val transport =
+            RecordingTransport { raw ->
+                BatchHTTPResponse(200, outcomes(requestFrom(raw, queue.records()), RECORD_TOO_OLD, RECORD_TOO_OLD))
+            }
+        val coordinator =
+            coordinator(
+                queue,
+                transport,
+                FakeClock(now),
+                streams = DeliveryStreams(MemoryDeliveryStreamStore(), newStreamId = { generated.removeFirst() }),
+                eventBatchBytes = SMALL_BATCH_BYTES,
+            )
+
+        assertEquals(BatchDeliveryStop.DRAINED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
+        assertTrue(queue.records().isEmpty())
+        assertEquals(listOf(ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
+        assertEquals(listOf("stream_rot2"), generated.toList())
         coordinator.close()
     }
 
@@ -1387,6 +1464,8 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     private fun streamOf(request: BatchHTTPRequest): String = JSONObject(request.bodyBytes().decodeToString()).getString("streamId")
+
+    private fun millisOf(value: String): Long = RuntimeRecordCodec.timestampToEpochMillisFloor(value)
 
     /**
      * A 200 acknowledgement with one outcome per entry of [results], in request order: [ACCEPTED],
@@ -1708,6 +1787,8 @@ class RuntimeBatchDeliveryCoordinatorTest {
         const val ROTATED_STREAM_ID = "stream_rot1"
         const val LONGER_STREAM_ID = "stream_a_longer_name"
         const val START = "2030-01-01T00:00:00.000Z"
+        /** The server stores a record this old as `record-too-old`. */
+        const val MAX_RECORD_AGE_SECONDS = 604_800
         const val ACCEPTED = "accepted"
         const val RECORD_TOO_OLD = "record-too-old"
         const val STREAM_GAP = "stream-gap"
