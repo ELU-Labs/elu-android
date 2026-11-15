@@ -26,7 +26,9 @@ internal object ExceptionSerializer {
             chain.map { link ->
                 val entry = LinkedHashMap<String, Any?>()
                 entry["type"] = typeName(link)
-                entry["value"] = message(link)
+                // The server reads `value` as a string and defaults only a missing key, so a
+                // JSON null would make the whole list unparseable. No message means no key.
+                message(link)?.let { entry["value"] = it }
                 entry["module"] = moduleName(link)
                 entry["stacktrace"] = mapOf("type" to "raw", "frames" to frames(link))
                 Collections.unmodifiableMap(entry)
@@ -135,10 +137,33 @@ internal object ExceptionSerializer {
                 frame["filename"] = element.fileName?.let { sanitize(it, MAX_MESSAGE_CODE_POINTS) }
                 frame["lineno"] = element.lineNumber.takeIf { it >= 0 }
                 frame["native"] = element.isNativeMethod
+                frame["in_app"] = isInApp(element.className)
                 Collections.unmodifiableMap(frame)
             },
         )
     }
+
+    /**
+     * False for the Java and Android platform, the Kotlin and AndroidX libraries and this SDK, so
+     * the app's own frames lead on the server. Everything else, including R8-renamed app
+     * classes, is app code, which is also what the server assumes when `in_app` is missing.
+     */
+    internal fun isInApp(className: String): Boolean {
+        if (RUNTIME_PREFIXES.any { className.startsWith(it) }) return false
+        if (SDK_INTERNAL_PREFIXES.any { className.startsWith(it) }) return false
+        // Exact packages only: the sample app and test fixtures live in sibling packages
+        // such as `dev.elu.analytics.sample` and are app code.
+        return className.substringBeforeLast('.', "") !in SDK_PACKAGES
+    }
+
+    private val RUNTIME_PREFIXES: List<String> =
+        listOf(
+            "java.", "javax.", "jdk.", "sun.", "kotlin.", "kotlinx.", "android.", "androidx.",
+            "com.android.", "dalvik.", "libcore.",
+        )
+    private val SDK_INTERNAL_PREFIXES: List<String> =
+        listOf("dev.elu.analytics.internal.", "dev.elu.analytics.compose.internal.")
+    private val SDK_PACKAGES: Set<String> = setOf("dev.elu.analytics", "dev.elu.analytics.compose")
 
     private const val REPLACEMENT = '\uFFFD'
 }

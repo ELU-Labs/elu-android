@@ -1,6 +1,7 @@
 package dev.elu.analytics.internal.runtime
 
 import dev.elu.analytics.internal.core.JsonValues
+import java.lang.reflect.InvocationTargetException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -30,11 +31,19 @@ class ExceptionSerializerTest {
         val frames = stacktrace["frames"] as List<*>
         assertTrue(frames.isNotEmpty())
         val top = frames.first() as Map<*, *>
-        assertTrue(frames.all { (it as Map<*, *>)["platform"] == "java" })
         assertEquals(javaClass.name, top["module"])
         assertTrue((top["function"] as String).isNotEmpty())
         assertEquals(false, top["native"])
         assertTrue((top["lineno"] as Int) > 0)
+        // This test lives in the SDK's own package, so its frame is not app code.
+        assertEquals(false, top["in_app"])
+        // The server rejects the whole list if any link has a frame without its platform.
+        for (entry in list) {
+            val linkFrames = ((entry as Map<*, *>)["stacktrace"] as Map<*, *>)["frames"] as List<*>
+            assertTrue(linkFrames.isNotEmpty())
+            assertTrue(linkFrames.all { (it as Map<*, *>)["platform"] == ExceptionSerializer.FRAME_PLATFORM })
+        }
+        assertEquals("java", ExceptionSerializer.FRAME_PLATFORM)
 
         val normalized = JsonValues.objectValue(properties, "exception")
         assertEquals(properties.keys, normalized.keys)
@@ -65,6 +74,75 @@ class ExceptionSerializerTest {
         val long = Throwable("m".repeat(5_000))
         val message = ExceptionSerializer.properties(long)[ExceptionSerializer.MESSAGE_PROPERTY] as String
         assertEquals(ExceptionSerializer.MAX_MESSAGE_CODE_POINTS, message.codePointCount(0, message.length))
+    }
+
+    @Test
+    fun `a link without a message sends no value instead of null`() {
+        // The server reads `value` as a string; a JSON null in any link fails the whole list.
+        val root = RuntimeException()
+        val reflective = InvocationTargetException(root)
+        val outer = IllegalStateException("Could not execute method for android:onClick", reflective)
+
+        val list = ExceptionSerializer.properties(outer)[ExceptionSerializer.LIST_PROPERTY] as List<*>
+
+        val entries = list.map { it as Map<*, *> }
+        assertEquals(
+            listOf("IllegalStateException", "InvocationTargetException", "RuntimeException"),
+            entries.map { it["type"] },
+        )
+        assertEquals("Could not execute method for android:onClick", entries[0]["value"])
+        assertFalse(entries[1].containsKey("value"))
+        assertFalse(entries[2].containsKey("value"))
+
+        val single = ExceptionSerializer.properties(RuntimeException())[ExceptionSerializer.LIST_PROPERTY] as List<*>
+        assertFalse((single.single() as Map<*, *>).containsKey("value"))
+        val empty = ExceptionSerializer.properties(RuntimeException(""))[ExceptionSerializer.LIST_PROPERTY] as List<*>
+        assertEquals("", (empty.single() as Map<*, *>)["value"])
+    }
+
+    @Test
+    fun `runtime and sdk frames are not in-app and everything else is`() {
+        val cases =
+            listOf(
+                "com.example.shop.CheckoutActivity" to true,
+                "a.b" to true,
+                "a" to true,
+                "kotlinapp.Main" to true,
+                "androidxtra.Widget" to true,
+                "dev.elu.analytics.sample.MainActivity" to true,
+                "dev.elu.analytics.composeconsumer.MainActivity" to true,
+                "dev.elu.fixture.smoke.ConsumerSmoke" to true,
+                "java.lang.reflect.Method" to false,
+                "javax.net.ssl.SSLSocket" to false,
+                "jdk.internal.reflect.DirectMethodHandleAccessor" to false,
+                "sun.nio.ch.SocketDispatcher" to false,
+                "kotlin.coroutines.jvm.internal.BaseContinuationImpl" to false,
+                "kotlinx.coroutines.DispatchedTask" to false,
+                "android.os.Looper" to false,
+                "androidx.activity.ComponentActivity" to false,
+                "com.android.internal.os.ZygoteInit" to false,
+                "dalvik.system.VMStack" to false,
+                "libcore.io.Linux" to false,
+                "dev.elu.analytics.Elu" to false,
+                "dev.elu.analytics.Elu\$captureException\$1" to false,
+                "dev.elu.analytics.internal.runtime.StandaloneRuntime" to false,
+                "dev.elu.analytics.compose.EluComposeReplayKt" to false,
+                "dev.elu.analytics.compose.internal.ComposeReplayNodes" to false,
+            )
+        for ((className, expected) in cases) {
+            assertEquals(className, expected, ExceptionSerializer.isInApp(className))
+        }
+
+        val throwable = Throwable("tap")
+        throwable.stackTrace =
+            arrayOf(
+                StackTraceElement("com.example.shop.CheckoutActivity", "onPay", "CheckoutActivity.kt", 42),
+                StackTraceElement("android.view.View", "performClick", "View.java", 7_000),
+                StackTraceElement("dev.elu.analytics.Elu", "capture", "Elu.kt", 10),
+            )
+        val entry = (ExceptionSerializer.properties(throwable)[ExceptionSerializer.LIST_PROPERTY] as List<*>).single() as Map<*, *>
+        val frames = (entry["stacktrace"] as Map<*, *>)["frames"] as List<*>
+        assertEquals(listOf(true, false, false), frames.map { (it as Map<*, *>)["in_app"] })
     }
 
     @Test
