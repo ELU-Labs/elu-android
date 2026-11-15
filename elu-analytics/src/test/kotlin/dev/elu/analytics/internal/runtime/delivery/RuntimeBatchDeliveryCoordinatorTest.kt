@@ -920,24 +920,25 @@ class RuntimeBatchDeliveryCoordinatorTest {
     @Test
     fun `a request on another stream renames only the stream and binds its acknowledgement to the queued stream`() {
         val records = listOf(event(0, START, properties = mapOf("blob" to "x".repeat(1_000))), mutation(1, plusSeconds(START, 1)))
+        // The codec does not limit the name; a longer one than the queued stream costs room.
         val sentAt = instant(plusSeconds(START, 2))
         val original = V1BatchRequestCodec.encodeExact(records, sentAt)
-        val moved = V1BatchRequestCodec.encodeExact(records, sentAt, ROTATED_STREAM_ID)
+        val moved = V1BatchRequestCodec.encodeExact(records, sentAt, LONGER_STREAM_ID)
 
         assertEquals(STREAM_ID, original.streamId)
         assertEquals(STREAM_ID, moved.sourceStreamId)
-        assertEquals(ROTATED_STREAM_ID, moved.streamId)
+        assertEquals(LONGER_STREAM_ID, moved.streamId)
         assertEquals(original.references, moved.references)
         assertNotEquals(original.requestId, moved.requestId)
-        assertEquals(V1BatchRequestCodec.requestId(ROTATED_STREAM_ID, versions(), records), moved.requestId)
+        assertEquals(V1BatchRequestCodec.requestId(LONGER_STREAM_ID, versions(), records), moved.requestId)
         // The envelope and the event name the new stream; nothing else changes, and the
         // mutation record, which names no stream, keeps its exact bytes.
         assertEquals(
-            original.bodyBytes().decodeToString().replace(original.requestId, moved.requestId).replace(STREAM_ID, ROTATED_STREAM_ID),
+            original.bodyBytes().decodeToString().replace(original.requestId, moved.requestId).replace(STREAM_ID, LONGER_STREAM_ID),
             moved.bodyBytes().decodeToString(),
         )
         val movedRecords = JSONObject(moved.bodyBytes().decodeToString()).getJSONArray("records")
-        assertEquals(ROTATED_STREAM_ID, movedRecords.getJSONObject(0).getJSONObject("event").getString("streamId"))
+        assertEquals(LONGER_STREAM_ID, movedRecords.getJSONObject(0).getJSONObject("event").getString("streamId"))
         assertEquals(records[0].recordId, movedRecords.getJSONObject(0).getJSONObject("event").getString("eventId"))
         assertEquals(
             JSONObject(original.bodyBytes().decodeToString()).getJSONArray("records").getJSONObject(1).toString(),
@@ -948,10 +949,10 @@ class RuntimeBatchDeliveryCoordinatorTest {
         assertEquals(2, (V1BatchRequestCodec.packLargest(records, sentAt, 100, original.bodySize) as BatchPackingResult.Packed).request.records.size)
         assertEquals(
             1,
-            (V1BatchRequestCodec.packLargest(records, sentAt, 100, original.bodySize, ROTATED_STREAM_ID) as BatchPackingResult.Packed)
+            (V1BatchRequestCodec.packLargest(records, sentAt, 100, original.bodySize, LONGER_STREAM_ID) as BatchPackingResult.Packed)
                 .request.records.size,
         )
-        val packedMoved = V1BatchRequestCodec.packLargest(records, sentAt, 100, moved.bodySize, ROTATED_STREAM_ID) as BatchPackingResult.Packed
+        val packedMoved = V1BatchRequestCodec.packLargest(records, sentAt, 100, moved.bodySize, LONGER_STREAM_ID) as BatchPackingResult.Packed
         assertArrayEquals(moved.bodyBytes(), packedMoved.request.bodyBytes())
 
         val parsed = V1BatchResponseCodec.parseAcknowledgement(acknowledgement(moved, 1, STREAM_GAP), moved)
@@ -1705,6 +1706,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
     private companion object {
         const val STREAM_ID = "stream_test"
         const val ROTATED_STREAM_ID = "stream_rot1"
+        const val LONGER_STREAM_ID = "stream_a_longer_name"
         const val START = "2030-01-01T00:00:00.000Z"
         const val ACCEPTED = "accepted"
         const val RECORD_TOO_OLD = "record-too-old"

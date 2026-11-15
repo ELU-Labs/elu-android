@@ -52,9 +52,11 @@ class DeliveryStreamsTest {
         assertThrows(IllegalStateException::class.java) { stuck.rotate(SOURCE) }
         assertEquals(SOURCE, stuck.wireStreamId(SOURCE))
 
+        // Generated IDs are the same length as the installation's own.
+        val generatedSource = "stream_" + "0".repeat(32)
         val generated = DeliveryStreams(MemoryDeliveryStreamStore())
-        val first = generated.rotate(SOURCE)
-        val second = generated.rotate(SOURCE)
+        val first = generated.rotate(generatedSource)
+        val second = generated.rotate(generatedSource)
         assertTrue(first, Regex("^stream_[0-9a-f]{32}$").matches(first))
         assertTrue(second, Regex("^stream_[0-9a-f]{32}$").matches(second))
         assertFalse(first == second)
