@@ -45,7 +45,7 @@ PINNED_FILES = {
     "elu-analytics/src/test/resources/contracts/v1/manifest.json":
         "98152d8725c286f29402ba3e420bda8dd364200fb6fdf1cfe49b2da9b8f63e54",
     "elu-analytics/src/test/resources/contracts/v1/fixtures/transport-policy.json":
-        "992900180683af04f69d5e459b7c0c9e68edf92c6ebf320136ed36dbae8b60ce",
+        "311e6e352d3fedcfff78f29fb3f34370a8c24047b53e27b3d862a92121b9ef07",
 }
 
 ANNOTATED_EXTRA_FILES = (
