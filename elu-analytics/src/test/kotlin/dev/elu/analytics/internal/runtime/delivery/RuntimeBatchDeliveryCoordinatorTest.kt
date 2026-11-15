@@ -1205,6 +1205,88 @@ class RuntimeBatchDeliveryCoordinatorTest {
     }
 
     @Test
+    fun `a head past the idempotency retention is sent on a new stream, once for the aged records behind it`() {
+        val retention = DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS.toLong()
+        val records = (0L..2L).map { sequence -> event(sequence, START) }
+        val queue = FakeDeliveryQueue(records)
+        val store = MemoryDeliveryStreamStore()
+        var generated = 0
+        val transport =
+            RecordingTransport { raw ->
+                BatchHTTPResponse(200, outcomes(requestFrom(raw, queue.records()), RECORD_TOO_OLD, RECORD_TOO_OLD, RECORD_TOO_OLD))
+            }
+        val coordinator =
+            coordinator(
+                queue,
+                transport,
+                FakeClock(plusSeconds(START, retention)),
+                streams = DeliveryStreams(store, newStreamId = { generated += 1; ROTATED_STREAM_ID }),
+            )
+
+        val result = coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertEquals(BatchDeliveryStop.DRAINED, result.stop)
+        assertEquals(3, result.resolvedRecords)
+        assertTrue(queue.records().isEmpty())
+        // Never sent on the stream that may have stored it: the first request already names the new one.
+        assertEquals(listOf(ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
+        assertEquals(1, generated)
+        assertEquals(DeliveryStreamState(STREAM_ID, ROTATED_STREAM_ID), store.read())
+        coordinator.close()
+    }
+
+    @Test
+    fun `a head one millisecond short of the idempotency retention stays on its stream`() {
+        val retention = DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS.toLong()
+        val queue = FakeDeliveryQueue(listOf(event(0, START)))
+        val store = MemoryDeliveryStreamStore()
+        val transport =
+            RecordingTransport { raw ->
+                BatchHTTPResponse(200, outcomes(requestFrom(raw, queue.records()), RECORD_TOO_OLD))
+            }
+        val coordinator =
+            coordinator(
+                queue,
+                transport,
+                FakeClock(plusMillis(plusSeconds(START, retention), -1)),
+                streams = DeliveryStreams(store, newStreamId = { ROTATED_STREAM_ID }),
+            )
+
+        assertEquals(BatchDeliveryStop.DRAINED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
+        assertEquals(listOf(STREAM_ID), transport.requests.map { streamOf(it) })
+        assertNull(store.read())
+        coordinator.close()
+    }
+
+    @Test
+    fun `a retry that waits past the idempotency retention is packed again on a new stream`() {
+        val retention = DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS.toLong()
+        val queue = FakeDeliveryQueue(listOf(event(0, START)))
+        val clock = FakeClock(plusSeconds(START, retention - 10))
+        val scheduler = FakeScheduler()
+        var calls = 0
+        val transport =
+            RecordingTransport { raw ->
+                val request = requestFrom(raw, queue.records())
+                calls += 1
+                if (calls == 1) {
+                    BatchHTTPResponse(429, transportError(429, request.requestId), retryAfter = "30")
+                } else {
+                    BatchHTTPResponse(200, outcomes(request, RECORD_TOO_OLD))
+                }
+            }
+        val coordinator =
+            coordinator(queue, transport, clock, scheduler, streams = DeliveryStreams(MemoryDeliveryStreamStore(), newStreamId = { ROTATED_STREAM_ID }))
+
+        assertEquals(BatchDeliveryStop.RETRY_SCHEDULED, coordinator.trigger().get(WAIT_SECONDS, TimeUnit.SECONDS).stop)
+        clock.wallMillis += 30_000L
+        clock.monotonicNanos += TimeUnit.SECONDS.toNanos(30)
+        scheduler.runNext()
+        awaitCondition { queue.records().isEmpty() }
+        assertEquals(listOf(STREAM_ID, ROTATED_STREAM_ID), transport.requests.map { streamOf(it) })
+        coordinator.close()
+    }
+
+    @Test
     fun `retryable answers other than stream-gap never move the stream`() {
         val queue = FakeDeliveryQueue(listOf(event(0, START)))
         val store = MemoryDeliveryStreamStore()
@@ -1622,7 +1704,7 @@ class RuntimeBatchDeliveryCoordinatorTest {
 
     private companion object {
         const val STREAM_ID = "stream_test"
-        const val ROTATED_STREAM_ID = "stream_rotated"
+        const val ROTATED_STREAM_ID = "stream_rot1"
         const val START = "2030-01-01T00:00:00.000Z"
         const val ACCEPTED = "accepted"
         const val RECORD_TOO_OLD = "record-too-old"

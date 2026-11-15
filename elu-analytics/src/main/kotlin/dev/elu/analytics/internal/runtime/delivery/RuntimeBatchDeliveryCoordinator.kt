@@ -191,6 +191,15 @@ internal class RuntimeBatchDeliveryCoordinator(
                 )
             }
             val head = queued.first()
+            if (isPastIdempotencyRetention(head, now) && streams.rotateForAge(head.streamId, now.epochMillis)) {
+                // The server may no longer hold this head's acceptance row: send it on a stream it
+                // has never seen, where it is stored as record-too-old, not refused for good.
+                retryAttempt = 0
+                retryRecords = null
+                blockedRequestId = null
+                localResolutions += 1
+                continue
+            }
             val streamId = streams.wireStreamId(head.streamId)
             val packed =
                 if (retryRecords == null) {
@@ -549,6 +558,16 @@ internal class RuntimeBatchDeliveryCoordinator(
             DeliveryQueueAcknowledgement.AlreadyApplied -> 0
             DeliveryQueueAcknowledgement.Empty -> 0
         }
+
+    private fun isPastIdempotencyRetention(
+        record: RuntimeQueuedRecord,
+        now: BatchWallInstant,
+    ): Boolean =
+        dev.elu.analytics.internal.runtime.RuntimeRecordCodec.compareElapsedSeconds(
+            now.rfc3339,
+            occurredAtOf(record),
+            DeliveryStreams.IDEMPOTENCY_RETENTION_SECONDS,
+        ) >= 0
 
     private fun isAuthorizationExpired(now: BatchWallInstant): Boolean =
         dev.elu.analytics.internal.runtime.RuntimeRecordCodec.compareTimestamps(now.rfc3339, authorization.expiresAt) >= 0

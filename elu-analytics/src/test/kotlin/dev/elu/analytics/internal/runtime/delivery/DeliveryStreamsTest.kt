@@ -61,6 +61,45 @@ class DeliveryStreamsTest {
     }
 
     @Test
+    fun `a past-retention head moves the stream once per window and again after it or after another move`() {
+        val week = DeliveryStreams.AGED_REUSE_MILLIS
+        val streams = DeliveryStreams(MemoryDeliveryStreamStore(), newStreamId = ids("stream_a", "stream_b", "stream_c", "stream_d"))
+        assertTrue(streams.rotateForAge(SOURCE, T0))
+        assertEquals("stream_a", streams.wireStreamId(SOURCE))
+        // The aged records behind it stay on the new stream.
+        assertFalse(streams.rotateForAge(SOURCE, T0 + 1))
+        assertFalse(streams.rotateForAge(SOURCE, T0 + week - 1))
+        assertEquals("stream_a", streams.wireStreamId(SOURCE))
+        // A move for another reason is a stream the marker does not know.
+        assertEquals("stream_b", streams.rotate(SOURCE))
+        assertTrue(streams.rotateForAge(SOURCE, T0 + 2))
+        assertEquals("stream_c", streams.wireStreamId(SOURCE))
+        // After the window, and when the clock went back, the move is made again.
+        assertTrue(streams.rotateForAge(SOURCE, T0 + 2 + week))
+        assertEquals("stream_d", streams.wireStreamId(SOURCE))
+    }
+
+    @Test
+    fun `a clock that went back moves a past-retention head again`() {
+        val streams = DeliveryStreams(MemoryDeliveryStreamStore(), newStreamId = ids("stream_a", "stream_b"))
+        assertTrue(streams.rotateForAge(SOURCE, T0))
+        assertTrue(streams.rotateForAge(SOURCE, T0 - 1))
+        assertEquals("stream_b", streams.wireStreamId(SOURCE))
+    }
+
+    @Test
+    fun `a replacement is never longer than the record stream ID`() {
+        val streams = DeliveryStreams(MemoryDeliveryStreamStore(), newStreamId = ids("stream_" + "a".repeat(40)))
+        val replacement = streams.rotate(SOURCE)
+        assertEquals(SOURCE.length, replacement.length)
+        assertEquals("stream_" + "a".repeat(SOURCE.length - 7), replacement)
+
+        // A candidate that is the record stream's own ID once cut is not a new stream.
+        val same = DeliveryStreams(MemoryDeliveryStreamStore(), newStreamId = { SOURCE + "x" })
+        assertThrows(IllegalStateException::class.java) { same.rotate(SOURCE) }
+    }
+
+    @Test
     fun `stream-gap answers move the stream only after both the answer count and the wait`() {
         val store = MemoryDeliveryStreamStore()
         val streams = DeliveryStreams(store, newStreamId = ids("stream_a"), rotateAfterMillis = MINUTES_30, rotateAfterAnswers = 5)

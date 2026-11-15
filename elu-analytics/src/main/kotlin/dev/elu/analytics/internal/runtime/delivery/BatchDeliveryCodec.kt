@@ -448,6 +448,12 @@ internal fun versionsOf(record: RuntimeQueuedRecord): RuntimeVersions =
         is RuntimeQueuedRecord.Mutation -> record.envelope.versions
     }
 
+internal fun occurredAtOf(record: RuntimeQueuedRecord): String =
+    when (record) {
+        is RuntimeQueuedRecord.Event -> record.record.occurredAt
+        is RuntimeQueuedRecord.Mutation -> record.envelope.mutation.occurredAt
+    }
+
 private object StrictJson {
     fun parseObject(bytes: ByteArray): JSONObject {
         if (bytes.isEmpty() || bytes.size > MAX_BATCH_RESPONSE_BYTES) protocol("Response body size is invalid")

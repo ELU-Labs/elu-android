@@ -201,6 +201,9 @@ internal class FileDeliveryStreamStore(
  *   `stream-gap` at least [rotateAfterAnswers] times over at least [rotateAfterMillis], delivery
  *   moves to a new stream and the head is sent again there.
  *
+ * - A record whose acceptance row the server may already have swept (eight days old) is never
+ *   resent on the stream that may have stored it: [rotateForAge] moves delivery first.
+ *
  * Records keep their sequence and record identity on the new stream; only the stream named in the
  * request and in each event changes. The state is written before it is used, so after a process
  * death the SDK resumes on the same stream. A write that fails still takes effect for this
@@ -215,6 +218,10 @@ internal class DeliveryStreams(
     private val lock = Any()
     private var loaded = false
     private var state: DeliveryStreamState? = null
+
+    // Kept in memory only: the wire stream a past-retention head was last moved to, and when.
+    private var agedWireStreamId: String? = null
+    private var agedAtEpochMillis: Long = 0L
 
     init {
         require(rotateAfterMillis >= 0) { "rotateAfterMillis must be non-negative" }
@@ -231,6 +238,32 @@ internal class DeliveryStreams(
             val replacement = freshStreamId(sourceStreamId, wireStreamIdLocked(sourceStreamId))
             save(DeliveryStreamState(sourceStreamId, replacement, gap = null))
             replacement
+        }
+
+    /**
+     * Call before a head that is [IDEMPOTENCY_RETENTION_SECONDS] old or older is sent. The server
+     * may have swept the acceptance row of a record it stored that long ago, and would then answer
+     * a resend of it `record-identity-conflict`, a permanent answer that blocks the whole queue.
+     * On a stream the server has never seen the record is simply stored as `record-too-old`.
+     * Returns true when delivery has moved to a new stream, so the head should be packed again.
+     *
+     * The records behind it are as old or older, and every one first sent on the new stream has its
+     * acceptance row from that moment on, so the move is made once per [AGED_REUSE_MILLIS] and not
+     * once per record. The marker is kept in memory; a restart costs at most one more move.
+     */
+    fun rotateForAge(
+        sourceStreamId: String,
+        nowEpochMillis: Long,
+    ): Boolean =
+        synchronized(lock) {
+            val current = wireStreamIdLocked(sourceStreamId)
+            val since = nowEpochMillis - agedAtEpochMillis
+            if (agedWireStreamId == current && since in 0 until AGED_REUSE_MILLIS) return false
+            val replacement = freshStreamId(sourceStreamId, current)
+            save(DeliveryStreamState(sourceStreamId, replacement, gap = null))
+            agedWireStreamId = replacement
+            agedAtEpochMillis = nowEpochMillis
+            true
         }
 
     /**
@@ -310,7 +343,9 @@ internal class DeliveryStreams(
         currentWireStreamId: String,
     ): String {
         repeat(MAXIMUM_GENERATION_ATTEMPTS) {
-            val candidate = newStreamId()
+            // Never longer than the record stream's own ID: an event names its stream in its body,
+            // so a longer one could push a record that fits a batch on one stream past the limit.
+            val candidate = newStreamId().take(sourceStreamId.length)
             if (candidate.length in 1..MAXIMUM_ID_LENGTH && candidate != sourceStreamId && candidate != currentWireStreamId) {
                 return candidate
             }
@@ -323,13 +358,20 @@ internal class DeliveryStreams(
     internal companion object {
         /**
          * How long the same head must keep getting `stream-gap` before delivery moves to a new
-         * stream. The server closes such a gap itself after 30 minutes; this waits 15 minutes
-         * longer, so a gap the server can close keeps its stream even if the clocks disagree.
+         * stream. A server that closes such gaps itself does so after 30 minutes; this waits 15
+         * minutes longer, so a gap that server can close keeps its stream even if the clocks
+         * disagree.
          */
         const val STREAM_GAP_ROTATE_AFTER_MILLIS = 45L * 60L * 1_000L
 
         /** And at least this many such answers, so one stale answer after a long pause never rotates. */
         const val STREAM_GAP_ROTATE_AFTER_ANSWERS = 5
+
+        /** How long the server keeps the acceptance row of a record it resolved (8 days). */
+        const val IDEMPOTENCY_RETENTION_SECONDS = 691_200
+
+        /** A stream a past-retention head was moved to stays good for later such heads this long. */
+        const val AGED_REUSE_MILLIS = 7L * 24L * 60L * 60L * 1_000L
 
         /** The server's limit for a stream or record ID. */
         const val MAXIMUM_ID_LENGTH = 256

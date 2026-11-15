@@ -342,8 +342,12 @@ moves delivery to a new stream ID, which the server starts at the next record.
 If the server keeps answering `stream-gap` for the same first record, for at
 least 45 minutes and five answers (for example after an earlier version deleted
 a record), the SDK moves delivery to a new stream and sends that record again
-there. Records keep their sequence and record identity on the new stream; only
-the stream named in the request and in each event changes. The delivery stream
+there. A record at least eight days old (the server's idempotency retention) is
+never sent on the stream that may have stored it: the SDK moves delivery to a
+new stream first, where the server stores it as `record-too-old`, so a resend of
+a record whose acknowledgement was lost is not refused as a changed identity.
+Records keep their sequence and record identity on the new stream; only the
+stream named in the request and in each event changes. The delivery stream
 is kept in `delivery-stream-v1.json` next to the queue, so a restart resumes on
 it.
 
