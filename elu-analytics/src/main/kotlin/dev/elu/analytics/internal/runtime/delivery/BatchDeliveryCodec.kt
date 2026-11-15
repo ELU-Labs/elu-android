@@ -25,7 +25,6 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
-internal const val MAX_RUNTIME_RECORD_AGE_SECONDS: Int = 604_800
 internal const val MAX_TRANSPORT_ERROR_BYTES: Int = 65_536
 
 internal class BatchProtocolException(
