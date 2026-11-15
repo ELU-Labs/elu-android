@@ -191,7 +191,7 @@
         "idempotencyRetentionSeconds": 691200,
         "maxRecordAgeSeconds": 604800,
         "retentionStartsAt": "first-resolution",
-        "clientRetryBoundary": "not-after-max-record-age",
+        "clientRetryBoundary": "before-idempotency-retention",
         "duplicateBehavior": "same-effective-ack"
     }
 }

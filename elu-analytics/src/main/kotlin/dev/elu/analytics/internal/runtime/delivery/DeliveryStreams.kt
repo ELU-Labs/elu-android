@@ -191,7 +191,7 @@ internal class FileDeliveryStreamStore(
  * The server accepts a stream's records only in sequence order: it keeps the next sequence it
  * expects and answers `stream-gap` (retryable, nothing stored) for any batch that starts past it.
  * A record the SDK resolves locally without sending it therefore leaves a gap the server waits on
- * for good, and every later record of that stream would be refused. Two things prevent that:
+ * for good, and every later record of that stream would be refused. Three things prevent that:
  *
  * - Before a record is discarded locally, [rotate] moves delivery to a stream the server has
  *   never seen. The server starts a new stream at the first sequence it receives, so the next
@@ -200,7 +200,6 @@ internal class FileDeliveryStreamStore(
  *   lost to a crash) is recovered by [streamGapAnswered]: when the same head has been answered
  *   `stream-gap` at least [rotateAfterAnswers] times over at least [rotateAfterMillis], delivery
  *   moves to a new stream and the head is sent again there.
- *
  * - A record whose acceptance row the server may already have swept (eight days old) is never
  *   resent on the stream that may have stored it: [rotateForAge] moves delivery first.
  *
@@ -345,6 +344,8 @@ internal class DeliveryStreams(
         repeat(MAXIMUM_GENERATION_ATTEMPTS) {
             // Never longer than the record stream's own ID: an event names its stream in its body,
             // so a longer one could push a record that fits a batch on one stream past the limit.
+            // Real IDs are "stream_" plus 32 hex digits, so the cut keeps enough entropy; a very
+            // short source ID would make a clash likely and end in the exception below.
             val candidate = newStreamId().take(sourceStreamId.length)
             if (candidate.length in 1..MAXIMUM_ID_LENGTH && candidate != sourceStreamId && candidate != currentWireStreamId) {
                 return candidate

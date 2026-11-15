@@ -346,8 +346,10 @@ there. A record at least eight days old (the server's idempotency retention) is
 never sent on the stream that may have stored it: the SDK moves delivery to a
 new stream first, where the server stores it as `record-too-old`, so a resend of
 a record whose acknowledgement was lost is not refused as a changed identity.
-Records keep their sequence and record identity on the new stream; only the
-stream named in the request and in each event changes. The delivery stream
+The shared transport policy names this boundary `clientRetryBoundary`
+`before-idempotency-retention`. Records keep their sequence and record identity
+on the new stream; only the stream named in the request and in each event
+changes. The delivery stream
 is kept in `delivery-stream-v1.json` next to the queue, so a restart resumes on
 it.
 
@@ -370,8 +372,10 @@ analytics session changes, or the app is opened again.
 
 Process restart reopens the existing owned queue and current schema upgrades
 preserve it. `flush` schedules work; it cannot guarantee network completion
-before Android stops the process. Queue and age limits can prevent admission
-or retire expired records; the SDK does not promise unlimited offline retention.
+before Android stops the process. Queue limits can prevent admission, and replay
+chunks expire by age; event and mutation records are never retired locally for
+age (the server rejects old ones), and the SDK does not promise unlimited
+offline retention.
 
 Existing-store preflight runs under the original process/file ownership lease.
 Before SQLite opens the original, the SDK streams its database and any WAL or
