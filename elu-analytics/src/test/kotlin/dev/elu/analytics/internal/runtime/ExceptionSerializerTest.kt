@@ -107,8 +107,31 @@ class ExceptionSerializerTest {
                 "com.example.shop.CheckoutActivity" to true,
                 "a.b" to true,
                 "a" to true,
+                // A platform name inside an app package is still the app.
+                "com.example.android.shop.CheckoutActivity" to true,
+                "com.example.java.Main" to true,
+                // Near misses: each runtime prefix ends at a package boundary.
+                "javaapp.Main" to true,
+                "javaxapp.Main" to true,
+                "jdkapp.Main" to true,
+                "sunrise.App" to true,
                 "kotlinapp.Main" to true,
+                "kotlinxapp.Main" to true,
+                "androidapp.Main" to true,
                 "androidxtra.Widget" to true,
+                "com.androidapp.Main" to true,
+                "dalvikapp.Main" to true,
+                "libcoreapp.Main" to true,
+                "org.jsonapp.Main" to true,
+                "org.xmlpullapp.Main" to true,
+                "org.w3c.domapp.Main" to true,
+                "org.xml.saxapp.Main" to true,
+                "org.apache.httpapp.Main" to true,
+                "org.apache.commons.lang3.Validate" to true,
+                "org.apache.harmonyapp.Main" to true,
+                "org.kxml2app.Main" to true,
+                "org.ccil.cowan.tagsoupapp.Main" to true,
+                "j\$app.Main" to true,
                 "dev.elu.analytics.sample.MainActivity" to true,
                 "dev.elu.analytics.composeconsumer.MainActivity" to true,
                 "dev.elu.fixture.smoke.ConsumerSmoke" to true,
@@ -123,6 +146,15 @@ class ExceptionSerializerTest {
                 "com.android.internal.os.ZygoteInit" to false,
                 "dalvik.system.VMStack" to false,
                 "libcore.io.Linux" to false,
+                "org.json.JSONObject" to false,
+                "org.xmlpull.v1.XmlPullParserException" to false,
+                "org.w3c.dom.Element" to false,
+                "org.xml.sax.helpers.DefaultHandler" to false,
+                "org.apache.http.impl.client.DefaultHttpClient" to false,
+                "org.apache.harmony.xml.ExpatParser" to false,
+                "org.kxml2.io.KXmlParser" to false,
+                "org.ccil.cowan.tagsoup.Parser" to false,
+                "j\$.util.stream.ReferencePipeline" to false,
                 "dev.elu.analytics.Elu" to false,
                 "dev.elu.analytics.Elu\$captureException\$1" to false,
                 "dev.elu.analytics.internal.runtime.StandaloneRuntime" to false,
@@ -133,16 +165,18 @@ class ExceptionSerializerTest {
             assertEquals(className, expected, ExceptionSerializer.isInApp(className))
         }
 
+        // As in a JSONException: the platform's org.json frame sits above the app's own frame.
         val throwable = Throwable("tap")
         throwable.stackTrace =
             arrayOf(
+                StackTraceElement("org.json.JSONObject", "getString", "JSONObject.java", 600),
                 StackTraceElement("com.example.shop.CheckoutActivity", "onPay", "CheckoutActivity.kt", 42),
                 StackTraceElement("android.view.View", "performClick", "View.java", 7_000),
                 StackTraceElement("dev.elu.analytics.Elu", "capture", "Elu.kt", 10),
             )
         val entry = (ExceptionSerializer.properties(throwable)[ExceptionSerializer.LIST_PROPERTY] as List<*>).single() as Map<*, *>
         val frames = (entry["stacktrace"] as Map<*, *>)["frames"] as List<*>
-        assertEquals(listOf(true, false, false), frames.map { (it as Map<*, *>)["in_app"] })
+        assertEquals(listOf(false, true, false, false), frames.map { (it as Map<*, *>)["in_app"] })
     }
 
     @Test

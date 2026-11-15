@@ -145,8 +145,9 @@ internal object ExceptionSerializer {
 
     /**
      * False for the Java and Android platform, the Kotlin and AndroidX libraries and this SDK, so
-     * the app's own frames lead on the server. Everything else, including R8-renamed app
-     * classes, is app code, which is also what the server assumes when `in_app` is missing.
+     * the server and the UI can tell app frames from library frames. Everything else, including
+     * R8-renamed app classes, is app code, which is also what the server assumes when `in_app`
+     * is missing.
      */
     internal fun isInApp(className: String): Boolean {
         if (RUNTIME_PREFIXES.any { className.startsWith(it) }) return false
@@ -160,6 +161,12 @@ internal object ExceptionSerializer {
         listOf(
             "java.", "javax.", "jdk.", "sun.", "kotlin.", "kotlinx.", "android.", "androidx.",
             "com.android.", "dalvik.", "libcore.",
+            // Other packages the Android platform ships, including its legacy Apache HTTP
+            // client and the XML and HTML parsers behind its public APIs.
+            "org.json.", "org.xmlpull.", "org.w3c.dom.", "org.xml.sax.", "org.apache.http.",
+            "org.apache.harmony.", "org.kxml2.", "org.ccil.cowan.tagsoup.",
+            // D8 core-library desugaring renames backported java.* classes to j$.*.
+            "j\$.",
         )
     private val SDK_INTERNAL_PREFIXES: List<String> =
         listOf("dev.elu.analytics.internal.", "dev.elu.analytics.compose.internal.")
