@@ -23,6 +23,9 @@ import dev.elu.analytics.internal.runtime.delivery.BatchJitterSource
 import dev.elu.analytics.internal.runtime.delivery.BatchRetryScheduler
 import dev.elu.analytics.internal.runtime.delivery.BatchScheduledTask
 import dev.elu.analytics.internal.runtime.delivery.BatchWallInstant
+import dev.elu.analytics.internal.runtime.delivery.DeliveryStreamState
+import dev.elu.analytics.internal.runtime.delivery.DeliveryStreams
+import dev.elu.analytics.internal.runtime.delivery.MemoryDeliveryStreamStore
 import java.time.Instant
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
@@ -276,6 +279,56 @@ class StandaloneRuntimeTest {
     }
 
     @Test
+    fun `a refused head and a stuck head move delivery to new streams the queue still acknowledges`() {
+        val transport = ScriptedTransport()
+        val scheduler = FakeScheduler()
+        val store = MemoryDeliveryStreamStore()
+        val replacements = ArrayDeque(listOf("stream_moved_1", "stream_moved_2"))
+        val streams =
+            DeliveryStreams(store, newStreamId = { replacements.removeFirst() }, rotateAfterMillis = 0L, rotateAfterAnswers = 1)
+        val harness = runtime(transport, scheduler, deliveryStreams = streams)
+        harness.runtime.applyConfiguration(config()).await()
+        settleDelivery(harness)
+        harness.runtime.capture("first").await() as RuntimeCaptureResult.Accepted
+        val second = harness.runtime.capture("second").await() as RuntimeCaptureResult.Accepted
+
+        // Both records together are refused with 413, and so is the first on its own.
+        transport.nextResponses += { request -> payloadTooLarge(request) }
+        transport.nextResponses += { request -> payloadTooLarge(request) }
+        val refused = harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertEquals(BatchDeliveryStop.DRAINED, refused.stop)
+        assertEquals(2, refused.resolvedRecords)
+        assertEquals(0, harness.owner.snapshot().await().queuedCount)
+        assertEquals(listOf("stream_runtime", "stream_runtime", "stream_moved_1"), transport.requests.map { streamOf(it) })
+        val moved = JSONObject(transport.requests.last().bodyBytes().decodeToString()).getJSONArray("records").getJSONObject(0)
+            .getJSONObject("event")
+        assertEquals("second", moved.getString("name"))
+        assertEquals("stream_moved_1", moved.getString("streamId"))
+        assertEquals(second.record.record.eventId, moved.getString("eventId"))
+        assertEquals(
+            RuntimeRecordIdentity.recordId("stream_runtime", second.record.record.sequence, RuntimeRecordKind.EVENT),
+            moved.getString("eventId"),
+        )
+        assertEquals(DeliveryStreamState("stream_runtime", "stream_moved_1", NOW_MS), store.read())
+
+        // The server then holds a gap on the new stream: the head goes again on another one.
+        val third = harness.runtime.capture("third").await() as RuntimeCaptureResult.Accepted
+        transport.nextResponses += { request -> streamGap(request) }
+        val stuck = harness.runtime.flush().get(WAIT_SECONDS, TimeUnit.SECONDS)
+        assertEquals(BatchDeliveryStop.DRAINED, stuck.stop)
+        assertEquals(2, stuck.networkRequests)
+        assertEquals(1, stuck.resolvedRecords)
+        assertEquals(0, harness.owner.snapshot().await().queuedCount)
+        assertEquals(listOf("stream_moved_1", "stream_moved_2"), transport.requests.takeLast(2).map { streamOf(it) })
+        assertEquals(
+            third.record.record.eventId,
+            JSONObject(transport.requests.last().bodyBytes().decodeToString()).getJSONArray("records").getJSONObject(0)
+                .getJSONObject("event").getString("eventId"),
+        )
+        assertEquals(DeliveryStreamState("stream_runtime", "stream_moved_2", NOW_MS), store.read())
+    }
+
+    @Test
     fun `background marks the session then triggers one bounded pass and close is idempotent`() {
         val transport = ScriptedTransport()
         val harness = runtime(transport, FakeScheduler())
@@ -433,6 +486,7 @@ class StandaloneRuntimeTest {
         deviceInEuTimezone: () -> Boolean = { deviceInEu },
         siteKey: String = SITE_KEY,
         endpointPolicy: dev.elu.analytics.internal.config.LocalEndpointPolicy = dev.elu.analytics.internal.config.LocalEndpointPolicy.CLOUD,
+        deliveryStreams: DeliveryStreams = DeliveryStreams(MemoryDeliveryStreamStore()),
     ): Harness {
         val owner =
             RuntimeQueueOwner.open(
@@ -457,6 +511,7 @@ class StandaloneRuntimeTest {
                 scheduler = executor,
                 retryScheduler = scheduler,
                 jitter = BatchJitterSource { 0.0 },
+                deliveryStreams = deliveryStreams,
                 transportFactory = { transport },
                 deviceInEuTimezone = deviceInEuTimezone,
                 configurationGate = configurationGate,
@@ -629,6 +684,44 @@ class StandaloneRuntimeTest {
                     .put("resolvedThroughSequence", last ?: JSONObject.NULL)
                     .put("retryFromSequence", JSONObject.NULL)
                     .put("outcomes", outcomes)
+            return BatchHTTPResponse(200, acknowledgement.toString().encodeToByteArray())
+        }
+
+        fun streamOf(request: BatchHTTPRequest): String = JSONObject(request.bodyBytes().decodeToString()).getString("streamId")
+
+        fun payloadTooLarge(request: BatchHTTPRequest): BatchHTTPResponse {
+            val body =
+                JSONObject()
+                    .put("schemaVersion", 1)
+                    .put("status", 413)
+                    .put("code", "payload-too-large")
+                    .put("disposition", "retry-after-reduction")
+                    .put("message", "Request could not be processed.")
+                    .put("requestId", JSONObject(request.bodyBytes().decodeToString()).getString("requestId"))
+            return BatchHTTPResponse(413, body.toString().encodeToByteArray())
+        }
+
+        /** The server is waiting for an earlier sequence: the request's first record is retryable. */
+        fun streamGap(request: BatchHTTPRequest): BatchHTTPResponse {
+            val body = JSONObject(request.bodyBytes().decodeToString())
+            val head = body.getJSONArray("records").getJSONObject(0)
+            val isEvent = head.getString("kind") == "event"
+            val payload = head.getJSONObject(if (isEvent) "event" else "mutation")
+            val outcome =
+                JSONObject()
+                    .put("sequence", payload.getLong("sequence"))
+                    .put("recordId", payload.getString(if (isEvent) "eventId" else "mutationId"))
+                    .put("kind", head.getString("kind"))
+                    .put("result", "retryable")
+                    .put("code", "stream-gap")
+            val acknowledgement =
+                JSONObject()
+                    .put("schemaVersion", 1)
+                    .put("requestId", body.getString("requestId"))
+                    .put("streamId", body.getString("streamId"))
+                    .put("resolvedThroughSequence", JSONObject.NULL)
+                    .put("retryFromSequence", payload.getLong("sequence"))
+                    .put("outcomes", JSONArray().put(outcome))
             return BatchHTTPResponse(200, acknowledgement.toString().encodeToByteArray())
         }
 

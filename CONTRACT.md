@@ -332,6 +332,35 @@ the submitted stream and records before local retirement. Lost acknowledgements
 can cause retransmission of the same identities; HTTP 200 alone is not enough
 to delete queued records.
 
+Every queued record is sent, however old: the server stores a record that is
+seven days old or more as rejected (`record-too-old`) and moves on. The server
+accepts a stream's records only in sequence order, so a record the SDK deletes
+without sending would hold back every later one. Only a record that can never
+be sent is deleted that way: one larger than the configured batch size, or one
+the server refuses with `413` when it is sent alone. Before deleting it, the SDK
+moves delivery to a new stream ID, which the server starts at the next record.
+If the server keeps answering `stream-gap` for the same first record, for at
+least 45 minutes and five answers (for example after an earlier version deleted
+a record), the SDK moves delivery to a new stream and sends that record again
+there. A server that closes such a gap itself does so after 30 minutes, so this
+move is only the fallback.
+
+The server keeps a record's outcome for eight days after it first answers it
+(its idempotency retention). After that it could refuse a resend of a record
+whose acknowledgement was lost as a changed identity. So a record seven and a
+half days old or more (12 hours kept back for a clock that changed) is sent
+only on a stream that delivery moved to less than seven days ago. Otherwise the
+SDK first moves delivery to a new stream, where the server stores the record as
+`record-too-old`. The shared transport policy names this boundary
+`clientRetryBoundary` `before-idempotency-retention`.
+
+Records keep their sequence and record identity on the new stream; only the
+stream named in the request and in each event changes. The server's
+idempotency is per stream: a record it already stored on the old stream, whose
+acknowledgement was lost, can be stored again on the new one. The delivery
+stream and the time delivery moved to it are kept in `delivery-stream-v1.json`
+next to the queue, so a restart resumes on that stream.
+
 For a `429` or `5xx` response, the SDK retries the unchanged request with
 backoff, whatever the response body. When the body is ELU's error object, its
 `Retry-After` is honoured (up to one day for replay), and a replay `429` pauses
@@ -351,8 +380,10 @@ analytics session changes, or the app is opened again.
 
 Process restart reopens the existing owned queue and current schema upgrades
 preserve it. `flush` schedules work; it cannot guarantee network completion
-before Android stops the process. Queue and age limits can prevent admission
-or retire expired records; the SDK does not promise unlimited offline retention.
+before Android stops the process. Queue limits can prevent admission, and replay
+chunks expire by age; event and mutation records are never retired locally for
+age (the server rejects old ones), and the SDK does not promise unlimited
+offline retention.
 
 Existing-store preflight runs under the original process/file ownership lease.
 Before SQLite opens the original, the SDK streams its database and any WAL or

@@ -260,7 +260,7 @@
                 "idempotencyRetentionSeconds": { "type": "integer", "minimum": 691200 },
                 "maxRecordAgeSeconds": { "const": 604800 },
                 "retentionStartsAt": { "const": "first-resolution" },
-                "clientRetryBoundary": { "const": "not-after-max-record-age" },
+                "clientRetryBoundary": { "const": "before-idempotency-retention" },
                 "duplicateBehavior": { "const": "same-effective-ack" }
             }
         }

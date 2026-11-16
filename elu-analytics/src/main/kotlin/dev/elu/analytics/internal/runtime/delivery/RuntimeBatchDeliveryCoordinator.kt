@@ -32,6 +32,12 @@ internal data class BatchDeliveryPassResult(
 /**
  * One serialized delivery state machine. Nothing in the public facade instantiates this type.
  * Queue ownership, authorization, clocks, scheduling, randomness, and HTTP are all injected.
+ *
+ * Every record is sent, however old: the server stores a terminal `record-too-old` outcome for a
+ * record past the maximum age and moves its stream on. The only records resolved without the
+ * server's outcome are a head too large for the authorized batch size and a head the server
+ * refuses with `413` on its own; before either is deleted, [DeliveryStreams.rotate] moves delivery
+ * to a new stream so the server is never left waiting on a sequence that will not arrive.
  */
 internal class RuntimeBatchDeliveryCoordinator(
     private val authorization: V1BatchAuthorizationSnapshot,
@@ -41,6 +47,8 @@ internal class RuntimeBatchDeliveryCoordinator(
     private val scheduler: BatchRetryScheduler,
     private val jitter: BatchJitterSource,
     private val executor: Executor,
+    /** Shared by every coordinator of one runtime; see [DeliveryStreams]. */
+    private val streams: DeliveryStreams = DeliveryStreams(MemoryDeliveryStreamStore()),
     private val maximumNetworkRequestsPerPass: Int = 11,
     private val maximumLocalResolutionsPerPass: Int = 64,
 ) : AutoCloseable {
@@ -74,14 +82,6 @@ internal class RuntimeBatchDeliveryCoordinator(
                         followUpRequested = false
                         state = CoordinatorState.IDLE
                         future.complete(BatchDeliveryPassResult(BatchDeliveryStop.AUTHORIZATION_UNAVAILABLE))
-                    } else if (pendingRetryRecords?.firstOrNull()?.let { isAged(it, now) } == true) {
-                        retryTask?.cancel()
-                        retryTask = null
-                        val records = pendingRetryRecords
-                        pendingRetryRecords = null
-                        followUpRequested = false
-                        state = CoordinatorState.RUNNING
-                        submitPass(future, records)
                     } else {
                         followUpRequested = true
                         future.complete(BatchDeliveryPassResult(BatchDeliveryStop.COALESCED))
@@ -191,14 +191,16 @@ internal class RuntimeBatchDeliveryCoordinator(
                 )
             }
             val head = queued.first()
-            if (isAged(head, now)) {
-                resolvedRecords += acknowledgeExact(listOf(head))
-                localResolutions += 1
+            if (isPastResendAgeLimit(head, now) && streams.rotateForAge(head.streamId, now.epochMillis)) {
+                // The server may no longer hold this head's acceptance row: send it on a stream it
+                // has never seen, where it is stored as record-too-old, not refused for good.
                 retryAttempt = 0
+                retryRecords = null
                 blockedRequestId = null
+                localResolutions += 1
                 continue
             }
-
+            val streamId = streams.wireStreamId(head.streamId)
             val packed =
                 if (retryRecords == null) {
                     V1BatchRequestCodec.packLargest(
@@ -206,12 +208,14 @@ internal class RuntimeBatchDeliveryCoordinator(
                         now,
                         authorization.eventBatchCount,
                         authorization.eventBatchBytes,
+                        streamId,
                     )
                 } else {
-                    BatchPackingResult.Packed(V1BatchRequestCodec.encodeExact(queued, now))
+                    BatchPackingResult.Packed(V1BatchRequestCodec.encodeExact(queued, now, streamId))
                 }
             if (packed is BatchPackingResult.OversizedHead) {
-                resolvedRecords += acknowledgeReferences(listOf(packed.reference), head.streamId)
+                // Larger than any request this authorization allows: it can never be sent.
+                resolvedRecords += discardHead(head, now)
                 localResolutions += 1
                 retryAttempt = 0
                 blockedRequestId = null
@@ -271,14 +275,9 @@ internal class RuntimeBatchDeliveryCoordinator(
     ): DeliveryStep {
         val requestWall = clock.wallNow()
         if (isAuthorizationExpired(requestWall)) return DeliveryStep.AuthorizationUnavailable()
-        val firstAgedIndex = records.indexOfFirst { record -> isAged(record, requestWall) }
-        if (firstAgedIndex == 0) {
-            if (!localBudget.take()) return DeliveryStep.Bounded()
-            return DeliveryStep.Restart(acknowledgeExact(listOf(records.first())))
-        }
-        val candidate = if (firstAgedIndex > 0) records.take(firstAgedIndex) else records
-        val stoppedBeforeAgedRecord = candidate.size != records.size
-        val request = V1BatchRequestCodec.encodeExact(candidate, requestWall)
+        val candidate = records
+        // Looked up for every request: a discard earlier in this pass may have moved the stream.
+        val request = V1BatchRequestCodec.encodeExact(candidate, requestWall, streams.wireStreamId(candidate.first().streamId))
         if (blockedRequestId == request.requestId) return DeliveryStep.Protocol(request.requestId)
         if (!networkBudget.take()) return DeliveryStep.Bounded()
         val response =
@@ -318,7 +317,23 @@ internal class RuntimeBatchDeliveryCoordinator(
                         }
                     val resolvedPrefixCount = resolution.acknowledgement.references.size
                     val resolved = acknowledgeResolution(resolution)
-                    retryStep(request.records.drop(resolvedPrefixCount), delay, resolved, responseMonotonic)
+                    val remaining = request.records.drop(resolvedPrefixCount)
+                    val waitingHead = remaining.first()
+                    if (
+                        resolution.retryableCode == STREAM_GAP_CODE &&
+                        streams.streamGapAnswered(
+                            request.sourceStreamId,
+                            request.streamId,
+                            waitingHead.sequence,
+                            waitingHead.recordId,
+                            responseWall.epochMillis,
+                        )
+                    ) {
+                        // Moved to a new stream: send the same head there now.
+                        DeliveryStep.Restart(resolved)
+                    } else {
+                        retryStep(remaining, delay, resolved, responseMonotonic)
+                    }
                 } else {
                     if (response.retryAfter == null) {
                         DeliveryStep.Success(acknowledgeResolution(resolution))
@@ -331,8 +346,9 @@ internal class RuntimeBatchDeliveryCoordinator(
                 if (response.retryAfter != null) return DeliveryStep.Protocol(request.requestId)
                 if (!validTransportError(response, request.requestId)) return DeliveryStep.Protocol(request.requestId)
                 if (candidate.size == 1) {
+                    // Refused on its own: no smaller request can carry it.
                     if (!localBudget.take()) return DeliveryStep.Bounded()
-                    DeliveryStep.Success(acknowledgeExact(candidate))
+                    DeliveryStep.Success(discardHead(candidate.single(), responseWall))
                 } else {
                     val firstSize = (candidate.size + 1) / 2
                     when (val first = deliver(candidate.take(firstSize), networkBudget, localBudget)) {
@@ -381,11 +397,7 @@ internal class RuntimeBatchDeliveryCoordinator(
             }
             else -> DeliveryStep.Permanent(request.requestId)
         }
-        return if (stoppedBeforeAgedRecord && step is DeliveryStep.Success) {
-            DeliveryStep.Restart(step.resolvedRecords)
-        } else {
-            step
-        }
+        return step
     }
 
     private fun validTransportError(
@@ -449,9 +461,7 @@ internal class RuntimeBatchDeliveryCoordinator(
         val elapsedSinceResponse = elapsedNanos(step.responseMonotonicNanos, nowMonotonic)
         val remainingRetryAfter = subtractFloor(retryAfterNanos, elapsedSinceResponse)
         val waitNanos = maxOf(backoffNanos, remainingRetryAfter)
-        val delayMillis = nanosToMillisCeiling(waitNanos)
-        val ageDelayMillis = ageBoundaryDelayMillis(step.records.first(), nowWall)
-        val wakeDelayMillis = minOf(delayMillis, ageDelayMillis)
+        val wakeDelayMillis = nanosToMillisCeiling(waitNanos)
         val expirationDelay = positiveDifferenceSaturated(authorization.expiresAtEpochMillisFloor, nowWall.epochMillis)
         if (expirationDelay <= 0 || wakeDelayMillis >= expirationDelay) {
             authorizationBlocked = true
@@ -490,19 +500,9 @@ internal class RuntimeBatchDeliveryCoordinator(
                 return
             }
             val records = pendingRetryRecords
-            if (records?.firstOrNull()?.let { isAged(it, nowWall) } == true) {
-                retryTask = null
-                pendingRetryRecords = null
-                followUpRequested = false
-                state = CoordinatorState.RUNNING
-                submitPass(null, records)
-                return
-            }
             val remaining = retryDeadlineNanos - clock.monotonicNowNanos()
             if (remaining > 0) {
-                val retryDelayMillis = nanosToMillisCeiling(remaining)
-                val ageDelayMillis = records?.firstOrNull()?.let { ageBoundaryDelayMillis(it, nowWall) } ?: Long.MAX_VALUE
-                val nextDelayMillis = minOf(retryDelayMillis, ageDelayMillis)
+                val nextDelayMillis = nanosToMillisCeiling(remaining)
                 val expirationDelay =
                     positiveDifferenceSaturated(authorization.expiresAtEpochMillisFloor, nowWall.epochMillis)
                 if (expirationDelay <= 0 || nextDelayMillis >= expirationDelay) {
@@ -533,15 +533,24 @@ internal class RuntimeBatchDeliveryCoordinator(
     }
 
     private fun acknowledgeResolution(resolution: BatchAcknowledgementResolution): Int {
-        if (resolution.acknowledgement.references.isEmpty()) return 0
-        return acknowledgeReferences(
-            resolution.acknowledgement.references,
-            resolution.acknowledgement.streamId,
-        )
+        val references = resolution.acknowledgement.references
+        if (references.isEmpty()) return 0
+        val resolved = acknowledgeReferences(references, resolution.acknowledgement.streamId)
+        streams.resolvedThrough(resolution.acknowledgement.streamId, references.last().sequence)
+        return resolved
     }
 
-    private fun acknowledgeExact(records: List<RuntimeQueuedRecord>): Int =
-        acknowledgeReferences(records.map(::referenceOf), records.first().streamId)
+    /**
+     * Deletes a head that can never be sent. The new stream is recorded first: if the process
+     * dies before the delete, the head is offered again on the new stream and refused again.
+     */
+    private fun discardHead(
+        record: RuntimeQueuedRecord,
+        now: BatchWallInstant,
+    ): Int {
+        streams.rotate(record.streamId, now.epochMillis)
+        return acknowledgeReferences(listOf(referenceOf(record)), record.streamId)
+    }
 
     private fun acknowledgeReferences(
         references: List<dev.elu.analytics.internal.runtime.RuntimeRecordReference>,
@@ -553,28 +562,18 @@ internal class RuntimeBatchDeliveryCoordinator(
             DeliveryQueueAcknowledgement.Empty -> 0
         }
 
-    private fun isAged(
+    private fun isPastResendAgeLimit(
         record: RuntimeQueuedRecord,
         now: BatchWallInstant,
     ): Boolean =
         dev.elu.analytics.internal.runtime.RuntimeRecordCodec.compareElapsedSeconds(
             now.rfc3339,
             occurredAtOf(record),
-            MAX_RUNTIME_RECORD_AGE_SECONDS,
+            DeliveryStreams.RESEND_AGE_LIMIT_SECONDS,
         ) >= 0
 
     private fun isAuthorizationExpired(now: BatchWallInstant): Boolean =
         dev.elu.analytics.internal.runtime.RuntimeRecordCodec.compareTimestamps(now.rfc3339, authorization.expiresAt) >= 0
-
-    private fun ageBoundaryDelayMillis(
-        record: RuntimeQueuedRecord,
-        now: BatchWallInstant,
-    ): Long =
-        dev.elu.analytics.internal.runtime.RuntimeRecordCodec.elapsedBoundaryDelayMillisCeiling(
-            now.rfc3339,
-            occurredAtOf(record),
-            MAX_RUNTIME_RECORD_AGE_SECONDS,
-        )
 
     private fun backoffMillis(attempt: Int): Long {
         val exponent = minOf(attempt, MAX_BACKOFF_ATTEMPT)
@@ -683,6 +682,8 @@ internal class RuntimeBatchDeliveryCoordinator(
     }
 
     private companion object {
+        /** The retryable outcome code for a record past the stream's next expected sequence. */
+        const val STREAM_GAP_CODE = "stream-gap"
         const val BASE_BACKOFF_MILLIS = 1_000L
         const val MAX_BACKOFF_MILLIS = 60_000L
         const val MAX_BACKOFF_ATTEMPT = 6

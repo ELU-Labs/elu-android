@@ -28,7 +28,9 @@ import dev.elu.analytics.internal.runtime.delivery.BatchHTTPTransport
 import dev.elu.analytics.internal.runtime.delivery.BatchJitterSource
 import dev.elu.analytics.internal.runtime.delivery.BatchRetryScheduler
 import dev.elu.analytics.internal.runtime.delivery.BatchScheduledTask
+import dev.elu.analytics.internal.runtime.delivery.DeliveryStreams
 import dev.elu.analytics.internal.runtime.delivery.HttpURLConnectionBatchTransport
+import dev.elu.analytics.internal.runtime.delivery.MemoryDeliveryStreamStore
 import dev.elu.analytics.internal.runtime.delivery.RuntimeBatchDeliveryCoordinator
 import dev.elu.analytics.internal.runtime.delivery.RuntimeQueueOwnerDeliveryQueue
 import dev.elu.analytics.internal.runtime.delivery.ScheduledExecutorBatchRetryScheduler
@@ -157,6 +159,8 @@ internal class StandaloneRuntime(
     private val scheduler: ScheduledExecutorService = newScheduler(),
     private val retryScheduler: BatchRetryScheduler = ScheduledExecutorBatchRetryScheduler(scheduler),
     private val jitter: BatchJitterSource = ThreadLocalRandomBatchJitter,
+    /** The stream each queued record stream is sent on; kept across coordinator replacements. */
+    private val deliveryStreams: DeliveryStreams = DeliveryStreams(MemoryDeliveryStreamStore()),
     transportFactory: () -> BatchHTTPTransport = { HttpURLConnectionBatchTransport() },
     private val deviceInEuTimezone: () -> Boolean = EluEuGuard::isEuTimezone,
     private val flushDelayMillis: Long = DEFAULT_FLUSH_DELAY_MILLIS,
@@ -560,6 +564,7 @@ internal class StandaloneRuntime(
                 scheduler = retryScheduler,
                 jitter = jitter,
                 executor = deliveryExecutor,
+                streams = deliveryStreams,
             )
         val previous =
             synchronized(deliveryLock) {
